@@ -215,8 +215,10 @@ If adjusting direction, provide specific and actionable tasks.
                     "focus_areas": data.get("focus_areas", []),
                     "deprioritize": data.get("deprioritize", [])
                 }
+            else:
+                logger.warning(f"[PI] No JSON found in response, using fallback parsing. Response: {response[:200]}...")
         except (json.JSONDecodeError, KeyError) as e:
-            pass
+            logger.warning(f"[PI] Failed to parse JSON response: {e}. Response: {response[:200]}...")
         
         # Fallback: check for stop keywords manually
         human_lower = human_input.lower()

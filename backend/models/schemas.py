@@ -211,14 +211,16 @@ class UploadRequest(BaseModel):
 class WebSocketMessage(BaseModel):
     """Message for WebSocket communication"""
     type: Literal[
-        "status", "message", "code", "result", "error", "figure", "progress", 
+        "status", "message", "code", "result", "error", "figure", "progress",
         "step", "prompt", "response", "thinking", "tool_call",
         # New types for autonomous bioinformatics agent
         "literature", "pi_question", "pi_response", "findings",
         # Human intervention
         "human_input_received", "human_input_requested",
         # Round management
-        "round_summary", "data_request"
+        "round_summary", "data_request",
+        # Workflow lifecycle
+        "completed", "output"
     ]
     agent: Optional[AgentType] = None
     content: Any

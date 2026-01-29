@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 from .models.schemas import (
     AnalysisState, AgentType, TaskStatus, RoundResult,
-    WebSocketMessage, AgentMessage, MessageRole
+    WebSocketMessage, AgentMessage, MessageRole, BiochemistryResult
 )
 from .agents.pi_agent import PIAgent
 from .agents.pathology_agent import PathologyAgent
@@ -302,7 +302,6 @@ Be specific and actionable in your response."""
         human_guidance = None
         user_action = None
         new_pathology_images = []
-        new_biochemistry_data = {}
         adjusted_instructions = None
         
         if analysis_state.pending_human_input or analysis_state.pending_uploaded_files:
@@ -352,18 +351,35 @@ Be specific and actionable in your response."""
             
             # Process file assignments from PI
             file_assignments = pi_response.get("file_assignments", {})
-            
-            # Queue up new pathology images for analysis
+
+            # Track new pathology images for prioritized analysis
             if file_assignments.get("pathology"):
                 for file_info in file_assignments["pathology"]:
-                    new_pathology_images.append({
-                        "filename": file_info.get("filename"),
-                        "image_type": file_info.get("image_type", "user_upload")
-                    })
-            
-            # Extract biochemistry values from user input
-            new_biochemistry_data = pi_response.get("biochemistry_values", {})
-            
+                    if file_info:
+                        new_pathology_images.append({
+                            "filename": file_info.get("filename"),
+                            "image_type": file_info.get("image_type", "user_upload"),
+                            "reason": file_info.get("reason", "")
+                        })
+
+            # Extract and add biochemistry values from user input
+            biochemistry_values = pi_response.get("biochemistry_values", {})
+            if biochemistry_values and isinstance(biochemistry_values, dict):
+                for indicator, data in biochemistry_values.items():
+                    if isinstance(data, dict) and "value" in data:
+                        try:
+                            value = float(data["value"])
+                            result = BiochemistryResult(
+                                indicator=indicator,
+                                value=value,
+                                unit=data.get("unit", ""),
+                                interpretation=data.get("interpretation")
+                            )
+                            analysis_state.biochemistry_results.append(result)
+                            logger.info(f"[{self.session_id}] Added biochemistry value: {indicator}={value} {data.get('unit', '')}")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"[{self.session_id}] Failed to parse biochemistry value for {indicator}: {e}")
+
             # Get adjusted instructions
             adjusted_instructions = pi_response.get("adjusted_instructions")
             
@@ -387,7 +403,6 @@ Be specific and actionable in your response."""
             "human_guidance": human_guidance,
             "user_action": user_action,
             "new_pathology_images": new_pathology_images,
-            "new_biochemistry_data": new_biochemistry_data,
             "adjusted_instructions": adjusted_instructions,
             "pathology_result": None,
             "bioinformatics_result": None,
@@ -441,15 +456,13 @@ Be specific and actionable in your response."""
             # Extract tasks for each agent
             for step in (last_round.next_steps if last_round else []):
                 if step.startswith("[Pathology]"):
-                    instructions["pathology_tasks"].append(step[11:])
+                    instructions["pathology_tasks"].append(step[11:].strip())
                 elif step.startswith("[Bioinformatics]"):
-                    instructions["bioinformatics_tasks"].append(step[16:])
+                    instructions["bioinformatics_tasks"].append(step[16:].strip())
                 elif step.startswith("[Biochemistry]"):
-                    instructions["biochemistry_tasks"].append(step[14:])
+                    instructions["biochemistry_tasks"].append(step[14:].strip())
                 elif step.startswith("[Literature]"):
-                    instructions["literature_topics"].append(step[12:])
-                elif step.startswith("[Literature]"):
-                    instructions["literature_topics"].append(step[12:])
+                    instructions["literature_topics"].append(step[12:].strip())
         
         await self._send_message(
             "message",
@@ -613,7 +626,16 @@ Report key findings when you complete each major analysis phase."""
             instruction,
             max_steps=30
         )
-        
+
+        # Check result status and log accordingly
+        result_status = result.get("status", "unknown")
+        if result_status == "error":
+            logger.error(f"[{self.session_id}] Bioinformatics analysis failed: {result.get('error', 'Unknown error')}")
+            await self._send_message("error", f"Bioinformatics analysis encountered an error: {result.get('error', 'Unknown error')}", AgentType.BIOINFORMATICS)
+        elif result_status == "timeout":
+            logger.warning(f"[{self.session_id}] Bioinformatics analysis timed out after {result.get('steps_executed', 0)} steps")
+            await self._send_message("status", "Bioinformatics analysis reached step limit, proceeding with partial results", AgentType.BIOINFORMATICS)
+
         # Collect results
         all_findings = result.get("findings", [])
         all_figures = result.get("figures", [])
@@ -670,7 +692,7 @@ Report key findings when you complete each major analysis phase."""
 
         tasks = instructions.get("biochemistry_tasks", [])
 
-        logger.info(f"[{self.session_id}] Starting biochemistry analysis with {len(analysis_state.biochemistry_data)} indicators")
+        logger.info(f"[{self.session_id}] Starting biochemistry analysis with {len(analysis_state.biochemistry_results)} results and {len(analysis_state.biochemistry_files)} files")
         logger.info(f"[{self.session_id}] Biochemistry tasks: {tasks}")
 
         await self._send_message("status", "Biochemistry analysis in progress...", AgentType.BIOCHEMISTRY)
@@ -778,7 +800,7 @@ Report key findings when you complete each major analysis phase."""
             literature_result=json.dumps(lit_findings, ensure_ascii=False)
         )
 
-        logger.info(f"[{self.session_id}] Round {round_result.round_number} synthesis complete: {len(round_result.new_findings)} new findings, {len(round_result.next_steps)} next steps")
+        logger.info(f"[{self.session_id}] Round {round_result.round_number} synthesis complete: new_findings={round_result.new_findings}, {len(round_result.next_steps)} next steps")
 
         analysis_state.round_results.append(round_result)
         
@@ -857,8 +879,11 @@ Report key findings when you complete each major analysis phase."""
             logger.info(f"[{self.session_id}] Stopping: should_continue flag is False")
             return "stop"
 
-        # Check max rounds (use state.max_rounds if set, otherwise config default)
+        # Check max rounds (use state.max_rounds if valid, otherwise config default)
+        # max_rounds <= 0 means use config default; max_rounds > 0 is user-specified limit
         max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
+        # Ensure max_rounds is always at least 1 to prevent infinite loops
+        max_rounds = max(1, max_rounds)
         if analysis_state.current_round >= max_rounds:
             logger.info(f"[{self.session_id}] Stopping: reached max rounds ({max_rounds})")
             return "stop"

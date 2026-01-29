@@ -52,11 +52,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global state
+# Global state with lock for thread-safe access
 sessions: Dict[str, AnalysisState] = {}
 workflows: Dict[str, LiverAnalysisWorkflow] = {}
 websockets: Dict[str, WebSocket] = {}
 config: Optional[SystemConfig] = None
+
+# Lock for protecting concurrent access to global dicts
+_state_lock = asyncio.Lock()
 
 # Log the data directory location (directories are created in config.py)
 logger.info(f"Data directory: {DATA_BASE_DIR.resolve()}")
@@ -1350,11 +1353,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         return
     
     logger.info(f"WebSocket connected for session {session_id}, state={state.status.value}")
-    
+
     # Check if workflow is already running BEFORE updating websocket reference
-    if session_id in workflows:
+    # Use lock to prevent race condition between check and set
+    async with _state_lock:
+        workflow_running = session_id in workflows
+        if not workflow_running:
+            # Only set websocket reference if we're the main connection (not an observer)
+            websockets[session_id] = websocket
+
+    if workflow_running:
         logger.info(f"Workflow already running for session {session_id}, observing...")
-        
+
         # Send current status (but don't take over the websocket reference)
         try:
             await websocket.send_json({
@@ -1365,7 +1375,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             })
         except Exception as e:
             logger.error(f"Failed to send status to observer: {e}")
-        
+
         # Wait for existing workflow to complete or for disconnect
         # Note: We don't update websockets[session_id] - let the main workflow keep control
         try:
@@ -1381,9 +1391,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             logger.info(f"WebSocket observer disconnected for session {session_id}")
         # Don't delete websockets[session_id] - we never owned it
         return
-    
-    # Only set websocket reference if we're the main connection (not an observer)
-    websockets[session_id] = websocket
     
     # Create message callback that uses the global websockets dict
     # This way, if the websocket reconnects, messages go to the new connection
@@ -1451,7 +1458,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         message_callback=message_callback,
         state_callback=state_callback
     )
-    workflows[session_id] = workflow
+    async with _state_lock:
+        workflows[session_id] = workflow
     
     try:
         # Run workflow
@@ -1495,16 +1503,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         save_session_to_disk(session_id, state)
         
     finally:
-        # Clean up
+        # Clean up with lock protection
         logger.info(f"Cleaning up session {session_id}")
         try:
             await workflow.close()
         except Exception as e:
             logger.error(f"Error closing workflow: {e}")
-        if session_id in workflows:
-            del workflows[session_id]
-        if session_id in websockets:
-            del websockets[session_id]
+        async with _state_lock:
+            if session_id in workflows:
+                del workflows[session_id]
+            if session_id in websockets:
+                del websockets[session_id]
 
 
 # Run with: uvicorn backend.main:app --reload --port 8000
