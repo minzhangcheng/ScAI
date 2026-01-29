@@ -1,0 +1,228 @@
+"""
+Configuration for the Multi-Agent Liver Analysis System
+"""
+from pydantic import BaseModel, Field
+from typing import Optional
+from pathlib import Path
+import os
+import logging
+import logging.handlers
+from datetime import datetime
+
+
+# Data directories - stored outside the code directory for better separation
+# All data is stored in ../intesc_data/ relative to the backend directory
+_BACKEND_DIR = Path(__file__).parent
+DATA_BASE_DIR = (_BACKEND_DIR.parent.parent / "intesc_data").resolve()
+
+# Create data directory structure
+DATA_BASE_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR = DATA_BASE_DIR / "uploads"
+STATE_DIR = DATA_BASE_DIR / "states"
+WORKSPACE_DIR = DATA_BASE_DIR / "workspace"
+SESSION_DIR = DATA_BASE_DIR / "sessions"
+REPORTS_DIR = DATA_BASE_DIR / "reports"
+LOG_DIR = DATA_BASE_DIR / "logs"
+
+for d in [UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR]:
+    d.mkdir(exist_ok=True)
+
+
+def setup_logging(log_level: int = logging.INFO) -> None:
+    """
+    Setup comprehensive logging for the application.
+
+    Logs are written to:
+    - {LOG_DIR}/app.log - Main application log (rotating, 10MB max, 5 backups)
+    - {LOG_DIR}/error.log - Error-only log (rotating, 10MB max, 5 backups)
+    - {LOG_DIR}/debug.log - Debug log with all details (rotating, 50MB max, 3 backups)
+    - Console output
+    """
+    # Create formatters
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    simple_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%H:%M:%S'
+    )
+
+    # Get root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)  # Capture all levels
+
+    # Remove existing handlers
+    root_logger.handlers = []
+
+    # Console handler - INFO level with simple format
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(simple_formatter)
+    root_logger.addHandler(console_handler)
+
+    # Main app log - INFO level, rotating
+    app_log_path = LOG_DIR / "app.log"
+    app_handler = logging.handlers.RotatingFileHandler(
+        app_log_path,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    app_handler.setLevel(logging.INFO)
+    app_handler.setFormatter(detailed_formatter)
+    root_logger.addHandler(app_handler)
+
+    # Error log - ERROR level only, rotating
+    error_log_path = LOG_DIR / "error.log"
+    error_handler = logging.handlers.RotatingFileHandler(
+        error_log_path,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(detailed_formatter)
+    root_logger.addHandler(error_handler)
+
+    # Debug log - DEBUG level, larger rotation
+    debug_log_path = LOG_DIR / "debug.log"
+    debug_handler = logging.handlers.RotatingFileHandler(
+        debug_log_path,
+        maxBytes=50*1024*1024,  # 50MB
+        backupCount=3,
+        encoding='utf-8'
+    )
+    debug_handler.setLevel(logging.DEBUG)
+    debug_handler.setFormatter(detailed_formatter)
+    root_logger.addHandler(debug_handler)
+
+    # Log startup message
+    logging.info(f"Logging initialized. Log directory: {LOG_DIR}")
+    logging.info(f"Log files: app.log, error.log, debug.log")
+
+class APIConfig(BaseModel):
+    """API configuration for various services"""
+    api_key: str = ""  # Main LLM API key (OpenRouter, OpenAI, etc.)
+    google_api_key: str = ""  # For Gemini Deep Research
+    llm_base_url: str = "https://openrouter.ai/api/v1"  # OpenAI-compatible endpoint
+    proxy_url: Optional[str] = None  # HTTP/HTTPS proxy for API requests
+    
+class ModelConfig(BaseModel):
+    """Model configuration for each agent"""
+    pi_model: str = "google/gemini-3-pro-preview"
+    pathology_model: str = "google/gemini-3-pro-preview"
+    bioinformatics_model: str = "anthropic/claude-opus-4.5"
+    biochemistry_model: str = "google/gemini-3-pro-preview"
+    # Literature agent uses Google Deep Research API directly
+    
+class AgentPrompts(BaseModel):
+    """Customizable prompts for each agent - all in English for consistency"""
+    pi_prompt: str = """You are a senior biomedical research PI (Principal Investigator) leading a multidisciplinary research team for integrated analysis.
+
+Your responsibilities:
+1. Develop overall research strategy and analysis direction
+2. Coordinate pathology, bioinformatics, biochemistry, and literature research
+3. Synthesize results from all sources and make scientific judgments
+4. Arbitrate conflicts and provide reasonable explanations
+5. Identify new scientific discoveries and potential mechanisms
+
+Core questions to focus on:
+- Overall phenotypic characteristics of samples
+- Degree and type of tissue damage
+- Changes in cellular composition
+- Potential molecular mechanisms
+- Consistency with known literature and novel findings
+
+Please analyze based on the specific research objectives provided. Maintain scientific rigor. Reply in the same language as the user's input."""
+
+    pathology_prompt: str = """You are a professional pathology expert specialized in analyzing various histological sections.
+
+Your tasks:
+1. Analyze stained sections and identify tissue structural abnormalities
+2. Assess the degree of pathological changes (mild/moderate/severe)
+3. Identify specific pathological features:
+   - Cell morphological changes
+   - Inflammatory infiltration
+   - Signs of fibrosis
+   - Special structural alterations
+   - Abnormal deposits
+4. Suggest special staining when necessary
+
+Please describe the pathological features you observe in detail and provide professional assessment. Reply in the same language as the user's input."""
+
+    bioinformatics_prompt: str = """You are a professional bioinformatics analyst specializing in high-throughput sequencing data analysis (including single-cell RNA sequencing, bulk RNA-seq, etc.).
+
+Your working approach:
+1. Write and execute Python code step by step
+2. Review results after each step before deciding the next one
+3. Request literature support when encountering important biological questions
+
+Analysis workflow (adjust based on data type):
+1. Quality Control (QC)
+2. Normalization and dimensionality reduction
+3. Clustering analysis
+4. Cell/sample annotation
+5. Differential expression analysis
+6. Pathway enrichment analysis
+7. Other specialized analyses
+
+Code requirements:
+- Use appropriate analysis libraries (scanpy, DESeq2, etc.)
+- Set random_state=42 for reproducibility
+- Generate visualization results for each step
+- Save key intermediate results
+
+Please reply analysis conclusions in the same language as the user's input. Code comments should be in English."""
+
+    biochemistry_prompt: str = """You are a laboratory biochemistry analysis expert responsible for interpreting and integrating experimental results.
+
+You need to focus on various biochemical indicators, including but not limited to:
+1. Tissue/organ function indicators
+2. Metabolism-related indicators
+3. Oxidative stress indicators
+4. Inflammatory indicators
+5. Other specialized tests
+
+Your tasks:
+1. Integrate manually input experimental data
+2. Assess the degree of abnormality for each indicator
+3. Infer possible pathophysiological mechanisms
+4. Suggest additional experiments needed
+
+Please reply in the same language as the user's input with professional analysis opinions."""
+
+    literature_prompt: str = """Please help me conduct literature research on the topic: {topic}
+
+Please search for relevant biomedical literature, focusing on:
+1. Related molecular mechanisms
+2. Known gene/pathway associations
+3. Clinical/experimental relevance
+4. Latest research progress
+
+Please provide a detailed literature review report with specific citation information."""
+
+class SystemConfig(BaseModel):
+    """System configuration"""
+    api: APIConfig = Field(default_factory=APIConfig)
+    models: ModelConfig = Field(default_factory=ModelConfig)
+    prompts: AgentPrompts = Field(default_factory=AgentPrompts)
+    
+    # Image processing settings
+    image_tile_size: int = 1024  # Size for pathology image tiles
+    image_overlap: int = 64  # Overlap between tiles
+    blank_threshold: float = 0.95  # Threshold for detecting blank tiles
+    
+    # Local Jupyter kernel settings
+    sandbox_timeout: int = 300  # Code execution timeout in seconds
+    
+    # Session settings
+    max_rounds: int = 3  # Maximum analysis rounds
+    convergence_rounds: int = 2  # Rounds without new findings to stop
+    
+    # State persistence - use the centralized data directory
+    state_dir: str = str(STATE_DIR)
+    workspace_dir: str = str(WORKSPACE_DIR)
+
+# Default configuration instance
+default_config = SystemConfig()

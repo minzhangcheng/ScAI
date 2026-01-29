@@ -1,0 +1,1046 @@
+"""
+LangGraph workflow for multi-agent liver analysis
+"""
+import asyncio
+import logging
+from typing import Dict, Any, List, Optional, TypedDict, Annotated
+from datetime import datetime
+import json
+import operator
+
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+
+# Configure logger
+logger = logging.getLogger(__name__)
+
+from .models.schemas import (
+    AnalysisState, AgentType, TaskStatus, RoundResult,
+    WebSocketMessage, AgentMessage, MessageRole
+)
+from .agents.pi_agent import PIAgent
+from .agents.pathology_agent import PathologyAgent
+from .agents.bioinformatics_agent import BioinformaticsAgent
+from .agents.biochemistry_agent import BiochemistryAgent
+from .agents.literature_agent import LiteratureAgent
+from .utils.llm_client import LLMManager
+from .utils.sandbox import LocalJupyterSandbox
+from .config import SystemConfig
+
+
+class WorkflowState(TypedDict, total=False):
+    """State for the LangGraph workflow"""
+    analysis_state: AnalysisState
+    current_round: int
+    pi_instructions: Dict[str, Any]
+    pathology_result: Optional[Dict[str, Any]]
+    bioinformatics_result: Optional[Dict[str, Any]]
+    biochemistry_result: Optional[Dict[str, Any]]
+    literature_result: Optional[Dict[str, Any]]
+    round_result: Optional[RoundResult]
+    should_continue: bool
+    error: Optional[str]
+    messages: Annotated[List[WebSocketMessage], operator.add]
+    # Human intervention fields
+    human_guidance: Optional[str]
+    human_stop_requested: bool
+    human_guidance_processed: bool
+
+
+class LiverAnalysisWorkflow:
+    """
+    Multi-agent workflow for liver analysis using LangGraph
+    """
+    
+    def __init__(
+        self,
+        config: SystemConfig,
+        session_id: str,
+        message_callback: Optional[callable] = None,
+        state_callback: Optional[callable] = None  # Callback to save state after each round
+    ):
+        self.config = config
+        self.session_id = session_id
+        self.message_callback = message_callback
+        self.state_callback = state_callback
+        
+        # Initialize components
+        self.llm_manager: Optional[LLMManager] = None
+        self.sandbox: Optional[LocalJupyterSandbox] = None
+        
+        # Agents
+        self.pi_agent: Optional[PIAgent] = None
+        self.pathology_agent: Optional[PathologyAgent] = None
+        self.bioinformatics_agent: Optional[BioinformaticsAgent] = None
+        self.biochemistry_agent: Optional[BiochemistryAgent] = None
+        self.literature_agent: Optional[LiteratureAgent] = None
+        
+        # Workflow graph
+        self.graph = None
+        self.compiled_graph = None
+        self.checkpointer = MemorySaver()
+        
+    async def initialize(self):
+        """Initialize all components"""
+        logger.info(f"[{self.session_id}] Initializing workflow components")
+        # Initialize LLM manager with session context
+        self.llm_manager = LLMManager(
+            api_key=self.config.api.api_key,
+            google_api_key=self.config.api.google_api_key,
+            base_url=self.config.api.llm_base_url,
+            proxy_url=self.config.api.proxy_url,
+            session_id=self.session_id,
+            agent_name="workflow"
+        )
+        
+        # Initialize local Jupyter sandbox with session ID for state persistence
+        self.sandbox = LocalJupyterSandbox(
+            session_id=self.session_id,
+            state_dir=self.config.state_dir,
+            working_dir=self.config.workspace_dir,
+            timeout=self.config.sandbox_timeout
+        )
+        
+        # Get custom models, prompts, and temperatures from initial state if provided
+        custom_models = getattr(self, '_custom_models', {})
+        custom_prompts = getattr(self, '_custom_prompts', {})
+        custom_temperatures = getattr(self, '_custom_temperatures', {})
+        
+        # Default temperatures
+        default_temperatures = {
+            "pi": 0.5,
+            "pathology": 0.2,
+            "bioinformatics": 0.1,
+            "biochemistry": 0.2,
+            "literature": 0.6
+        }
+        
+        # Store temperatures for use in agent calls
+        self.temperatures = {
+            "pi": custom_temperatures.get('pi', default_temperatures['pi']),
+            "pathology": custom_temperatures.get('pathology', default_temperatures['pathology']),
+            "bioinformatics": custom_temperatures.get('bioinformatics', default_temperatures['bioinformatics']),
+            "biochemistry": custom_temperatures.get('biochemistry', default_temperatures['biochemistry']),
+            "literature": custom_temperatures.get('literature', default_temperatures['literature'])
+        }
+        
+        # Determine models to use (custom takes precedence)
+        pi_model = custom_models.get('pi', self.config.models.pi_model)
+        pathology_model = custom_models.get('pathology', self.config.models.pathology_model)
+        bioinformatics_model = custom_models.get('bioinformatics', self.config.models.bioinformatics_model)
+        biochemistry_model = custom_models.get('biochemistry', self.config.models.biochemistry_model)
+        literature_model = custom_models.get('literature', self.config.models.pi_model)
+        
+        # Determine prompts to use (custom takes precedence)
+        pi_prompt = custom_prompts.get('pi', self.config.prompts.pi_prompt)
+        pathology_prompt = custom_prompts.get('pathology', self.config.prompts.pathology_prompt)
+        bioinformatics_prompt = custom_prompts.get('bioinformatics', self.config.prompts.bioinformatics_prompt)
+        biochemistry_prompt = custom_prompts.get('biochemistry', self.config.prompts.biochemistry_prompt)
+        literature_prompt = custom_prompts.get('literature', self.config.prompts.literature_prompt)
+        
+        # Initialize agents with resolved models and prompts
+        self.pi_agent = PIAgent(
+            llm_client=self.llm_manager.openrouter,
+            model=pi_model,
+            system_prompt=pi_prompt
+        )
+        
+        self.pathology_agent = PathologyAgent(
+            llm_client=self.llm_manager.openrouter,
+            model=pathology_model,
+            system_prompt=pathology_prompt,
+            tile_size=self.config.image_tile_size,
+            max_tiles=50
+        )
+        
+        self.bioinformatics_agent = BioinformaticsAgent(
+            llm_client=self.llm_manager.openrouter,
+            model=bioinformatics_model,
+            system_prompt=bioinformatics_prompt,
+            sandbox=self.sandbox,
+            literature_callback=self._literature_callback,
+            pi_callback=self._pi_callback,
+            message_callback=self._agent_message_callback
+        )
+        
+        self.biochemistry_agent = BiochemistryAgent(
+            llm_client=self.llm_manager.openrouter,
+            model=biochemistry_model,
+            system_prompt=biochemistry_prompt
+        )
+        
+        self.literature_agent = LiteratureAgent(
+            llm_client=self.llm_manager.openrouter,
+            deep_research_client=self.llm_manager.deep_research,
+            model=literature_model,
+            system_prompt=literature_prompt
+        )
+
+        logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model}, Literature={literature_model}")
+
+        # Build workflow graph
+        self._build_graph()
+        logger.info(f"[{self.session_id}] Workflow graph built")
+        
+    def _build_graph(self):
+        """Build the LangGraph workflow"""
+        
+        # Create graph
+        self.graph = StateGraph(WorkflowState)
+        
+        # Add nodes
+        self.graph.add_node("initialize_round", self._initialize_round)
+        self.graph.add_node("pi_planning", self._pi_planning)
+        self.graph.add_node("pathology_analysis", self._pathology_analysis)
+        self.graph.add_node("bioinformatics_analysis", self._bioinformatics_analysis)
+        self.graph.add_node("biochemistry_analysis", self._biochemistry_analysis)
+        self.graph.add_node("literature_research", self._literature_research)
+        self.graph.add_node("pi_synthesis", self._pi_synthesis)
+        self.graph.add_node("check_convergence", self._check_convergence)
+        self.graph.add_node("generate_final_report", self._generate_final_report)
+        
+        # Add edges
+        self.graph.add_edge("initialize_round", "pi_planning")
+        
+        # After PI planning, run analyses in parallel (simulated)
+        self.graph.add_edge("pi_planning", "pathology_analysis")
+        self.graph.add_edge("pathology_analysis", "bioinformatics_analysis")
+        self.graph.add_edge("bioinformatics_analysis", "biochemistry_analysis")
+        self.graph.add_edge("biochemistry_analysis", "literature_research")
+        self.graph.add_edge("literature_research", "pi_synthesis")
+        
+        # After synthesis, check if we should continue
+        self.graph.add_conditional_edges(
+            "pi_synthesis",
+            self._should_continue,
+            {
+                "continue": "check_convergence",
+                "stop": "generate_final_report"
+            }
+        )
+        
+        self.graph.add_conditional_edges(
+            "check_convergence",
+            self._check_convergence_condition,
+            {
+                "continue": "initialize_round",
+                "stop": "generate_final_report"
+            }
+        )
+        
+        self.graph.add_edge("generate_final_report", END)
+        
+        # Set entry point
+        self.graph.set_entry_point("initialize_round")
+        
+        # Compile
+        self.compiled_graph = self.graph.compile(checkpointer=self.checkpointer)
+    
+    async def _send_message(self, msg_type: str, content: Any, agent: Optional[AgentType] = None):
+        """Send message through callback"""
+        if self.message_callback:
+            msg = WebSocketMessage(
+                type=msg_type,
+                agent=agent,
+                content=content
+            )
+            try:
+                await self.message_callback(msg)
+            except Exception as e:
+                logger.error(f"[Workflow] Failed to send message: {e}")
+    
+    async def _literature_callback(self, topic: str) -> str:
+        """Callback for bioinformatics agent to request literature support"""
+        result = await self.literature_agent.process(
+            AnalysisState(),
+            topic,
+            use_deep_research=True
+        )
+        return result.get("report", "")
+    
+    async def _pi_callback(self, question: str, context: str) -> str:
+        """Callback for bioinformatics agent to consult PI for biological decisions"""
+        await self._send_message("status", "Bioinformatics consulting PI...", AgentType.BIOINFORMATICS)
+        await self._send_message("pi_question", f"Question: {question}\nContext: {context}", AgentType.BIOINFORMATICS)
+        
+        # Use PI agent to answer the biological question
+        prompt = f"""The bioinformatics analyst is asking for your guidance on a biological decision:
+
+QUESTION: {question}
+
+CONTEXT FROM ANALYSIS:
+{context}
+
+Please provide clear guidance on:
+1. Your recommended decision/direction
+2. The reasoning behind your recommendation
+3. Any specific parameters, genes, or pathways to focus on
+4. Potential pitfalls to avoid
+
+Be specific and actionable in your response."""
+
+        try:
+            response = await self.pi_agent.chat(prompt, temperature=self.temperatures.get('pi', 0.5))
+            await self._send_message("pi_response", response, AgentType.PI)
+            return response
+        except Exception as e:
+            error_msg = f"PI consultation failed: {str(e)}"
+            await self._send_message("error", error_msg, AgentType.PI)
+            return "Unable to get PI guidance. Please proceed with standard bioinformatics practices."
+    
+    async def _agent_message_callback(self, msg_type: str, content: str):
+        """Callback for agent messages"""
+        await self._send_message(msg_type, content, AgentType.BIOINFORMATICS)
+    
+    # Node functions
+    async def _initialize_round(self, state: WorkflowState) -> WorkflowState:
+        """Initialize a new analysis round, processing any pending user input"""
+        analysis_state = state["analysis_state"]
+        logger.info(f"[{self.session_id}] Initializing round {analysis_state.current_round + 1}")
+        
+        # Process pending human input (if any)
+        human_guidance = None
+        user_action = None
+        new_pathology_images = []
+        new_biochemistry_data = {}
+        adjusted_instructions = None
+        
+        if analysis_state.pending_human_input or analysis_state.pending_uploaded_files:
+            human_message = analysis_state.pending_human_input or ""
+            uploaded_files = analysis_state.pending_uploaded_files or []
+            
+            await self._send_message(
+                "human_input_received",
+                f"Processing user input: {human_message[:100]}{'...' if len(human_message) > 100 else ''}" + 
+                (f" ({len(uploaded_files)} files)" if uploaded_files else ""),
+                AgentType.PI
+            )
+            
+            # Let PI Agent process the user input
+            pi_response = await self.pi_agent.process_user_input(
+                analysis_state,
+                human_message,
+                uploaded_files
+            )
+            
+            user_action = pi_response.get("action", "continue")
+            human_guidance = human_message
+            
+            await self._send_message(
+                "response",
+                pi_response.get("response", "Acknowledged"),
+                AgentType.PI
+            )
+            
+            # Check if user requested to stop
+            if user_action == "stop":
+                await self._send_message(
+                    "status",
+                    "User requested to conclude analysis. Generating final report...",
+                    AgentType.PI
+                )
+                # Clear pending input
+                analysis_state.pending_human_input = None
+                analysis_state.pending_uploaded_files = []
+                
+                return {
+                    **state,
+                    "analysis_state": analysis_state,
+                    "should_continue": False,
+                    "human_stop_requested": True
+                }
+            
+            # Process file assignments from PI
+            file_assignments = pi_response.get("file_assignments", {})
+            
+            # Queue up new pathology images for analysis
+            if file_assignments.get("pathology"):
+                for file_info in file_assignments["pathology"]:
+                    new_pathology_images.append({
+                        "filename": file_info.get("filename"),
+                        "image_type": file_info.get("image_type", "user_upload")
+                    })
+            
+            # Extract biochemistry values from user input
+            new_biochemistry_data = pi_response.get("biochemistry_values", {})
+            
+            # Get adjusted instructions
+            adjusted_instructions = pi_response.get("adjusted_instructions")
+            
+            # Clear pending input
+            analysis_state.pending_human_input = None
+            analysis_state.pending_uploaded_files = []
+        
+        # Increment round counter
+        analysis_state.current_round += 1
+        analysis_state.status = TaskStatus.RUNNING
+        
+        await self._send_message(
+            "status",
+            f"Starting round {analysis_state.current_round} analysis"
+        )
+        
+        return {
+            **state,
+            "analysis_state": analysis_state,
+            "current_round": analysis_state.current_round,
+            "human_guidance": human_guidance,
+            "user_action": user_action,
+            "new_pathology_images": new_pathology_images,
+            "new_biochemistry_data": new_biochemistry_data,
+            "adjusted_instructions": adjusted_instructions,
+            "pathology_result": None,
+            "bioinformatics_result": None,
+            "biochemistry_result": None,
+            "literature_result": None,
+            "round_result": None
+        }
+    
+    async def _pi_planning(self, state: WorkflowState) -> WorkflowState:
+        """PI agent plans the round, incorporating human guidance and adjusted instructions"""
+        analysis_state = state["analysis_state"]
+        human_guidance = state.get("human_guidance")
+        adjusted_instructions = state.get("adjusted_instructions")
+
+        logger.info(f"[{self.session_id}] PI planning for round {analysis_state.current_round}")
+        if human_guidance:
+            logger.info(f"[{self.session_id}] Human guidance received: {human_guidance[:100]}...")
+
+        await self._send_message("status", "PI is creating analysis plan...", AgentType.PI)
+        
+        # If we already have adjusted instructions from user input processing, use them
+        if adjusted_instructions:
+            await self._send_message(
+                "message",
+                f"Using adjusted instructions from user input:\n{json.dumps(adjusted_instructions, ensure_ascii=False, indent=2)}",
+                AgentType.PI
+            )
+            return {
+                **state,
+                "pi_instructions": adjusted_instructions,
+                "human_guidance_processed": True
+            }
+        
+        # Normal planning without pre-processed instructions
+        if analysis_state.current_round == 1:
+            # First round - generate initial instructions
+            instructions = await self.pi_agent.initial_instruction(
+                analysis_state,
+                analysis_state.initial_instruction
+            )
+        else:
+            # Subsequent rounds - based on previous results
+            last_round = analysis_state.get_latest_round()
+            instructions = {
+                "pathology_tasks": last_round.next_steps if last_round else [],
+                "bioinformatics_tasks": [],
+                "biochemistry_tasks": [],
+                "literature_topics": []
+            }
+            
+            # Extract tasks for each agent
+            for step in (last_round.next_steps if last_round else []):
+                if step.startswith("[Pathology]"):
+                    instructions["pathology_tasks"].append(step[11:])
+                elif step.startswith("[Bioinformatics]"):
+                    instructions["bioinformatics_tasks"].append(step[16:])
+                elif step.startswith("[Biochemistry]"):
+                    instructions["biochemistry_tasks"].append(step[14:])
+                elif step.startswith("[Literature]"):
+                    instructions["literature_topics"].append(step[12:])
+                elif step.startswith("[Literature]"):
+                    instructions["literature_topics"].append(step[12:])
+        
+        await self._send_message(
+            "message",
+            json.dumps(instructions, ensure_ascii=False, indent=2),
+            AgentType.PI
+        )
+        
+        return {
+            **state,
+            "pi_instructions": instructions
+        }
+    
+    async def _pathology_analysis(self, state: WorkflowState) -> WorkflowState:
+        """Pathology agent analyzes images"""
+        analysis_state = state["analysis_state"]
+        instructions = state["pi_instructions"]
+
+        tasks = instructions.get("pathology_tasks", [])
+        if not tasks:
+            tasks = ["Perform standard pathology analysis"]
+
+        logger.info(f"[{self.session_id}] Starting pathology analysis with {len(analysis_state.pathology_images)} images")
+        await self._send_message("status", "Pathology analysis starting...", AgentType.PATHOLOGY)
+        
+        # Check if images are available
+        if not analysis_state.pathology_images:
+            await self._send_message(
+                "result",
+                {
+                    "status": "no_data",
+                    "message": "No pathology images uploaded. Please upload H&E or other stained sections for analysis.",
+                    "findings": []
+                },
+                AgentType.PATHOLOGY
+            )
+            return {
+                **state,
+                "analysis_state": analysis_state,
+                "pathology_result": {"findings": [], "status": "no_data"}
+            }
+        
+        # Log image count
+        await self._send_message(
+            "status", 
+            f"Analyzing {len(analysis_state.pathology_images)} pathology image(s)...", 
+            AgentType.PATHOLOGY
+        )
+        
+        try:
+            result = await self.pathology_agent.process(
+                analysis_state,
+                "\n".join(tasks)
+            )
+            
+            await self._send_message(
+                "result",
+                result,
+                AgentType.PATHOLOGY
+            )
+            
+            # Add message to state
+            analysis_state.add_message(
+                AgentType.PATHOLOGY,
+                MessageRole.ASSISTANT,
+                json.dumps(result, ensure_ascii=False)
+            )
+            
+            return {
+                **state,
+                "analysis_state": analysis_state,
+                "pathology_result": result
+            }
+            
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            logger.error(f"Pathology analysis failed: {error_detail}")
+            
+            error_result = {
+                "status": "error",
+                "message": f"Pathology analysis failed: {str(e)}",
+                "findings": [],
+                "error": str(e)
+            }
+            
+            await self._send_message(
+                "error",
+                f"Pathology analysis error: {str(e)}",
+                AgentType.PATHOLOGY
+            )
+            
+            return {
+                **state,
+                "analysis_state": analysis_state,
+                "pathology_result": error_result
+            }
+    
+    async def _bioinformatics_analysis(self, state: WorkflowState) -> WorkflowState:
+        """
+        Bioinformatics analysis with PI-controlled iterative execution
+
+        Flow:
+        1. PI provides high-level analysis goals
+        2. Bioinformatics agent runs autonomously for technical steps
+        3. Agent consults PI only for biological decisions
+        4. Agent reports findings when analysis phase is complete
+        """
+        analysis_state = state["analysis_state"]
+
+        logger.info(f"[{self.session_id}] Starting bioinformatics analysis")
+        logger.info(f"[{self.session_id}] Control seq: {analysis_state.control_seq_path}, Treatment seq: {analysis_state.treatment_seq_path}")
+
+        await self._send_message("status", "Starting bioinformatics analysis...", AgentType.BIOINFORMATICS)
+        
+        # Check if data is available
+        if not analysis_state.control_seq_path and not analysis_state.treatment_seq_path:
+            await self._send_message(
+                "result",
+                {"message": "Please upload sequencing data first", "findings": []},
+                AgentType.BIOINFORMATICS
+            )
+            return {
+                **state,
+                "analysis_state": analysis_state,
+                "bioinformatics_result": {"findings": [], "status": "waiting_data"}
+            }
+        
+        # Check for pending human input and incorporate it
+        human_guidance = ""
+        if analysis_state.pending_human_input:
+            human_guidance = f"\n\nHuman researcher guidance: {analysis_state.pending_human_input}"
+            analysis_state.pending_human_input = None  # Clear after using
+        
+        # Step 1: PI provides analysis goals
+        await self._send_message("status", "PI is defining analysis goals...", AgentType.PI)
+        
+        # Get PI instructions from workflow state
+        pi_instructions = state.get("pi_instructions", {})
+        bioinf_tasks = pi_instructions.get("bioinformatics_tasks", [])
+        
+        # Build comprehensive instruction for bioinformatics agent
+        instruction = f"""Analyze single-cell RNA-seq data for project: {analysis_state.name}
+
+Research context: {analysis_state.initial_instruction}
+
+PI's analysis goals:
+{chr(10).join(f"- {task}" for task in bioinf_tasks) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
+{human_guidance}
+
+Execute the analysis autonomously for technical steps (data loading, QC, normalization, clustering).
+For biological decisions (cell annotation, pathway selection, etc.), consult PI for guidance.
+Report key findings when you complete each major analysis phase."""
+
+        await self._send_message("prompt", instruction, AgentType.PI)
+        
+        # Step 2: Bioinformatics agent runs autonomously
+        await self._send_message("status", "Bioinformatics agent is running autonomous analysis...", AgentType.BIOINFORMATICS)
+        
+        result = await self.bioinformatics_agent.run_autonomous_analysis(
+            analysis_state,
+            instruction,
+            max_steps=30
+        )
+        
+        # Collect results
+        all_findings = result.get("findings", [])
+        all_figures = result.get("figures", [])
+        
+        # Store code executions
+        for code_exec in result.get("code_history", []):
+            if code_exec not in analysis_state.code_history:
+                analysis_state.code_history.append(code_exec)
+        
+        # Step 3: PI summarizes results
+        await self._send_message("status", "PI is reviewing analysis results...", AgentType.PI)
+        
+        summary = await self.pi_agent.summarize_bioinformatics_analysis(
+            analysis_state,
+            [{"findings": all_findings, "figures": all_figures}]
+        )
+        
+        final_result = {
+            "findings": all_findings,
+            "figures": all_figures,
+            "summary": summary,
+            "steps_executed": result.get("steps_executed", 0),
+            "status": result.get("status", "completed")
+        }
+
+        logger.info(f"[{self.session_id}] Bioinformatics analysis completed: {len(all_findings)} findings, {len(all_figures)} figures, {result.get('steps_executed', 0)} steps")
+
+        await self._send_message(
+            "result",
+            {
+                "findings": all_findings,
+                "summary": summary,
+                "steps_executed": result.get("steps_executed", 0)
+            },
+            AgentType.BIOINFORMATICS
+        )
+        
+        analysis_state.add_message(
+            AgentType.BIOINFORMATICS,
+            MessageRole.ASSISTANT,
+            json.dumps({"findings": all_findings, "summary": summary}, ensure_ascii=False)
+        )
+        
+        return {
+            **state,
+            "analysis_state": analysis_state,
+            "bioinformatics_result": final_result
+        }
+    
+    async def _biochemistry_analysis(self, state: WorkflowState) -> WorkflowState:
+        """Biochemistry agent analyzes experimental results"""
+        analysis_state = state["analysis_state"]
+        instructions = state["pi_instructions"]
+
+        tasks = instructions.get("biochemistry_tasks", [])
+
+        logger.info(f"[{self.session_id}] Starting biochemistry analysis with {len(analysis_state.biochemistry_data)} indicators")
+        logger.info(f"[{self.session_id}] Biochemistry tasks: {tasks}")
+
+        await self._send_message("status", "Biochemistry analysis in progress...", AgentType.BIOCHEMISTRY)
+        
+        result = await self.biochemistry_agent.process(
+            analysis_state,
+            "\n".join(tasks) if tasks else "Analyze existing biochemistry indicators"
+        )
+        
+        await self._send_message(
+            "result",
+            result,
+            AgentType.BIOCHEMISTRY
+        )
+        
+        analysis_state.add_message(
+            AgentType.BIOCHEMISTRY,
+            MessageRole.ASSISTANT,
+            json.dumps(result, ensure_ascii=False)
+        )
+        
+        return {
+            **state,
+            "analysis_state": analysis_state,
+            "biochemistry_result": result
+        }
+    
+    async def _literature_research(self, state: WorkflowState) -> WorkflowState:
+        """Literature agent researches relevant topics"""
+        analysis_state = state["analysis_state"]
+        instructions = state["pi_instructions"]
+
+        topics = instructions.get("literature_topics", [])
+        logger.info(f"[{self.session_id}] Starting literature research with topics: {topics}")
+        if not topics:
+            # Default topics based on other findings
+            path_findings = state["pathology_result"].get("findings", []) if state["pathology_result"] else []
+            bio_findings = state["bioinformatics_result"].get("findings", []) if state["bioinformatics_result"] else []
+            
+            if path_findings or bio_findings:
+                topics = [f"liver {' '.join((path_findings + bio_findings)[:3])}"]
+        
+        await self._send_message("status", "Literature research in progress...", AgentType.LITERATURE)
+        
+        results = []
+        for topic in topics[:3]:  # Limit to 3 topics
+            result = await self.literature_agent.process(
+                analysis_state,
+                topic,
+                use_deep_research=True
+            )
+            results.append(result)
+        
+        # Combine results
+        combined_result = {
+            "topics": topics,
+            "findings": [],
+            "reports": []
+        }
+        
+        for r in results:
+            combined_result["findings"].extend(r.get("findings", []))
+            if r.get("report"):
+                combined_result["reports"].append(r["report"])
+
+        logger.info(f"[{self.session_id}] Literature research completed: {len(combined_result['findings'])} findings from {len(topics)} topics")
+
+        await self._send_message(
+            "result",
+            combined_result,
+            AgentType.LITERATURE
+        )
+        
+        analysis_state.add_message(
+            AgentType.LITERATURE,
+            MessageRole.ASSISTANT,
+            json.dumps({"findings": combined_result["findings"]}, ensure_ascii=False)
+        )
+        
+        return {
+            **state,
+            "analysis_state": analysis_state,
+            "literature_result": combined_result
+        }
+    
+    async def _pi_synthesis(self, state: WorkflowState) -> WorkflowState:
+        """PI synthesizes all results and prepares round summary for user"""
+        analysis_state = state["analysis_state"]
+
+        logger.info(f"[{self.session_id}] PI synthesis for round {analysis_state.current_round}")
+
+        await self._send_message("status", "PI is synthesizing analysis results...", AgentType.PI)
+        
+        # Extract findings from each agent
+        path_findings = state["pathology_result"].get("findings", []) if state["pathology_result"] else []
+        bio_findings = state["bioinformatics_result"].get("findings", []) if state["bioinformatics_result"] else []
+        chem_findings = state["biochemistry_result"].get("findings", []) if state["biochemistry_result"] else []
+        lit_findings = state["literature_result"].get("findings", []) if state["literature_result"] else []
+        
+        round_result = await self.pi_agent.synthesize_round(
+            analysis_state,
+            pathology_result=json.dumps(path_findings, ensure_ascii=False),
+            bioinformatics_result=json.dumps(bio_findings, ensure_ascii=False),
+            biochemistry_result=json.dumps(chem_findings, ensure_ascii=False),
+            literature_result=json.dumps(lit_findings, ensure_ascii=False)
+        )
+
+        logger.info(f"[{self.session_id}] Round {round_result.round_number} synthesis complete: {len(round_result.new_findings)} new findings, {len(round_result.next_steps)} next steps")
+
+        analysis_state.round_results.append(round_result)
+        
+        # Save state after each round
+        if self.state_callback:
+            try:
+                await self.state_callback(analysis_state)
+            except Exception as e:
+                logger.error(f"Failed to save state after round: {e}")
+        
+        # Extract data requests from PI
+        data_requests = await self.pi_agent.identify_data_needs(
+            analysis_state,
+            round_result
+        )
+        
+        # Send round summary with data requests
+        round_summary = {
+            "round": round_result.round_number,
+            "summary": round_result.pi_summary,
+            "findings": [
+                *round_result.pathology_findings,
+                *round_result.bioinformatics_findings,
+                *round_result.biochemistry_findings
+            ],
+            "data_requests": data_requests,
+            "status": "waiting_input"
+        }
+        
+        await self._send_message(
+            "round_summary",
+            round_summary,
+            AgentType.PI
+        )
+        
+        # Also send traditional result message for compatibility
+        await self._send_message(
+            "result",
+            {
+                "round": round_result.round_number,
+                "summary": round_result.pi_summary,
+                "next_steps": round_result.next_steps,
+                "new_findings": round_result.new_findings
+            },
+            AgentType.PI
+        )
+        
+        # Set status to waiting for user input
+        analysis_state.status = TaskStatus.WAITING_INPUT
+        
+        await self._send_message(
+            "status",
+            f"Round {round_result.round_number} complete. Waiting for your input - you can provide additional data or instructions.",
+            AgentType.PI
+        )
+        
+        return {
+            **state,
+            "analysis_state": analysis_state,
+            "round_result": round_result,
+            "data_requests": data_requests
+        }
+    
+    def _should_continue(self, state: WorkflowState) -> str:
+        """Determine if analysis should continue"""
+        round_result = state.get("round_result")
+        analysis_state = state["analysis_state"]
+
+        # Check if human requested stop (processed by PI Agent)
+        if state.get("human_stop_requested", False):
+            logger.info(f"[{self.session_id}] Stopping: human stop requested")
+            return "stop"
+        
+        # Check explicit should_continue flag (set by human intervention)
+        if state.get("should_continue") == False:
+            logger.info(f"[{self.session_id}] Stopping: should_continue flag is False")
+            return "stop"
+
+        # Check max rounds (use state.max_rounds if set, otherwise config default)
+        max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
+        if analysis_state.current_round >= max_rounds:
+            logger.info(f"[{self.session_id}] Stopping: reached max rounds ({max_rounds})")
+            return "stop"
+
+        # Check if forced to stop
+        if analysis_state.status == TaskStatus.PAUSED:
+            logger.info(f"[{self.session_id}] Stopping: analysis is paused")
+            return "stop"
+
+        logger.info(f"[{self.session_id}] Continuing analysis (round {analysis_state.current_round}/{max_rounds})")
+        return "continue"
+    
+    async def _check_convergence(self, state: WorkflowState) -> WorkflowState:
+        """Check if analysis has converged"""
+        analysis_state = state["analysis_state"]
+
+        should_stop = analysis_state.should_stop(self.config.convergence_rounds)
+
+        logger.info(f"[{self.session_id}] Convergence check: round={analysis_state.current_round}, should_stop={should_stop}")
+
+        return {
+            **state,
+            "should_continue": not should_stop
+        }
+    
+    def _check_convergence_condition(self, state: WorkflowState) -> str:
+        """Conditional check for convergence"""
+        if state.get("should_continue", True):
+            return "continue"
+        return "stop"
+    
+    async def _generate_final_report(self, state: WorkflowState) -> WorkflowState:
+        """Generate final analysis report"""
+        analysis_state = state["analysis_state"]
+
+        logger.info(f"[{self.session_id}] Generating final report after {analysis_state.current_round} rounds")
+
+        await self._send_message("status", "Generating final report...")
+        
+        final_summary = await self.pi_agent.generate_final_summary(analysis_state)
+        analysis_state.final_summary = final_summary
+        analysis_state.status = TaskStatus.COMPLETED
+
+        logger.info(f"[{self.session_id}] Final report generated, analysis completed")
+
+        await self._send_message(
+            "result",
+            {"final_summary": final_summary},
+            AgentType.PI
+        )
+        
+        return {
+            **state,
+            "analysis_state": analysis_state
+        }
+    
+    async def run(
+        self,
+        initial_state: AnalysisState,
+        thread_id: str
+    ) -> AnalysisState:
+        """
+        Run the complete workflow
+        
+        Args:
+            initial_state: Initial analysis state
+            thread_id: Thread ID for checkpointing
+            
+        Returns:
+            Final analysis state
+        """
+        # Store custom models, prompts, and temperatures for initialization
+        self._custom_models = initial_state.custom_models
+        self._custom_prompts = initial_state.custom_prompts
+        self._custom_temperatures = initial_state.custom_temperatures
+        
+        try:
+            await self._send_message("status", "Initializing analysis system...")
+            await self.initialize()
+            logger.info(f"Workflow initialized for session {self.session_id}")
+        except Exception as e:
+            logger.error(f"Failed to initialize workflow: {e}")
+            await self._send_message("error", f"Initialization failed: {str(e)}")
+            initial_state.status = TaskStatus.FAILED
+            return initial_state
+        
+        # Create initial workflow state
+        workflow_state: WorkflowState = {
+            "analysis_state": initial_state,
+            "current_round": 0,
+            "pi_instructions": {},
+            "pathology_result": None,
+            "bioinformatics_result": None,
+            "biochemistry_result": None,
+            "literature_result": None,
+            "round_result": None,
+            "should_continue": True,
+            "error": None,
+            "messages": []
+        }
+        
+        # Run workflow
+        config = {"configurable": {"thread_id": thread_id}}
+        
+        try:
+            logger.info(f"Starting workflow execution for {thread_id}")
+            final_state = await self.compiled_graph.ainvoke(
+                workflow_state,
+                config
+            )
+            logger.info(f"Workflow completed for {thread_id}")
+            return final_state["analysis_state"]
+            
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            logger.error(f"Workflow execution failed: {error_detail}")
+            await self._send_message("error", f"Workflow execution failed: {str(e)}")
+            initial_state.status = TaskStatus.FAILED
+            initial_state.add_message(
+                AgentType.PI,
+                MessageRole.SYSTEM,
+                f"Workflow execution failed: {str(e)}"
+            )
+            return initial_state
+    
+    async def resume(
+        self,
+        thread_id: str
+    ) -> AnalysisState:
+        """Resume a paused workflow"""
+        logger.info(f"[{self.session_id}] Resuming workflow for thread {thread_id}")
+        config = {"configurable": {"thread_id": thread_id}}
+
+        # Get current state
+        state = await self.compiled_graph.aget_state(config)
+
+        if state and state.values:
+            # Resume from checkpoint
+            logger.info(f"[{self.session_id}] Found saved state, resuming execution")
+            final_state = await self.compiled_graph.ainvoke(
+                None,
+                config
+            )
+            logger.info(f"[{self.session_id}] Workflow resumed and completed")
+            return final_state["analysis_state"]
+
+        logger.error(f"[{self.session_id}] No saved state found for thread {thread_id}")
+        raise ValueError(f"No saved state found for thread {thread_id}")
+    
+    async def pause(self, thread_id: str):
+        """Pause the workflow and save sandbox state including Python session"""
+        logger.info(f"[{self.session_id}] Pausing workflow for thread {thread_id}")
+        config = {"configurable": {"thread_id": thread_id}}
+        state = await self.compiled_graph.aget_state(config)
+
+        if state and state.values:
+            analysis_state = state.values["analysis_state"]
+            analysis_state.status = TaskStatus.PAUSED
+            
+            # Save sandbox state including Python session using dill
+            if self.sandbox:
+                await self.sandbox.save_session()
+                self.sandbox.notebook_state.save()
+                logger.info(f"[{self.session_id}] Sandbox state saved")
+
+            # State will be automatically checkpointed
+            logger.info(f"[{self.session_id}] Workflow paused successfully")
+    
+    async def close(self):
+        """Clean up resources and save state"""
+        logger.info(f"[{self.session_id}] Closing workflow and cleaning up resources")
+        if self.sandbox:
+            # This will save the notebook state before stopping
+            await self.sandbox.stop()
+            logger.info(f"[{self.session_id}] Sandbox stopped")
+        if self.llm_manager:
+            await self.llm_manager.close()
+            logger.info(f"[{self.session_id}] LLM manager closed")
+    
+    def get_notebook_path(self) -> Optional[str]:
+        """Get path to the saved Jupyter notebook"""
+        if self.sandbox:
+            return self.sandbox.get_notebook_path()
+        return None
