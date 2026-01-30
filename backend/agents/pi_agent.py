@@ -347,6 +347,19 @@ If no additional data is needed, return empty lists.
         uploaded_files = uploaded_files or []
         logger.info(f"[PI] Processing user input: {user_message[:100] if user_message else 'no message'}... ({len(uploaded_files)} files)")
 
+        # Quick path: [CONTINUE] marker means just continue without additional processing
+        if user_message and user_message.strip() == '[CONTINUE]':
+            logger.info("[PI] Continue marker detected, proceeding to next round")
+            return {
+                "action": "continue",
+                "response": "Continuing to next round of analysis.",
+                "file_assignments": {},
+                "biochemistry_values": {},
+                "adjusted_instructions": None,
+                "focus_areas": [],
+                "reason": "User requested to continue"
+            }
+
         # Build file description
         file_descriptions = []
         for f in uploaded_files:

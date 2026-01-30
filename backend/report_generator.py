@@ -23,6 +23,7 @@ import pandas as pd
 from .models.schemas import AnalysisState, AgentType, CodeExecution
 from .utils.llm_client import OpenAICompatibleClient
 from .utils.sandbox import LocalJupyterSandbox
+from .config import STATE_DIR, WORKSPACE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -550,8 +551,12 @@ class DetailedReportGenerator:
 
         await self._report_progress(2, "初始化..." if language == "zh" else "Initializing...")
 
-        # Initialize Jupyter sandbox
-        self.sandbox = LocalJupyterSandbox(session_id=f"report_{report_id}")
+        # Initialize Jupyter sandbox with correct data directories
+        self.sandbox = LocalJupyterSandbox(
+            session_id=f"report_{report_id}",
+            state_dir=str(STATE_DIR),
+            working_dir=str(WORKSPACE_DIR)
+        )
         await self.sandbox.start()
 
         try:

@@ -21,7 +21,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
-  const { currentSession, setCurrentSession, clearMessages, language, maxRounds, setMaxRounds } = useAppStore()
+  const { currentSession, setCurrentSession, clearMessages, language, maxRounds, setMaxRounds, reportGenerated } = useAppStore()
   const { createSession, loadSession, listSessions, deleteSession } = useSession()
   const { t } = useTranslation(language)
   const [showNewSession, setShowNewSession] = useState(false)
@@ -303,6 +303,11 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
                 <span>{language === 'zh' ? '默认: 10' : 'Default: 10'}</span>
                 <span>30</span>
               </div>
+              <p className="text-xs text-indigo-500 mt-2 leading-relaxed">
+                {language === 'zh'
+                  ? '💡 建议先设较小值，完成后可通过对话框要求继续分析'
+                  : '💡 Start small - you can request more rounds via chat later'}
+              </p>
             </div>
             
             <div className="flex gap-2">
@@ -353,8 +358,16 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
               {currentSession.instruction}
             </p>
             <div className="flex items-center gap-2 mt-2">
-              <span className={`text-xs px-2 py-0.5 rounded-full status-${currentSession.status}`}>
-                {currentSession.status}
+              <span className={`text-xs px-2 py-0.5 rounded-full ${
+                currentSession.status === 'completed' && !reportGenerated
+                  ? 'bg-amber-100 text-amber-700'
+                  : `status-${currentSession.status}`
+              }`}>
+                {currentSession.status === 'completed'
+                  ? (reportGenerated
+                      ? (language === 'zh' ? '已完成' : 'completed')
+                      : (language === 'zh' ? '分析完成' : 'analysis done'))
+                  : currentSession.status}
               </span>
               <span className="text-xs text-violet-500">
                 Round {currentSession.currentRound} / {maxRounds}

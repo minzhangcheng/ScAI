@@ -79,7 +79,7 @@ interface ReportPreview {
 }
 
 export function ReportPanel() {
-  const { currentSession, language } = useAppStore()
+  const { currentSession, language, addMessage, setReportGenerated } = useAppStore()
   const { t } = useTranslation(language)
 
   const [report, setReport] = useState<DetailedReport | null>(null)
@@ -114,14 +114,42 @@ export function ReportPanel() {
           current_step: data.step,
           status: data.status
         } : null)
+        // Also add to message stream
+        addMessage({
+          id: `report-progress-${Date.now()}`,
+          type: 'progress',
+          agent: 'pi',
+          content: `[Report] ${data.step} (${Math.round(data.progress)}%)`,
+          timestamp: new Date().toISOString()
+        })
       } else if (data.type === 'complete') {
         setReport(data.report)
         setGenerating(false)
+        setReportGenerated(true)
         // Load preview after generation
         loadPreview()
+        // Add completion message
+        addMessage({
+          id: `report-complete-${Date.now()}`,
+          type: 'completed',
+          agent: 'pi',
+          content: {
+            status: 'completed',
+            message: language === 'zh' ? '报告生成完成' : 'Report generation completed'
+          },
+          timestamp: new Date().toISOString()
+        })
       } else if (data.type === 'error') {
         setError(data.message)
         setGenerating(false)
+        // Add error message
+        addMessage({
+          id: `report-error-${Date.now()}`,
+          type: 'error',
+          agent: 'pi',
+          content: `[Report Error] ${data.message}`,
+          timestamp: new Date().toISOString()
+        })
       }
     }
 
@@ -149,6 +177,10 @@ export function ReportPanel() {
         const data = await response.json()
         if (data.report) {
           setReport(data.report)
+          // Mark report as generated if it's completed
+          if (data.report.status === 'completed') {
+            setReportGenerated(true)
+          }
           // Expand first section by default
           if (data.report.sections?.length > 0) {
             setExpandedSections(new Set([data.report.sections[0].id]))
@@ -183,6 +215,15 @@ export function ReportPanel() {
 
     setGenerating(true)
     setError(null)
+
+    // Add start message to stream
+    addMessage({
+      id: `report-start-${Date.now()}`,
+      type: 'status',
+      agent: 'pi',
+      content: language === 'zh' ? '开始生成详细报告...' : 'Starting detailed report generation...',
+      timestamp: new Date().toISOString()
+    })
 
     // Initialize report with pending status
     setReport({

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from './stores/appStore'
 import { useConfig, useWebSocket } from './hooks/useApi'
 import { useTranslation } from './i18n/translations'
@@ -11,25 +11,68 @@ import { ResultsPanel } from './components/ResultsPanel'
 import { ReportPanel } from './components/ReportPanel'
 import { MessageStream } from './components/MessageStream'
 import { LanguageSelector } from './components/LanguageSelector'
-import { 
-  Beaker, 
-  FileText, 
-  Settings, 
+import {
+  Beaker,
+  FileText,
+  Settings,
   BarChart3,
   Menu,
   X,
   Wifi,
   WifiOff,
-  FileSpreadsheet
+  FileSpreadsheet,
+  GripVertical
 } from 'lucide-react'
 
 function App() {
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected } = useAppStore()
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth } = useAppStore()
   const { checkStatus } = useConfig()
   const { connect, connected } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
   const { t } = useTranslation(language)
+
+  // Resizable panel state
+  const [isResizing, setIsResizing] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  // Handle mouse move for resizing
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing || !containerRef.current) return
+
+    const containerRect = containerRef.current.getBoundingClientRect()
+    const newWidth = ((containerRect.right - e.clientX) / containerRect.width) * 100
+
+    // Clamp between 20% and 80%
+    setMessagePanelWidth(Math.max(20, Math.min(80, newWidth)))
+  }, [isResizing, setMessagePanelWidth])
+
+  // Handle mouse up to stop resizing
+  const handleMouseUp = useCallback(() => {
+    setIsResizing(false)
+  }, [])
+
+  // Add/remove event listeners for resizing
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+    } else {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [isResizing, handleMouseMove, handleMouseUp])
 
   // Check API config status
   useEffect(() => {
@@ -155,9 +198,12 @@ function App() {
           </header>
 
           {/* Content Area */}
-          <div className="flex-1 flex overflow-hidden">
+          <div ref={containerRef} className="flex-1 flex overflow-hidden">
             {/* Left Panel - Tab Content */}
-            <div className={`${currentSession ? 'flex-1 lg:w-1/2' : 'flex-1'} overflow-auto p-6`}>
+            <div
+              className="overflow-auto p-6"
+              style={{ width: currentSession ? `${100 - messagePanelWidth}%` : '100%' }}
+            >
               {activeTab === 'analysis' && <AnalysisPanel />}
               {activeTab === 'data' && <DataPanel />}
               {activeTab === 'prompts' && <PromptsPanel />}
@@ -165,9 +211,24 @@ function App() {
               {activeTab === 'report' && <ReportPanel />}
             </div>
 
+            {/* Resizable Divider */}
+            {currentSession && (
+              <div
+                className="hidden lg:flex items-center justify-center w-1 bg-slate-200 hover:bg-violet-400 cursor-col-resize transition-colors group"
+                onMouseDown={() => setIsResizing(true)}
+              >
+                <div className="absolute p-1 bg-slate-300 group-hover:bg-violet-500 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+                  <GripVertical className="w-3 h-3 text-white" />
+                </div>
+              </div>
+            )}
+
             {/* Right Panel - Message Stream */}
             {currentSession && (
-              <div className="hidden lg:flex lg:w-1/2 border-l border-slate-200 bg-white overflow-hidden flex-col">
+              <div
+                className="hidden lg:flex border-l border-slate-200 bg-white overflow-hidden flex-col"
+                style={{ width: `${messagePanelWidth}%` }}
+              >
                 <MessageStream />
               </div>
             )}

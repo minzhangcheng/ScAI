@@ -1049,20 +1049,28 @@ async def pause_analysis(session_id: str):
 
 @app.post("/api/session/{session_id}/resume")
 async def resume_analysis(session_id: str):
-    """Resume paused analysis"""
+    """Resume paused or completed analysis (for re-analysis)"""
     state = ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    if state.status != TaskStatus.PAUSED:
-        raise HTTPException(status_code=400, detail="Analysis not paused")
-    
-    state.status = TaskStatus.RUNNING
-    
-    return APIResponse(
-        success=True,
-        message="Analysis resumed"
-    )
+
+    if state.status == TaskStatus.COMPLETED:
+        # Re-analysis: reset for a new round while keeping existing data
+        state.status = TaskStatus.RUNNING
+        # Increment max_rounds to allow additional analysis
+        state.max_rounds = state.current_round + 1
+        return APIResponse(
+            success=True,
+            message="Re-analysis started"
+        )
+    elif state.status == TaskStatus.PAUSED:
+        state.status = TaskStatus.RUNNING
+        return APIResponse(
+            success=True,
+            message="Analysis resumed"
+        )
+    else:
+        raise HTTPException(status_code=400, detail="Analysis not paused or completed")
 
 
 class UploadedFileInfo(BaseModel):

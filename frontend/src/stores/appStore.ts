@@ -157,7 +157,15 @@ interface AppState {
   
   sidebarOpen: boolean
   setSidebarOpen: (open: boolean) => void
-  
+
+  // Message panel width (percentage)
+  messagePanelWidth: number
+  setMessagePanelWidth: (width: number) => void
+
+  // Report generation status
+  reportGenerated: boolean
+  setReportGenerated: (generated: boolean) => void
+
   // WebSocket
   wsConnected: boolean
   setWsConnected: (connected: boolean) => void
@@ -238,7 +246,15 @@ export const useAppStore = create<AppState>()(
       
       sidebarOpen: true,
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
-      
+
+      // Message panel width (percentage, 20-80)
+      messagePanelWidth: 50,
+      setMessagePanelWidth: (width) => set({ messagePanelWidth: Math.max(20, Math.min(80, width)) }),
+
+      // Report generation status
+      reportGenerated: false,
+      setReportGenerated: (generated) => set({ reportGenerated: generated }),
+
       // WebSocket
       wsConnected: false,
       setWsConnected: (connected) => set({ wsConnected: connected })
@@ -252,6 +268,7 @@ export const useAppStore = create<AppState>()(
         models: state.models,
         temperatures: state.temperatures,
         maxRounds: state.maxRounds,
+        messagePanelWidth: state.messagePanelWidth,
         // Persist session and messages for page refresh recovery
         currentSession: state.currentSession,
         messages: state.messages.slice(-200), // Keep last 200 messages

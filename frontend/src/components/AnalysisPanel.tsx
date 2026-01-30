@@ -129,10 +129,44 @@ export function AnalysisPanel() {
     setUploadedFiles(prev => prev.filter((_, i) => i !== index))
   }
 
+  // Continue analysis without additional input (just add one more round)
+  const continueAnalysis = async () => {
+    if (!currentSession) return
+
+    setSending(true)
+    try {
+      // Send a simple continue message
+      const response = await fetch(
+        `${API_BASE}/session/${currentSession.id}/human-input`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: '[CONTINUE]',  // Special marker for continue without new instructions
+            uploaded_files: [],
+            target_agent: 'pi'
+          })
+        }
+      )
+
+      if (response.ok) {
+        // Resume analysis
+        await resumeAnalysis()
+        if (!connected) {
+          setTimeout(() => connect(), 100)
+        }
+      }
+    } catch (e) {
+      console.error('Failed to continue analysis:', e)
+    } finally {
+      setSending(false)
+    }
+  }
+
   // Send user input with optional files
   const sendUserInput = async () => {
     if (!currentSession || (!userInput.trim() && uploadedFiles.length === 0)) return
-    
+
     setSending(true)
     try {
       // First upload any files
@@ -191,9 +225,9 @@ export function AnalysisPanel() {
       if (response.ok) {
         setUserInput('')
         setUploadedFiles([])
-        
-        // Resume analysis if paused
-        if (currentSession.status === 'paused' || currentSession.status === 'waiting_input') {
+
+        // Resume analysis if paused or completed (for re-analysis)
+        if (currentSession.status === 'paused' || currentSession.status === 'waiting_input' || currentSession.status === 'completed') {
           await resumeAnalysis()
           if (!connected) {
             setTimeout(() => connect(), 100)
@@ -494,19 +528,23 @@ export function AnalysisPanel() {
       </div>
 
       {/* User Input Area - Fixed at Bottom */}
-      {!isCompleted && currentSession.status !== 'pending' && (
+      {currentSession.status !== 'pending' && (
         <div className="border-t border-slate-200 pt-4 bg-white">
-          <div className="p-4 bg-slate-50 rounded-xl">
+          <div className={`p-4 rounded-xl ${isCompleted ? 'bg-green-50' : 'bg-slate-50'}`}>
             <div className="flex items-start gap-3 mb-3">
-              <Users className="w-5 h-5 text-violet-600 mt-0.5" />
+              <Users className={`w-5 h-5 mt-0.5 ${isCompleted ? 'text-green-600' : 'text-violet-600'}`} />
               <div>
                 <h4 className="font-medium text-slate-900">
                   {language === 'zh' ? '与 PI Agent 交流' : 'Communicate with PI Agent'}
                 </h4>
                 <p className="text-sm text-slate-500">
-                  {isWaitingInput 
-                    ? (language === 'zh' 
-                        ? '请上传补充数据或提供新的指导意见' 
+                  {isCompleted
+                    ? (language === 'zh'
+                        ? '分析已完成。如不满意，可以补充数据或要求重新分析'
+                        : 'Analysis completed. You can add data or request re-analysis if needed')
+                    : isWaitingInput
+                    ? (language === 'zh'
+                        ? '请上传补充数据或提供新的指导意见'
                         : 'Please upload additional data or provide guidance')
                     : (language === 'zh'
                         ? '您可以随时上传数据或调整分析方向'
@@ -514,7 +552,7 @@ export function AnalysisPanel() {
                 </p>
               </div>
             </div>
-            
+
             {/* Quick Actions */}
             <div className="flex flex-wrap gap-2 mb-3">
               <button
@@ -524,30 +562,62 @@ export function AnalysisPanel() {
                 <Upload className="w-3.5 h-3.5" />
                 {language === 'zh' ? '上传图片/文件' : 'Upload Files'}
               </button>
-              <button
-                onClick={() => setUserInput(language === 'zh' ? '补充染色结果：' : 'Additional staining results:')}
-                className="px-3 py-1.5 text-xs bg-red-50 hover:bg-red-100 text-red-700 rounded-full transition-colors"
-              >
-                🔬 {language === 'zh' ? '补充染色' : 'Add Staining'}
-              </button>
-              <button
-                onClick={() => setUserInput(language === 'zh' ? '补充生化指标：' : 'Additional biochemistry data:')}
-                className="px-3 py-1.5 text-xs bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-full transition-colors"
-              >
-                🧪 {language === 'zh' ? '补充生化' : 'Add Biochem'}
-              </button>
-              <button
-                onClick={() => setUserInput(language === 'zh' ? '请继续下一轮分析' : 'Please continue to next round')}
-                className="px-3 py-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-full transition-colors"
-              >
-                ▶️ {language === 'zh' ? '继续分析' : 'Continue'}
-              </button>
-              <button
-                onClick={() => setUserInput(language === 'zh' ? '请结束分析并生成最终报告' : 'Please conclude and generate final report')}
-                className="px-3 py-1.5 text-xs bg-green-50 hover:bg-green-100 text-green-700 rounded-full transition-colors"
-              >
-                🏁 {language === 'zh' ? '结束分析' : 'Conclude'}
-              </button>
+              {isCompleted ? (
+                <>
+                  <button
+                    onClick={continueAnalysis}
+                    disabled={sending}
+                    className="px-3 py-1.5 text-xs bg-green-50 hover:bg-green-100 disabled:opacity-50 text-green-700 rounded-full transition-colors"
+                  >
+                    ▶️ {language === 'zh' ? '继续分析' : 'Continue'}
+                  </button>
+                  <button
+                    onClick={() => setUserInput(language === 'zh' ? '我对分析结果不满意，请根据以下建议重新分析：' : 'I am not satisfied with the results. Please re-analyze with the following guidance:')}
+                    className="px-3 py-1.5 text-xs bg-violet-50 hover:bg-violet-100 text-violet-700 rounded-full transition-colors"
+                  >
+                    🔄 {language === 'zh' ? '重新分析' : 'Re-analyze'}
+                  </button>
+                  <button
+                    onClick={() => setUserInput(language === 'zh' ? '请补充以下数据后继续分析：' : 'Please continue analysis with additional data:')}
+                    className="px-3 py-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-full transition-colors"
+                  >
+                    ➕ {language === 'zh' ? '补充数据继续' : 'Add Data & Continue'}
+                  </button>
+                  <button
+                    onClick={() => setUserInput(language === 'zh' ? '请针对以下方面进行更深入的分析：' : 'Please provide deeper analysis on the following aspects:')}
+                    className="px-3 py-1.5 text-xs bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-full transition-colors"
+                  >
+                    🔍 {language === 'zh' ? '深入分析' : 'Deeper Analysis'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => setUserInput(language === 'zh' ? '补充染色结果：' : 'Additional staining results:')}
+                    className="px-3 py-1.5 text-xs bg-red-50 hover:bg-red-100 text-red-700 rounded-full transition-colors"
+                  >
+                    🔬 {language === 'zh' ? '补充染色' : 'Add Staining'}
+                  </button>
+                  <button
+                    onClick={() => setUserInput(language === 'zh' ? '补充生化指标：' : 'Additional biochemistry data:')}
+                    className="px-3 py-1.5 text-xs bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-full transition-colors"
+                  >
+                    🧪 {language === 'zh' ? '补充生化' : 'Add Biochem'}
+                  </button>
+                  <button
+                    onClick={() => setUserInput(language === 'zh' ? '请继续下一轮分析' : 'Please continue to next round')}
+                    className="px-3 py-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-full transition-colors"
+                  >
+                    ▶️ {language === 'zh' ? '继续分析' : 'Continue'}
+                  </button>
+                  <button
+                    onClick={() => setUserInput(language === 'zh' ? '请结束分析并生成最终报告' : 'Please conclude and generate final report')}
+                    className="px-3 py-1.5 text-xs bg-green-50 hover:bg-green-100 text-green-700 rounded-full transition-colors"
+                  >
+                    🏁 {language === 'zh' ? '结束分析' : 'Conclude'}
+                  </button>
+                </>
+              )}
             </div>
             
             {/* Uploaded Files Preview */}
