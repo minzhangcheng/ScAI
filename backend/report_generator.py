@@ -13,7 +13,6 @@ import uuid
 import asyncio
 import logging
 import re
-import base64
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Callable
 from pathlib import Path
@@ -491,17 +490,48 @@ REPORT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "report_complete",
-            "description": "Call this when all figures and tables for this section are generated",
+            "name": "consult_pi",
+            "description": "Request guidance from PI Agent on what data/figures are needed, or ask for feedback on generated results",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question or request for PI guidance"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Relevant context (e.g., what has been generated so far, current data status)"
+                    }
+                },
+                "required": ["question", "context"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_for_review",
+            "description": "Submit current section output to PI for review. PI will decide if more data/figures are needed.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "summary": {
                         "type": "string",
-                        "description": "Brief summary of what was generated"
+                        "description": "Summary of what has been generated for this section"
+                    },
+                    "figures_generated": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of figure names/descriptions generated"
+                    },
+                    "tables_generated": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of table names generated"
                     }
                 },
-                "required": ["summary"]
+                "required": ["summary", "figures_generated"]
             }
         }
     }
@@ -578,6 +608,160 @@ class DetailedReportGenerator:
             temperature=temperature,
             max_tokens=4096
         )
+
+    async def _pi_review_section(
+        self,
+        section_plan: Dict[str, Any],
+        figures_generated: List[Dict],
+        tables_generated: List[Dict],
+        findings: Dict[str, Any],
+        language: str
+    ) -> Dict[str, Any]:
+        """
+        PI Agent reviews the generated section output and decides if more data is needed.
+
+        Returns:
+            Dict with:
+            - satisfied: bool - whether PI is satisfied with current output
+            - feedback: str - feedback for bioinformatics agent if not satisfied
+            - missing_elements: List[str] - specific items still needed
+        """
+        zh = language == "zh"
+
+        # Build summary of what was generated
+        fig_summary = "\n".join([
+            f"- {f.get('name', 'Unknown')}: {f.get('caption', '')[:100]}"
+            for f in figures_generated
+        ]) if figures_generated else "No figures generated"
+
+        tbl_summary = "\n".join([
+            f"- {t.get('name', 'Unknown')}"
+            for t in tables_generated
+        ]) if tables_generated else "No tables generated"
+
+        # Build expected outputs from plan
+        expected_figs = "\n".join([
+            f"- {f['name']}: {f['description']}"
+            for f in section_plan.get("figures", [])
+        ]) if section_plan.get("figures") else "No specific figures required"
+
+        expected_tbls = "\n".join([
+            f"- {t['name']}: {t['description']}"
+            for t in section_plan.get("tables", [])
+        ]) if section_plan.get("tables") else "No specific tables required"
+
+        prompt = f"""You are the PI reviewing the bioinformatics output for a report section.
+
+## Section: {section_plan.get('title', 'Unknown')}
+Description: {section_plan.get('description', '')}
+Analysis Type: {section_plan.get('analysis_type', 'general')}
+
+## Expected Outputs (from plan):
+### Figures:
+{expected_figs}
+
+### Tables:
+{expected_tbls}
+
+## Actually Generated:
+### Figures ({len(figures_generated)} total):
+{fig_summary}
+
+### Tables ({len(tables_generated)} total):
+{tbl_summary}
+
+## Research Context:
+Key findings: {json.dumps(findings.get('bioinformatics', [])[:5], ensure_ascii=False)}
+
+## Task
+Evaluate whether the generated outputs adequately cover the section requirements.
+
+Consider:
+1. Are all required figures present?
+2. Do the figures address the section's goals?
+3. Is the data quality sufficient for publication?
+4. Are there important visualizations missing?
+
+{"用中文回复" if zh else "Reply in English"}
+
+Return JSON:
+{{
+    "satisfied": true/false,
+    "quality_score": 1-10,
+    "feedback": "Detailed feedback for the bioinformatics agent",
+    "missing_elements": ["List of specific figures/tables still needed"],
+    "improvement_suggestions": ["Suggestions for improving existing figures"]
+}}
+
+Be strict but fair. For a publication-quality report:
+- Each section should have comprehensive visualizations
+- Key findings should be clearly illustrated
+- Statistical information should be included where relevant
+"""
+
+        response = await self._pi_chat(prompt, temperature=0.3)
+
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                result = json.loads(json_match.group())
+                return {
+                    "satisfied": result.get("satisfied", False),
+                    "quality_score": result.get("quality_score", 5),
+                    "feedback": result.get("feedback", ""),
+                    "missing_elements": result.get("missing_elements", []),
+                    "improvement_suggestions": result.get("improvement_suggestions", [])
+                }
+        except Exception as e:
+            logger.error(f"Failed to parse PI review: {e}")
+
+        # Default: not satisfied if fewer figures than planned
+        min_figures = len(section_plan.get("figures", []))
+        is_satisfied = len(figures_generated) >= max(min_figures, 2)
+
+        return {
+            "satisfied": is_satisfied,
+            "quality_score": 5 if is_satisfied else 3,
+            "feedback": "Please ensure all required figures are generated." if not is_satisfied else "Acceptable output.",
+            "missing_elements": [],
+            "improvement_suggestions": []
+        }
+
+    async def _pi_guide_bio_agent(
+        self,
+        question: str,
+        context: str,
+        section_plan: Dict[str, Any],
+        findings: Dict[str, Any],
+        language: str
+    ) -> str:
+        """PI provides guidance to bioinformatics agent during report generation"""
+        zh = language == "zh"
+
+        prompt = f"""You are the PI guiding the bioinformatics analyst in generating report figures.
+
+## Section Being Generated: {section_plan.get('title', '')}
+{section_plan.get('description', '')}
+
+## Bioinformatics Agent's Question:
+{question}
+
+## Context:
+{context}
+
+## Research Background:
+{json.dumps(findings.get('bioinformatics', [])[:10], ensure_ascii=False)}
+
+{"用中文回复，提供具体的分析指导" if zh else "Provide specific analytical guidance"}
+
+Be specific and actionable. Include:
+1. What specific visualizations to create
+2. What data/metrics to include
+3. How to make figures publication-quality
+4. Any statistical considerations
+"""
+
+        return await self._pi_chat(prompt, temperature=0.4)
 
     async def generate_report(
         self,
@@ -844,29 +1028,118 @@ print("Data loader ready. Use load_data(file_path) to load data files.")
 """
         await self.sandbox.execute(dir_code)
 
-        # Let Agent explore and load data as needed
-        # Provide information about available data paths
-        if state.control_seq_path or state.treatment_seq_path:
-            info_code = """
+        # Auto-load processed data from analysis phase
+        # Look for processed h5ad files in the session's upload directory
+        await self._auto_load_processed_data(state)
+
+        return True
+
+    async def _auto_load_processed_data(self, state: AnalysisState):
+        """
+        Automatically load processed data from analysis phase.
+        This ensures report generation can use the analyzed data with clustering, annotations, etc.
+        """
+        import os
+
+        # Determine the session's upload directory
+        upload_dir = None
+        if state.control_seq_path:
+            upload_dir = Path(state.control_seq_path).parent
+        elif state.treatment_seq_path:
+            upload_dir = Path(state.treatment_seq_path).parent
+
+        if not upload_dir or not upload_dir.exists():
+            logger.warning("Could not determine upload directory for processed data")
+            return
+
+        # Priority order for loading processed data
+        processed_files = [
+            "annotated_adata.h5ad",      # Best: has cell type annotations
+            "processed_adata_markers.h5ad",  # Has marker genes
+            "processed_adata.h5ad",      # Basic processed
+            "hepatocytes_subset_scored.h5ad",  # Subset with scores
+        ]
+
+        # Find available processed files
+        available_files = []
+        for fname in processed_files:
+            fpath = upload_dir / fname
+            if fpath.exists():
+                available_files.append(str(fpath))
+                logger.info(f"Found processed data: {fpath}")
+
+        if not available_files:
+            logger.warning(f"No processed data found in {upload_dir}")
+            # Fall back to showing available data paths
+            info_code = f"""
 print("\\n=== Available Data Files ===")
+print("No pre-processed data found. You may need to load and process the raw data.")
 """
             if state.control_seq_path:
                 info_code += f"""
 print(f"Control data: {{DATA_PATH_CONTROL}}")
-print(f"  File exists: {{Path(DATA_PATH_CONTROL).exists()}}")
 """
             if state.treatment_seq_path:
                 info_code += f"""
 print(f"Treatment data: {{DATA_PATH_TREATMENT}}")
-print(f"  File exists: {{Path(DATA_PATH_TREATMENT).exists()}}")
-"""
-            info_code += """
-print("\\nUse load_data(path) to load the data when needed.")
-print("The Agent will decide how to process the data based on its type.")
 """
             await self.sandbox.execute(info_code)
+            return
 
-        return True
+        # Load the best available processed data
+        best_file = available_files[0]
+        logger.info(f"Auto-loading processed data: {best_file}")
+
+        load_code = f"""
+# === AUTO-LOADING PROCESSED DATA ===
+import scanpy as sc
+import warnings
+warnings.filterwarnings('ignore')
+
+# Load the processed/annotated data from analysis phase
+PROCESSED_DATA_PATH = "{best_file}"
+print(f"Loading processed data from: {{PROCESSED_DATA_PATH}}")
+
+try:
+    adata = sc.read_h5ad(PROCESSED_DATA_PATH)
+    print(f"\\n=== Data Loaded Successfully ===")
+    print(f"Shape: {{adata.shape[0]}} cells x {{adata.shape[1]}} genes")
+
+    # Show available annotations
+    print(f"\\nObservations (obs) columns:")
+    for col in adata.obs.columns[:15]:
+        print(f"  - {{col}}")
+    if len(adata.obs.columns) > 15:
+        print(f"  ... and {{len(adata.obs.columns) - 15}} more columns")
+
+    # Show obsm (embeddings)
+    if adata.obsm:
+        print(f"\\nEmbeddings (obsm):")
+        for key in adata.obsm.keys():
+            print(f"  - {{key}}: shape {{adata.obsm[key].shape}}")
+
+    # Show uns (unstructured annotations)
+    if adata.uns:
+        print(f"\\nUnstructured (uns) keys: {{list(adata.uns.keys())[:10]}}")
+
+    print("\\n=== Ready for Visualization ===")
+    print("Use `adata` variable to access the data")
+    print("Use `save_figure(fig, FIGURES_DIR / 'filename')` to save figures")
+
+except Exception as e:
+    print(f"ERROR loading processed data: {{e}}")
+    adata = None
+
+# Also list other available processed files
+AVAILABLE_PROCESSED_FILES = {available_files}
+print(f"\\nOther available processed files: {{AVAILABLE_PROCESSED_FILES}}")
+"""
+
+        result = await self.sandbox.execute(load_code)
+        if result.error:
+            logger.error(f"Failed to load processed data: {result.error}")
+        else:
+            logger.info(f"Processed data loaded successfully")
 
     def _extract_findings(self, state: AnalysisState) -> Dict[str, Any]:
         """Extract key findings from analysis rounds"""
@@ -995,8 +1268,18 @@ Important Guidelines:
 
 ### Section requirements:
 - Each section should have 2-4 figures and 1-2 tables
-- Total 5-8 sections for comprehensive coverage
+- **MUST have at least 5 sections total** for comprehensive coverage
+- **MUST have at least 3 "general" analysis sections** (QC, clustering, markers)
+- **MUST have at least 2 "specific" analysis sections** (differential expression, key findings)
 - General sections should come first, followed by specific sections
+
+### IMPORTANT: Your response MUST include exactly this structure:
+1. Quality Control section (general)
+2. Clustering/UMAP section (general)
+3. Marker Genes section (general)
+4. Differential Expression section (specific)
+5. Key Findings section (specific)
+6. [Optional additional sections as needed]
 """
 
         response = await self._pi_chat(prompt, temperature=0.4)
@@ -1016,27 +1299,71 @@ Important Guidelines:
         except Exception as e:
             logger.error(f"Failed to parse report plan: {e}")
 
-        # Fallback: minimal structure - let Agent fill in details
+        # Fallback: comprehensive structure with multiple sections
         return {
             "title": state.name or ("分析报告" if zh else "Analysis Report"),
             "sections": [
                 {
-                    "id": "general_overview",
-                    "title": "数据概览与质量评估" if zh else "Data Overview and Quality Assessment",
-                    "description": "基于实际分析结果的数据概览" if zh else "Data overview based on actual analysis results",
+                    "id": "qc_overview",
+                    "title": "质量控制与数据预处理" if zh else "Quality Control and Data Preprocessing",
+                    "description": "展示数据质量指标和预处理结果" if zh else "Display data quality metrics and preprocessing results",
                     "analysis_type": "general",
                     "figures": [
-                        {"name": "Data Overview", "description": "Visualize the key characteristics of the analyzed data", "type": "auto"}
+                        {"name": "QC Violin Plots", "description": "Violin plots showing nGenes, nCounts, and percent_mito distributions for quality assessment", "type": "violin"},
+                        {"name": "QC Scatter Plot", "description": "Scatter plot of nCounts vs nGenes colored by percent_mito to identify low-quality cells", "type": "scatter"}
                     ],
-                    "tables": []
+                    "tables": [
+                        {"name": "QC Summary", "description": "Summary statistics of quality control metrics before and after filtering"}
+                    ]
+                },
+                {
+                    "id": "clustering_overview",
+                    "title": "细胞聚类与降维分析" if zh else "Cell Clustering and Dimensionality Reduction",
+                    "description": "UMAP可视化和聚类结果" if zh else "UMAP visualization and clustering results",
+                    "analysis_type": "general",
+                    "figures": [
+                        {"name": "UMAP Clusters", "description": "UMAP visualization colored by Leiden clusters with cell count annotations", "type": "umap"},
+                        {"name": "UMAP by Condition", "description": "UMAP visualization split or colored by experimental condition (Control vs Treatment)", "type": "umap"},
+                        {"name": "Cell Composition", "description": "Stacked bar plot showing cell type composition per condition with exact percentages", "type": "bar"}
+                    ],
+                    "tables": [
+                        {"name": "Cluster Sizes", "description": "Table of cell counts per cluster and condition"}
+                    ]
+                },
+                {
+                    "id": "marker_genes",
+                    "title": "标记基因分析" if zh else "Marker Gene Analysis",
+                    "description": "各细胞群的标记基因鉴定" if zh else "Identification of marker genes for each cell population",
+                    "analysis_type": "general",
+                    "figures": [
+                        {"name": "Marker Genes Dotplot", "description": "Dot plot showing top 5-10 marker genes per cluster with expression level and percentage", "type": "dotplot"},
+                        {"name": "Marker Genes Heatmap", "description": "Heatmap of top marker genes with hierarchical clustering", "type": "heatmap"}
+                    ],
+                    "tables": [
+                        {"name": "Top Markers", "description": "Table of top marker genes per cluster with log fold change and adjusted p-values"}
+                    ]
+                },
+                {
+                    "id": "differential_expression",
+                    "title": "差异表达分析" if zh else "Differential Expression Analysis",
+                    "description": "实验组与对照组的差异基因分析" if zh else "Analysis of differentially expressed genes between conditions",
+                    "analysis_type": "specific",
+                    "figures": [
+                        {"name": "Volcano Plot", "description": "Volcano plot showing differentially expressed genes with labeled top genes, fold change and p-value thresholds", "type": "volcano"},
+                        {"name": "Top DE Genes Heatmap", "description": "Heatmap of top 50 differentially expressed genes between conditions", "type": "heatmap"}
+                    ],
+                    "tables": [
+                        {"name": "DE Genes", "description": "Table of significantly differentially expressed genes with statistics"}
+                    ]
                 },
                 {
                     "id": "key_findings",
-                    "title": "主要研究发现" if zh else "Key Research Findings",
-                    "description": "支持研究结论的核心可视化" if zh else "Core visualizations supporting research conclusions",
+                    "title": "关键研究发现" if zh else "Key Research Findings",
+                    "description": "基于分析结果的核心发现可视化" if zh else "Visualization of key findings from the analysis",
                     "analysis_type": "specific",
                     "figures": [
-                        {"name": "Key Findings Visualization", "description": "Visualize the most important findings from the analysis", "type": "auto"}
+                        {"name": "Key Pathway Expression", "description": "Feature plots or violin plots showing expression of key genes related to research findings", "type": "feature"},
+                        {"name": "Condition Comparison", "description": "Comparative visualization between control and treatment highlighting key differences", "type": "comparison"}
                     ],
                     "tables": []
                 }
@@ -1051,8 +1378,15 @@ Important Guidelines:
         language: str
     ) -> Dict[str, Any]:
         """
-        Generate a report section using autonomous Bioinformatics Agent.
-        The Agent writes and executes code to generate all figures and tables.
+        Generate a report section using PI-guided Bioinformatics Agent dialogue.
+
+        Flow:
+        1. Bioinformatics Agent generates figures/tables
+        2. Agent can consult PI for guidance during generation
+        3. Agent submits for PI review when ready
+        4. PI evaluates and provides feedback
+        5. If not satisfied, Agent continues based on feedback
+        6. Loop until PI is satisfied or max iterations reached
         """
         zh = language == "zh"
         section_id = section_plan.get("id", str(uuid.uuid4())[:8])
@@ -1075,9 +1409,21 @@ Important Guidelines:
 
         system_prompt = f"""You are a bioinformatics expert generating PUBLICATION-QUALITY figures and tables for a research paper.
 
+## Available Tools
+1. **execute_code**: Execute Python code to generate figures/tables
+2. **consult_pi**: Ask PI for guidance on what data/visualizations are needed
+3. **submit_for_review**: Submit your work to PI for evaluation
+
+## Workflow
+1. First explore the data to understand what's available
+2. Generate figures based on section requirements
+3. If unsure about what visualizations to create, use **consult_pi** to ask PI
+4. When you think you have enough figures, use **submit_for_review**
+5. PI will provide feedback - if not satisfied, continue generating based on feedback
+
 ## Available Data
-The following variables may be available in your environment. First explore what data exists before generating visualizations:
-- `adata`: Main data object (could be AnnData, DataFrame, or other format depending on the analysis)
+The following variables may be available in your environment:
+- `adata`: Main data object (could be AnnData, DataFrame, or other format)
 - `adata_control`, `adata_treatment`: Separate datasets if comparative analysis was performed
 - `FIGURES_DIR`: Path to save figures
 - `TABLES_DIR`: Path to save tables
@@ -1106,93 +1452,50 @@ Description: {section_plan.get('description', '')}
 - Use **appropriate color palettes** (colorblind-friendly preferred)
 
 ### For single-cell analysis figures specifically:
-1. **UMAP/t-SNE plots**:
-   - Size: `figsize=(12, 10)`
-   - Point size: `size=15-30` for visibility
-   - Show cluster labels ON the plot using `sc.pl.umap(..., legend_loc='on data')`
-   - Include cell count annotations
-
-2. **Quality Control plots**:
-   - Create **multi-panel figures** showing: violin plots of nGenes, nCounts, percent_mito
-   - Include **before/after filtering** comparison if applicable
-   - Show **exact numbers**: total cells, filtered cells, remaining cells
-
-3. **Marker gene heatmaps/dotplots**:
-   - Include **top 5-10 marker genes per cluster**
-   - Use hierarchical clustering for genes
-   - Show expression values AND percentage expressed
-
-4. **Differential expression**:
-   - Volcano plots with labeled top genes
-   - Include fold-change and p-value thresholds as lines
-
-5. **Cell type composition**:
-   - Stacked bar plots or pie charts with percentages
-   - Include exact cell counts
-
-### General Analysis Section Requirements:
-For "general" analysis type, you MUST include comprehensive figures showing:
-- Data quality metrics (violin plots, scatter plots)
-- Dimensionality reduction results (PCA variance, UMAP)
-- Clustering results with cluster sizes
-- Basic statistics and summaries
-
-## Instructions
-1. FIRST: Explore the available data thoroughly
-   - Run `print(dir())` to see available variables
-   - Check data structure: shape, columns, obs, var, etc.
-   - Identify what preprocessing has been done
-
-2. Generate DETAILED, INFORMATIVE figures:
-   - Each figure should tell a complete story
-   - Include annotations, labels, and statistics
-   - Make figures self-explanatory
-
-3. Save figures using save_figure() for both PNG and PDF:
-   ```python
-   fig, ax = plt.subplots(figsize=(12, 10))  # Use large size!
-   # ... your plotting code with proper labels ...
-   ax.set_title('Descriptive Title', fontsize=14)
-   ax.set_xlabel('X Label', fontsize=12)
-   ax.set_ylabel('Y Label', fontsize=12)
-   save_figure(fig, FIGURES_DIR / "descriptive_filename")
-   plt.close(fig)
-   ```
-
-4. For scanpy plots, use matplotlib figure context:
-   ```python
-   fig, ax = plt.subplots(figsize=(12, 10))
-   sc.pl.umap(adata, color='leiden', ax=ax, show=False,
-              legend_loc='on data', legend_fontsize=10, size=20)
-   ax.set_title('UMAP - Cell Clusters (N=XXX cells)', fontsize=14)
-   save_figure(fig, FIGURES_DIR / "umap_clusters")
-   plt.close(fig)
-   ```
-
-5. Save tables as CSV with descriptive columns
-
-6. Call report_complete when ALL outputs are generated
+1. **UMAP/t-SNE plots**: Size `figsize=(12, 10)`, point size 15-30, show cluster labels on data
+2. **Quality Control plots**: Multi-panel violin plots, show exact cell counts
+3. **Marker gene heatmaps/dotplots**: Top 5-10 genes per cluster, hierarchical clustering
+4. **Differential expression**: Volcano plots with labeled top genes
+5. **Cell type composition**: Stacked bar plots with percentages and cell counts
 
 ## Code Guidelines
 - Always check data structure before plotting
 - Handle missing data gracefully
 - Include exact numbers in titles/annotations
 - Use `plt.tight_layout()` before saving
-- Close figures after saving: plt.close(fig)
+- Close figures after saving: `plt.close(fig)`
 """
+
+        # Build the list of required figures
+        required_figures = section_plan.get("figures", [])
+        num_required = len(required_figures)
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Generate figures and tables for the '{section_title}' section. Start with the first figure."}
+            {"role": "user", "content": f"""Generate figures and tables for the '{section_title}' section.
+
+Target: Generate at least {max(num_required, 2)} figure(s) for this section.
+
+Required figures:
+{figures_desc if figures_desc else "- Generate appropriate figures based on section topic"}
+
+Instructions:
+1. First explore the data (run `print(dir())` to see variables)
+2. Generate each required figure
+3. If you need guidance on what to visualize, use `consult_pi`
+4. When you have generated all figures, use `submit_for_review` to let PI evaluate
+5. PI will tell you if more work is needed"""}
         ]
 
         section_figures = []
         section_tables = []
-        max_steps = 15
+        max_steps = 30  # Allow more steps for the dialogue
+        max_pi_iterations = 3  # Maximum times PI can request more work
         step_count = 0
+        pi_iteration = 0
         completed = False
 
-        while step_count < max_steps and not completed:
+        while step_count < max_steps and pi_iteration < max_pi_iterations and not completed:
             step_count += 1
 
             try:
@@ -1312,10 +1615,105 @@ For "general" analysis type, you MUST include comprehensive figures showing:
                         "content": tool_result
                     })
 
-                elif tool_name == "report_complete":
-                    completed = True
-                    logger.info(f"Section {section_title} completed: {args.get('summary', '')}")
-                    break
+                elif tool_name == "consult_pi":
+                    # Bioinformatics Agent asks PI for guidance
+                    question = args.get("question", "")
+                    context = args.get("context", "")
+
+                    logger.info(f"Bio Agent consulting PI: {question[:50]}...")
+
+                    pi_response = await self._pi_guide_bio_agent(
+                        question, context, section_plan, findings, language
+                    )
+
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {"name": tool_name, "arguments": json.dumps(args)}
+                        }]
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": f"PI Guidance:\n{pi_response}"
+                    })
+
+                elif tool_name == "submit_for_review":
+                    # Submit to PI for evaluation
+                    summary = args.get("summary", "")
+                    figs_list = args.get("figures_generated", [])
+                    tbls_list = args.get("tables_generated", [])
+
+                    logger.info(f"Submitting section for PI review: {len(section_figures)} figures")
+
+                    # PI reviews the output
+                    review = await self._pi_review_section(
+                        section_plan, section_figures, section_tables, findings, language
+                    )
+
+                    pi_iteration += 1
+
+                    if review["satisfied"]:
+                        # PI is satisfied, section complete
+                        completed = True
+                        logger.info(f"PI satisfied with section {section_title} (score: {review['quality_score']}/10)")
+
+                        messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {"name": tool_name, "arguments": json.dumps(args)}
+                            }]
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": f"PI Review: APPROVED (Quality Score: {review['quality_score']}/10)\n{review['feedback']}"
+                        })
+                        break
+                    else:
+                        # PI wants more work
+                        logger.info(f"PI requests more work on section {section_title}: {review['feedback'][:100]}...")
+
+                        feedback_msg = f"""PI Review: NEEDS MORE WORK (Quality Score: {review['quality_score']}/10)
+
+Feedback: {review['feedback']}
+
+Missing elements:
+{chr(10).join(f'- {item}' for item in review['missing_elements']) if review['missing_elements'] else 'None specified'}
+
+Suggestions:
+{chr(10).join(f'- {s}' for s in review['improvement_suggestions']) if review['improvement_suggestions'] else 'None'}
+
+Please address PI's feedback and generate additional figures/tables as needed.
+Iteration {pi_iteration}/{max_pi_iterations} - {"Last chance to complete!" if pi_iteration >= max_pi_iterations - 1 else "Continue generating."}"""
+
+                        messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {"name": tool_name, "arguments": json.dumps(args)}
+                            }]
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": feedback_msg
+                        })
+
+        # If we exited without completion, log reason
+        if not completed:
+            if pi_iteration >= max_pi_iterations:
+                logger.warning(f"Section {section_title}: reached max PI iterations ({max_pi_iterations})")
+            elif step_count >= max_steps:
+                logger.warning(f"Section {section_title}: reached max steps ({max_steps})")
 
         # Generate section narrative using PI Agent
         narrative = await self._generate_section_narrative(
@@ -1329,7 +1727,9 @@ For "general" analysis type, you MUST include comprehensive figures showing:
             "analysis_type": analysis_type,
             "content": narrative,
             "figures": section_figures,
-            "tables": section_tables
+            "tables": section_tables,
+            "pi_iterations": pi_iteration,
+            "steps_executed": step_count
         }
 
     async def _generate_section_narrative(
@@ -1507,18 +1907,12 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 png_path = figure.get("png_path", "")
                 pdf_path = figure.get("pdf_path", "")
 
-                # Encode PNG image as base64 for embedding
-                png_base64 = ""
-                if png_path and os.path.exists(png_path):
-                    try:
-                        with open(png_path, "rb") as f:
-                            png_base64 = base64.b64encode(f.read()).decode()
-                    except:
-                        pass
-
-                # Create relative paths for downloads
+                # Use relative paths for images (reference PNG files directly)
                 png_filename = os.path.basename(png_path) if png_path else ""
                 pdf_filename = os.path.basename(pdf_path) if pdf_path else ""
+
+                # Check if image file exists
+                image_exists = png_path and os.path.exists(png_path)
 
                 # Generate figure ID for referencing
                 fig_num = section.get("figures", []).index(figure) + 1 if figure in section.get("figures", []) else ""
@@ -1529,7 +1923,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 section_html += f'''
                     <div class="figure-container" id="fig-{fig_id}">
                         <div class="figure-image">
-                            {"<img src='data:image/png;base64," + png_base64 + "' alt='" + fig_name + "' />" if png_base64 else "<p>Image not available</p>"}
+                            {"<img src='figures/" + png_filename + "' alt='" + fig_name + "' />" if image_exists else "<p>Image not available</p>"}
                         </div>
                         <div class="figure-caption">
                             <h4>{fig_label}: {fig_name}</h4>
