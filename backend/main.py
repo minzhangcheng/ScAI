@@ -1793,3 +1793,116 @@ async def download_full_report(session_id: str):
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+@app.get("/api/session/{session_id}/report/html")
+async def get_report_html(session_id: str):
+    """Get the HTML report for preview"""
+    report_dir = REPORTS_DIR / session_id
+    html_path = report_dir / "report.html"
+
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="HTML report not found")
+
+    return FileResponse(
+        html_path,
+        media_type="text/html",
+        filename=f"{session_id}_report.html"
+    )
+
+
+@app.get("/api/session/{session_id}/report/preview")
+async def preview_report(session_id: str):
+    """Get report preview data including HTML content and metadata"""
+    report_dir = REPORTS_DIR / session_id
+
+    if not report_dir.exists():
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    # Load report metadata
+    report_json_path = report_dir / "report.json"
+    html_path = report_dir / "report.html"
+
+    report_data = None
+    if report_json_path.exists():
+        with open(report_json_path, "r", encoding="utf-8") as f:
+            report_data = json.load(f)
+
+    html_content = None
+    if html_path.exists():
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+
+    # Get list of figures and tables
+    figures_dir = report_dir / "figures"
+    tables_dir = report_dir / "tables"
+
+    figures = []
+    if figures_dir.exists():
+        for f in figures_dir.glob("*"):
+            if f.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                pdf_path = f.with_suffix('.pdf')
+                figures.append({
+                    "name": f.stem,
+                    "png_url": f"/api/session/{session_id}/report/figure/{f.name}",
+                    "pdf_url": f"/api/session/{session_id}/report/figure/{pdf_path.name}" if pdf_path.exists() else None
+                })
+
+    tables = []
+    if tables_dir.exists():
+        for f in tables_dir.glob("*.csv"):
+            tables.append({
+                "name": f.stem,
+                "csv_url": f"/api/session/{session_id}/report/table/{f.name}"
+            })
+
+    return {
+        "session_id": session_id,
+        "html_url": f"/api/session/{session_id}/report/html",
+        "download_url": f"/api/session/{session_id}/report/download-full",
+        "report": report_data,
+        "html_content": html_content,
+        "figures": figures,
+        "tables": tables,
+        "has_html": html_path.exists()
+    }
+
+
+@app.get("/api/session/{session_id}/report/figure/{filename}")
+async def get_report_figure(session_id: str, filename: str):
+    """Get a specific figure from the report"""
+    figure_path = REPORTS_DIR / session_id / "figures" / filename
+
+    if not figure_path.exists():
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    # Determine media type based on extension
+    ext = figure_path.suffix.lower()
+    media_types = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.pdf': 'application/pdf'
+    }
+    media_type = media_types.get(ext, 'application/octet-stream')
+
+    return FileResponse(
+        figure_path,
+        media_type=media_type,
+        filename=filename
+    )
+
+
+@app.get("/api/session/{session_id}/report/table/{filename}")
+async def get_report_table(session_id: str, filename: str):
+    """Get a specific table from the report"""
+    table_path = REPORTS_DIR / session_id / "tables" / filename
+
+    if not table_path.exists():
+        raise HTTPException(status_code=404, detail="Table not found")
+
+    return FileResponse(
+        table_path,
+        media_type="text/csv",
+        filename=filename
+    )

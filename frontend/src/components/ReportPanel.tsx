@@ -13,37 +13,39 @@ import {
   Loader2,
   CheckCircle,
   AlertCircle,
-  Play
+  Play,
+  Eye,
+  Code,
+  ExternalLink,
+  Package
 } from 'lucide-react'
 
 const API_BASE = '/api'
 
 interface ReportFigure {
   id: string
-  title: string
-  description: string
+  name: string
   png_path: string
-  pdf_path: string
-  analysis_method: string
-  results: string
-  conclusion: string
+  pdf_path: string | null
+  section: string
+  analysis_type: string
 }
 
 interface ReportTable {
   id: string
-  title: string
-  description: string
+  name: string
   csv_path: string
+  section: string
   columns: string[]
   preview_data: any[]
-  analysis_method: string
-  results: string
-  conclusion: string
+  analysis_type: string
 }
 
 interface ReportSection {
   id: string
   title: string
+  description: string
+  analysis_type: 'general' | 'specific'
   content: string
   figures: ReportFigure[]
   tables: ReportTable[]
@@ -56,22 +58,38 @@ interface DetailedReport {
   abstract: string
   sections: ReportSection[]
   conclusions: string
+  figures: ReportFigure[]
+  tables: ReportTable[]
   generated_at: string
   status: 'pending' | 'generating' | 'completed' | 'failed'
   progress: number
   current_step: string
+  html_path?: string
+}
+
+interface ReportPreview {
+  session_id: string
+  html_url: string
+  download_url: string
+  report: DetailedReport | null
+  html_content: string | null
+  figures: { name: string; png_url: string; pdf_url: string | null }[]
+  tables: { name: string; csv_url: string }[]
+  has_html: boolean
 }
 
 export function ReportPanel() {
   const { currentSession, language } = useAppStore()
   const { t } = useTranslation(language)
-  
+
   const [report, setReport] = useState<DetailedReport | null>(null)
+  const [preview, setPreview] = useState<ReportPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
   const [ws, setWs] = useState<WebSocket | null>(null)
+  const [viewMode, setViewMode] = useState<'preview' | 'detail'>('preview')
 
   // Load existing report on mount
   useEffect(() => {
@@ -86,7 +104,7 @@ export function ReportPanel() {
 
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/report/${currentSession.id}`
     const websocket = new WebSocket(wsUrl)
-    
+
     websocket.onmessage = (event) => {
       const data = JSON.parse(event.data)
       if (data.type === 'progress') {
@@ -99,19 +117,21 @@ export function ReportPanel() {
       } else if (data.type === 'complete') {
         setReport(data.report)
         setGenerating(false)
+        // Load preview after generation
+        loadPreview()
       } else if (data.type === 'error') {
         setError(data.message)
         setGenerating(false)
       }
     }
-    
+
     websocket.onerror = () => {
       setError('WebSocket connection failed')
       setGenerating(false)
     }
-    
+
     setWs(websocket)
-    
+
     return () => {
       websocket.close()
     }
@@ -119,10 +139,10 @@ export function ReportPanel() {
 
   const loadReport = async () => {
     if (!currentSession?.id) return
-    
+
     setLoading(true)
     setError(null)
-    
+
     try {
       const response = await fetch(`${API_BASE}/session/${currentSession.id}/detailed-report`)
       if (response.ok) {
@@ -133,6 +153,8 @@ export function ReportPanel() {
           if (data.report.sections?.length > 0) {
             setExpandedSections(new Set([data.report.sections[0].id]))
           }
+          // Also load preview
+          await loadPreview()
         }
       }
     } catch (e) {
@@ -142,12 +164,26 @@ export function ReportPanel() {
     }
   }
 
+  const loadPreview = async () => {
+    if (!currentSession?.id) return
+
+    try {
+      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/preview`)
+      if (response.ok) {
+        const data = await response.json()
+        setPreview(data)
+      }
+    } catch (e) {
+      console.error('Failed to load preview:', e)
+    }
+  }
+
   const generateReport = async () => {
     if (!currentSession?.id) return
-    
+
     setGenerating(true)
     setError(null)
-    
+
     // Initialize report with pending status
     setReport({
       id: '',
@@ -156,17 +192,19 @@ export function ReportPanel() {
       abstract: '',
       sections: [],
       conclusions: '',
+      figures: [],
+      tables: [],
       generated_at: '',
       status: 'generating',
       progress: 0,
       current_step: language === 'zh' ? '初始化报告生成...' : 'Initializing report generation...'
     })
-    
+
     try {
       const response = await fetch(`${API_BASE}/session/${currentSession.id}/generate-detailed-report`, {
         method: 'POST'
       })
-      
+
       if (!response.ok) {
         throw new Error('Failed to start report generation')
       }
@@ -205,9 +243,26 @@ export function ReportPanel() {
     }
   }
 
+  const downloadFromUrl = async (url: string, filename: string) => {
+    try {
+      const response = await fetch(url)
+      const blob = await response.blob()
+      const blobUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = blobUrl
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(blobUrl)
+    } catch (e) {
+      console.error('Download failed:', e)
+    }
+  }
+
   const downloadAllFigures = async () => {
     if (!report || !currentSession) return
-    
+
     try {
       const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/download-all-figures`, {
         method: 'POST'
@@ -228,7 +283,7 @@ export function ReportPanel() {
 
   const downloadAllTables = async () => {
     if (!report || !currentSession) return
-    
+
     try {
       const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/download-all-tables`, {
         method: 'POST'
@@ -249,7 +304,7 @@ export function ReportPanel() {
 
   const downloadFullReport = async () => {
     if (!report || !currentSession) return
-    
+
     try {
       const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/download-full`, {
         method: 'POST'
@@ -266,6 +321,11 @@ export function ReportPanel() {
     } catch (e) {
       console.error('Download failed:', e)
     }
+  }
+
+  const openHtmlInNewTab = () => {
+    if (!currentSession?.id) return
+    window.open(`${API_BASE}/session/${currentSession.id}/report/html`, '_blank')
   }
 
   if (!currentSession) {
@@ -288,8 +348,8 @@ export function ReportPanel() {
             {language === 'zh' ? '分析尚未完成' : 'Analysis not completed'}
           </p>
           <p className="text-sm">
-            {language === 'zh' 
-              ? '请等待分析完成后再生成详细报告' 
+            {language === 'zh'
+              ? '请等待分析完成后再生成详细报告'
               : 'Please wait for the analysis to complete before generating a detailed report'}
           </p>
         </div>
@@ -308,34 +368,70 @@ export function ReportPanel() {
               {language === 'zh' ? '详细研究报告' : 'Detailed Research Report'}
             </h2>
           </div>
-          
+
           <div className="flex items-center gap-2">
             {report && report.status === 'completed' && (
               <>
+                {/* View mode toggle */}
+                <div className="flex items-center bg-slate-100 rounded-lg p-1 mr-2">
+                  <button
+                    onClick={() => setViewMode('preview')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                      viewMode === 'preview'
+                        ? 'bg-white text-indigo-700 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Eye className="w-4 h-4" />
+                    {language === 'zh' ? '预览' : 'Preview'}
+                  </button>
+                  <button
+                    onClick={() => setViewMode('detail')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                      viewMode === 'detail'
+                        ? 'bg-white text-indigo-700 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Code className="w-4 h-4" />
+                    {language === 'zh' ? '详情' : 'Detail'}
+                  </button>
+                </div>
+
+                {preview?.has_html && (
+                  <button
+                    onClick={openHtmlInNewTab}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-violet-50 text-violet-700 rounded-lg hover:bg-violet-100"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    {language === 'zh' ? '新窗口打开' : 'Open in Tab'}
+                  </button>
+                )}
+
                 <button
                   onClick={downloadAllFigures}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-pink-50 text-pink-700 rounded-lg hover:bg-pink-100"
                 >
                   <Image className="w-4 h-4" />
-                  {language === 'zh' ? '下载所有图片' : 'Download Figures'}
+                  {language === 'zh' ? '下载图片' : 'Figures'}
                 </button>
                 <button
                   onClick={downloadAllTables}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100"
                 >
                   <Table className="w-4 h-4" />
-                  {language === 'zh' ? '下载所有表格' : 'Download Tables'}
+                  {language === 'zh' ? '下载表格' : 'Tables'}
                 </button>
                 <button
                   onClick={downloadFullReport}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100"
                 >
-                  <FileDown className="w-4 h-4" />
-                  {language === 'zh' ? '下载完整报告' : 'Download Full Report'}
+                  <Package className="w-4 h-4" />
+                  {language === 'zh' ? '打包下载' : 'Download All'}
                 </button>
               </>
             )}
-            
+
             <button
               onClick={generateReport}
               disabled={generating}
@@ -346,13 +442,13 @@ export function ReportPanel() {
               ) : (
                 <Play className="w-4 h-4" />
               )}
-              {generating 
-                ? (language === 'zh' ? '生成中...' : 'Generating...') 
-                : (language === 'zh' ? '生成详细报告' : 'Generate Report')}
+              {generating
+                ? (language === 'zh' ? '生成中...' : 'Generating...')
+                : (language === 'zh' ? '生成报告' : 'Generate')}
             </button>
           </div>
         </div>
-        
+
         {/* Progress bar */}
         {generating && report && (
           <div className="mt-4">
@@ -361,7 +457,7 @@ export function ReportPanel() {
               <span>{Math.round(report.progress)}%</span>
             </div>
             <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
-              <div 
+              <div
                 className="h-full bg-indigo-600 transition-all duration-300"
                 style={{ width: `${report.progress}%` }}
               />
@@ -371,13 +467,13 @@ export function ReportPanel() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto p-4">
+      <div className="flex-1 overflow-auto">
         {loading ? (
           <div className="flex items-center justify-center h-64">
             <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
           </div>
         ) : error ? (
-          <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
+          <div className="m-4 bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
             <div className="flex items-center gap-2">
               <AlertCircle className="w-5 h-5" />
               <span>{error}</span>
@@ -390,180 +486,190 @@ export function ReportPanel() {
               {language === 'zh' ? '尚未生成详细报告' : 'No detailed report yet'}
             </p>
             <p className="text-sm">
-              {language === 'zh' 
-                ? '点击上方"生成详细报告"按钮开始生成' 
-                : 'Click "Generate Report" button above to start'}
+              {language === 'zh'
+                ? '点击上方"生成报告"按钮开始生成'
+                : 'Click "Generate" button above to start'}
             </p>
           </div>
+        ) : viewMode === 'preview' && preview?.has_html ? (
+          // HTML Preview Mode
+          <div className="h-full">
+            <iframe
+              srcDoc={preview.html_content || ''}
+              className="w-full h-full border-0"
+              title="Report Preview"
+              sandbox="allow-same-origin"
+            />
+          </div>
         ) : (
-          <div className="max-w-4xl mx-auto space-y-6">
-            {/* Title */}
-            <div className="bg-gradient-to-r from-indigo-50 to-violet-50 rounded-2xl p-6 border border-indigo-100">
-              <h1 className="text-2xl font-bold text-slate-900 mb-2">{report.title}</h1>
-              <p className="text-sm text-slate-500">
-                {language === 'zh' ? '生成时间：' : 'Generated: '}
-                {new Date(report.generated_at).toLocaleString()}
-              </p>
-            </div>
-
-            {/* Abstract */}
-            {report.abstract && (
-              <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm">
-                <h2 className="text-lg font-semibold text-slate-900 mb-3 flex items-center gap-2">
-                  <span className="w-1 h-6 bg-indigo-500 rounded-full" />
-                  {language === 'zh' ? '摘要' : 'Abstract'}
-                </h2>
-                <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{report.abstract}</p>
+          // Detail Mode
+          <div className="p-4">
+            <div className="max-w-4xl mx-auto space-y-6">
+              {/* Title */}
+              <div className="bg-gradient-to-r from-indigo-50 to-violet-50 rounded-2xl p-6 border border-indigo-100">
+                <h1 className="text-2xl font-bold text-slate-900 mb-2">{report.title}</h1>
+                <p className="text-sm text-slate-500">
+                  {language === 'zh' ? '生成时间：' : 'Generated: '}
+                  {new Date(report.generated_at).toLocaleString()}
+                </p>
               </div>
-            )}
 
-            {/* Sections */}
-            {report.sections?.map((section) => (
-              <div key={section.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                {/* Section Header */}
-                <button
-                  onClick={() => toggleSection(section.id)}
-                  className="w-full px-6 py-4 flex items-center justify-between hover:bg-slate-50 transition-colors"
-                >
-                  <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-                    <span className="w-1 h-6 bg-violet-500 rounded-full" />
-                    {section.title}
+              {/* Abstract */}
+              {report.abstract && (
+                <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm">
+                  <h2 className="text-lg font-semibold text-slate-900 mb-3 flex items-center gap-2">
+                    <span className="w-1 h-6 bg-indigo-500 rounded-full" />
+                    {language === 'zh' ? '摘要' : 'Abstract'}
                   </h2>
-                  {expandedSections.has(section.id) ? (
-                    <ChevronDown className="w-5 h-5 text-slate-400" />
-                  ) : (
-                    <ChevronRight className="w-5 h-5 text-slate-400" />
-                  )}
-                </button>
+                  <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{report.abstract}</p>
+                </div>
+              )}
 
-                {/* Section Content */}
-                {expandedSections.has(section.id) && (
-                  <div className="px-6 pb-6 space-y-6">
-                    {/* Text Content */}
-                    {section.content && (
-                      <div className="text-slate-700 leading-relaxed whitespace-pre-wrap">
-                        {section.content}
-                      </div>
+              {/* Sections */}
+              {report.sections?.map((section) => (
+                <div key={section.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                  {/* Section Header */}
+                  <button
+                    onClick={() => toggleSection(section.id)}
+                    className="w-full px-6 py-4 flex items-center justify-between hover:bg-slate-50 transition-colors"
+                  >
+                    <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                      <span className={`w-1 h-6 rounded-full ${section.analysis_type === 'general' ? 'bg-blue-500' : 'bg-amber-500'}`} />
+                      {section.title}
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${
+                        section.analysis_type === 'general'
+                          ? 'bg-blue-100 text-blue-700'
+                          : 'bg-amber-100 text-amber-700'
+                      }`}>
+                        {section.analysis_type === 'general'
+                          ? (language === 'zh' ? '通用分析' : 'General')
+                          : (language === 'zh' ? '特定分析' : 'Specific')}
+                      </span>
+                    </h2>
+                    {expandedSections.has(section.id) ? (
+                      <ChevronDown className="w-5 h-5 text-slate-400" />
+                    ) : (
+                      <ChevronRight className="w-5 h-5 text-slate-400" />
                     )}
+                  </button>
 
-                    {/* Figures */}
-                    {section.figures?.map((figure) => (
-                      <div key={figure.id} className="bg-slate-50 rounded-xl p-4 border border-slate-200">
-                        <div className="flex items-start justify-between mb-3">
-                          <h3 className="font-medium text-slate-900 flex items-center gap-2">
-                            <Image className="w-4 h-4 text-pink-500" />
-                            {figure.title}
-                          </h3>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => downloadFile(figure.png_path, `${figure.title}.png`)}
-                              className="text-xs px-2 py-1 bg-pink-100 text-pink-700 rounded hover:bg-pink-200"
-                            >
-                              PNG
-                            </button>
-                            <button
-                              onClick={() => downloadFile(figure.pdf_path, `${figure.title}.pdf`)}
-                              className="text-xs px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200"
-                            >
-                              PDF
-                            </button>
+                  {/* Section Content */}
+                  {expandedSections.has(section.id) && (
+                    <div className="px-6 pb-6 space-y-6">
+                      {/* Text Content */}
+                      {section.content && (
+                        <div className="text-slate-700 leading-relaxed whitespace-pre-wrap">
+                          {section.content}
+                        </div>
+                      )}
+
+                      {/* Figures */}
+                      {section.figures?.map((figure) => (
+                        <div key={figure.id} className="bg-slate-50 rounded-xl p-4 border border-slate-200">
+                          <div className="flex items-start justify-between mb-3">
+                            <h3 className="font-medium text-slate-900 flex items-center gap-2">
+                              <Image className="w-4 h-4 text-pink-500" />
+                              {figure.name}
+                            </h3>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => downloadFile(figure.png_path, `${figure.name}.png`)}
+                                className="text-xs px-2 py-1 bg-pink-100 text-pink-700 rounded hover:bg-pink-200"
+                              >
+                                PNG
+                              </button>
+                              {figure.pdf_path && (
+                                <button
+                                  onClick={() => downloadFile(figure.pdf_path!, `${figure.name}.pdf`)}
+                                  className="text-xs px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200"
+                                >
+                                  PDF
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Image Preview */}
+                          <div className="mb-4 bg-white rounded-lg p-2 border border-slate-200">
+                            <img
+                              src={`${API_BASE}/file?path=${encodeURIComponent(figure.png_path)}`}
+                              alt={figure.name}
+                              className="max-w-full h-auto mx-auto cursor-pointer"
+                              onClick={() => figure.pdf_path && downloadFile(figure.pdf_path, `${figure.name}.pdf`)}
+                              title={figure.pdf_path ? (language === 'zh' ? '点击下载高清PDF' : 'Click to download high-res PDF') : ''}
+                            />
                           </div>
                         </div>
-                        
-                        {/* Image Preview */}
-                        <div className="mb-4 bg-white rounded-lg p-2 border border-slate-200">
-                          <img
-                            src={`${API_BASE}/file?path=${encodeURIComponent(figure.png_path)}`}
-                            alt={figure.title}
-                            className="max-w-full h-auto mx-auto"
-                          />
-                        </div>
-                        
-                        {/* Figure Description */}
-                        <div className="space-y-2 text-sm">
-                          <p className="text-slate-600"><strong>{language === 'zh' ? '描述：' : 'Description: '}</strong>{figure.description}</p>
-                          <p className="text-slate-600"><strong>{language === 'zh' ? '分析方法：' : 'Method: '}</strong>{figure.analysis_method}</p>
-                          <p className="text-slate-600"><strong>{language === 'zh' ? '结果：' : 'Results: '}</strong>{figure.results}</p>
-                          <p className="text-slate-600"><strong>{language === 'zh' ? '结论：' : 'Conclusion: '}</strong>{figure.conclusion}</p>
-                        </div>
-                      </div>
-                    ))}
+                      ))}
 
-                    {/* Tables */}
-                    {section.tables?.map((table) => (
-                      <div key={table.id} className="bg-slate-50 rounded-xl p-4 border border-slate-200">
-                        <div className="flex items-start justify-between mb-3">
-                          <h3 className="font-medium text-slate-900 flex items-center gap-2">
-                            <Table className="w-4 h-4 text-emerald-500" />
-                            {table.title}
-                          </h3>
-                          <button
-                            onClick={() => downloadFile(table.csv_path, `${table.title}.csv`)}
-                            className="text-xs px-2 py-1 bg-emerald-100 text-emerald-700 rounded hover:bg-emerald-200"
-                          >
-                            CSV
-                          </button>
-                        </div>
-                        
-                        {/* Table Preview */}
-                        <div className="mb-4 overflow-x-auto">
-                          <table className="min-w-full bg-white rounded-lg border border-slate-200 text-sm">
-                            <thead className="bg-slate-100">
-                              <tr>
-                                {table.columns?.map((col, i) => (
-                                  <th key={i} className="px-3 py-2 text-left font-medium text-slate-700 border-b">
-                                    {col}
-                                  </th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {table.preview_data?.slice(0, 10).map((row, i) => (
-                                <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
-                                  {table.columns?.map((col, j) => (
-                                    <td key={j} className="px-3 py-2 text-slate-600 border-b border-slate-100">
-                                      {row[col] ?? '-'}
-                                    </td>
+                      {/* Tables */}
+                      {section.tables?.map((table) => (
+                        <div key={table.id} className="bg-slate-50 rounded-xl p-4 border border-slate-200">
+                          <div className="flex items-start justify-between mb-3">
+                            <h3 className="font-medium text-slate-900 flex items-center gap-2">
+                              <Table className="w-4 h-4 text-emerald-500" />
+                              {table.name}
+                            </h3>
+                            <button
+                              onClick={() => downloadFile(table.csv_path, `${table.name}.csv`)}
+                              className="text-xs px-2 py-1 bg-emerald-100 text-emerald-700 rounded hover:bg-emerald-200"
+                            >
+                              CSV
+                            </button>
+                          </div>
+
+                          {/* Table Preview */}
+                          <div className="mb-4 overflow-x-auto">
+                            <table className="min-w-full bg-white rounded-lg border border-slate-200 text-sm">
+                              <thead className="bg-slate-100">
+                                <tr>
+                                  {table.columns?.map((col, i) => (
+                                    <th key={i} className="px-3 py-2 text-left font-medium text-slate-700 border-b">
+                                      {col}
+                                    </th>
                                   ))}
                                 </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                          {table.preview_data && table.preview_data.length > 10 && (
-                            <p className="text-xs text-slate-500 mt-2 text-center">
-                              {language === 'zh' 
-                                ? `显示前10行，共${table.preview_data.length}行` 
-                                : `Showing first 10 of ${table.preview_data.length} rows`}
-                            </p>
-                          )}
+                              </thead>
+                              <tbody>
+                                {table.preview_data?.slice(0, 10).map((row, i) => (
+                                  <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
+                                    {table.columns?.map((col, j) => (
+                                      <td key={j} className="px-3 py-2 text-slate-600 border-b border-slate-100">
+                                        {row[col] ?? '-'}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            {table.preview_data && table.preview_data.length > 10 && (
+                              <p className="text-xs text-slate-500 mt-2 text-center">
+                                {language === 'zh'
+                                  ? `显示前10行，共${table.preview_data.length}行`
+                                  : `Showing first 10 of ${table.preview_data.length} rows`}
+                              </p>
+                            )}
+                          </div>
                         </div>
-                        
-                        {/* Table Description */}
-                        <div className="space-y-2 text-sm">
-                          <p className="text-slate-600"><strong>{language === 'zh' ? '描述：' : 'Description: '}</strong>{table.description}</p>
-                          <p className="text-slate-600"><strong>{language === 'zh' ? '分析方法：' : 'Method: '}</strong>{table.analysis_method}</p>
-                          <p className="text-slate-600"><strong>{language === 'zh' ? '结果：' : 'Results: '}</strong>{table.results}</p>
-                          <p className="text-slate-600"><strong>{language === 'zh' ? '结论：' : 'Conclusion: '}</strong>{table.conclusion}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-
-            {/* Conclusions */}
-            {report.conclusions && (
-              <div className="bg-gradient-to-r from-violet-50 to-indigo-50 rounded-xl p-6 border border-violet-100">
-                <h2 className="text-lg font-semibold text-slate-900 mb-3 flex items-center gap-2">
-                  <CheckCircle className="w-5 h-5 text-green-500" />
-                  {language === 'zh' ? '结论' : 'Conclusions'}
-                </h2>
-                <div className="text-slate-700 leading-relaxed whitespace-pre-wrap">
-                  {report.conclusions}
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              ))}
+
+              {/* Conclusions */}
+              {report.conclusions && (
+                <div className="bg-gradient-to-r from-violet-50 to-indigo-50 rounded-xl p-6 border border-violet-100">
+                  <h2 className="text-lg font-semibold text-slate-900 mb-3 flex items-center gap-2">
+                    <CheckCircle className="w-5 h-5 text-green-500" />
+                    {language === 'zh' ? '结论' : 'Conclusions'}
+                  </h2>
+                  <div className="text-slate-700 leading-relaxed whitespace-pre-wrap">
+                    {report.conclusions}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
