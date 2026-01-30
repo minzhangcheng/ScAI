@@ -28,6 +28,29 @@ from .config import STATE_DIR, WORKSPACE_DIR
 logger = logging.getLogger(__name__)
 
 
+def markdown_to_html(text: str) -> str:
+    """Convert basic markdown formatting to HTML"""
+    if not text:
+        return ""
+
+    # Bold: **text** or __text__
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+
+    # Italic: *text* or _text_
+    text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+    text = re.sub(r'_(.+?)_', r'<em>\1</em>', text)
+
+    # Code: `text`
+    text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+
+    # Line breaks
+    text = text.replace('\n\n', '</p><p>')
+    text = text.replace('\n', '<br>')
+
+    return text
+
+
 # HTML Template for the report
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -128,6 +151,25 @@ HTML_TEMPLATE = """
         .section-content p {{
             margin-bottom: 16px;
             text-align: justify;
+        }}
+
+        .section-content strong {{
+            font-weight: 600;
+            color: #1e40af;
+        }}
+
+        .section-content em {{
+            font-style: italic;
+            color: #6b7280;
+        }}
+
+        .section-content code {{
+            background: #f1f5f9;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.9em;
+            color: #dc2626;
         }}
 
         .abstract {{
@@ -430,7 +472,11 @@ REPORT_TOOLS = [
                     },
                     "description": {
                         "type": "string",
-                        "description": "Brief description of what this code does"
+                        "description": "Brief title for the figure/table (e.g., 'UMAP visualization of cell clusters')"
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "DETAILED figure caption for publication (50-100 words). Describe: what is shown, key observations, sample sizes, statistical details. Example: 'UMAP visualization of 15,234 cells from control and treatment groups, colored by Leiden clustering (resolution=0.8). A total of 12 distinct clusters were identified, with cluster 0 (3,421 cells, 22.4%) representing the largest population.'"
                     },
                     "output_type": {
                         "type": "string",
@@ -438,7 +484,7 @@ REPORT_TOOLS = [
                         "description": "Type of output this code generates"
                     }
                 },
-                "required": ["code", "description", "output_type"]
+                "required": ["code", "description", "caption", "output_type"]
             }
         }
     },
@@ -926,8 +972,31 @@ Important Guidelines:
 - Include both "general" and "specific" analysis_type sections
 - Design figures/tables that specifically illustrate the discovered findings
 - Be creative and specific - you are the expert, decide what best tells the story
-- Each section should have 1-3 figures and 0-2 tables
-- Total 4-8 sections depending on the richness of findings
+
+## Publication-Quality Figure Requirements:
+
+### For "general" analysis sections, MUST include standard figures:
+1. **Quality Control**: Multi-panel violin plots showing nGenes, nCounts, percent_mito distributions
+2. **Data Overview**: UMAP/t-SNE colored by clusters with cell count annotations
+3. **Cluster Markers**: Heatmap or dotplot of top marker genes per cluster
+4. **Cell Statistics**: Bar chart showing cell counts per cluster/sample
+
+### For "specific" analysis sections:
+1. **Differential Expression**: Volcano plots with labeled significant genes
+2. **Pathway Analysis**: Bar plots of enriched pathways with p-values
+3. **Comparative Analysis**: Side-by-side comparisons between conditions
+4. **Key Gene Expression**: Feature plots or violin plots for key genes
+
+### Figure description requirements:
+- Each figure description should be DETAILED (50+ words)
+- Specify exact visualization type (violin, UMAP, heatmap, etc.)
+- Mention what comparisons or annotations to include
+- State the biological question the figure addresses
+
+### Section requirements:
+- Each section should have 2-4 figures and 1-2 tables
+- Total 5-8 sections for comprehensive coverage
+- General sections should come first, followed by specific sections
 """
 
         response = await self._pi_chat(prompt, temperature=0.4)
@@ -1004,7 +1073,7 @@ Important Guidelines:
         analysis_type = section_plan.get('analysis_type', 'general')
         analysis_type_label = "General Analysis" if analysis_type == "general" else "Specific Analysis (Research-Focused)"
 
-        system_prompt = f"""You are a bioinformatics expert generating figures and tables for a research report.
+        system_prompt = f"""You are a bioinformatics expert generating PUBLICATION-QUALITY figures and tables for a research paper.
 
 ## Available Data
 The following variables may be available in your environment. First explore what data exists before generating visualizations:
@@ -1026,40 +1095,90 @@ Description: {section_plan.get('description', '')}
 ### Tables to Generate:
 {tables_desc if tables_desc else "Generate appropriate tables if needed"}
 
-## Instructions
-1. FIRST: Explore the available data to understand its structure
-   - Check what variables exist and their types
-   - Examine the data structure (columns, keys, attributes)
-   - Adapt your visualization approach based on actual data
+## CRITICAL: Publication-Quality Figure Requirements
 
-2. Use execute_code tool to generate each figure/table
+### For ALL figures:
+- Use **large figure size**: `figsize=(10, 8)` minimum, or `(12, 10)` for complex plots
+- Use **readable font sizes**: title=14-16, labels=12-14, ticks=10-12
+- Add **clear titles** that describe what the figure shows
+- Add **axis labels** with units where applicable
+- Include **legends** with descriptive labels
+- Use **appropriate color palettes** (colorblind-friendly preferred)
+
+### For single-cell analysis figures specifically:
+1. **UMAP/t-SNE plots**:
+   - Size: `figsize=(12, 10)`
+   - Point size: `size=15-30` for visibility
+   - Show cluster labels ON the plot using `sc.pl.umap(..., legend_loc='on data')`
+   - Include cell count annotations
+
+2. **Quality Control plots**:
+   - Create **multi-panel figures** showing: violin plots of nGenes, nCounts, percent_mito
+   - Include **before/after filtering** comparison if applicable
+   - Show **exact numbers**: total cells, filtered cells, remaining cells
+
+3. **Marker gene heatmaps/dotplots**:
+   - Include **top 5-10 marker genes per cluster**
+   - Use hierarchical clustering for genes
+   - Show expression values AND percentage expressed
+
+4. **Differential expression**:
+   - Volcano plots with labeled top genes
+   - Include fold-change and p-value thresholds as lines
+
+5. **Cell type composition**:
+   - Stacked bar plots or pie charts with percentages
+   - Include exact cell counts
+
+### General Analysis Section Requirements:
+For "general" analysis type, you MUST include comprehensive figures showing:
+- Data quality metrics (violin plots, scatter plots)
+- Dimensionality reduction results (PCA variance, UMAP)
+- Clustering results with cluster sizes
+- Basic statistics and summaries
+
+## Instructions
+1. FIRST: Explore the available data thoroughly
+   - Run `print(dir())` to see available variables
+   - Check data structure: shape, columns, obs, var, etc.
+   - Identify what preprocessing has been done
+
+2. Generate DETAILED, INFORMATIVE figures:
+   - Each figure should tell a complete story
+   - Include annotations, labels, and statistics
+   - Make figures self-explanatory
 
 3. Save figures using save_figure() for both PNG and PDF:
    ```python
-   fig, ax = plt.subplots(figsize=(8, 6))
-   # ... your plotting code ...
+   fig, ax = plt.subplots(figsize=(12, 10))  # Use large size!
+   # ... your plotting code with proper labels ...
+   ax.set_title('Descriptive Title', fontsize=14)
+   ax.set_xlabel('X Label', fontsize=12)
+   ax.set_ylabel('Y Label', fontsize=12)
    save_figure(fig, FIGURES_DIR / "descriptive_filename")
    plt.close(fig)
    ```
 
-4. Save tables as CSV: `df.to_csv(TABLES_DIR / "filename.csv", index=False)`
+4. For scanpy plots, use matplotlib figure context:
+   ```python
+   fig, ax = plt.subplots(figsize=(12, 10))
+   sc.pl.umap(adata, color='leiden', ax=ax, show=False,
+              legend_loc='on data', legend_fontsize=10, size=20)
+   ax.set_title('UMAP - Cell Clusters (N=XXX cells)', fontsize=14)
+   save_figure(fig, FIGURES_DIR / "umap_clusters")
+   plt.close(fig)
+   ```
 
-5. Call report_complete when all outputs are generated
+5. Save tables as CSV with descriptive columns
+
+6. Call report_complete when ALL outputs are generated
 
 ## Code Guidelines
-- Always explore data structure before plotting
-- Handle missing data/columns gracefully with checks
-- Use try-except for operations that might fail
-- Use random_state=42 for reproducibility where applicable
+- Always check data structure before plotting
+- Handle missing data gracefully
+- Include exact numbers in titles/annotations
+- Use `plt.tight_layout()` before saving
 - Close figures after saving: plt.close(fig)
-- Choose appropriate visualization types based on the actual data
-
-## Your Expertise
-As a bioinformatics expert, use your professional judgment to:
-- Select the most appropriate visualization methods for the data
-- Apply domain-specific best practices
-- Create informative and publication-quality figures
-- Generate meaningful summary tables
 """
 
         messages = [
@@ -1094,6 +1213,7 @@ As a bioinformatics expert, use your professional judgment to:
                 if tool_name == "execute_code":
                     code = args.get("code", "")
                     description = args.get("description", "")
+                    caption = args.get("caption", "")
                     output_type = args.get("output_type", "figure")
 
                     logger.info(f"Executing: {description}")
@@ -1129,6 +1249,7 @@ As a bioinformatics expert, use your professional judgment to:
                             fig_info = {
                                 "id": str(uuid.uuid4())[:8],
                                 "name": description or fig_name,
+                                "caption": caption or description or "",
                                 "png_path": png_path_str,
                                 "pdf_path": str(pdf_file) if pdf_file.exists() else None,
                                 "section": section_id,
@@ -1219,32 +1340,52 @@ As a bioinformatics expert, use your professional judgment to:
         findings: Dict[str, Any],
         language: str
     ) -> str:
-        """PI Agent writes the narrative for a section"""
+        """PI Agent writes the narrative for a section with figure references"""
         zh = language == "zh"
 
-        prompt = f"""Write the narrative text for this report section.
+        # Build figure list with IDs for referencing
+        figure_list = []
+        for i, f in enumerate(figures):
+            fig_id = f.get('id', str(i+1))
+            figure_list.append(f"- Figure {fig_id}: {f['name']}")
+
+        table_list = []
+        for i, t in enumerate(tables):
+            tbl_id = t.get('id', str(i+1))
+            table_list.append(f"- Table {tbl_id}: {t['name']}")
+
+        prompt = f"""Write the narrative text for this report section, following academic paper standards.
 
 ## Section: {section_plan.get('title', 'Section')}
 {section_plan.get('description', '')}
 
-## Generated Figures:
-{json.dumps([f['name'] for f in figures], ensure_ascii=False)}
+## Generated Figures (you MUST reference each one):
+{chr(10).join(figure_list) if figure_list else "No figures"}
 
-## Generated Tables:
-{json.dumps([t['name'] for t in tables], ensure_ascii=False)}
+## Generated Tables (reference if applicable):
+{chr(10).join(table_list) if table_list else "No tables"}
 
 ## Relevant Findings:
 {json.dumps(findings['bioinformatics'][:10], ensure_ascii=False)}
 
-{"用中文撰写，2-4段，300-500字" if zh else "Write in English, 2-4 paragraphs, 200-400 words"}
+## Requirements
+{"用中文撰写，遵循以下格式要求：" if zh else "Write in English, following these format requirements:"}
 
-Focus on:
-1. What the figures/tables show
-2. Key observations and patterns
-3. Biological significance
-4. Connection to research objectives
+1. **MUST reference each figure** - Use format like "如图 X 所示" or "As shown in Figure X"
+2. For each figure, provide:
+   - What the figure displays (methodology/visualization type)
+   - Key observations visible in the figure
+   - Quantitative details where applicable (e.g., "共鉴定出 X 个细胞群")
+   - Biological interpretation of the results
 
-Do not include figure/table captions - just the narrative text.
+3. Use **bold** for important terms (gene names, cell types, key findings)
+4. Include specific numbers and statistics where relevant
+5. Connect observations to the research objectives
+
+{"撰写 3-5 段，400-600字，确保每个图片都有详细解释" if zh else "Write 3-5 paragraphs, 300-500 words, ensure each figure is explained in detail"}
+
+Example format:
+{"为了评估数据质量，我们首先进行了质控分析（如图 X 所示）。结果显示..." if zh else "To assess data quality, we first performed QC analysis (Figure X). The results show..."}
 """
 
         return await self._pi_chat(prompt, temperature=0.4)
@@ -1344,6 +1485,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             type_class = "general" if analysis_type == "general" else "specific"
             type_label = ("通用分析" if zh else "General") if analysis_type == "general" else ("特定分析" if zh else "Specific")
 
+            # Convert markdown in content to HTML
+            content_html = markdown_to_html(section.get("content", ""))
+
             section_html = f'''
             <div class="section" id="{section["id"]}">
                 <div class="section-header">
@@ -1353,7 +1497,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                     </h2>
                 </div>
                 <div class="section-content">
-                    <p>{section.get("content", "").replace(chr(10), "</p><p>")}</p>
+                    <p>{content_html}</p>
             '''
 
             # Add figures
@@ -1376,13 +1520,20 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 png_filename = os.path.basename(png_path) if png_path else ""
                 pdf_filename = os.path.basename(pdf_path) if pdf_path else ""
 
+                # Generate figure ID for referencing
+                fig_num = section.get("figures", []).index(figure) + 1 if figure in section.get("figures", []) else ""
+                fig_label = f"Figure {fig_id}" if fig_id else f"Figure {fig_num}"
+                fig_caption = figure.get("caption", "")
+                fig_caption_html = markdown_to_html(fig_caption) if fig_caption else ""
+
                 section_html += f'''
-                    <div class="figure-container">
+                    <div class="figure-container" id="fig-{fig_id}">
                         <div class="figure-image">
                             {"<img src='data:image/png;base64," + png_base64 + "' alt='" + fig_name + "' />" if png_base64 else "<p>Image not available</p>"}
                         </div>
                         <div class="figure-caption">
-                            <h4>{fig_name}</h4>
+                            <h4>{fig_label}: {fig_name}</h4>
+                            {"<p>" + fig_caption_html + "</p>" if fig_caption_html else ""}
                             <div class="figure-actions">
                                 <a href="figures/{png_filename}" download class="download-btn png">
                                     {"下载 PNG" if zh else "Download PNG"}
@@ -1433,6 +1584,10 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             '''
             sections_html.append(section_html)
 
+        # Convert markdown in abstract and conclusions
+        abstract_html = markdown_to_html(report.get("abstract", ""))
+        conclusions_html = markdown_to_html(report.get("conclusions", ""))
+
         # Build full HTML
         html_content = HTML_TEMPLATE.format(
             language="zh" if zh else "en",
@@ -1441,10 +1596,10 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             toc_title="目录" if zh else "Table of Contents",
             toc_items="\n".join(toc_items),
             abstract_title="摘要" if zh else "Abstract",
-            abstract=report.get("abstract", "").replace("\n", "<br>"),
+            abstract=abstract_html,
             sections_html="\n".join(sections_html),
             conclusions_title="结论" if zh else "Conclusions",
-            conclusions=report.get("conclusions", "").replace("\n", "<br>")
+            conclusions=conclusions_html
         )
 
         # Save HTML file
