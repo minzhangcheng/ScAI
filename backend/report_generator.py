@@ -8,6 +8,8 @@ Report Structure:
 - Specific Analysis: Supporting data for previous analysis findings
 """
 import os
+import io
+import base64
 import json
 import uuid
 import asyncio
@@ -18,6 +20,7 @@ from typing import Dict, Any, List, Optional, Callable
 from pathlib import Path
 
 import pandas as pd
+from PIL import Image
 
 from .models.schemas import AnalysisState, AgentType, CodeExecution
 from .utils.llm_client import OpenAICompatibleClient
@@ -25,6 +28,109 @@ from .utils.sandbox import LocalJupyterSandbox
 from .config import STATE_DIR, WORKSPACE_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def compress_image_to_base64(image_path: str, max_width: int = 800, quality: int = 85) -> str:
+    """
+    Compress an image and convert to base64 for HTML embedding.
+
+    Args:
+        image_path: Path to the image file
+        max_width: Maximum width for resizing (preserves aspect ratio)
+        quality: JPEG quality (1-100)
+
+    Returns:
+        Base64 encoded string with data URI prefix
+    """
+    try:
+        with Image.open(image_path) as img:
+            # Convert to RGB if necessary (for PNG with transparency)
+            if img.mode in ('RGBA', 'P'):
+                # Create white background
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            # Resize if too large
+            width, height = img.size
+            if width > max_width:
+                ratio = max_width / width
+                new_size = (max_width, int(height * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+            # Save to buffer as JPEG
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=quality, optimize=True)
+            buffer.seek(0)
+
+            # Encode to base64
+            b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            return f"data:image/jpeg;base64,{b64_data}"
+    except Exception as e:
+        logger.error(f"Error compressing image {image_path}: {e}")
+        return ""
+
+
+def categorize_figures(figures_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Scan figures directory and categorize images by their content type.
+
+    Returns a dictionary mapping category names to lists of figure info.
+    """
+    categories = {
+        "qc": [],           # Quality control figures
+        "umap": [],         # UMAP visualizations
+        "clustering": [],   # Clustering related
+        "markers": [],      # Marker gene analysis
+        "de": [],           # Differential expression
+        "heatmap": [],      # Heatmaps
+        "violin": [],       # Violin plots
+        "other": []         # Other figures
+    }
+
+    if not figures_dir.exists():
+        return categories
+
+    for png_file in sorted(figures_dir.glob("*.png")):
+        filename = png_file.stem.lower()
+        pdf_file = png_file.with_suffix('.pdf')
+
+        fig_info = {
+            "name": png_file.stem,
+            "png_path": str(png_file),
+            "pdf_path": str(pdf_file) if pdf_file.exists() else None,
+            "filename": png_file.name
+        }
+
+        # Categorize based on filename
+        if "qc" in filename or "quality" in filename:
+            categories["qc"].append(fig_info)
+        elif "umap" in filename:
+            categories["umap"].append(fig_info)
+        elif "cluster" in filename or "leiden" in filename:
+            categories["clustering"].append(fig_info)
+        elif "marker" in filename:
+            categories["markers"].append(fig_info)
+        elif "volcano" in filename or "_de_" in filename or "differential" in filename:
+            categories["de"].append(fig_info)
+        elif "heatmap" in filename:
+            categories["heatmap"].append(fig_info)
+        elif "violin" in filename:
+            categories["violin"].append(fig_info)
+        elif "dotplot" in filename:
+            categories["markers"].append(fig_info)
+        elif "stacked_bar" in filename or "composition" in filename or "fold_change" in filename:
+            categories["clustering"].append(fig_info)
+        elif "feature" in filename or "expression" in filename:
+            categories["de"].append(fig_info)
+        else:
+            categories["other"].append(fig_info)
+
+    return categories
 
 
 def markdown_to_html(text: str) -> str:
@@ -233,6 +339,26 @@ HTML_TEMPLATE = """
             font-size: 0.85rem;
             color: var(--text-secondary);
             margin-bottom: 8px;
+        }}
+
+        .figure-interpretation {{
+            margin-top: 12px;
+            padding: 12px;
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            border-radius: 8px;
+            border-left: 3px solid #0ea5e9;
+        }}
+
+        .figure-interpretation strong {{
+            color: #0369a1;
+            font-size: 0.85rem;
+        }}
+
+        .figure-interpretation p {{
+            font-size: 0.85rem;
+            color: var(--text-color);
+            margin-top: 8px;
+            text-align: justify;
         }}
 
         .figure-actions {{
@@ -805,9 +931,14 @@ Be specific and actionable. Include:
             await self._report_progress(10, "提取分析结论..." if language == "zh" else "Extracting conclusions...")
             findings = self._extract_findings(state)
 
-            # PI Agent dynamically plans the report structure
-            await self._report_progress(15, "规划报告结构..." if language == "zh" else "Planning report structure...")
-            report_plan = await self._plan_report_dynamic(state, findings, language)
+            # Scan for existing figures from analysis phase
+            await self._report_progress(12, "扫描已有图片..." if language == "zh" else "Scanning existing figures...")
+            existing_figures = self._scan_existing_figures()
+            logger.info(f"Found {len(existing_figures)} existing figures for report")
+
+            # PI Agent dynamically plans the report structure based on existing figures
+            await self._report_progress(15, "PI Agent分析图片并规划报告..." if language == "zh" else "PI Agent analyzing figures and planning report...")
+            report_plan = await self._plan_report_dynamic(state, findings, language, existing_figures)
 
             # Generate each section using Agent-driven code generation
             sections = []
@@ -1160,126 +1291,177 @@ print(f"\\nOther available processed files: {{AVAILABLE_PROCESSED_FILES}}")
 
         return findings
 
+    def _scan_existing_figures(self) -> List[Dict[str, Any]]:
+        """
+        Scan the figures directory for existing images from analysis phase.
+        Returns a list of figure info dicts with path, name, and inferred type.
+        """
+        existing_figures = []
+
+        if not self.figures_dir.exists():
+            return existing_figures
+
+        for png_file in sorted(self.figures_dir.glob("*.png")):
+            filename = png_file.stem.lower()
+            pdf_file = png_file.with_suffix('.pdf')
+
+            # Infer figure type from filename
+            fig_type = "unknown"
+            if "umap" in filename:
+                fig_type = "umap"
+            elif "violin" in filename:
+                fig_type = "violin"
+            elif "heatmap" in filename:
+                fig_type = "heatmap"
+            elif "dotplot" in filename:
+                fig_type = "dotplot"
+            elif "volcano" in filename:
+                fig_type = "volcano"
+            elif "bar" in filename or "composition" in filename:
+                fig_type = "bar_chart"
+            elif "feature" in filename or "expression" in filename:
+                fig_type = "feature_plot"
+            elif "cluster" in filename or "leiden" in filename:
+                fig_type = "clustering"
+            elif "fold_change" in filename:
+                fig_type = "fold_change"
+            elif "marker" in filename:
+                fig_type = "marker_genes"
+            elif "qc" in filename or "quality" in filename:
+                fig_type = "qc"
+
+            fig_info = {
+                "filename": png_file.name,
+                "name": png_file.stem.replace("_", " ").title(),
+                "png_path": str(png_file),
+                "pdf_path": str(pdf_file) if pdf_file.exists() else None,
+                "inferred_type": fig_type
+            }
+            existing_figures.append(fig_info)
+
+        logger.info(f"Found {len(existing_figures)} existing figures in {self.figures_dir}")
+        return existing_figures
+
     async def _plan_report_dynamic(
         self,
         state: AnalysisState,
         findings: Dict[str, Any],
-        language: str
+        language: str,
+        existing_figures: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        PI Agent dynamically plans the report structure based on actual findings.
-        The report is divided into two parts:
-        1. General Analysis: Standard analysis workflow based on data type
-        2. Specific Analysis: Supporting data for research findings
+        PI Agent dynamically plans the report structure based on actual findings and EXISTING figures.
+
+        Key responsibilities:
+        1. Review all existing figures from the analysis phase
+        2. Decide which figures to include in the report
+        3. Determine the order and importance of each figure
+        4. Provide scientific interpretation for each figure
+        5. Organize figures into logical sections
 
         The Agent decides what specific analyses to include based on the actual data and findings.
         """
         zh = language == "zh"
 
-        prompt = f"""You are a Principal Investigator planning a research report.
+        # Format existing figures list for PI Agent
+        existing_figures = existing_figures or []
+        figures_list = "\n".join([
+            f"  {i+1}. {fig['filename']} (type: {fig['inferred_type']})"
+            for i, fig in enumerate(existing_figures)
+        ]) if existing_figures else "No existing figures found."
+
+        prompt = f"""You are a Principal Investigator writing a rigorous scientific research report for single-cell RNA sequencing analysis.
+
+## CRITICAL: Use EXISTING FIGURES from the Analysis Phase
+You have {len(existing_figures)} figures that were generated during the analysis phase. Your task is to:
+1. SELECT which figures to include in the report (prioritize by scientific importance)
+2. ORGANIZE them in logical sections following standard scRNA-seq publication format
+3. PROVIDE detailed scientific interpretation and caption for EACH selected figure
+4. WRITE comprehensive narrative connecting the figures to the research findings
+
+## Available Figures (already generated):
+{figures_list}
 
 ## Research Project
 Title: {state.name}
 Objective: {state.initial_instruction}
-Analysis Rounds: {findings['round_count']}
 
 ## Key Findings from Analysis
-
 ### Bioinformatics Findings:
 {json.dumps(findings['bioinformatics'][:20], ensure_ascii=False, indent=2)}
 
 ### Pathology Findings:
 {json.dumps(findings['pathology'][:10], ensure_ascii=False, indent=2)}
 
-### Biochemistry Findings:
-{json.dumps(findings['biochemistry'][:10], ensure_ascii=False, indent=2)}
-
 ### Final Summary:
 {findings['summary'][:2000] if findings['summary'] else 'Not available'}
 
-## Task
-Based on the ACTUAL findings above, plan a comprehensive research report with TWO PARTS:
+## Task: Create a comprehensive report plan
+{"使用中文撰写所有内容（标题、描述、解读）" if zh else "Write all content in English"}
 
-### Part 1: General Analysis (analysis_type: "general")
-Standard analysis workflow sections. As an expert, YOU decide what general analyses are appropriate based on:
-- The type of data analyzed (look at the findings to understand what data was used)
-- Standard practices in the field
-- What preprocessing/QC was performed
-
-### Part 2: Specific Analysis (analysis_type: "specific")
-Research-focused sections that directly support the findings. YOU decide what specific analyses to include based on:
-- The research objective stated above
-- The actual findings discovered during analysis
-- What visualizations would best communicate the key results
-
-{"使用中文撰写section标题和描述" if zh else "Use English for section titles and descriptions"}
-
-Return JSON:
+Return JSON with this EXACT structure:
 {{
-    "title": "Report title based on actual research",
+    "title": "Report title reflecting the research",
     "sections": [
         {{
             "id": "unique_section_id",
             "title": "Section Title",
-            "description": "What this section covers and why it's important",
+            "description": "Brief description of what this section covers",
             "analysis_type": "general" or "specific",
-            "figures": [
+            "existing_figures": [
                 {{
-                    "name": "Descriptive figure name",
-                    "description": "Detailed description of what to visualize and why",
-                    "type": "appropriate_plot_type"
+                    "filename": "exact_filename.png from the available figures list",
+                    "caption": "Detailed scientific caption (50-100 words) explaining what the figure shows",
+                    "interpretation": "Scientific interpretation (100-200 words) explaining the biological significance and how it relates to the research findings",
+                    "importance": "high/medium/low"
                 }}
             ],
-            "tables": [
-                {{
-                    "name": "Table name",
-                    "description": "What data to include and its significance"
-                }}
-            ]
+            "narrative": "Detailed narrative text (200-400 words) for this section, referencing the figures and explaining the scientific context, methods, and implications"
         }}
     ]
 }}
 
-Important Guidelines:
-- Base ALL sections on the ACTUAL findings above - do not assume generic analyses
-- Include both "general" and "specific" analysis_type sections
-- Design figures/tables that specifically illustrate the discovered findings
-- Be creative and specific - you are the expert, decide what best tells the story
+## IMPORTANT Requirements:
 
-## Publication-Quality Figure Requirements:
+### Section Organization (follow standard scRNA-seq paper format):
+1. **Data Overview & Quality Control** (general): UMAP visualizations, clustering results
+2. **Cell Type Identification** (general): Marker gene analysis, cluster annotations
+3. **Comparative Analysis** (specific): Differential expression, condition comparisons
+4. **Key Biological Findings** (specific): Specific genes, pathways related to research hypothesis
 
-### For "general" analysis sections, MUST include standard figures:
-1. **Quality Control**: Multi-panel violin plots showing nGenes, nCounts, percent_mito distributions
-2. **Data Overview**: UMAP/t-SNE colored by clusters with cell count annotations
-3. **Cluster Markers**: Heatmap or dotplot of top marker genes per cluster
-4. **Cell Statistics**: Bar chart showing cell counts per cluster/sample
+### Figure Selection Guidelines:
+- Include ALL relevant UMAP visualizations (cluster, condition, annotated)
+- Include marker gene dotplots AND heatmaps
+- Include ALL volcano plots for differential expression
+- Include violin plots for key genes
+- Include composition/bar charts showing cell proportions
+- Prioritize figures that directly support the research findings
 
-### For "specific" analysis sections:
-1. **Differential Expression**: Volcano plots with labeled significant genes
-2. **Pathway Analysis**: Bar plots of enriched pathways with p-values
-3. **Comparative Analysis**: Side-by-side comparisons between conditions
-4. **Key Gene Expression**: Feature plots or violin plots for key genes
+### Caption Requirements:
+- State what the figure shows (plot type, data represented)
+- Specify sample sizes (n=X cells, clusters, etc.)
+- Note statistical methods or thresholds used
+- Reference specific clusters or genes highlighted
 
-### Figure description requirements:
-- Each figure description should be DETAILED (50+ words)
-- Specify exact visualization type (violin, UMAP, heatmap, etc.)
-- Mention what comparisons or annotations to include
-- State the biological question the figure addresses
+### Interpretation Requirements:
+- Explain the biological significance of the observations
+- Connect to the research hypothesis/objectives
+- Reference specific findings (e.g., "Cluster 1 shows upregulation of Mt1/Mt2")
+- Discuss implications for the disease/condition studied
 
-### Section requirements:
-- Each section should have 2-4 figures and 1-2 tables
-- **MUST have at least 5 sections total** for comprehensive coverage
-- **MUST have at least 3 "general" analysis sections** (QC, clustering, markers)
-- **MUST have at least 2 "specific" analysis sections** (differential expression, key findings)
-- General sections should come first, followed by specific sections
+### Narrative Requirements:
+- Write as a scientific paper section
+- Reference figures by their filename (e.g., "As shown in umap_leiden_clusters.png...")
+- Include quantitative details where available
+- Connect findings across figures within the section
 
-### IMPORTANT: Your response MUST include exactly this structure:
-1. Quality Control section (general)
-2. Clustering/UMAP section (general)
-3. Marker Genes section (general)
-4. Differential Expression section (specific)
-5. Key Findings section (specific)
-6. [Optional additional sections as needed]
+### MUST include sections:
+1. **Data Overview & Clustering** (general): UMAP visualizations, cell composition
+2. **Marker Gene Analysis** (general): Dotplots, heatmaps of cluster markers
+3. **Differential Expression** (specific): Volcano plots, DE gene heatmaps
+4. **Key Biological Findings** (specific): Gene expression patterns supporting research hypothesis
+
+### IMPORTANT: Use ONLY figures from the "Available Figures" list above!
 """
 
         response = await self._pi_chat(prompt, temperature=0.4)
@@ -1288,86 +1470,246 @@ Important Guidelines:
             json_match = re.search(r'\{[\s\S]*\}', response)
             if json_match:
                 plan = json.loads(json_match.group())
-                logger.info(f"Report plan: {len(plan.get('sections', []))} sections")
+                logger.info(f"Report plan: {len(plan.get('sections', []))} sections with existing figures")
 
                 # Ensure all sections have analysis_type
                 for section in plan.get("sections", []):
                     if "analysis_type" not in section:
                         section["analysis_type"] = "general"
 
+                # Store the existing figures reference
+                plan["_existing_figures"] = existing_figures
+
                 return plan
         except Exception as e:
             logger.error(f"Failed to parse report plan: {e}")
 
-        # Fallback: comprehensive structure with multiple sections
+        # Fallback: auto-assign existing figures to sections based on type
+        return self._create_fallback_plan_with_existing_figures(state, existing_figures, zh)
+
+    def _create_fallback_plan_with_existing_figures(
+        self,
+        state: AnalysisState,
+        existing_figures: List[Dict[str, Any]],
+        zh: bool
+    ) -> Dict[str, Any]:
+        """
+        Create a fallback report plan using existing figures, organized by type.
+        """
+        # Categorize existing figures
+        umap_figs = [f for f in existing_figures if f["inferred_type"] in ["umap", "clustering"]]
+        marker_figs = [f for f in existing_figures if f["inferred_type"] in ["marker_genes", "dotplot"]]
+        heatmap_figs = [f for f in existing_figures if f["inferred_type"] == "heatmap"]
+        de_figs = [f for f in existing_figures if f["inferred_type"] in ["volcano", "fold_change"]]
+        violin_figs = [f for f in existing_figures if f["inferred_type"] == "violin"]
+        bar_figs = [f for f in existing_figures if f["inferred_type"] == "bar_chart"]
+        feature_figs = [f for f in existing_figures if f["inferred_type"] == "feature_plot"]
+        other_figs = [f for f in existing_figures if f["inferred_type"] in ["unknown", "qc"]]
+
+        def make_fig_entry(fig):
+            return {
+                "filename": fig["filename"],
+                "caption": f"{'该图展示了' if zh else 'This figure shows '}{fig['name'].lower()}",
+                "interpretation": "待PI Agent生成详细解读" if zh else "Detailed interpretation to be generated by PI Agent",
+                "importance": "medium",
+                "png_path": fig["png_path"],
+                "pdf_path": fig["pdf_path"]
+            }
+
         return {
             "title": state.name or ("分析报告" if zh else "Analysis Report"),
+            "_existing_figures": existing_figures,
             "sections": [
                 {
-                    "id": "qc_overview",
-                    "title": "质量控制与数据预处理" if zh else "Quality Control and Data Preprocessing",
-                    "description": "展示数据质量指标和预处理结果" if zh else "Display data quality metrics and preprocessing results",
+                    "id": "data_overview",
+                    "title": "数据概览与细胞聚类" if zh else "Data Overview and Cell Clustering",
+                    "description": "UMAP降维可视化与细胞聚类结果" if zh else "UMAP dimensionality reduction and cell clustering results",
                     "analysis_type": "general",
-                    "figures": [
-                        {"name": "QC Violin Plots", "description": "Violin plots showing nGenes, nCounts, and percent_mito distributions for quality assessment", "type": "violin"},
-                        {"name": "QC Scatter Plot", "description": "Scatter plot of nCounts vs nGenes colored by percent_mito to identify low-quality cells", "type": "scatter"}
-                    ],
-                    "tables": [
-                        {"name": "QC Summary", "description": "Summary statistics of quality control metrics before and after filtering"}
-                    ]
-                },
-                {
-                    "id": "clustering_overview",
-                    "title": "细胞聚类与降维分析" if zh else "Cell Clustering and Dimensionality Reduction",
-                    "description": "UMAP可视化和聚类结果" if zh else "UMAP visualization and clustering results",
-                    "analysis_type": "general",
-                    "figures": [
-                        {"name": "UMAP Clusters", "description": "UMAP visualization colored by Leiden clusters with cell count annotations", "type": "umap"},
-                        {"name": "UMAP by Condition", "description": "UMAP visualization split or colored by experimental condition (Control vs Treatment)", "type": "umap"},
-                        {"name": "Cell Composition", "description": "Stacked bar plot showing cell type composition per condition with exact percentages", "type": "bar"}
-                    ],
-                    "tables": [
-                        {"name": "Cluster Sizes", "description": "Table of cell counts per cluster and condition"}
-                    ]
+                    "existing_figures": [make_fig_entry(f) for f in umap_figs + bar_figs],
+                    "narrative": ""
                 },
                 {
                     "id": "marker_genes",
                     "title": "标记基因分析" if zh else "Marker Gene Analysis",
-                    "description": "各细胞群的标记基因鉴定" if zh else "Identification of marker genes for each cell population",
+                    "description": "各细胞群的标记基因鉴定与表达模式" if zh else "Identification of marker genes and expression patterns for each cell population",
                     "analysis_type": "general",
-                    "figures": [
-                        {"name": "Marker Genes Dotplot", "description": "Dot plot showing top 5-10 marker genes per cluster with expression level and percentage", "type": "dotplot"},
-                        {"name": "Marker Genes Heatmap", "description": "Heatmap of top marker genes with hierarchical clustering", "type": "heatmap"}
-                    ],
-                    "tables": [
-                        {"name": "Top Markers", "description": "Table of top marker genes per cluster with log fold change and adjusted p-values"}
-                    ]
+                    "existing_figures": [make_fig_entry(f) for f in marker_figs + heatmap_figs[:2]],
+                    "narrative": ""
                 },
                 {
                     "id": "differential_expression",
                     "title": "差异表达分析" if zh else "Differential Expression Analysis",
                     "description": "实验组与对照组的差异基因分析" if zh else "Analysis of differentially expressed genes between conditions",
                     "analysis_type": "specific",
-                    "figures": [
-                        {"name": "Volcano Plot", "description": "Volcano plot showing differentially expressed genes with labeled top genes, fold change and p-value thresholds", "type": "volcano"},
-                        {"name": "Top DE Genes Heatmap", "description": "Heatmap of top 50 differentially expressed genes between conditions", "type": "heatmap"}
-                    ],
-                    "tables": [
-                        {"name": "DE Genes", "description": "Table of significantly differentially expressed genes with statistics"}
-                    ]
+                    "existing_figures": [make_fig_entry(f) for f in de_figs + heatmap_figs[2:]],
+                    "narrative": ""
                 },
                 {
                     "id": "key_findings",
                     "title": "关键研究发现" if zh else "Key Research Findings",
-                    "description": "基于分析结果的核心发现可视化" if zh else "Visualization of key findings from the analysis",
+                    "description": "支持研究假说的关键基因表达分析" if zh else "Key gene expression analysis supporting research hypothesis",
                     "analysis_type": "specific",
-                    "figures": [
-                        {"name": "Key Pathway Expression", "description": "Feature plots or violin plots showing expression of key genes related to research findings", "type": "feature"},
-                        {"name": "Condition Comparison", "description": "Comparative visualization between control and treatment highlighting key differences", "type": "comparison"}
-                    ],
-                    "tables": []
+                    "existing_figures": [make_fig_entry(f) for f in violin_figs + feature_figs + other_figs],
+                    "narrative": ""
                 }
             ]
+        }
+
+    async def _generate_section_from_existing_figures(
+        self,
+        state: AnalysisState,
+        section_plan: Dict[str, Any],
+        findings: Dict[str, Any],
+        language: str
+    ) -> Dict[str, Any]:
+        """
+        Generate a report section using EXISTING figures from the analysis phase.
+        PI Agent writes the narrative, captions, and scientific interpretations.
+        """
+        zh = language == "zh"
+        section_id = section_plan.get("id", str(uuid.uuid4())[:8])
+        section_title = section_plan.get("title", "Section")
+        section_description = section_plan.get("description", "")
+        analysis_type = section_plan.get("analysis_type", "general")
+        existing_figures = section_plan.get("existing_figures", [])
+        provided_narrative = section_plan.get("narrative", "")
+
+        logger.info(f"Generating section '{section_title}' with {len(existing_figures)} existing figures")
+
+        # Build figure info for PI Agent
+        figures_info = "\n".join([
+            f"  - {fig.get('filename', 'unknown')}: {fig.get('caption', 'No caption provided')}"
+            for fig in existing_figures
+        ])
+
+        # Ask PI Agent to write comprehensive content for this section
+        prompt = f"""You are a Principal Investigator writing a section for a scientific research report.
+
+## Section Information
+Title: {section_title}
+Description: {section_description}
+Analysis Type: {analysis_type}
+
+## Figures in This Section
+{figures_info}
+
+## Research Context
+Project: {state.name}
+Objective: {state.initial_instruction}
+
+## Key Findings
+{json.dumps(findings.get('bioinformatics', [])[:15], ensure_ascii=False, indent=2)}
+
+## Summary
+{findings.get('summary', '')[:1500]}
+
+## Your Task
+{"用中文撰写" if zh else "Write in English"}
+
+Generate a comprehensive scientific narrative for this section. Your response must be a JSON object with this exact structure:
+
+{{
+    "narrative": "A detailed scientific narrative (300-500 words) that:
+        - Introduces the purpose of this analysis
+        - References each figure by filename (e.g., 'As shown in umap_leiden_clusters.png...')
+        - Explains the methodology used
+        - Presents the key observations
+        - Discusses the biological significance
+        - Connects findings to the research hypothesis",
+
+    "figures": [
+        {{
+            "filename": "exact_filename.png",
+            "caption": "Detailed figure caption (50-100 words) describing what the figure shows, including sample sizes, methods, and key observations",
+            "interpretation": "Scientific interpretation (100-200 words) explaining the biological significance of the observations shown in this figure"
+        }}
+    ]
+}}
+
+## Important Requirements:
+1. Write as a rigorous scientific paper section
+2. Include quantitative details where available (cell counts, percentages, p-values)
+3. Reference specific clusters, genes, or conditions discussed in the findings
+4. Each figure must have BOTH a detailed caption AND an interpretation
+5. The narrative should flow logically and reference all figures in the section
+"""
+
+        response = await self._pi_chat(prompt, temperature=0.3)
+
+        # Parse the response
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                content = json.loads(json_match.group())
+                narrative = content.get("narrative", "")
+                figure_details = content.get("figures", [])
+
+                # Merge PI Agent's interpretations with existing figure info
+                section_figures = []
+                for fig in existing_figures:
+                    filename = fig.get("filename", "")
+                    # Find matching details from PI Agent
+                    matching_detail = next(
+                        (d for d in figure_details if d.get("filename", "").lower() == filename.lower()),
+                        {}
+                    )
+
+                    fig_id = str(uuid.uuid4())[:8]
+                    section_figures.append({
+                        "id": fig_id,
+                        "name": fig.get("caption", fig.get("filename", "Figure")).replace("_", " ").title(),
+                        "caption": matching_detail.get("caption", fig.get("caption", "")),
+                        "interpretation": matching_detail.get("interpretation", ""),
+                        "png_path": fig.get("png_path", ""),
+                        "pdf_path": fig.get("pdf_path"),
+                        "section": section_id,
+                        "analysis_type": analysis_type
+                    })
+
+                    # Add to global generated figures list
+                    self.generated_figures.append(section_figures[-1])
+
+                return {
+                    "id": section_id,
+                    "title": section_title,
+                    "description": section_description,
+                    "analysis_type": analysis_type,
+                    "content": narrative,
+                    "figures": section_figures,
+                    "tables": section_plan.get("tables", []),
+                    "pi_iterations": 1,
+                    "steps_executed": 1
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to parse PI Agent response: {e}")
+
+        # Fallback: use provided narrative and basic figure info
+        section_figures = []
+        for fig in existing_figures:
+            fig_id = str(uuid.uuid4())[:8]
+            section_figures.append({
+                "id": fig_id,
+                "name": fig.get("filename", "Figure").replace("_", " ").title(),
+                "caption": fig.get("caption", ""),
+                "interpretation": fig.get("interpretation", ""),
+                "png_path": fig.get("png_path", ""),
+                "pdf_path": fig.get("pdf_path"),
+                "section": section_id,
+                "analysis_type": analysis_type
+            })
+            self.generated_figures.append(section_figures[-1])
+
+        return {
+            "id": section_id,
+            "title": section_title,
+            "description": section_description,
+            "analysis_type": analysis_type,
+            "content": provided_narrative or section_description,
+            "figures": section_figures,
+            "tables": section_plan.get("tables", []),
+            "pi_iterations": 1,
+            "steps_executed": 1
         }
 
     async def _generate_section_autonomous(
@@ -1378,21 +1720,25 @@ Important Guidelines:
         language: str
     ) -> Dict[str, Any]:
         """
-        Generate a report section using PI-guided Bioinformatics Agent dialogue.
+        Generate a report section.
 
-        Flow:
-        1. Bioinformatics Agent generates figures/tables
-        2. Agent can consult PI for guidance during generation
-        3. Agent submits for PI review when ready
-        4. PI evaluates and provides feedback
-        5. If not satisfied, Agent continues based on feedback
-        6. Loop until PI is satisfied or max iterations reached
+        If section_plan contains 'existing_figures', use those figures and have PI Agent
+        write the narrative. Otherwise, use PI-guided Bioinformatics Agent to generate new figures.
         """
         zh = language == "zh"
         section_id = section_plan.get("id", str(uuid.uuid4())[:8])
         section_title = section_plan.get("title", "Section")
 
         logger.info(f"Generating section: {section_title}")
+
+        # Check if we have existing figures from the analysis phase
+        existing_figures = section_plan.get("existing_figures", [])
+
+        if existing_figures:
+            # Use existing figures - have PI Agent write narrative and interpretations
+            return await self._generate_section_from_existing_figures(
+                state, section_plan, findings, language
+            )
 
         # Build instruction for Bioinformatics Agent
         figures_desc = "\n".join([
@@ -1862,9 +2208,26 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         language: str
     ) -> Path:
         """
-        Generate HTML report with embedded images and download links
+        Generate HTML report with embedded images and download links.
+        Images are embedded as base64 for standalone HTML display.
         """
         zh = language == "zh"
+
+        # Scan figures directory for all available images
+        all_figures = categorize_figures(self.figures_dir)
+        logger.info(f"Found figures in categories: {', '.join([f'{k}: {len(v)}' for k, v in all_figures.items() if v])}")
+
+        # Map section IDs to figure categories
+        section_figure_map = {
+            "qc_overview": ["qc"],
+            "clustering_overview": ["umap", "clustering"],
+            "marker_genes": ["markers", "heatmap"],
+            "differential_expression": ["de", "violin"],
+            "key_findings": ["de", "violin", "heatmap", "other"]
+        }
+
+        # Track which figures have been used
+        used_figures = set()
 
         # Prepare table of contents
         toc_items = []
@@ -1900,34 +2263,82 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                     <p>{content_html}</p>
             '''
 
-            # Add figures
-            for figure in section.get("figures", []):
-                fig_id = figure.get("id", "")
+            # Collect all figures for this section
+            section_figures = list(section.get("figures", []))
+
+            # Add figures from scanned directory based on section type
+            section_id = section.get("id", "")
+            categories_for_section = section_figure_map.get(section_id, [])
+
+            for category in categories_for_section:
+                for fig_info in all_figures.get(category, []):
+                    # Skip if already used
+                    if fig_info["png_path"] in used_figures:
+                        continue
+                    # Skip if already in section figures
+                    if any(f.get("png_path") == fig_info["png_path"] for f in section_figures):
+                        continue
+
+                    # Add to section figures
+                    section_figures.append({
+                        "id": str(uuid.uuid4())[:8],
+                        "name": fig_info["name"].replace("_", " ").title(),
+                        "caption": "",
+                        "png_path": fig_info["png_path"],
+                        "pdf_path": fig_info["pdf_path"]
+                    })
+                    used_figures.add(fig_info["png_path"])
+
+            # Add figures with base64 embedding
+            fig_counter = 0
+            for figure in section_figures:
+                fig_counter += 1
+                fig_id = figure.get("id", str(uuid.uuid4())[:8])
                 fig_name = figure.get("name", "Figure")
                 png_path = figure.get("png_path", "")
                 pdf_path = figure.get("pdf_path", "")
 
-                # Use relative paths for images (reference PNG files directly)
                 png_filename = os.path.basename(png_path) if png_path else ""
                 pdf_filename = os.path.basename(pdf_path) if pdf_path else ""
 
                 # Check if image file exists
                 image_exists = png_path and os.path.exists(png_path)
 
+                # Generate base64 embedded image
+                img_src = ""
+                if image_exists:
+                    img_src = compress_image_to_base64(png_path, max_width=900, quality=85)
+                    used_figures.add(png_path)
+
                 # Generate figure ID for referencing
-                fig_num = section.get("figures", []).index(figure) + 1 if figure in section.get("figures", []) else ""
-                fig_label = f"Figure {fig_id}" if fig_id else f"Figure {fig_num}"
+                fig_label = f"Figure {section_id[:3].upper()}-{fig_counter}"
                 fig_caption = figure.get("caption", "")
                 fig_caption_html = markdown_to_html(fig_caption) if fig_caption else ""
+
+                # Get interpretation if available
+                fig_interpretation = figure.get("interpretation", "")
+                fig_interpretation_html = markdown_to_html(fig_interpretation) if fig_interpretation else ""
+
+                img_tag = f"<img src='{img_src}' alt='{fig_name}' />" if img_src else ("<p>" + ("图片不可用" if zh else "Image not available") + "</p>")
+
+                # Build interpretation section if available
+                interpretation_section = ""
+                if fig_interpretation_html:
+                    interpretation_section = f'''
+                            <div class="figure-interpretation">
+                                <strong>{"科学解读" if zh else "Scientific Interpretation"}:</strong>
+                                <p>{fig_interpretation_html}</p>
+                            </div>'''
 
                 section_html += f'''
                     <div class="figure-container" id="fig-{fig_id}">
                         <div class="figure-image">
-                            {"<img src='figures/" + png_filename + "' alt='" + fig_name + "' />" if image_exists else "<p>Image not available</p>"}
+                            {img_tag}
                         </div>
                         <div class="figure-caption">
                             <h4>{fig_label}: {fig_name}</h4>
-                            {"<p>" + fig_caption_html + "</p>" if fig_caption_html else ""}
+                            {"<p><em>" + fig_caption_html + "</em></p>" if fig_caption_html else ""}
+                            {interpretation_section}
                             <div class="figure-actions">
                                 <a href="figures/{png_filename}" download class="download-btn png">
                                     {"下载 PNG" if zh else "Download PNG"}
@@ -1977,6 +2388,65 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             </div>
             '''
             sections_html.append(section_html)
+
+        # Add supplementary figures section for any remaining figures
+        remaining_figures = []
+        for category, figs in all_figures.items():
+            for fig_info in figs:
+                if fig_info["png_path"] not in used_figures:
+                    remaining_figures.append(fig_info)
+
+        if remaining_figures:
+            supp_title = "补充图表" if zh else "Supplementary Figures"
+            toc_items.append(
+                f'<li><a href="#supplementary_figures">{supp_title}</a>'
+                f'<span class="section-type specific">{"补充" if zh else "Supplementary"}</span></li>'
+            )
+
+            supp_section_html = f'''
+            <div class="section" id="supplementary_figures">
+                <div class="section-header">
+                    <h2>
+                        {supp_title}
+                        <span class="analysis-type-badge specific">{"补充" if zh else "Supplementary"}</span>
+                    </h2>
+                </div>
+                <div class="section-content">
+                    <p>{"以下是分析过程中生成的其他图表，供参考。" if zh else "The following figures were generated during the analysis and are provided for reference."}</p>
+            '''
+
+            for idx, fig_info in enumerate(remaining_figures, 1):
+                fig_name = fig_info["name"].replace("_", " ").title()
+                png_path = fig_info["png_path"]
+                pdf_path = fig_info["pdf_path"]
+                png_filename = os.path.basename(png_path)
+                pdf_filename = os.path.basename(pdf_path) if pdf_path else ""
+
+                img_src = compress_image_to_base64(png_path, max_width=900, quality=85) if os.path.exists(png_path) else ""
+                img_tag = f"<img src='{img_src}' alt='{fig_name}' />" if img_src else ("<p>" + ("图片不可用" if zh else "Image not available") + "</p>")
+
+                supp_section_html += f'''
+                    <div class="figure-container" id="fig-supp-{idx}">
+                        <div class="figure-image">
+                            {img_tag}
+                        </div>
+                        <div class="figure-caption">
+                            <h4>{"补充图" if zh else "Supp. Fig."} {idx}: {fig_name}</h4>
+                            <div class="figure-actions">
+                                <a href="figures/{png_filename}" download class="download-btn png">
+                                    {"下载 PNG" if zh else "Download PNG"}
+                                </a>
+                                {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("下载 PDF (高清)" if zh else "Download PDF (High-Res)") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
+                            </div>
+                        </div>
+                    </div>
+                '''
+
+            supp_section_html += '''
+                </div>
+            </div>
+            '''
+            sections_html.append(supp_section_html)
 
         # Convert markdown in abstract and conclusions
         abstract_html = markdown_to_html(report.get("abstract", ""))
