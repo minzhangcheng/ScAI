@@ -278,16 +278,12 @@ class SingleCellAnalysisWorkflow:
             config=AgentConfig(temperature=self.temperatures.get('literature', 0.6))
         )
 
-        # Initialize Painter Agent for graphic abstract generation
+        # Initialize Painter Agent for graphic abstract generation (uses OpenRouter like other agents)
         painter_model = custom_models.get('painter', self.config.models.painter_model)
-        # Validate Google API key for Painter Agent
-        if not self.config.api.google_api_key or not self.config.api.google_api_key.strip():
-            logger.warning(f"[{self.session_id}] Google API key not configured - graphic abstract generation will be disabled")
         self.painter_agent = PainterAgent(
-            google_api_key=self.config.api.google_api_key,
+            llm_client=self.llm_manager.openrouter,
             model=painter_model,
-            proxy_url=self.config.api.proxy_url,
-            session_id=self.session_id
+            config=AgentConfig(temperature=self.temperatures.get('painter', 0.7))
         )
 
         logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model}, Literature={literature_model}, Painter={painter_model}")
@@ -1492,9 +1488,6 @@ Report key findings when you complete each major analysis phase."""
         if self.llm_manager:
             await self.llm_manager.close()
             logger.info(f"[{self.session_id}] LLM manager closed")
-        if self.painter_agent:
-            await self.painter_agent.close()
-            logger.info(f"[{self.session_id}] Painter agent closed")
     
     def get_notebook_path(self) -> Optional[str]:
         """Get path to the saved Jupyter notebook"""

@@ -20,36 +20,18 @@ logger = logging.getLogger(__name__)
 class BiochemistryAgent(BaseAgent):
     """
     Biochemistry Agent
-    
+
     Responsibilities:
     - Integrate user-uploaded biochemistry data
-    - Interpret biochemical indicators
+    - Interpret biochemical indicators dynamically based on project context
     - Suggest additional experiments
     - Correlate with pathology and bioinformatics findings
+
+    Note: This agent does NOT use hardcoded reference ranges. Instead, it relies on
+    the LLM to dynamically interpret biochemistry indicators based on the specific
+    research context (species, tissue type, experimental conditions, etc.).
     """
-    
-    # Reference ranges for common biochemistry markers (examples - actual interpretation should consider context)
-    # The agent should dynamically interpret results based on the project context and tissue type
-    REFERENCE_RANGES = {
-        # General metabolic markers
-        "Glucose": {"min": 70, "max": 110, "unit": "mg/dL", "name": "Blood Glucose"},
-        "Lactate": {"min": 0.5, "max": 2.2, "unit": "mmol/L", "name": "Lactate"},
-        # Tissue function markers (context-dependent)
-        "ALT": {"min": 20, "max": 60, "unit": "U/L", "name": "Alanine Aminotransferase"},
-        "AST": {"min": 50, "max": 150, "unit": "U/L", "name": "Aspartate Aminotransferase"},
-        "ALP": {"min": 40, "max": 150, "unit": "U/L", "name": "Alkaline Phosphatase"},
-        # Oxidative stress markers
-        "GSH": {"min": 5, "max": 15, "unit": "μmol/g tissue", "name": "Glutathione"},
-        "SOD": {"min": 100, "max": 300, "unit": "U/mg protein", "name": "Superoxide Dismutase"},
-        "MDA": {"min": 0.5, "max": 2.0, "unit": "nmol/mg protein", "name": "Malondialdehyde"},
-        # Inflammatory markers
-        "TNF-α": {"min": 0, "max": 50, "unit": "pg/mL", "name": "Tumor Necrosis Factor Alpha"},
-        "IL-6": {"min": 0, "max": 10, "unit": "pg/mL", "name": "Interleukin-6"},
-        "IL-1β": {"min": 0, "max": 20, "unit": "pg/mL", "name": "Interleukin-1 Beta"},
-        # Note: Reference ranges vary by species, tissue, and experimental conditions
-        # The LLM should interpret results in context of the specific project
-    }
-    
+
     def __init__(
         self,
         llm_client: OpenAICompatibleClient,
@@ -277,28 +259,19 @@ Extract EVERY biochemistry-related numerical value. Ignore metadata like dates o
         unit: str,
         state: AnalysisState
     ) -> BiochemistryResult:
-        """Add a single biochemistry result"""
-        
-        # Check if we have reference range
-        ref_range = self.REFERENCE_RANGES.get(indicator.upper())
-        
-        interpretation = None
-        if ref_range:
-            if value < ref_range["min"]:
-                interpretation = "below normal range"
-            elif value > ref_range["max"]:
-                interpretation = "above normal range"
-            else:
-                interpretation = "within normal range"
-        
+        """Add a single biochemistry result.
+
+        Note: Interpretation is NOT done here with hardcoded reference ranges.
+        Instead, the LLM will interpret all results contextually in _analyze_results().
+        """
         result = BiochemistryResult(
             indicator=indicator,
             value=value,
             unit=unit,
-            reference_range=f"{ref_range['min']}-{ref_range['max']} {ref_range['unit']}" if ref_range else None,
-            interpretation=interpretation
+            reference_range=None,  # LLM will provide context-appropriate interpretation
+            interpretation=None    # Will be determined by LLM based on project context
         )
-        
+
         state.biochemistry_results.append(result)
         return result
     
@@ -372,60 +345,48 @@ Notes:
         results: List[BiochemistryResult],
         instruction: str
     ) -> Dict[str, Any]:
-        """Analyze all biochemistry results"""
-        
-        # Build results summary
-        results_text = []
-        abnormal_markers = []
-        
-        for r in results:
-            status = ""
-            ref_info = self.REFERENCE_RANGES.get(r.indicator.upper(), {})
-            
-            if ref_info:
-                if r.value < ref_info.get("min", 0):
-                    status = "↓ Low"
-                    abnormal_markers.append({
-                        "indicator": r.indicator,
-                        "value": r.value,
-                        "status": "low",
-                        "reference": f"{ref_info['min']}-{ref_info['max']}"
-                    })
-                elif r.value > ref_info.get("max", float('inf')):
-                    status = "↑ High"
-                    abnormal_markers.append({
-                        "indicator": r.indicator,
-                        "value": r.value,
-                        "status": "high",
-                        "reference": f"{ref_info['min']}-{ref_info['max']}"
-                    })
-                else:
-                    status = "Normal"
-            
-            name = ref_info.get("name", r.indicator)
-            results_text.append(f"- {name} ({r.indicator}): {r.value} {r.unit} {status}")
-        
-        prompt = f"""
-Analyze the following mouse biochemistry indicators:
+        """Analyze all biochemistry results using LLM for dynamic interpretation.
 
+        The LLM determines which indicators are abnormal based on the research context,
+        species, tissue type, and experimental conditions - NOT hardcoded reference ranges.
+        """
+        # Build results summary (without pre-judging normal/abnormal)
+        results_text = []
+        for r in results:
+            results_text.append(f"- {r.indicator}: {r.value} {r.unit}")
+
+        prompt = f"""Analyze the following biochemistry indicators in the context of the research objective.
+
+## Biochemistry Results:
 {chr(10).join(results_text)}
 
-Current analysis objective: {instruction}
+## Research Context / Analysis Objective:
+{instruction}
 
-Please analyze:
-1. Main abnormal indicators and their significance
+**IMPORTANT**: You must determine which indicators are abnormal based on:
+1. The specific research context (species, tissue type, experimental model)
+2. Standard reference ranges for the relevant species/tissue
+3. The expected changes given the experimental conditions
+4. Relative changes between treatment and control groups (if applicable)
+
+Please analyze and provide:
+1. Which indicators are abnormal (high or low) and their significance
 2. Correlations between indicators
 3. Possible pathophysiological mechanisms
 4. Suggested supplementary experiments
 
 Reply in JSON format:
 {{
+    "abnormal_markers": [
+        {{"indicator": "name", "value": number, "status": "high/low/normal", "significance": "brief explanation"}},
+        ...
+    ],
     "findings": ["finding 1", "finding 2", ...],
     "mechanisms": ["possible mechanism 1", ...],
     "suggested_experiments": ["experiment 1", ...]
 }}
 """
-        
+
         response = await self.chat(prompt, temperature=0.3)
 
         # Use the safer JSON extraction
@@ -433,7 +394,7 @@ Reply in JSON format:
 
         return {
             "findings": data.get("findings", []),
-            "abnormal_markers": abnormal_markers,
+            "abnormal_markers": data.get("abnormal_markers", []),
             "mechanisms": data.get("mechanisms", []),
             "suggested_experiments": data.get("suggested_experiments", [])
         }
@@ -512,32 +473,5 @@ Reply in JSON format.
         return self._parse_json_response(response)
     
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
-        """Parse JSON from response using non-greedy extraction"""
-        # Handle None or empty response
-        if not response:
-            return {"raw_response": "", "error": "Empty response from LLM"}
-
-        try:
-            # Try to find balanced JSON object (handles nested objects)
-            # Find the first { and then count brackets to find matching }
-            start = response.find('{')
-            if start == -1:
-                return {"raw_response": response}
-
-            depth = 0
-            end = start
-            for i, c in enumerate(response[start:], start):
-                if c == '{':
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-
-            if depth == 0 and end > start:
-                json_str = response[start:end]
-                return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON from response: {e}")
-        return {"raw_response": response}
+        """Parse JSON from response using safe balanced bracket matching from base class"""
+        return self._safe_parse_json(response)

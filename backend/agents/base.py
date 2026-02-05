@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from datetime import datetime
 import json
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 from ..models.schemas import (
     AgentType, AgentMessage, MessageRole, AnalysisState

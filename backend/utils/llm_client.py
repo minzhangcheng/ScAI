@@ -466,20 +466,84 @@ class OpenAICompatibleClient:
         
         try:
             logger.info(f"[{self.agent_name}] Sending vision request to {model} with {len(images)} images")
-            
+
             # Use retry mechanism for the API call
             response = await retry_with_backoff(
                 _make_request,
                 agent_name=self.agent_name
             )
-            
-            # Safely extract content from response
+
+            # Extract content - handle various response formats from different providers
             content = ""
             if response and response.choices and len(response.choices) > 0:
                 message = response.choices[0].message
-                if message and message.content:
-                    content = message.content
-            
+                if message:
+                    raw_content = message.content
+
+                    # Case 1: String content (normal case)
+                    if isinstance(raw_content, str):
+                        content = raw_content
+
+                    # Case 2: List content (multimodal response format)
+                    elif isinstance(raw_content, list):
+                        text_parts = []
+                        for part in raw_content:
+                            if isinstance(part, dict):
+                                if part.get("type") == "text":
+                                    text_parts.append(part.get("text", ""))
+                                elif "text" in part:
+                                    text_parts.append(part["text"])
+                            elif isinstance(part, str):
+                                text_parts.append(part)
+                        content = "\n".join(text_parts)
+
+                    # Case 3: None - try alternative extraction methods
+                    elif raw_content is None:
+                        # Try model_dump() for Pydantic models (OpenAI SDK uses Pydantic)
+                        try:
+                            if hasattr(message, 'model_dump'):
+                                msg_data = message.model_dump()
+                                if 'content' in msg_data and msg_data['content']:
+                                    raw = msg_data['content']
+                                    if isinstance(raw, str):
+                                        content = raw
+                                    elif isinstance(raw, list):
+                                        content = "\n".join(
+                                            p.get("text", "") if isinstance(p, dict) else str(p)
+                                            for p in raw
+                                        )
+                        except Exception as e:
+                            logger.debug(f"[{self.agent_name}] model_dump extraction failed: {e}")
+
+                        # Fallback: check for text attribute
+                        if not content and hasattr(message, 'text'):
+                            content = message.text or ""
+
+                    # Case 4: Other types - convert to string
+                    else:
+                        content = str(raw_content)
+
+                    # Check for refusal if still empty
+                    if not content and hasattr(message, 'refusal') and message.refusal:
+                        content = f"[Refusal]: {message.refusal}"
+                        logger.warning(f"[{self.agent_name}] Vision request was refused: {message.refusal}")
+
+                    # Debug logging for empty content cases
+                    if not content:
+                        msg_dict = {}
+                        for attr in ['content', 'refusal', 'role', 'function_call', 'tool_calls']:
+                            if hasattr(message, attr):
+                                val = getattr(message, attr)
+                                msg_dict[attr] = str(val)[:200] if val else None
+                        logger.warning(
+                            f"[{self.agent_name}] Vision response has empty content. "
+                            f"Message attributes: {msg_dict}. "
+                            f"Usage: prompt={response.usage.prompt_tokens if response.usage else 0}, "
+                            f"completion={response.usage.completion_tokens if response.usage else 0}"
+                        )
+            else:
+                logger.warning(f"[{self.agent_name}] Vision response has no choices")
+
             result = LLMResponse(
                 content=content,
                 model=response.model if response else model,

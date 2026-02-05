@@ -1,79 +1,58 @@
 """
-Painter Agent - Generates graphic abstracts using Google Gemini image generation
+Painter Agent - Generates graphic abstracts using LLM image generation via OpenRouter
+
+This agent uses the user-configured LLM hosting service (default: OpenRouter) to call
+image generation models like Google Gemini with modalities=["image", "text"].
 """
 from typing import Dict, Any, Optional
-import httpx
 import logging
-import uuid
-from datetime import datetime
+import base64
+import json
 
+from .base import BaseAgent, AgentConfig
 from ..models.schemas import AgentType, AnalysisState, GraphicAbstract
+from ..utils.llm_client import OpenAICompatibleClient
 
 logger = logging.getLogger(__name__)
 
 
-class PainterAgent:
+class PainterAgent(BaseAgent):
     """
-    Painter Agent using Google Gemini's image generation capabilities.
+    Painter Agent using OpenRouter (or other OpenAI-compatible API) for image generation.
 
     Responsibilities:
     - Generate graphic abstracts summarizing research findings
     - Create visual representations of key discoveries
 
-    Note: This agent does not inherit from BaseAgent as it uses a different
-    API (Google's image generation) instead of the standard LLM client.
+    This agent inherits from BaseAgent and uses the same LLM client as other agents,
+    ensuring it respects the user's configured LLM hosting service (OpenRouter by default).
     """
 
     def __init__(
         self,
-        google_api_key: str,
-        model: str = "gemini-3-pro-image-preview",
-        proxy_url: Optional[str] = None,
-        session_id: str = "default"
+        llm_client: OpenAICompatibleClient,
+        model: str = "google/gemini-3-pro-image-preview",
+        system_prompt: str = "",
+        config: Optional[AgentConfig] = None
     ):
         """
         Initialize the Painter Agent.
 
         Args:
-            google_api_key: Google API key for Gemini
-            model: Model to use for image generation
-            proxy_url: Optional HTTP/HTTPS proxy URL
-            session_id: Session ID for logging
+            llm_client: OpenAI-compatible client (OpenRouter, etc.)
+            model: Model to use for image generation (e.g., google/gemini-3-pro-image-preview)
+            system_prompt: System prompt (optional for image generation)
+            config: Agent configuration
         """
-        self.google_api_key = google_api_key
-        self.model = model
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
-        self.session_id = session_id
-        self.agent_type = AgentType.PAINTER
-        self.proxy_url = proxy_url
-
-        # Lazy-initialized HTTP client to avoid resource leaks
-        self._client: Optional[httpx.AsyncClient] = None
+        super().__init__(
+            agent_type=AgentType.PAINTER,
+            llm_client=llm_client,
+            model=model,
+            system_prompt=system_prompt or "You are a professional scientific illustrator.",
+            config=config or AgentConfig(temperature=0.7)
+        )
 
         logger.info(f"[Painter] Initialized with model={model}")
-
-    @property
-    def client(self) -> httpx.AsyncClient:
-        """Lazy-initialized HTTP client with proxy support"""
-        if self._client is None:
-            transport = None
-            if self.proxy_url:
-                transport = httpx.AsyncHTTPTransport(proxy=self.proxy_url)
-            self._client = httpx.AsyncClient(
-                transport=transport,
-                timeout=180.0  # Image generation can take time
-            )
-        return self._client
-
-    async def close(self):
-        """Close the HTTP client"""
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
-    def set_session(self, session_id: str):
-        """Update session ID for logging"""
-        self.session_id = session_id
 
     async def generate_graphic_abstract(
         self,
@@ -95,7 +74,7 @@ class PainterAgent:
         # Build comprehensive prompt for image generation
         prompt = self._build_graphic_prompt(state, summary)
 
-        # Call Gemini image generation API
+        # Call image generation via OpenRouter
         image_base64 = await self._generate_image(prompt)
 
         graphic_abstract = GraphicAbstract(
@@ -157,7 +136,10 @@ The graphic abstract should tell the story of the research at a glance, highligh
 
     async def _generate_image(self, prompt: str) -> str:
         """
-        Call Gemini image generation API.
+        Call image generation API via OpenRouter.
+
+        Uses modalities parameter per OpenRouter documentation:
+        https://openrouter.ai/docs/guides/overview/multimodal/image-generation
 
         Args:
             prompt: The prompt for image generation
@@ -166,60 +148,149 @@ The graphic abstract should tell the story of the research at a glance, highligh
             Base64 encoded image string
 
         Raises:
-            ValueError: If google_api_key is not configured
+            ValueError: If image generation fails
         """
-        # Validate API key before making request
-        if not self.google_api_key or not self.google_api_key.strip():
-            error_msg = "Google API key is not configured. Please set the Google API key in the configuration to enable graphic abstract generation."
-            logger.error(f"[{self.session_id}][Painter] {error_msg}")
-            raise ValueError(error_msg)
+        self._set_llm_context()
 
-        url = f"{self.base_url}/models/{self.model}:generateContent"
-
-        payload = {
-            "contents": [{
-                "parts": [{
-                    "text": prompt
-                }]
-            }],
-            "generationConfig": {
-                "responseModalities": ["TEXT", "IMAGE"]
-            }
-        }
-
-        logger.debug(f"[{self.session_id}][Painter] Calling Gemini API: {url}")
+        logger.debug(f"[{self.session_id}][Painter] Calling image generation via OpenRouter")
 
         try:
-            response = await self.client.post(
-                url,
-                headers={"x-goog-api-key": self.google_api_key},
-                json=payload
+            # Call via OpenRouter with correct modalities parameter
+            # Per OpenRouter docs: use modalities=["image", "text"] (lowercase)
+            response = await self.llm_client.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=self.config.temperature,
+                max_tokens=4096,
+                extra_body={
+                    "modalities": ["image", "text"]  # OpenRouter format
+                }
             )
-            response.raise_for_status()
-
-            data = response.json()
 
             # Extract image from response
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise ValueError("No candidates in response")
+            if response and response.choices and len(response.choices) > 0:
+                message = response.choices[0].message
 
-            content = candidates[0].get("content", {})
-            parts = content.get("parts", [])
+                # Method 1: Check for images field directly (OpenRouter format)
+                # Response format: message.images = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]
+                if hasattr(message, 'images') and message.images:
+                    logger.debug(f"[{self.session_id}][Painter] Found images field in response")
+                    for img in message.images:
+                        if isinstance(img, dict):
+                            url = img.get("image_url", {}).get("url", "")
+                            if url.startswith("data:image"):
+                                return url.split(",", 1)[1] if "," in url else url
 
-            for part in parts:
-                if "inlineData" in part:
-                    image_data = part["inlineData"]
-                    # Return the base64 data (may include mime type prefix)
-                    return image_data.get("data", "")
+                # Method 2: Check model_dump for images (Pydantic model with extra='allow')
+                if hasattr(message, 'model_dump'):
+                    # Use mode='python' and by_alias=False to get all fields including extras
+                    try:
+                        msg_data = message.model_dump(mode='python')
+                    except TypeError:
+                        msg_data = message.model_dump()
+                    logger.debug(f"[{self.session_id}][Painter] model_dump keys: {list(msg_data.keys())}")
 
-            # If no inline data found, log the response structure for debugging
-            logger.warning(f"[{self.session_id}][Painter] Response structure: {data.keys()}")
+                    if 'images' in msg_data and msg_data['images']:
+                        logger.debug(f"[{self.session_id}][Painter] Found images in model_dump")
+                        for img in msg_data['images']:
+                            if isinstance(img, dict):
+                                url = img.get("image_url", {}).get("url", "")
+                                if url.startswith("data:image"):
+                                    return url.split(",", 1)[1] if "," in url else url
+
+                # Method 2b: Check response.model_dump() for images at choice level
+                if hasattr(response, 'model_dump'):
+                    try:
+                        resp_data = response.model_dump(mode='python')
+                    except TypeError:
+                        resp_data = response.model_dump()
+                    logger.debug(f"[{self.session_id}][Painter] response model_dump keys: {list(resp_data.keys())}")
+
+                    # Check in choices[0].message.images
+                    if 'choices' in resp_data and resp_data['choices']:
+                        choice_msg = resp_data['choices'][0].get('message', {})
+                        if 'images' in choice_msg and choice_msg['images']:
+                            logger.debug(f"[{self.session_id}][Painter] Found images in response model_dump")
+                            for img in choice_msg['images']:
+                                if isinstance(img, dict):
+                                    url = img.get("image_url", {}).get("url", "")
+                                    if url.startswith("data:image"):
+                                        return url.split(",", 1)[1] if "," in url else url
+
+                # Method 3: Check content for image data
+                if message and message.content:
+                    content = message.content
+
+                    # If content is a string
+                    if isinstance(content, str):
+                        # Try to parse as JSON
+                        try:
+                            data = json.loads(content)
+                            if isinstance(data, dict) and "image" in data:
+                                return data["image"]
+                            if isinstance(data, dict) and "images" in data:
+                                for img in data["images"]:
+                                    if isinstance(img, dict):
+                                        url = img.get("image_url", {}).get("url", "")
+                                        if url.startswith("data:image"):
+                                            return url.split(",", 1)[1] if "," in url else url
+                        except json.JSONDecodeError:
+                            pass
+
+                        # Check if content is base64 image data
+                        if content.startswith("data:image"):
+                            if "," in content:
+                                return content.split(",", 1)[1]
+                            return content
+
+                        # Check for raw base64
+                        if len(content) > 100 and not content.startswith("{"):
+                            try:
+                                base64.b64decode(content[:100])
+                                return content
+                            except Exception:
+                                pass
+
+                    # If content is a list (multimodal response)
+                    elif isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict):
+                                # Check for inline_data (Gemini format)
+                                if "inlineData" in part:
+                                    return part["inlineData"].get("data", "")
+                                # Check for image_url format
+                                if part.get("type") == "image_url":
+                                    url = part.get("image_url", {}).get("url", "")
+                                    if url.startswith("data:image"):
+                                        return url.split(",", 1)[1] if "," in url else url
+
+                # Log the response structure for debugging
+                msg_attrs = {}
+                if message:
+                    for attr in ['content', 'images', 'role', 'refusal']:
+                        if hasattr(message, attr):
+                            val = getattr(message, attr)
+                            msg_attrs[attr] = str(val)[:100] if val else None
+                    if hasattr(message, 'model_dump'):
+                        msg_attrs['model_dump_keys'] = list(message.model_dump().keys())
+
+                logger.warning(
+                    f"[{self.session_id}][Painter] Could not extract image from response. "
+                    f"Message attributes: {msg_attrs}"
+                )
+
+                # If we have text content but no image
+                if message and message.content and isinstance(message.content, str):
+                    raise ValueError(
+                        f"Model returned text instead of image. "
+                        f"Response preview: {message.content[:300]}"
+                    )
+
             raise ValueError("No image data found in response")
 
-        except httpx.HTTPStatusError as e:
-            logger.error(f"[{self.session_id}][Painter] HTTP error: {e.response.status_code} - {e.response.text}")
-            raise ValueError(f"Image generation HTTP error: {e.response.status_code}") from e
         except Exception as e:
             logger.error(f"[{self.session_id}][Painter] Error generating image: {e}")
             raise ValueError(f"Image generation failed: {e}") from e
@@ -253,11 +324,3 @@ The graphic abstract should tell the story of the research at a glance, highligh
                 "success": False,
                 "error": str(e)
             }
-
-    async def __aenter__(self):
-        """Async context manager entry"""
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit - ensures client is closed"""
-        await self.close()

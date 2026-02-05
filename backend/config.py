@@ -125,8 +125,8 @@ class ModelConfig(BaseModel):
     bioinformatics_model: str = "anthropic/claude-opus-4.5"
     biochemistry_model: str = "google/gemini-3-pro-preview"
     # Literature agent uses Google Deep Research API directly
-    # Painter agent uses Google Gemini image generation
-    painter_model: str = "gemini-2.0-flash-exp-image-generation"
+    # Painter agent uses image generation model via OpenRouter
+    painter_model: str = "google/gemini-3-pro-image-preview"
 
 class AgentTemperatures(BaseModel):
     """Default temperatures for each agent - centralized configuration"""

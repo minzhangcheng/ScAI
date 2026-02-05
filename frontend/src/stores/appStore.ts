@@ -146,7 +146,7 @@ export const DEFAULT_MODELS: AgentModels = {
   bioinformatics: 'anthropic/claude-opus-4.5',
   biochemistry: 'google/gemini-3-pro-preview',
   literature: 'google/gemini-3-pro-preview',
-  painter: 'gemini-2.0-flash-exp-image-generation'  // Must match backend config.py painter_model
+  painter: 'google/gemini-3-pro-image-preview'  // Image generation model via OpenRouter
 }
 
 // Default temperatures

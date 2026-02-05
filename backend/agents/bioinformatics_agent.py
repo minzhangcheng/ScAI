@@ -313,9 +313,7 @@ class BioinformaticsAgent(BaseAgent):
         (r'\bmarshal\b', 'marshal module'),
         (r'\bshelve\b', 'shelve module'),
 
-        # Environment manipulation
-        (r'\bos\.environ\s*\[', 'os.environ modification'),
-        (r'\bos\.putenv\b', 'os.putenv'),
+        # Environment manipulation (os.environ allowed for setting runtime flags like NUMBA_DISABLE_JIT)
         (r'\bos\.chdir\b', 'os.chdir (changing working directory)'),
         (r'\bos\.chroot\b', 'os.chroot'),
         (r'\bsys\.path\s*\.(?:append|insert|extend)\b', 'sys.path modification'),
@@ -468,7 +466,12 @@ class BioinformaticsAgent(BaseAgent):
         review_callback = figure_review_callback or self.figure_review_callback
 
         # Initialize checkpoint manager for step-level recovery
-        state_dir = str(self.sandbox.state_dir) if hasattr(self.sandbox, 'state_dir') else 'states'
+        if hasattr(self.sandbox, 'state_dir') and self.sandbox.state_dir:
+            state_dir = str(self.sandbox.state_dir)
+        else:
+            # Use sandbox working directory as base for states
+            state_dir = str(Path(self.sandbox.working_dir) / "states")
+            Path(state_dir).mkdir(parents=True, exist_ok=True)
         checkpoint_mgr = CheckpointManager(session_id=state.id, state_dir=state_dir)
 
         # Try to resume from checkpoint if enabled
