@@ -2,12 +2,13 @@ import { useState, useEffect } from 'react'
 import { usePrompts } from '../hooks/useApi'
 import { useAppStore, AgentType, DEFAULT_MODELS, DEFAULT_TEMPERATURES } from '../stores/appStore'
 import { useTranslation, getDefaultPrompts } from '../i18n/translations'
-import { 
-  Users, 
-  Microscope, 
-  Code2, 
-  FlaskConical, 
+import {
+  Users,
+  Microscope,
+  Code2,
+  FlaskConical,
   BookOpen,
+  Palette,
   Save,
   RotateCcw,
   Cpu,
@@ -18,19 +19,79 @@ export function PromptsPanel() {
   const { currentSession, language, prompts, setPrompt, models, setModel, temperatures, setTemperature } = useAppStore()
   const { savePrompt, saveModel, saveTemperature } = usePrompts()
   const { t } = useTranslation(language)
+  const defaultPrompts = getDefaultPrompts(language)
   const [selectedAgent, setSelectedAgent] = useState<AgentType>('pi')
-  const [editedPrompt, setEditedPrompt] = useState(prompts[selectedAgent])
-  const [editedModel, setEditedModel] = useState(models[selectedAgent])
-  const [editedTemperature, setEditedTemperature] = useState(temperatures[selectedAgent])
+  const [editedPrompt, setEditedPrompt] = useState(prompts[selectedAgent] ?? defaultPrompts[selectedAgent] ?? '')
+  const [editedModel, setEditedModel] = useState(models[selectedAgent] ?? DEFAULT_MODELS[selectedAgent] ?? '')
+  const [editedTemperature, setEditedTemperature] = useState(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
   // Update edited prompt, model, and temperature when selected agent changes
   useEffect(() => {
-    setEditedPrompt(prompts[selectedAgent])
-    setEditedModel(models[selectedAgent])
-    setEditedTemperature(temperatures[selectedAgent])
-  }, [selectedAgent, prompts, models, temperatures])
+    setEditedPrompt(prompts[selectedAgent] ?? defaultPrompts[selectedAgent] ?? '')
+    setEditedModel(models[selectedAgent] ?? DEFAULT_MODELS[selectedAgent] ?? '')
+    setEditedTemperature(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
+  }, [selectedAgent, prompts, models, temperatures, defaultPrompts])
+
+  // Color styles mapping for Tailwind - use complete class names to prevent purging
+  const colorStyles: Record<string, {
+    bgSelected: string
+    borderSelected: string
+    bgIcon: string
+    bgIconSelected: string
+    textIcon: string
+    textIconSelected: string
+  }> = {
+    violet: {
+      bgSelected: 'bg-violet-50',
+      borderSelected: 'border-violet-200',
+      bgIcon: 'bg-slate-100',
+      bgIconSelected: 'bg-violet-100',
+      textIcon: 'text-slate-500',
+      textIconSelected: 'text-violet-600'
+    },
+    red: {
+      bgSelected: 'bg-red-50',
+      borderSelected: 'border-red-200',
+      bgIcon: 'bg-slate-100',
+      bgIconSelected: 'bg-red-100',
+      textIcon: 'text-slate-500',
+      textIconSelected: 'text-red-600'
+    },
+    green: {
+      bgSelected: 'bg-green-50',
+      borderSelected: 'border-green-200',
+      bgIcon: 'bg-slate-100',
+      bgIconSelected: 'bg-green-100',
+      textIcon: 'text-slate-500',
+      textIconSelected: 'text-green-600'
+    },
+    amber: {
+      bgSelected: 'bg-amber-50',
+      borderSelected: 'border-amber-200',
+      bgIcon: 'bg-slate-100',
+      bgIconSelected: 'bg-amber-100',
+      textIcon: 'text-slate-500',
+      textIconSelected: 'text-amber-600'
+    },
+    blue: {
+      bgSelected: 'bg-blue-50',
+      borderSelected: 'border-blue-200',
+      bgIcon: 'bg-slate-100',
+      bgIconSelected: 'bg-blue-100',
+      textIcon: 'text-slate-500',
+      textIconSelected: 'text-blue-600'
+    },
+    pink: {
+      bgSelected: 'bg-pink-50',
+      borderSelected: 'border-pink-200',
+      bgIcon: 'bg-slate-100',
+      bgIconSelected: 'bg-pink-100',
+      textIcon: 'text-slate-500',
+      textIconSelected: 'text-pink-600'
+    }
+  }
 
   const agentConfig: {
     id: AgentType
@@ -39,48 +100,55 @@ export function PromptsPanel() {
     icon: typeof Users
     color: string
   }[] = [
-    { 
-      id: 'pi', 
-      name: t('piAgent'), 
-      description: t('piAgentDesc'), 
+    {
+      id: 'pi',
+      name: t('piAgent'),
+      description: t('piAgentDesc'),
       icon: Users,
-      color: 'violet' 
+      color: 'violet'
     },
-    { 
-      id: 'pathology', 
-      name: t('pathologyAgent'), 
-      description: t('pathologyAgentDesc'), 
+    {
+      id: 'pathology',
+      name: t('pathologyAgent'),
+      description: t('pathologyAgentDesc'),
       icon: Microscope,
-      color: 'red' 
+      color: 'red'
     },
-    { 
-      id: 'bioinformatics', 
-      name: t('bioinformaticsAgent'), 
-      description: t('bioinformaticsAgentDesc'), 
+    {
+      id: 'bioinformatics',
+      name: t('bioinformaticsAgent'),
+      description: t('bioinformaticsAgentDesc'),
       icon: Code2,
-      color: 'green' 
+      color: 'green'
     },
-    { 
-      id: 'biochemistry', 
-      name: t('biochemistryAgent'), 
-      description: t('biochemistryAgentDesc'), 
+    {
+      id: 'biochemistry',
+      name: t('biochemistryAgent'),
+      description: t('biochemistryAgentDesc'),
       icon: FlaskConical,
-      color: 'amber' 
+      color: 'amber'
     },
-    { 
-      id: 'literature', 
-      name: t('literatureAgent'), 
-      description: t('literatureAgentDesc'), 
+    {
+      id: 'literature',
+      name: t('literatureAgent'),
+      description: t('literatureAgentDesc'),
       icon: BookOpen,
-      color: 'blue' 
+      color: 'blue'
+    },
+    {
+      id: 'painter',
+      name: t('painterAgent'),
+      description: t('painterAgentDesc'),
+      icon: Palette,
+      color: 'pink'
     },
   ]
 
   const handleSelectAgent = (agentId: AgentType) => {
     setSelectedAgent(agentId)
-    setEditedPrompt(prompts[agentId])
-    setEditedModel(models[agentId])
-    setEditedTemperature(temperatures[agentId])
+    setEditedPrompt(prompts[agentId] ?? defaultPrompts[agentId] ?? '')
+    setEditedModel(models[agentId] ?? DEFAULT_MODELS[agentId] ?? '')
+    setEditedTemperature(temperatures[agentId] ?? DEFAULT_TEMPERATURES[agentId] ?? 0.5)
     setSaved(false)
   }
 
@@ -119,8 +187,13 @@ export function PromptsPanel() {
     setSaved(false)
   }
 
-  const selectedConfig = agentConfig.find(a => a.id === selectedAgent)!
+  const selectedConfig = agentConfig.find(a => a.id === selectedAgent)
+  if (!selectedConfig) {
+    console.warn('Selected agent config not found:', selectedAgent)
+    return null
+  }
   const Icon = selectedConfig.icon
+  const selectedStyles = colorStyles[selectedConfig.color] || colorStyles.violet
 
   return (
     <div className="flex gap-6 h-full">
@@ -133,22 +206,23 @@ export function PromptsPanel() {
           {agentConfig.map((agent) => {
             const AgentIcon = agent.icon
             const isSelected = selectedAgent === agent.id
-            
+            const styles = colorStyles[agent.color] || colorStyles.violet
+
             return (
               <button
                 key={agent.id}
                 onClick={() => handleSelectAgent(agent.id)}
                 className={`w-full flex items-start gap-3 p-3 rounded-xl text-left transition-all ${
                   isSelected
-                    ? `bg-${agent.color}-50 border-2 border-${agent.color}-200`
+                    ? `${styles.bgSelected} border-2 ${styles.borderSelected}`
                     : 'hover:bg-slate-50 border-2 border-transparent'
                 }`}
               >
                 <div className={`p-2 rounded-lg ${
-                  isSelected ? `bg-${agent.color}-100` : 'bg-slate-100'
+                  isSelected ? styles.bgIconSelected : styles.bgIcon
                 }`}>
                   <AgentIcon className={`w-4 h-4 ${
-                    isSelected ? `text-${agent.color}-600` : 'text-slate-500'
+                    isSelected ? styles.textIconSelected : styles.textIcon
                   }`} />
                 </div>
                 <div>
@@ -171,8 +245,8 @@ export function PromptsPanel() {
       <div className="flex-1 flex flex-col">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg bg-${selectedConfig.color}-100`}>
-              <Icon className={`w-5 h-5 text-${selectedConfig.color}-600`} />
+            <div className={`p-2 rounded-lg ${selectedStyles.bgIconSelected}`}>
+              <Icon className={`w-5 h-5 ${selectedStyles.textIconSelected}`} />
             </div>
             <div>
               <h3 className="font-semibold text-slate-900">{selectedConfig.name}</h3>
@@ -218,13 +292,27 @@ export function PromptsPanel() {
                 setSaved(false)
               }}
               className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
-              placeholder="e.g., google/gemini-2.5-pro-preview-05-06"
+              placeholder="e.g., google/gemini-3-pro-preview"
             />
           </div>
-          <p className="text-xs text-slate-400 mt-2 ml-8">
-            {language === 'zh' 
-              ? '使用 OpenRouter 模型格式，如 google/gemini-2.5-pro-preview-05-06、anthropic/claude-sonnet-4 等'
-              : 'Use OpenRouter model format, e.g., google/gemini-2.5-pro-preview-05-06, anthropic/claude-sonnet-4'}
+          <p className="text-xs text-slate-500 mt-2 ml-8">
+            {language === 'zh' ? (
+              selectedAgent === 'pi' ? '推荐: google/gemini-3-pro-preview' :
+              selectedAgent === 'pathology' ? '需要具有病理图片识别能力的模型，强烈推荐: google/gemini-3-pro-preview' :
+              selectedAgent === 'bioinformatics' ? '需要 coding 能力较强的模型，推荐: google/gemini-3-pro-preview 或 anthropic/claude-opus-4.5' :
+              selectedAgent === 'biochemistry' ? '推荐: google/gemini-3-pro-preview' :
+              selectedAgent === 'literature' ? '推荐: google/gemini-3-pro-preview' :
+              selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3-pro-image-preview' :
+              '使用 OpenRouter 模型格式'
+            ) : (
+              selectedAgent === 'pi' ? 'Recommended: google/gemini-3-pro-preview' :
+              selectedAgent === 'pathology' ? 'Requires pathology image recognition capability. Strongly recommended: google/gemini-3-pro-preview' :
+              selectedAgent === 'bioinformatics' ? 'Requires strong coding capability. Recommended: google/gemini-3-pro-preview or anthropic/claude-opus-4.5' :
+              selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3-pro-preview' :
+              selectedAgent === 'literature' ? 'Recommended: google/gemini-3-pro-preview' :
+              selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3-pro-image-preview' :
+              'Use OpenRouter model format'
+            )}
           </p>
         </div>
 

@@ -1,5 +1,4 @@
 import { useAppStore } from '../stores/appStore'
-import { Language } from '../i18n/translations'
 import { Globe } from 'lucide-react'
 
 export function LanguageSelector() {

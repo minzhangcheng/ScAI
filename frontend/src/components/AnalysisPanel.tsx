@@ -1,9 +1,10 @@
-import { useEffect, useState, useRef } from 'react'
-import { useAppStore } from '../stores/appStore'
-import { useSession, useWebSocket } from '../hooks/useApi'
+import { useEffect, useState, useRef, useMemo } from 'react'
+import { useAppStore, PublicationFigure, PublicationTable, GraphicAbstract as GraphicAbstractType, AgentError } from '../stores/appStore'
+import { useSession, useWebSocket, useConfig } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
-import { 
-  Play, 
+import { FigureGallery, IntegratedReport, GraphicAbstract, DownloadButtons } from './analysis'
+import {
+  Play,
   AlertCircle,
   CheckCircle2,
   Loader2,
@@ -18,7 +19,8 @@ import {
   Image as ImageIcon,
   FileText,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Palette
 } from 'lucide-react'
 
 const API_BASE = '/api'
@@ -36,9 +38,10 @@ interface RoundSummary {
 }
 
 export function AnalysisPanel() {
-  const { currentSession, messages, language, wsConnected } = useAppStore()
+  const { currentSession, messages, language, showConfigPanel } = useAppStore()
   const { startAnalysis, resumeAnalysis } = useSession()
   const { connect, disconnect, connected } = useWebSocket()
+  const { checkStatus } = useConfig()
   const { t } = useTranslation(language)
   
   // User input state
@@ -48,33 +51,67 @@ export function AnalysisPanel() {
   const [expandedRound, setExpandedRound] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Publication outputs state
+  const [publicationFigures, setPublicationFigures] = useState<PublicationFigure[]>([])
+  const [publicationTables, setPublicationTables] = useState<PublicationTable[]>([])
+  const [integratedReport, setIntegratedReport] = useState<string | null>(null)
+  const [graphicAbstract, setGraphicAbstract] = useState<GraphicAbstractType | null>(null)
+
   const agents = [
     { id: 'pi', name: t('piAgent'), icon: Users, color: 'violet' },
     { id: 'pathology', name: t('pathologyAgent'), icon: Microscope, color: 'red' },
     { id: 'bioinformatics', name: t('bioinformaticsAgent'), icon: Code2, color: 'green' },
     { id: 'biochemistry', name: t('biochemistryAgent'), icon: FlaskConical, color: 'amber' },
     { id: 'literature', name: t('literatureAgent'), icon: BookOpen, color: 'blue' },
+    { id: 'painter', name: t('painterAgent'), icon: Palette, color: 'pink' },
   ]
 
-  // Get latest status for each agent
+  // Get unresolved errors for display
+  const getUnresolvedErrors = (): AgentError[] => {
+    return useAppStore.getState().agentErrors.filter(e => !e.resolved)
+  }
+
+  // Get latest status for each agent - balances persistent errors with recovery
   const getAgentStatus = (agentId: string) => {
     const agentMessages = messages.filter(m => m.agent === agentId)
-    if (agentMessages.length === 0) return 'idle'
-    
+    const unresolvedErrors = useAppStore.getState().agentErrors
+      .filter(e => e.agent === agentId && !e.resolved)
+
+    if (agentMessages.length === 0) {
+      // No messages yet - show error if there are unresolved errors, otherwise idle
+      return unresolvedErrors.length > 0 ? 'error' : 'idle'
+    }
+
     const lastMessage = agentMessages[agentMessages.length - 1]
+
+    // If the last message is a result (success), the agent has recovered from any previous errors
+    // Clear error state visually when agent succeeds
+    if (lastMessage.type === 'result') {
+      return 'done'
+    }
+
+    // Check for unresolved errors, but only if the latest message isn't showing progress
+    if (unresolvedErrors.length > 0) {
+      // If agent is currently working (has recent status message), show working state
+      // This allows error recovery to be visible
+      if (lastMessage.type === 'status') {
+        return 'working'
+      }
+      return 'error'  // Persistent error state
+    }
+
     if (lastMessage.type === 'status') return 'working'
-    if (lastMessage.type === 'result') return 'done'
     if (lastMessage.type === 'error') return 'error'
     return 'working'
   }
 
-  // Extract round summaries from messages
-  const getRoundSummaries = (): RoundSummary[] => {
+  // Extract round summaries from messages (memoized to avoid recalculation on every render)
+  const roundSummaries = useMemo((): RoundSummary[] => {
     const summaries: RoundSummary[] = []
-    
+
     // Look for round_summary messages from PI
     const piMessages = messages.filter(m => m.agent === 'pi')
-    
+
     for (const msg of piMessages) {
       if (msg.type === 'round_summary' && typeof msg.content === 'object') {
         const content = msg.content as any
@@ -87,7 +124,7 @@ export function AnalysisPanel() {
         })
       }
     }
-    
+
     // Also check roundResults from session
     if (currentSession?.roundResults) {
       for (const round of currentSession.roundResults) {
@@ -95,11 +132,11 @@ export function AnalysisPanel() {
         if (!existing) {
           summaries.push({
             round: round.round,
-            summary: round.summary,
+            summary: round.summary || '',
             findings: [
-              ...round.pathologyFindings,
-              ...round.bioinformaticsFindings,
-              ...round.biochemistryFindings
+              ...(round.pathologyFindings || []),
+              ...(round.bioinformaticsFindings || []),
+              ...(round.biochemistryFindings || [])
             ],
             dataRequests: { pathology: [], biochemistry: [], other: [] },
             status: 'completed'
@@ -107,12 +144,22 @@ export function AnalysisPanel() {
         }
       }
     }
-    
+
     return summaries.sort((a, b) => a.round - b.round)
-  }
+  }, [messages, currentSession?.roundResults])
 
   const handleStart = async () => {
     try {
+      // Check if API is configured before starting
+      const status = await checkStatus()
+      if (!status.configured) {
+        // Show config panel if not configured
+        if (showConfigPanel) {
+          showConfigPanel()
+        }
+        return
+      }
+
       await startAnalysis()
       setTimeout(() => connect(), 100)
     } catch (e) {
@@ -170,49 +217,82 @@ export function AnalysisPanel() {
     setSending(true)
     try {
       // First upload any files
-      const uploadedData: { type: string, filename: string, id?: string }[] = []
-      
+      const uploadResults: Array<{ file: File; success: boolean; error?: string; data?: { type: string; filename: string; id?: string } }> = []
+
       for (const file of uploadedFiles) {
         const formData = new FormData()
         formData.append('file', file)
-        
+
         // Determine file type and endpoint
         const isImage = file.type.startsWith('image/')
-        
-        if (isImage) {
-          // Upload as pathology image (PI will classify it)
-          formData.append('image_type', 'user_upload')
-          const response = await fetch(
-            `${API_BASE}/session/${currentSession.id}/upload/pathology`,
-            { method: 'POST', body: formData }
-          )
-          if (response.ok) {
-            const data = await response.json()
-            uploadedData.push({ 
-              type: 'image', 
-              filename: file.name,
-              id: data.data?.image_id 
-            })
+
+        try {
+          if (isImage) {
+            // Upload as pathology image (PI will classify it)
+            formData.append('image_type', 'user_upload')
+            const response = await fetch(
+              `${API_BASE}/session/${currentSession.id}/upload/pathology`,
+              { method: 'POST', body: formData }
+            )
+            if (response.ok) {
+              const data = await response.json()
+              uploadResults.push({
+                file,
+                success: true,
+                data: {
+                  type: 'image',
+                  filename: file.name,
+                  id: data.data?.image_id
+                }
+              })
+            } else {
+              uploadResults.push({ file, success: false, error: `HTTP ${response.status}` })
+            }
+          } else {
+            // Upload as generic file
+            const response = await fetch(
+              `${API_BASE}/session/${currentSession.id}/upload/file`,
+              { method: 'POST', body: formData }
+            )
+            if (response.ok) {
+              uploadResults.push({
+                file,
+                success: true,
+                data: { type: 'file', filename: file.name }
+              })
+            } else {
+              uploadResults.push({ file, success: false, error: `HTTP ${response.status}` })
+            }
           }
-        } else {
-          // Upload as generic file
-          const response = await fetch(
-            `${API_BASE}/session/${currentSession.id}/upload/file`,
-            { method: 'POST', body: formData }
-          )
-          if (response.ok) {
-            uploadedData.push({ type: 'file', filename: file.name })
-          }
+        } catch (err) {
+          uploadResults.push({ file, success: false, error: String(err) })
         }
       }
-      
+
+      // Check for failures and notify user
+      const failures = uploadResults.filter(r => !r.success)
+      if (failures.length > 0) {
+        const failedNames = failures.map(f => f.file.name).join(', ')
+        alert(language === 'zh'
+          ? `以下文件上传失败: ${failedNames}`
+          : `Failed to upload: ${failedNames}`)
+      }
+
+      // Get successfully uploaded data
+      const uploadedData: Array<{ type: string; filename: string; id?: string }> = []
+      for (const r of uploadResults) {
+        if (r.success && r.data) {
+          uploadedData.push(r.data)
+        }
+      }
+
       // Then send the message with file references
       const message = {
         message: userInput,
         uploaded_files: uploadedData,
         target_agent: 'pi'
       }
-      
+
       const response = await fetch(
         `${API_BASE}/session/${currentSession.id}/human-input`,
         {
@@ -221,7 +301,7 @@ export function AnalysisPanel() {
           body: JSON.stringify(message)
         }
       )
-      
+
       if (response.ok) {
         setUserInput('')
         setUploadedFiles([])
@@ -258,11 +338,66 @@ export function AnalysisPanel() {
 
   // Auto-expand latest round
   useEffect(() => {
-    const summaries = getRoundSummaries()
-    if (summaries.length > 0) {
-      setExpandedRound(summaries[summaries.length - 1].round)
+    if (roundSummaries.length > 0) {
+      setExpandedRound(roundSummaries[roundSummaries.length - 1].round)
     }
-  }, [messages])
+  }, [roundSummaries])
+
+  // Extract publication outputs from messages and session
+  useEffect(() => {
+    // Sync from session state first
+    if (currentSession?.publicationFigures) {
+      setPublicationFigures(currentSession.publicationFigures)
+    }
+    if (currentSession?.publicationTables) {
+      setPublicationTables(currentSession.publicationTables)
+    }
+    if (currentSession?.integratedReport) {
+      setIntegratedReport(currentSession.integratedReport)
+    }
+    if (currentSession?.graphicAbstract) {
+      setGraphicAbstract(currentSession.graphicAbstract)
+    }
+
+    // Process messages for real-time updates
+    for (const msg of messages) {
+      if (msg.type === 'figure_review' || msg.type === 'figure_approved') {
+        const content = msg.content as any
+        if (content?.figure) {
+          setPublicationFigures(prev => {
+            const existing = prev.find(f => f.id === content.figure.id)
+            if (existing) {
+              return prev.map(f => f.id === content.figure.id ? content.figure : f)
+            }
+            return [...prev, content.figure]
+          })
+        }
+      }
+      if (msg.type === 'integrated_report') {
+        const content = msg.content as any
+        if (content?.report) {
+          setIntegratedReport(content.report)
+        }
+        if (content?.figures) {
+          setPublicationFigures(content.figures)
+        }
+        if (content?.tables) {
+          setPublicationTables(content.tables)
+        }
+      }
+      if (msg.type === 'graphic_abstract') {
+        const content = msg.content as any
+        if (content?.image_base64 || content?.imageBase64) {
+          setGraphicAbstract({
+            id: content.id || 'ga-1',
+            prompt: content.prompt || '',
+            imageBase64: content.image_base64 || content.imageBase64,
+            createdAt: content.created_at || content.createdAt || new Date().toISOString()
+          })
+        }
+      }
+    }
+  }, [currentSession, messages])
 
   if (!currentSession) {
     return (
@@ -280,7 +415,6 @@ export function AnalysisPanel() {
     )
   }
 
-  const roundSummaries = getRoundSummaries()
   const isWaitingInput = currentSession.status === 'paused' || currentSession.status === 'waiting_input'
   const isRunning = currentSession.status === 'running'
   const isCompleted = currentSession.status === 'completed'
@@ -338,7 +472,7 @@ export function AnalysisPanel() {
           {agents.map((agent) => {
             const status = getAgentStatus(agent.id)
             const Icon = agent.icon
-            
+
             return (
               <div
                 key={agent.id}
@@ -363,6 +497,61 @@ export function AnalysisPanel() {
           })}
         </div>
       </div>
+
+      {/* Agent Errors Display */}
+      {(() => {
+        const unresolvedErrors = getUnresolvedErrors()
+        if (unresolvedErrors.length === 0) return null
+
+        return (
+          <div className="py-3 border-b border-slate-200">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle className="w-4 h-4 text-red-500" />
+              <span className="text-sm font-medium text-red-700">
+                {language === 'zh' ? '分析错误' : 'Analysis Errors'} ({unresolvedErrors.length})
+              </span>
+            </div>
+            <div className="space-y-2">
+              {unresolvedErrors.map((error) => {
+                const agentInfo = agents.find(a => a.id === error.agent)
+                return (
+                  <div
+                    key={error.id}
+                    className="flex items-start gap-2 p-2 bg-red-50 border border-red-200 rounded-lg text-sm"
+                  >
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          error.agent === 'pathology' ? 'bg-rose-100 text-rose-700' :
+                          error.agent === 'bioinformatics' ? 'bg-emerald-100 text-emerald-700' :
+                          error.agent === 'biochemistry' ? 'bg-amber-100 text-amber-700' :
+                          error.agent === 'literature' ? 'bg-blue-100 text-blue-700' :
+                          'bg-slate-100 text-slate-700'
+                        }`}>
+                          {agentInfo?.name || error.agent}
+                        </span>
+                        <span className="text-xs text-slate-500">Round {error.round}</span>
+                        <span className="text-xs text-slate-400">{error.errorType}</span>
+                      </div>
+                      <p className="text-red-700 mt-1">{error.message}</p>
+                      {error.details && (
+                        <details className="mt-1">
+                          <summary className="text-xs text-red-500 cursor-pointer hover:text-red-700">
+                            {language === 'zh' ? '查看详情' : 'View Details'}
+                          </summary>
+                          <pre className="text-xs text-red-600 mt-1 whitespace-pre-wrap bg-red-100 p-2 rounded max-h-32 overflow-y-auto">
+                            {error.details}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Main Content Area - Scrollable */}
       <div className="flex-1 overflow-y-auto py-4 space-y-4">
@@ -431,7 +620,7 @@ export function AnalysisPanel() {
                     <ChevronDown className="w-5 h-5 text-slate-400" />
                   )}
                 </button>
-                
+
                 {/* Round Details */}
                 {expandedRound === round.round && (
                   <div className="px-4 pb-4 border-t border-slate-200">
@@ -444,7 +633,7 @@ export function AnalysisPanel() {
                         {round.summary}
                       </p>
                     </div>
-                    
+
                     {/* Findings */}
                     {round.findings.length > 0 && (
                       <div className="mt-3">
@@ -466,9 +655,9 @@ export function AnalysisPanel() {
                         </ul>
                       </div>
                     )}
-                    
+
                     {/* Data Requests */}
-                    {(round.dataRequests.pathology.length > 0 || 
+                    {(round.dataRequests.pathology.length > 0 ||
                       round.dataRequests.biochemistry.length > 0 ||
                       round.dataRequests.other.length > 0) && (
                       <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
@@ -476,7 +665,7 @@ export function AnalysisPanel() {
                           <AlertCircle className="w-4 h-4" />
                           {language === 'zh' ? '需要补充的数据' : 'Additional Data Requested'}
                         </h4>
-                        
+
                         {round.dataRequests.pathology.length > 0 && (
                           <div className="mb-2">
                             <span className="text-xs font-medium text-red-700 flex items-center gap-1">
@@ -490,7 +679,7 @@ export function AnalysisPanel() {
                             </ul>
                           </div>
                         )}
-                        
+
                         {round.dataRequests.biochemistry.length > 0 && (
                           <div className="mb-2">
                             <span className="text-xs font-medium text-amber-700 flex items-center gap-1">
@@ -504,7 +693,7 @@ export function AnalysisPanel() {
                             </ul>
                           </div>
                         )}
-                        
+
                         {round.dataRequests.other.length > 0 && (
                           <div>
                             <span className="text-xs font-medium text-slate-700">
@@ -525,6 +714,32 @@ export function AnalysisPanel() {
             ))}
           </div>
         </div>
+
+        {/* Publication Outputs Section - Only show when analysis is completed or has figures */}
+        {(isCompleted || publicationFigures.length > 0) && (
+          <div className="border-t border-slate-200 pt-4">
+            {/* Figure Gallery */}
+            <FigureGallery figures={publicationFigures} />
+
+            {/* Integrated Report */}
+            {integratedReport && (
+              <IntegratedReport report={integratedReport} />
+            )}
+
+            {/* Graphic Abstract */}
+            {graphicAbstract && (
+              <GraphicAbstract graphicAbstract={graphicAbstract} />
+            )}
+
+            {/* Download Buttons */}
+            {publicationFigures.length > 0 && (
+              <DownloadButtons
+                figures={publicationFigures}
+                tables={publicationTables}
+              />
+            )}
+          </div>
+        )}
       </div>
 
       {/* User Input Area - Fixed at Bottom */}
@@ -655,9 +870,9 @@ export function AnalysisPanel() {
               <textarea
                 value={userInput}
                 onChange={(e) => setUserInput(e.target.value)}
-                placeholder={language === 'zh' 
-                  ? '输入您的指令或描述补充数据...\n例如：\n• 已上传 Sirius Red 染色结果\n• ALT 值为 120 U/L，AST 值为 95 U/L\n• 请重点分析纤维化程度' 
-                  : 'Enter your instructions or describe additional data...\ne.g.:\n• Uploaded Sirius Red staining results\n• ALT: 120 U/L, AST: 95 U/L\n• Please focus on fibrosis analysis'}
+                placeholder={language === 'zh'
+                  ? '输入您的指令或描述补充数据...\n例如：\n• 已上传免疫组化染色结果\n• 补充生化指标数据\n• 请重点分析某一细胞类型'
+                  : 'Enter your instructions or describe additional data...\ne.g.:\n• Uploaded immunohistochemistry staining results\n• Additional biochemistry markers\n• Please focus on specific cell type analysis'}
                 className="flex-1 px-4 py-3 bg-white border border-slate-200 rounded-lg text-sm resize-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
                 rows={3}
                 onKeyDown={(e) => {

@@ -3,17 +3,14 @@ import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import {
   FileText,
-  Download,
-  RefreshCw,
   Image,
   Table,
-  FileDown,
   ChevronDown,
   ChevronRight,
   Loader2,
   CheckCircle,
   AlertCircle,
-  Play,
+  RefreshCw,
   Eye,
   Code,
   ExternalLink,
@@ -80,7 +77,7 @@ interface ReportPreview {
 
 export function ReportPanel() {
   const { currentSession, language, addMessage, setReportGenerated } = useAppStore()
-  const { t } = useTranslation(language)
+  useTranslation(language) // For future use
 
   const [report, setReport] = useState<DetailedReport | null>(null)
   const [preview, setPreview] = useState<ReportPreview | null>(null)
@@ -88,25 +85,33 @@ export function ReportPanel() {
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
-  const [ws, setWs] = useState<WebSocket | null>(null)
+  const [_ws, setWs] = useState<WebSocket | null>(null)
   const [viewMode, setViewMode] = useState<'preview' | 'detail'>('preview')
 
-  // Load existing report on mount
+  // Load existing report on mount and when analysis completes
   useEffect(() => {
-    if (currentSession?.id) {
+    if (currentSession?.id && currentSession?.status === 'completed') {
       loadReport()
     }
-  }, [currentSession?.id])
+  }, [currentSession?.id, currentSession?.status])
 
   // WebSocket for real-time progress
   useEffect(() => {
     if (!generating || !currentSession?.id) return
 
+    let isMounted = true
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/report/${currentSession.id}`
     const websocket = new WebSocket(wsUrl)
 
     websocket.onmessage = (event) => {
-      const data = JSON.parse(event.data)
+      if (!isMounted) return
+      let data
+      try {
+        data = JSON.parse(event.data)
+      } catch (e) {
+        console.error('Failed to parse WebSocket message:', e)
+        return
+      }
       if (data.type === 'progress') {
         setReport(prev => prev ? {
           ...prev,
@@ -153,7 +158,13 @@ export function ReportPanel() {
       }
     }
 
+    websocket.onopen = () => {
+      if (!isMounted) return
+      // Connection established
+    }
+
     websocket.onerror = () => {
+      if (!isMounted) return
       setError('WebSocket connection failed')
       setGenerating(false)
     }
@@ -161,7 +172,11 @@ export function ReportPanel() {
     setWs(websocket)
 
     return () => {
-      websocket.close()
+      isMounted = false
+      if (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING) {
+        websocket.close()
+      }
+      setWs(null)
     }
   }, [generating, currentSession?.id])
 
@@ -284,23 +299,6 @@ export function ReportPanel() {
     }
   }
 
-  const downloadFromUrl = async (url: string, filename: string) => {
-    try {
-      const response = await fetch(url)
-      const blob = await response.blob()
-      const blobUrl = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = blobUrl
-      a.download = filename
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(blobUrl)
-    } catch (e) {
-      console.error('Download failed:', e)
-    }
-  }
-
   const downloadAllFigures = async () => {
     if (!report || !currentSession) return
 
@@ -384,14 +382,14 @@ export function ReportPanel() {
     return (
       <div className="flex-1 flex items-center justify-center text-slate-500">
         <div className="text-center">
-          <AlertCircle className="w-16 h-16 mx-auto mb-4 opacity-50 text-amber-500" />
+          <Loader2 className="w-16 h-16 mx-auto mb-4 animate-spin text-indigo-400" />
           <p className="text-lg font-medium mb-2">
-            {language === 'zh' ? '分析尚未完成' : 'Analysis not completed'}
+            {language === 'zh' ? '分析进行中...' : 'Analysis in progress...'}
           </p>
           <p className="text-sm">
             {language === 'zh'
-              ? '请等待分析完成后再生成详细报告'
-              : 'Please wait for the analysis to complete before generating a detailed report'}
+              ? '分析完成后将自动生成详细报告'
+              : 'Detailed report will be generated automatically when analysis completes'}
           </p>
         </div>
       </div>
@@ -473,20 +471,23 @@ export function ReportPanel() {
               </>
             )}
 
-            <button
-              onClick={generateReport}
-              disabled={generating}
-              className="flex items-center gap-1.5 px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-            >
-              {generating ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Play className="w-4 h-4" />
-              )}
-              {generating
-                ? (language === 'zh' ? '生成中...' : 'Generating...')
-                : (language === 'zh' ? '生成报告' : 'Generate')}
-            </button>
+            {/* Only show regenerate button when report exists */}
+            {report && report.status === 'completed' && (
+              <button
+                onClick={generateReport}
+                disabled={generating}
+                className="flex items-center gap-1.5 px-4 py-2 text-sm bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 disabled:opacity-50"
+              >
+                {generating ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
+                {generating
+                  ? (language === 'zh' ? '生成中...' : 'Generating...')
+                  : (language === 'zh' ? '重新生成' : 'Regenerate')}
+              </button>
+            )}
           </div>
         </div>
 
@@ -508,43 +509,77 @@ export function ReportPanel() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 flex flex-col min-h-0">
         {loading ? (
-          <div className="flex items-center justify-center h-64">
+          <div className="flex-1 flex items-center justify-center">
             <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
           </div>
         ) : error ? (
-          <div className="m-4 bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-5 h-5" />
-              <span>{error}</span>
+          <div className="flex-1 overflow-auto p-4">
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-5 h-5" />
+                <span>{error}</span>
+              </div>
             </div>
           </div>
         ) : !report || report.status === 'pending' ? (
-          <div className="flex flex-col items-center justify-center h-64 text-slate-500">
+          <div className="flex-1 flex flex-col items-center justify-center text-slate-500">
             <FileText className="w-16 h-16 mb-4 opacity-50" />
             <p className="text-lg mb-2">
-              {language === 'zh' ? '尚未生成详细报告' : 'No detailed report yet'}
+              {language === 'zh' ? '详细报告尚未生成' : 'Detailed report not yet generated'}
             </p>
-            <p className="text-sm">
+            <p className="text-sm mb-4">
               {language === 'zh'
-                ? '点击上方"生成报告"按钮开始生成'
-                : 'Click "Generate" button above to start'}
+                ? '报告可能正在生成中，或者生成过程中出现了问题'
+                : 'Report may be generating, or there was an issue during generation'}
             </p>
+            <button
+              onClick={generateReport}
+              disabled={generating}
+              className="flex items-center gap-1.5 px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {generating ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+              {generating
+                ? (language === 'zh' ? '生成中...' : 'Generating...')
+                : (language === 'zh' ? '生成报告' : 'Generate Report')}
+            </button>
+          </div>
+        ) : report.status === 'generating' ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-slate-500">
+            <Loader2 className="w-16 h-16 mb-4 animate-spin text-indigo-500" />
+            <p className="text-lg mb-2">
+              {language === 'zh' ? '正在生成详细报告...' : 'Generating detailed report...'}
+            </p>
+            <p className="text-sm text-indigo-600">
+              {report.current_step || (language === 'zh' ? '准备中...' : 'Preparing...')}
+            </p>
+            {report.progress > 0 && (
+              <div className="w-64 mt-4">
+                <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-indigo-600 transition-all duration-300"
+                    style={{ width: `${report.progress}%` }}
+                  />
+                </div>
+                <p className="text-xs text-center mt-1">{Math.round(report.progress)}%</p>
+              </div>
+            )}
           </div>
         ) : viewMode === 'preview' && preview?.has_html ? (
-          // HTML Preview Mode
-          <div className="h-full">
-            <iframe
-              srcDoc={preview.html_content || ''}
-              className="w-full h-full border-0"
-              title="Report Preview"
-              sandbox="allow-same-origin"
-            />
-          </div>
+          // HTML Preview Mode - use src instead of srcDoc so relative paths work
+          <iframe
+            src={preview.html_url}
+            className="w-full flex-1 border-0 min-h-0"
+            title="Report Preview"
+          />
         ) : (
           // Detail Mode
-          <div className="p-4">
+          <div className="flex-1 overflow-auto min-h-0 p-4">
             <div className="max-w-4xl mx-auto space-y-6">
               {/* Title */}
               <div className="bg-gradient-to-r from-indigo-50 to-violet-50 rounded-2xl p-6 border border-indigo-100">
@@ -605,7 +640,7 @@ export function ReportPanel() {
                       )}
 
                       {/* Figures */}
-                      {section.figures?.map((figure) => (
+                      {section.figures?.filter(f => f.png_path).map((figure) => (
                         <div key={figure.id} className="bg-slate-50 rounded-xl p-4 border border-slate-200">
                           <div className="flex items-start justify-between mb-3">
                             <h3 className="font-medium text-slate-900 flex items-center gap-2">
@@ -644,7 +679,7 @@ export function ReportPanel() {
                       ))}
 
                       {/* Tables */}
-                      {section.tables?.map((table) => (
+                      {section.tables?.filter(t => t.csv_path).map((table) => (
                         <div key={table.id} className="bg-slate-50 rounded-xl p-4 border border-slate-200">
                           <div className="flex items-start justify-between mb-3">
                             <h3 className="font-medium text-slate-900 flex items-center gap-2">

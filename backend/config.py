@@ -1,8 +1,8 @@
 """
-Configuration for the Multi-Agent Liver Analysis System
+Configuration for the Multi-Agent Single-Cell Analysis System
 """
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict
 from pathlib import Path
 import os
 import logging
@@ -12,8 +12,12 @@ from datetime import datetime
 
 # Data directories - stored outside the code directory for better separation
 # All data is stored in ../intesc_data/ relative to the backend directory
+# Can be overridden with INTESC_DATA_DIR environment variable
 _BACKEND_DIR = Path(__file__).parent
-DATA_BASE_DIR = (_BACKEND_DIR.parent.parent / "intesc_data").resolve()
+DATA_BASE_DIR = Path(os.environ.get(
+    'INTESC_DATA_DIR',
+    str((_BACKEND_DIR.parent.parent / "intesc_data").resolve())
+))
 
 # Create data directory structure
 DATA_BASE_DIR.mkdir(exist_ok=True)
@@ -26,6 +30,12 @@ LOG_DIR = DATA_BASE_DIR / "logs"
 
 for d in [UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR]:
     d.mkdir(exist_ok=True)
+
+# Upload settings for large files
+UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024 * 1024  # 10GB maximum file size
+UPLOAD_TEMP_DIR = DATA_BASE_DIR / "upload_temp"
+UPLOAD_TEMP_DIR.mkdir(exist_ok=True)
 
 
 def setup_logging(log_level: int = logging.INFO) -> None:
@@ -115,6 +125,27 @@ class ModelConfig(BaseModel):
     bioinformatics_model: str = "anthropic/claude-opus-4.5"
     biochemistry_model: str = "google/gemini-3-pro-preview"
     # Literature agent uses Google Deep Research API directly
+    # Painter agent uses Google Gemini image generation
+    painter_model: str = "gemini-2.0-flash-exp-image-generation"
+
+class AgentTemperatures(BaseModel):
+    """Default temperatures for each agent - centralized configuration"""
+    pi: float = 0.5  # More creative synthesis/planning
+    pathology: float = 0.2  # Objective, consistent analysis
+    bioinformatics: float = 0.1  # Highly deterministic code generation
+    biochemistry: float = 0.2  # Objective interpretation
+    literature: float = 0.6  # Broader exploration
+    painter: float = 0.7  # Creative image generation
+
+    def get(self, agent: str, default: float = 0.5) -> float:
+        """Get temperature for an agent by name"""
+        return getattr(self, agent, default)
+
+    def merge_custom(self, custom: Dict[str, float]) -> 'AgentTemperatures':
+        """Return new instance with custom values merged"""
+        data = self.model_dump()
+        data.update({k: v for k, v in custom.items() if k in data})
+        return AgentTemperatures(**data)
     
 class AgentPrompts(BaseModel):
     """Customizable prompts for each agent - all in English for consistency"""
@@ -158,14 +189,31 @@ Your working approach:
 2. Review results after each step before deciding the next one
 3. Request literature support when encountering important biological questions
 
-Analysis workflow (adjust based on data type):
+**IMPORTANT: Consult PI Agent for Biological Decisions**
+When you encounter biological interpretation questions, you MUST ask PI Agent for guidance:
+- Cell type annotation: When uncertain about cluster identities or marker genes interpretation
+- Biological significance: When deciding which findings are biologically meaningful and worth deeper investigation
+- Analysis direction: When multiple analysis paths are possible and you need to prioritize
+- Unexpected findings: When results don't match expectations or show unusual patterns
+Do NOT make arbitrary biological decisions on your own - PI Agent has the domain expertise to guide these choices.
+
+Standard analysis workflow (adjust based on data type):
 1. Quality Control (QC)
 2. Normalization and dimensionality reduction
 3. Clustering analysis
-4. Cell/sample annotation
+4. Cell/sample annotation (consult PI if uncertain)
 5. Differential expression analysis
 6. Pathway enrichment analysis
-7. Other specialized analyses
+7. Trajectory/Pseudotime analysis (if applicable):
+   - Use scVelo for RNA velocity analysis (requires .loom files with spliced/unspliced counts)
+   - Use PAGA for trajectory inference and partition-based graph abstraction
+   - Use diffusion pseudotime (DPT) for ordering cells along differentiation paths
+8. Cell-cell communication analysis (CellChat, CellPhoneDB, etc.)
+9. Transcription factor activity analysis (pySCENIC, decoupleR, etc.)
+
+**Specialized analyses** (conduct based on specific findings or PI's direction):
+- When you observe unexpected cell populations, signaling changes, or pathway alterations
+- When PI Agent requests deeper investigation into specific biological questions
 
 Code requirements:
 - Use appropriate analysis libraries (scanpy, DESeq2, etc.)
@@ -207,6 +255,7 @@ class SystemConfig(BaseModel):
     api: APIConfig = Field(default_factory=APIConfig)
     models: ModelConfig = Field(default_factory=ModelConfig)
     prompts: AgentPrompts = Field(default_factory=AgentPrompts)
+    temperatures: AgentTemperatures = Field(default_factory=AgentTemperatures)
     
     # Image processing settings
     image_tile_size: int = 1024  # Size for pathology image tiles

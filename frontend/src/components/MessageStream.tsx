@@ -1,13 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useMemo, memo } from 'react'
 import { useAppStore, Message, AgentType } from '../stores/appStore'
-import { useTranslation } from '../i18n/translations'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
-import { 
-  Users, 
-  Microscope, 
-  Code2, 
-  FlaskConical, 
+import {
+  Users,
+  Microscope,
+  Code2,
+  FlaskConical,
   BookOpen,
   ChevronDown,
   ChevronRight,
@@ -22,8 +21,44 @@ import {
   Send,
   Reply,
   Wrench,
-  HelpCircle
+  HelpCircle,
+  Palette,
+  FileText,
+  Clock
 } from 'lucide-react'
+
+// Type interfaces for message content
+interface ResultContent {
+  findings?: string[]
+  summary?: string
+  message?: string
+  output?: string
+  text?: unknown
+}
+
+interface CompletedContent {
+  status?: string
+  final_summary?: string
+}
+
+interface FigureContent {
+  approved?: boolean
+  revision_requested?: boolean
+  figure_name?: string
+  feedback?: string
+  png_base64?: string
+}
+
+interface ReportContent {
+  report?: string
+  figures?: unknown[]
+}
+
+interface GraphicAbstractContent {
+  prompt?: string
+  image_base64?: string
+  imageBase64?: string
+}
 
 const agentIcons: Record<AgentType, typeof Users> = {
   pi: Users,
@@ -31,14 +66,7 @@ const agentIcons: Record<AgentType, typeof Users> = {
   bioinformatics: Code2,
   biochemistry: FlaskConical,
   literature: BookOpen,
-}
-
-const agentColors: Record<AgentType, string> = {
-  pi: 'violet',
-  pathology: 'rose',
-  bioinformatics: 'emerald',
-  biochemistry: 'amber',
-  literature: 'blue',
+  painter: Palette,
 }
 
 const agentBgColors: Record<AgentType, string> = {
@@ -47,23 +75,23 @@ const agentBgColors: Record<AgentType, string> = {
   bioinformatics: 'bg-emerald-50 border-emerald-200',
   biochemistry: 'bg-amber-50 border-amber-200',
   literature: 'bg-blue-50 border-blue-200',
+  painter: 'bg-pink-50 border-pink-200',
 }
 
-function MessageItem({ message, language }: { message: Message; language: 'zh' | 'en' }) {
+const MessageItem = memo(function MessageItem({ message, language }: { message: Message; language: 'zh' | 'en' }) {
   const [expanded, setExpanded] = useState(true)
-  const { t } = useTranslation(language)
-  
+
   const agentNames: Record<AgentType, string> = {
     pi: 'PI Agent',
     pathology: language === 'zh' ? '病理 Agent' : 'Pathology Agent',
     bioinformatics: language === 'zh' ? '生信 Agent' : 'Bioinformatics Agent',
     biochemistry: language === 'zh' ? '生化 Agent' : 'Biochemistry Agent',
     literature: language === 'zh' ? '文献 Agent' : 'Literature Agent',
+    painter: language === 'zh' ? 'Painter Agent' : 'Painter Agent',
   }
-  
+
   const agent = message.agent
   const Icon = agent ? agentIcons[agent] : Bot
-  const color = agent ? agentColors[agent] : 'slate'
   const bgColor = agent ? agentBgColors[agent] : 'bg-slate-50 border-slate-200'
   const name = agent ? agentNames[agent] : (language === 'zh' ? '系统' : 'System')
 
@@ -138,7 +166,9 @@ function MessageItem({ message, language }: { message: Message; language: 'zh' |
       
       case 'tool_call':
         // 工具调用（如function calling）
-        const toolContent = typeof message.content === 'object' ? message.content : { name: 'unknown', args: message.content }
+        const toolContent = (message.content !== null && typeof message.content === 'object' && !Array.isArray(message.content))
+          ? message.content
+          : { name: 'unknown', args: message.content }
         return (
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs text-orange-600">
@@ -196,7 +226,9 @@ function MessageItem({ message, language }: { message: Message; language: 'zh' |
         )
       
       case 'result':
-        const content = typeof message.content === 'object' ? message.content : { text: message.content }
+        const content: ResultContent = (message.content !== null && typeof message.content === 'object' && !Array.isArray(message.content))
+          ? message.content as ResultContent
+          : { text: message.content }
         return (
           <div className="space-y-3">
             {content.findings && content.findings.length > 0 && (
@@ -257,7 +289,9 @@ function MessageItem({ message, language }: { message: Message; language: 'zh' |
       
       case 'completed':
         // 分析完成
-        const completedContent = typeof message.content === 'object' ? message.content : { status: 'completed' }
+        const completedContent: CompletedContent = (message.content !== null && typeof message.content === 'object' && !Array.isArray(message.content))
+          ? message.content as CompletedContent
+          : { status: 'completed' }
         return (
           <div className="bg-green-50 border border-green-200 rounded-lg p-3">
             <div className="flex items-center gap-2 text-green-700 font-medium">
@@ -279,6 +313,99 @@ function MessageItem({ message, language }: { message: Message; language: 'zh' |
           </div>
         )
       
+      case 'figure_review':
+      case 'figure_approved':
+      case 'figure_revision': {
+        const figureContent: FigureContent = (message.content !== null && typeof message.content === 'object' && !Array.isArray(message.content))
+          ? message.content as FigureContent
+          : {}
+        const isApproved = message.type === 'figure_approved' || Boolean(figureContent.approved)
+        const isRevision = message.type === 'figure_revision' || Boolean(figureContent.revision_requested)
+
+        return (
+          <div className="space-y-2">
+            <div className={`flex items-center gap-2 text-xs ${isApproved ? 'text-green-600' : isRevision ? 'text-amber-600' : 'text-blue-600'}`}>
+              {isApproved ? <CheckCircle2 className="w-3 h-3" /> : isRevision ? <AlertCircle className="w-3 h-3" /> : <Clock className="w-3 h-3" />}
+              <span>
+                {isApproved
+                  ? (language === 'zh' ? '图片审核通过' : 'Figure Approved')
+                  : isRevision
+                  ? (language === 'zh' ? '图片需要修改' : 'Figure Revision Requested')
+                  : (language === 'zh' ? '图片审核中' : 'Figure Under Review')}
+              </span>
+            </div>
+            <div className={`border rounded-lg p-3 ${isApproved ? 'bg-green-50 border-green-200' : isRevision ? 'bg-amber-50 border-amber-200' : 'bg-blue-50 border-blue-200'}`}>
+              {figureContent.figure_name && (
+                <p className="font-medium text-sm text-slate-800">{figureContent.figure_name}</p>
+              )}
+              {figureContent.feedback && (
+                <p className="text-sm text-slate-600 mt-1">{figureContent.feedback}</p>
+              )}
+              {figureContent.png_base64 && (
+                <img
+                  src={`data:image/jpeg;base64,${figureContent.png_base64}`}
+                  alt={figureContent.figure_name || 'Figure'}
+                  className="mt-2 max-w-xs rounded border border-slate-200"
+                />
+              )}
+            </div>
+          </div>
+        )
+      }
+
+      case 'integrated_report': {
+        const reportContent: ReportContent = (message.content !== null && typeof message.content === 'object' && !Array.isArray(message.content))
+          ? message.content as ReportContent
+          : { report: String(message.content) }
+        return (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-xs text-violet-600">
+              <FileText className="w-3 h-3" />
+              <span>{language === 'zh' ? '整合报告生成' : 'Integrated Report Generated'}</span>
+            </div>
+            <div className="bg-violet-50 border border-violet-200 rounded-lg p-3">
+              <p className="text-sm text-violet-800">
+                {language === 'zh'
+                  ? `报告已生成，包含 ${reportContent.figures?.length || 0} 张图片`
+                  : `Report generated with ${reportContent.figures?.length || 0} figures`}
+              </p>
+              {reportContent.report && (
+                <p className="text-xs text-violet-600 mt-1 line-clamp-3">
+                  {reportContent.report.substring(0, 200)}...
+                </p>
+              )}
+            </div>
+          </div>
+        )
+      }
+
+      case 'graphic_abstract': {
+        const gaContent: GraphicAbstractContent = (message.content !== null && typeof message.content === 'object' && !Array.isArray(message.content))
+          ? message.content as GraphicAbstractContent
+          : {}
+        const imageBase64 = gaContent.image_base64 || gaContent.imageBase64
+        return (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-xs text-pink-600">
+              <Sparkles className="w-3 h-3" />
+              <span>{language === 'zh' ? '图形摘要生成' : 'Graphic Abstract Generated'}</span>
+            </div>
+            <div className="bg-pink-50 border border-pink-200 rounded-lg p-3">
+              {gaContent.prompt && (
+                <p className="text-xs text-pink-700 mb-2">{gaContent.prompt}</p>
+              )}
+              {imageBase64 && (
+                <img
+                  src={`data:image/png;base64,${imageBase64}`}
+                  alt="Graphic Abstract"
+                  className="max-w-full rounded border border-pink-200"
+                />
+              )}
+            </div>
+          </div>
+        )
+      }
+
       case 'message':
       default:
         // Check for special new types first
@@ -481,20 +608,31 @@ function MessageItem({ message, language }: { message: Message; language: 'zh' |
       </div>
     </div>
   )
-}
+}, (prevProps, nextProps) => {
+  // Only re-render if message id or language changed
+  return prevProps.message.id === nextProps.message.id &&
+         prevProps.language === nextProps.language
+})
+
+const VISIBLE_MESSAGE_LIMIT = 100
 
 export function MessageStream() {
   const { messages, language } = useAppStore()
-  const { t } = useTranslation(language)
   const containerRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
+
+  // Limit rendered messages for performance
+  const visibleMessages = useMemo(() => {
+    if (messages.length <= VISIBLE_MESSAGE_LIMIT) return messages
+    return messages.slice(-VISIBLE_MESSAGE_LIMIT)
+  }, [messages])
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
     if (containerRef.current && autoScroll) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight
     }
-  }, [messages, autoScroll])
+  }, [visibleMessages, autoScroll])
 
   // Detect manual scroll
   const handleScroll = () => {
@@ -553,7 +691,7 @@ export function MessageStream() {
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-100"
       >
-        {messages.map((msg) => (
+        {visibleMessages.map((msg) => (
           <MessageItem key={msg.id} message={msg} language={language} />
         ))}
       </div>

@@ -2,15 +2,18 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
+**Version**: 0.3.0
+
 ## Core Features
 
-### Five Specialized Agent Collaboration
+### Six Specialized Agent Collaboration
 
-- **PI Agent**: Project coordinator, manages overall workflow and makes decisions
+- **PI Agent**: Project coordinator, manages overall workflow, makes decisions, and reviews publication-quality figures
 - **Pathology Agent**: Analyzes histological sections (supports H&E, Sirius Red, Prussian Blue, and other staining types)
-- **Bioinformatics Agent**: Performs high-throughput sequencing data analysis (scRNA-seq, snRNA-seq, bulk RNA-seq)
+- **Bioinformatics Agent**: Performs autonomous high-throughput sequencing data analysis (scRNA-seq, snRNA-seq, bulk RNA-seq) with checkpoint recovery
 - **Biochemistry Agent**: Interprets biochemical experimental results
 - **Literature Agent**: Provides literature support (using Google Deep Research)
+- **Painter Agent**: Generates graphic abstracts using Google Gemini image generation
 
 ### Iterative Analysis Workflow
 
@@ -25,12 +28,15 @@
 - Supports scanpy and other bioinformatics tools
 - Reproducible code (fixed random seed 42)
 
-### State Persistence
+### State Persistence & Synchronization
 
 - Pause/resume analysis at any time
 - Uses dill to save complete Python runtime environment (including all variables, AnnData objects, etc.)
 - Resumes without re-executing code, directly loading all variables
 - Notebook history saved as .ipynb files
+- **State Version Control**: Atomic version increments ensure frontend-backend consistency
+- **WebSocket Reconnection Recovery**: Automatic message history restoration after connection loss
+- **Structured Error Tracking**: Per-agent error tracking with detailed information and resolution support
 
 ### Detailed Report Generation
 
@@ -65,7 +71,11 @@ The system supports generating comprehensive reports with 9 chapters and 40+ ana
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │            React Web Frontend (localhost:3000)              │
-│               (Zustand + Tailwind CSS)                      │
+│           (Zustand + Tailwind CSS + Recharts)               │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────┐ │
+│  │  Data   │ │ Prompts │ │Analysis │ │ Results │ │Report │ │
+│  │  Panel  │ │  Panel  │ │  Panel  │ │  Panel  │ │ Panel │ │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └───────┘ │
 └─────────────────────────┬───────────────────────────────────┘
                           │ WebSocket / REST API
 ┌─────────────────────────▼───────────────────────────────────┐
@@ -77,14 +87,15 @@ The system supports generating comprehensive reports with 9 chapters and 40+ ana
 │  │  Agent  │◄─┤  Agent  │◄─┤  Agent  │◄─┤  Agent  │        │
 │  └────┬────┘  └─────────┘  └────┬────┘  └─────────┘        │
 │       │                         │                           │
-│       │    ┌─────────────┐      │                           │
-│       └───►│  Literature │◄─────┘                           │
-│            │    Agent    │                                  │
-│            └─────────────┘                                  │
+│       │    ┌─────────────┐      │      ┌─────────────┐     │
+│       └───►│  Literature │◄─────┴─────►│   Painter   │     │
+│            │    Agent    │             │    Agent    │     │
+│            └─────────────┘             └─────────────┘     │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │  OpenRouter  │  │Local Jupyter │  │    Google    │      │
-│  │  (LLM API)   │  │   Kernel     │  │ Deep Research│      │
+│  │  OpenRouter  │  │Local Jupyter │  │ Google APIs  │      │
+│  │  (LLM API)   │  │   Kernel     │  │ (Research +  │      │
+│  │              │  │   + dill     │  │  Imagen)     │      │
 │  └──────────────┘  └──────────────┘  └──────────────┘      │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -236,28 +247,38 @@ intesc/                         # Code directory
 ├── backend/
 │   ├── agents/                 # Agent implementations
 │   │   ├── base.py             # Base Agent class
-│   │   ├── pi_agent.py         # PI Agent
+│   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer)
 │   │   ├── pathology_agent.py  # Pathology Agent
-│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent
+│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous)
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent
-│   │   └── literature_agent.py      # Literature Agent
+│   │   ├── literature_agent.py      # Literature Agent
+│   │   └── painter_agent.py         # Painter Agent (graphic abstract)
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models
+│   │   └── schemas.py          # Pydantic data models (AgentError, state_version)
 │   ├── utils/
 │   │   ├── llm_client.py       # OpenAI compatible API client
 │   │   ├── sandbox.py          # Jupyter code execution environment
 │   │   ├── image_utils.py      # Pathology image processing
+│   │   ├── upload.py           # Chunked file upload manager
 │   │   └── llm_logger.py       # LLM interaction logging
 │   ├── static/                 # Frontend static files
 │   ├── config.py               # Configuration management
-│   ├── workflow.py             # LangGraph workflow
+│   ├── workflow.py             # LangGraph workflow (parallel execution)
 │   ├── report_generator.py     # Detailed report generator
 │   └── main.py                 # FastAPI service
 ├── frontend/
 │   ├── src/
+│   │   ├── App.tsx             # Main application
 │   │   ├── components/         # React components
-│   │   ├── stores/             # Zustand state management
-│   │   ├── hooks/              # API hooks
+│   │   │   ├── AnalysisPanel.tsx   # Analysis control + error display
+│   │   │   ├── DataPanel.tsx       # Data upload
+│   │   │   ├── PromptsPanel.tsx    # Agent configuration
+│   │   │   ├── ResultsPanel.tsx    # Round results
+│   │   │   ├── ReportPanel.tsx     # Report generation
+│   │   │   ├── MessageStream.tsx   # Real-time messages
+│   │   │   └── analysis/           # Report sub-components
+│   │   ├── stores/             # Zustand state (agentErrors, stateVersion)
+│   │   ├── hooks/              # API hooks (WebSocket reconnection)
 │   │   ├── i18n/               # Internationalization
 │   │   └── styles/             # CSS styles
 │   ├── package.json
@@ -305,6 +326,7 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 
 - **Main Models**: Gemini 3 Pro, Claude Opus 4.5 (via OpenRouter)
 - **Literature Research**: Google Gemini Deep Research
+- **Image Generation**: Gemini 2.0 Flash (Imagen) for graphic abstracts
 
 ### Bioinformatics
 
@@ -322,6 +344,18 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 4. Recommended to run in a stable network environment
 5. All code executions are automatically saved as Jupyter Notebooks (.ipynb) in the `states/` directory
 6. When pausing/resuming analysis, the previous Python environment state is automatically restored
+7. WebSocket reconnection automatically restores message history - no data loss on network interruptions
+8. Analysis errors are tracked per-agent and displayed persistently until resolved
+9. State version conflicts are detected automatically to ensure data consistency
+
+## New in v0.3.0
+
+- **Painter Agent**: Generates publication-quality graphic abstracts using Google Gemini image generation
+- **State Version Control**: Atomic state versioning prevents frontend-backend synchronization issues
+- **WebSocket Reconnection Recovery**: Automatic message history restoration after connection loss
+- **Structured Error Tracking**: Per-agent error tracking with detailed information display
+- **Parallel Analysis**: Pathology, Bioinformatics, and Biochemistry agents now run in parallel
+- **Figure Review Loop**: PI Agent reviews and approves publication-quality figures before inclusion
 
 ## License
 

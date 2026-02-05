@@ -2,10 +2,9 @@ import { useState, useEffect } from 'react'
 import { useSession } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
-import { 
-  Plus, 
-  Settings, 
-  ChevronRight,
+import {
+  Plus,
+  Settings,
   Dna,
   Trash2,
   RefreshCw,
@@ -274,7 +273,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
               value={instruction}
               onChange={(e) => setInstruction(e.target.value)}
               placeholder={t('researchGoalPlaceholder')}
-              rows={4}
+              rows={8}
               className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-violet-500 resize-none"
             />
             

@@ -1,19 +1,18 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { useAppStore } from '../stores/appStore'
 import { useSession } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
-import { 
-  Upload, 
-  Image as ImageIcon, 
+import {
+  Upload,
+  Image as ImageIcon,
   FileSpreadsheet,
   FlaskConical,
   Plus,
   Check,
   File,
   Zap,
-  Trash2,
-  X
+  Trash2
 } from 'lucide-react'
 
 export function DataPanel() {
@@ -58,6 +57,32 @@ export function DataPanel() {
   const [uploadingBioFile, setUploadingBioFile] = useState(false)
   const [bioFileProgress, setBioFileProgress] = useState(0)
 
+  // Track active intervals for cleanup on unmount
+  const activeIntervalsRef = useRef<Set<ReturnType<typeof setInterval>>>(new Set())
+
+  // Cleanup all intervals on unmount
+  useEffect(() => {
+    return () => {
+      activeIntervalsRef.current.forEach(interval => clearInterval(interval))
+      activeIntervalsRef.current.clear()
+    }
+  }, [])
+
+  // Helper to create tracked interval (stable reference)
+  const createTrackedInterval = useCallback((callback: () => void, delay: number) => {
+    const interval = setInterval(callback, delay)
+    activeIntervalsRef.current.add(interval)
+    return interval
+  }, [])
+
+  // Helper to clear tracked interval (stable reference)
+  const clearTrackedInterval = useCallback((interval: ReturnType<typeof setInterval> | null) => {
+    if (interval) {
+      clearInterval(interval)
+      activeIntervalsRef.current.delete(interval)
+    }
+  }, [])
+
   // Get the actual stain type to use
   const getStainTypeValue = () => {
     if (stainType === 'H&E') return 'H&E'
@@ -67,36 +92,40 @@ export function DataPanel() {
   // Pathology dropzone with progress simulation
   const onDropPathology = useCallback(async (files: File[]) => {
     if (!currentSession || files.length === 0) return
-    
+
     const finalStainType = getStainTypeValue()
     if (stainType === 'Other' && !customStainType) {
       alert(language === 'zh' ? '请输入染色类型' : 'Please enter stain type')
       return
     }
-    
+
     setUploadingPathology(true)
     setPathologyProgress(0)
-    
+
+    let progressInterval: ReturnType<typeof setInterval> | null = null
+
     try {
       for (let i = 0; i < files.length; i++) {
         const file = files[i]
         // Simulate progress for large files
-        const progressInterval = setInterval(() => {
+        progressInterval = createTrackedInterval(() => {
           setPathologyProgress(prev => Math.min(prev + 10, 90))
         }, 200)
-        
+
         await uploadPathology(file, finalStainType)
-        
-        clearInterval(progressInterval)
+
+        clearTrackedInterval(progressInterval)
+        progressInterval = null
         setPathologyProgress(((i + 1) / files.length) * 100)
       }
     } catch (e) {
       console.error('Upload failed:', e)
     } finally {
+      clearTrackedInterval(progressInterval)
       setUploadingPathology(false)
       setPathologyProgress(0)
     }
-  }, [currentSession, stainType, customStainType, uploadPathology, language])
+  }, [currentSession, stainType, customStainType, uploadPathology, language, createTrackedInterval, clearTrackedInterval])
 
   const { getRootProps: getPathologyRootProps, getInputProps: getPathologyInputProps, isDragActive: isPathologyDragActive } = useDropzone({
     onDrop: onDropPathology,
@@ -109,54 +138,62 @@ export function DataPanel() {
   // Control group dropzone
   const onDropControl = useCallback(async (files: File[]) => {
     if (!currentSession || files.length === 0) return
-    
+
     setUploadingControl(true)
     setControlProgress(0)
-    
+
+    let progressInterval: ReturnType<typeof setInterval> | null = null
+
     try {
-      const progressInterval = setInterval(() => {
+      progressInterval = createTrackedInterval(() => {
         setControlProgress(prev => Math.min(prev + 5, 90))
       }, 300)
-      
+
       await uploadSnRNASeq(files[0], 'control')
-      
-      clearInterval(progressInterval)
+
+      clearTrackedInterval(progressInterval)
+      progressInterval = null
       setControlProgress(100)
     } catch (e) {
       console.error('Upload failed:', e)
     } finally {
+      clearTrackedInterval(progressInterval)
       setTimeout(() => {
         setUploadingControl(false)
         setControlProgress(0)
       }, 500)
     }
-  }, [currentSession, uploadSnRNASeq])
+  }, [currentSession, uploadSnRNASeq, createTrackedInterval, clearTrackedInterval])
 
   // Treatment group dropzone
   const onDropTreatment = useCallback(async (files: File[]) => {
     if (!currentSession || files.length === 0) return
-    
+
     setUploadingTreatment(true)
     setTreatmentProgress(0)
-    
+
+    let progressInterval: ReturnType<typeof setInterval> | null = null
+
     try {
-      const progressInterval = setInterval(() => {
+      progressInterval = createTrackedInterval(() => {
         setTreatmentProgress(prev => Math.min(prev + 5, 90))
       }, 300)
-      
+
       await uploadSnRNASeq(files[0], 'treatment')
-      
-      clearInterval(progressInterval)
+
+      clearTrackedInterval(progressInterval)
+      progressInterval = null
       setTreatmentProgress(100)
     } catch (e) {
       console.error('Upload failed:', e)
     } finally {
+      clearTrackedInterval(progressInterval)
       setTimeout(() => {
         setUploadingTreatment(false)
         setTreatmentProgress(0)
       }, 500)
     }
-  }, [currentSession, uploadSnRNASeq])
+  }, [currentSession, uploadSnRNASeq, createTrackedInterval, clearTrackedInterval])
 
   const { getRootProps: getControlRootProps, getInputProps: getControlInputProps, isDragActive: isControlDragActive } = useDropzone({
     onDrop: onDropControl,
@@ -183,54 +220,62 @@ export function DataPanel() {
   // Control group loom dropzone
   const onDropControlLoom = useCallback(async (files: File[]) => {
     if (!currentSession || files.length === 0) return
-    
+
     setUploadingControlLoom(true)
     setControlLoomProgress(0)
-    
+
+    let progressInterval: ReturnType<typeof setInterval> | null = null
+
     try {
-      const progressInterval = setInterval(() => {
+      progressInterval = createTrackedInterval(() => {
         setControlLoomProgress(prev => Math.min(prev + 5, 90))
       }, 300)
-      
+
       await uploadLoom(files[0], 'control')
-      
-      clearInterval(progressInterval)
+
+      clearTrackedInterval(progressInterval)
+      progressInterval = null
       setControlLoomProgress(100)
     } catch (e) {
       console.error('Upload failed:', e)
     } finally {
+      clearTrackedInterval(progressInterval)
       setTimeout(() => {
         setUploadingControlLoom(false)
         setControlLoomProgress(0)
       }, 500)
     }
-  }, [currentSession, uploadLoom])
+  }, [currentSession, uploadLoom, createTrackedInterval, clearTrackedInterval])
 
   // Treatment group loom dropzone
   const onDropTreatmentLoom = useCallback(async (files: File[]) => {
     if (!currentSession || files.length === 0) return
-    
+
     setUploadingTreatmentLoom(true)
     setTreatmentLoomProgress(0)
-    
+
+    let progressInterval: ReturnType<typeof setInterval> | null = null
+
     try {
-      const progressInterval = setInterval(() => {
+      progressInterval = createTrackedInterval(() => {
         setTreatmentLoomProgress(prev => Math.min(prev + 5, 90))
       }, 300)
-      
+
       await uploadLoom(files[0], 'treatment')
-      
-      clearInterval(progressInterval)
+
+      clearTrackedInterval(progressInterval)
+      progressInterval = null
       setTreatmentLoomProgress(100)
     } catch (e) {
       console.error('Upload failed:', e)
     } finally {
+      clearTrackedInterval(progressInterval)
       setTimeout(() => {
         setUploadingTreatmentLoom(false)
         setTreatmentLoomProgress(0)
       }, 500)
     }
-  }, [currentSession, uploadLoom])
+  }, [currentSession, uploadLoom, createTrackedInterval, clearTrackedInterval])
 
   const { getRootProps: getControlLoomRootProps, getInputProps: getControlLoomInputProps, isDragActive: isControlLoomDragActive } = useDropzone({
     onDrop: onDropControlLoom,
@@ -252,9 +297,15 @@ export function DataPanel() {
 
   const handleAddBiochemistry = async () => {
     if (!bioIndicator || !bioValue || !bioUnit) return
-    
+
+    const numValue = parseFloat(bioValue)
+    if (isNaN(numValue)) {
+      alert(language === 'zh' ? '请输入有效的数值' : 'Please enter a valid number')
+      return
+    }
+
     try {
-      await addBiochemistry(bioIndicator, parseFloat(bioValue), bioUnit)
+      await addBiochemistry(bioIndicator, numValue, bioUnit)
       setBioIndicator('')
       setBioValue('')
       setBioUnit('')
@@ -267,29 +318,33 @@ export function DataPanel() {
   // Biochemistry file upload handler
   const onDropBioFile = useCallback(async (files: File[]) => {
     if (!currentSession || files.length === 0) return
-    
+
     setUploadingBioFile(true)
     setBioFileProgress(0)
-    
+
+    let progressInterval: ReturnType<typeof setInterval> | null = null
+
     try {
       for (let i = 0; i < files.length; i++) {
         const file = files[i]
-        const progressInterval = setInterval(() => {
+        progressInterval = createTrackedInterval(() => {
           setBioFileProgress(prev => Math.min(prev + 10, 90))
         }, 200)
-        
+
         await uploadBiochemistryFile(file)
-        
-        clearInterval(progressInterval)
+
+        clearTrackedInterval(progressInterval)
+        progressInterval = null
         setBioFileProgress(((i + 1) / files.length) * 100)
       }
     } catch (e) {
       console.error('Failed to upload biochemistry file:', e)
     } finally {
+      clearTrackedInterval(progressInterval)
       setUploadingBioFile(false)
       setBioFileProgress(0)
     }
-  }, [currentSession, uploadBiochemistryFile])
+  }, [currentSession, uploadBiochemistryFile, createTrackedInterval, clearTrackedInterval])
 
   const { getRootProps: getBioFileRootProps, getInputProps: getBioFileInputProps, isDragActive: isBioFileDragActive } = useDropzone({
     onDrop: onDropBioFile,

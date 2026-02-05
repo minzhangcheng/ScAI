@@ -1,10 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useSession } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import ReactMarkdown from 'react-markdown'
-import { 
-  FileText, 
+import {
+  FileText,
   Download,
   ChevronDown,
   ChevronRight,
@@ -21,15 +21,9 @@ export function ResultsPanel() {
   const { t } = useTranslation(language)
   const [report, setReport] = useState<any>(null)
   const [expandedRounds, setExpandedRounds] = useState<Set<number>>(new Set())
-  const [loading, setLoading] = useState(false)
+  const [_loading, setLoading] = useState(false)
 
-  useEffect(() => {
-    if (currentSession?.status === 'completed') {
-      loadReport()
-    }
-  }, [currentSession?.status])
-
-  const loadReport = async () => {
+  const loadReport = useCallback(async () => {
     setLoading(true)
     try {
       const data = await getReport()
@@ -39,7 +33,13 @@ export function ResultsPanel() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [getReport])
+
+  useEffect(() => {
+    if (currentSession?.status === 'completed') {
+      loadReport()
+    }
+  }, [currentSession?.status, loadReport])
 
   const toggleRound = (round: number) => {
     const newExpanded = new Set(expandedRounds)
@@ -80,7 +80,7 @@ export function ResultsPanel() {
     )
   }
 
-  if (currentSession.status !== 'completed' && currentSession.roundResults.length === 0) {
+  if (currentSession.status !== 'completed' && (!currentSession.roundResults || currentSession.roundResults.length === 0)) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center">
         <div className="p-6 bg-slate-100 rounded-full mb-6">
@@ -103,7 +103,7 @@ export function ResultsPanel() {
         <div>
           <h2 className="text-xl font-semibold text-slate-900">{t('analysisResults')}</h2>
           <p className="text-sm text-slate-500 mt-1">
-            {t('completedRounds', { n: currentSession.roundResults.length })}
+            {t('completedRounds', { n: currentSession.roundResults?.length || 0 })}
           </p>
         </div>
         
@@ -139,7 +139,7 @@ export function ResultsPanel() {
           {t('roundDetails')}
         </h3>
         <div className="space-y-3">
-          {currentSession.roundResults.map((round) => {
+          {(currentSession.roundResults || []).map((round) => {
             const isExpanded = expandedRounds.has(round.round)
             
             return (
@@ -162,7 +162,7 @@ export function ResultsPanel() {
                       Round {round.round}
                     </span>
                     <span className="text-sm text-slate-500">
-                      {round.pathologyFindings.length + round.bioinformaticsFindings.length + round.biochemistryFindings.length + round.literatureFindings.length} {t('findings')}
+                      {(round.pathologyFindings?.length || 0) + (round.bioinformaticsFindings?.length || 0) + (round.biochemistryFindings?.length || 0) + (round.literatureFindings?.length || 0)} {t('findings')}
                     </span>
                   </div>
                 </button>
@@ -180,7 +180,7 @@ export function ResultsPanel() {
                     {/* Findings by Agent */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {/* Pathology */}
-                      {round.pathologyFindings.length > 0 && (
+                      {round.pathologyFindings?.length > 0 && (
                         <div className="p-3 border border-red-100 bg-red-50/50 rounded-lg">
                           <div className="flex items-center gap-2 mb-2">
                             <Microscope className="w-4 h-4 text-red-600" />
@@ -198,7 +198,7 @@ export function ResultsPanel() {
                       )}
 
                       {/* Bioinformatics */}
-                      {round.bioinformaticsFindings.length > 0 && (
+                      {round.bioinformaticsFindings?.length > 0 && (
                         <div className="p-3 border border-green-100 bg-green-50/50 rounded-lg">
                           <div className="flex items-center gap-2 mb-2">
                             <Code2 className="w-4 h-4 text-green-600" />
@@ -216,7 +216,7 @@ export function ResultsPanel() {
                       )}
 
                       {/* Biochemistry */}
-                      {round.biochemistryFindings.length > 0 && (
+                      {round.biochemistryFindings?.length > 0 && (
                         <div className="p-3 border border-amber-100 bg-amber-50/50 rounded-lg">
                           <div className="flex items-center gap-2 mb-2">
                             <FlaskConical className="w-4 h-4 text-amber-600" />
@@ -234,7 +234,7 @@ export function ResultsPanel() {
                       )}
 
                       {/* Literature */}
-                      {round.literatureFindings.length > 0 && (
+                      {round.literatureFindings?.length > 0 && (
                         <div className="p-3 border border-blue-100 bg-blue-50/50 rounded-lg">
                           <div className="flex items-center gap-2 mb-2">
                             <BookOpen className="w-4 h-4 text-blue-600" />

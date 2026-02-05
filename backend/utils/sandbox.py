@@ -238,22 +238,34 @@ class LocalJupyterSandbox:
         self.notebook_state = NotebookState(session_id, state_dir)
         self._initialized = False
         self._session_restored = False
+        self._session_restore_failed = False  # Track if session restore failed
     
-    async def start(self):
-        """Start the Jupyter kernel"""
+    async def start(self) -> dict:
+        """Start the Jupyter kernel
+
+        Returns:
+            dict with keys:
+                - started: bool - whether kernel was started (False if already running)
+                - session_restored: bool - whether previous session was restored
+                - restore_failed: bool - whether restore was attempted but failed
+        """
         if self.km is not None:
-            return
-        
+            return {
+                "started": False,
+                "session_restored": self._session_restored,
+                "restore_failed": self._session_restore_failed
+            }
+
         logger.info(f"Starting Jupyter kernel for session {self.session_id}")
-        
+
         # Create kernel manager
         self.km = KernelManager(kernel_name='python3')
         self.km.start_kernel(cwd=str(self.working_dir))
-        
+
         # Get client
         self.kc = self.km.client()
         self.kc.start_channels()
-        
+
         # Wait for kernel to be ready
         try:
             await asyncio.wait_for(
@@ -262,12 +274,18 @@ class LocalJupyterSandbox:
             )
         except asyncio.TimeoutError:
             raise RuntimeError("Kernel failed to start within timeout")
-        
+
         # Initialize with common imports and settings
         await self._initialize_kernel()
-        
+
         # Try to restore previous session
         await self._restore_session()
+
+        return {
+            "started": True,
+            "session_restored": self._session_restored,
+            "restore_failed": self._session_restore_failed
+        }
     
     async def _wait_for_ready(self):
         """Wait for kernel to be ready"""
@@ -280,7 +298,8 @@ class LocalJupyterSandbox:
                 )
                 if msg['msg_type'] == 'kernel_info_reply':
                     break
-            except:
+            except Exception:
+                # Kernel not ready yet, wait and retry
                 await asyncio.sleep(0.5)
     
     async def _initialize_kernel(self):
@@ -410,27 +429,28 @@ print("Helper functions available: get_seed(), check_and_fix_nan(adata)")
         """Restore session from dill dump if available"""
         # First load notebook metadata
         self.notebook_state.load()
-        
+
         if not self.notebook_state.has_session_dump():
             logger.info("No session dump to restore")
             return
-        
-        # Use absolute path
+
+        # Use absolute path with proper escaping for Python string
         session_path = str(self.notebook_state.session_path.absolute())
+        escaped_path = repr(session_path)  # Properly escape special characters
         logger.info(f"Restoring session from {session_path}")
-        
+
         # Load saved variables
         restore_code = f"""
 import dill
 
 try:
-    with open('{session_path}', 'rb') as f:
+    with open({escaped_path}, 'rb') as f:
         _session_data = dill.load(f)
-    
+
     # Restore variables to global namespace
     for _var_name, _obj in _session_data.items():
         globals()[_var_name] = _obj
-    
+
     print(f"Session restored: {{len(_session_data)}} variables")
     print(f"Restored: {{list(_session_data.keys())}}")
 except Exception as e:
@@ -440,23 +460,26 @@ except Exception as e:
         
         if result.success:
             self._session_restored = True
+            self._session_restore_failed = False
             logger.info("Session restored successfully")
         else:
-            logger.warning(f"Failed to restore session: {result.error}")
+            self._session_restore_failed = True
+            logger.warning(f"Session restore failed: {result.error}. Starting with fresh session.")
     
     async def save_session(self):
         """Save the current session state using dill - only save data variables"""
         # Use absolute path to avoid working directory issues
         session_path = str(self.notebook_state.session_path.absolute())
+        escaped_path = repr(session_path)  # Properly escape special characters
         logger.info(f"Saving session to {session_path}")
-        
+
         # Only save important data variables, avoid non-serializable objects like zmq
         save_code = f"""
 import dill
 import os
 
 # Ensure directory exists
-os.makedirs(os.path.dirname('{session_path}'), exist_ok=True)
+os.makedirs(os.path.dirname({escaped_path}), exist_ok=True)
 
 # List of variable names to save (data objects that can be serialized)
 _vars_to_save = ['adata', 'adata_control', 'adata_treatment', 'adata_merged',
@@ -487,7 +510,7 @@ for _var_name, _obj in list(globals().items()):
             pass
 
 # Save the collected variables
-with open('{session_path}', 'wb') as f:
+with open({escaped_path}, 'wb') as f:
     dill.dump(_session_data, f)
 
 print(f"Session saved: {{len(_session_data)}} variables")
@@ -529,6 +552,27 @@ print(f"Session saved: {{len(_session_data)}} variables")
                     )
                 except asyncio.TimeoutError:
                     error_msg = f"Execution timed out after {self.timeout} seconds"
+                    # Interrupt the kernel to stop the running code
+                    if self.km:
+                        try:
+                            self.km.interrupt_kernel()
+                            logger.warning(f"Kernel interrupted after timeout for session {self.session_id}")
+                            # Wait briefly for kernel to acknowledge interrupt
+                            await asyncio.sleep(0.5)
+                            # Drain any remaining messages to clear the queue
+                            try:
+                                while True:
+                                    drain_msg = await asyncio.wait_for(
+                                        asyncio.to_thread(self.kc.get_iopub_msg),
+                                        timeout=1.0
+                                    )
+                                    if drain_msg['msg_type'] == 'status' and drain_msg['content']['execution_state'] == 'idle':
+                                        break
+                            except asyncio.TimeoutError:
+                                # Kernel may be in bad state, log but continue
+                                logger.warning(f"Kernel did not return to idle after interrupt for session {self.session_id}")
+                        except Exception as interrupt_error:
+                            logger.error(f"Failed to interrupt kernel: {interrupt_error}")
                     break
                 
                 msg_type = msg['msg_type']
@@ -613,20 +657,28 @@ print(f"Session saved: {{len(_session_data)}} variables")
         return str(dst)
     
     def save_state(self):
-        """Save current state (notebook + session) - synchronous version
+        """Save current state synchronously - only saves notebook, not session.
 
-        Note: For reliable saving, prefer save_state_async() in async contexts.
-        This method schedules async save but may not complete before program exit.
+        Note: This method only reliably saves the notebook state. Session state
+        (Python variables) may not be saved if called from sync context.
+        Use save_state_async() for complete state persistence.
         """
         self.notebook_state.save()
         # Try to run in existing event loop, or create one if needed
         try:
             loop = asyncio.get_running_loop()
-            # We're in an async context, schedule the task
-            loop.create_task(self.save_session())
+            # We're in an async context - cannot safely run async code
+            # Log warning and skip session save (notebook is already saved)
+            logger.warning(
+                "save_state() called from async context - session variables may not be saved. "
+                "Use save_state_async() for guaranteed persistence."
+            )
         except RuntimeError:
-            # No running loop, run synchronously
-            asyncio.run(self.save_session())
+            # No running loop - safe to create a new one
+            try:
+                asyncio.run(self.save_session())
+            except Exception as e:
+                logger.error(f"Failed to save session state: {e}")
     
     async def save_state_async(self):
         """Save current state asynchronously"""
@@ -676,6 +728,14 @@ print(f"Session saved: {{len(_session_data)}} variables")
     def get_code_history(self) -> List[Dict[str, Any]]:
         """Get all executed code cells"""
         return self.notebook_state.cells
+
+    def was_session_restored(self) -> bool:
+        """Check if session was successfully restored from previous state"""
+        return self._session_restored
+
+    def did_session_restore_fail(self) -> bool:
+        """Check if session restore was attempted but failed"""
+        return self._session_restore_failed
 
 
 # Convenience function to create sandbox

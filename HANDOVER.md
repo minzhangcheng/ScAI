@@ -2,9 +2,12 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
+**Version**: 0.3.0
+**Last Updated**: 2026-02-04
+
 ## Project Overview
 
-**InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of PI Agent, Bioinformatics Agent, Pathology Agent, Biochemistry Agent, and Literature Agent, it automates comprehensive analysis of single-cell sequencing data.
+**InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of six specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, and Painter), it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, and structured error tracking.
 
 ## Technical Architecture
 
@@ -13,24 +16,36 @@ This document is intended for developers and operations personnel, providing tec
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                 React Frontend (Port 3000)                  │
-│              Zustand State + Tailwind CSS                   │
+│         Zustand State + Tailwind CSS + Recharts             │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────┐ │
+│  │  Data   │ │ Prompts │ │Analysis │ │ Results │ │Report │ │
+│  │  Panel  │ │  Panel  │ │+ Errors │ │  Panel  │ │ Panel │ │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └───────┘ │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ REST API + WebSocket
+                           │ REST API + WebSocket (state_sync, parallel_errors)
 ┌──────────────────────────▼──────────────────────────────────┐
 │                FastAPI Backend (Port 8000)                  │
 ├─────────────────────────────────────────────────────────────┤
 │                  LangGraph Workflow Engine                  │
 │  ┌────────────────────────────────────────────────────────┐ │
-│  │ PI Agent ──► Pathology Agent ──► Bioinformatics Agent │ │
-│  │     │                                    │             │ │
-│  │     └────────► Biochemistry Agent ◄──────┘             │ │
-│  │                      │                                 │ │
-│  │                Literature Agent                        │ │
+│  │                    PI Agent                            │ │
+│  │                       │                                │ │
+│  │        ┌──────────────┼──────────────┐ (parallel)      │ │
+│  │        ▼              ▼              ▼                 │ │
+│  │   Pathology    Bioinformatics   Biochemistry           │ │
+│  │     Agent          Agent          Agent                │ │
+│  │        │              │              │                 │ │
+│  │        └──────────────┼──────────────┘                 │ │
+│  │                       ▼                                │ │
+│  │               Literature Agent                         │ │
+│  │                       │                                │ │
+│  │                       ▼                                │ │
+│  │                Painter Agent (graphic abstract)        │ │
 │  └────────────────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │  OpenRouter │  │   Jupyter   │  │   Google Gemini     │ │
-│  │   LLM API   │  │   Kernel    │  │   Deep Research     │ │
+│  │  OpenRouter │  │   Jupyter   │  │   Google APIs       │ │
+│  │   LLM API   │  │ Kernel+dill │  │ (Research + Imagen) │ │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
                            │
@@ -72,19 +87,24 @@ intesc/                         # Code directory
 │   │
 │   ├── agents/
 │   │   ├── base.py             # Agent base class
-│   │   ├── pi_agent.py         # PI Agent
-│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent
+│   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer)
+│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent
-│   │   └── literature_agent.py # Literature Agent
+│   │   ├── literature_agent.py # Literature Agent
+│   │   └── painter_agent.py    # Painter Agent (graphic abstract)
 │   │
 │   ├── models/
 │   │   └── schemas.py          # Pydantic data models
+│   │                           # - AgentError: Structured error tracking
+│   │                           # - state_version: Version control
+│   │                           # - WebSocketMessage: New types (state_sync, parallel_errors)
 │   │
 │   ├── utils/
 │   │   ├── llm_client.py       # LLM client
 │   │   ├── sandbox.py          # Jupyter execution environment
 │   │   ├── image_utils.py      # Image processing
+│   │   ├── upload.py           # Chunked upload manager (10GB support)
 │   │   └── llm_logger.py       # LLM logging
 │   │
 │   └── static/                 # Static files (backup)
@@ -128,26 +148,77 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 
 ### 1. Workflow Engine (workflow.py)
 
-Multi-Agent coordination system based on LangGraph:
+Multi-Agent coordination system based on LangGraph with parallel execution and error recovery:
 
 ```python
-class AnalysisWorkflow:
-    def __init__(self, state_callback, message_callback):
+class SingleCellAnalysisWorkflow:
+    def __init__(self, config, session_id, message_callback, state_callback):
+        # message_callback: Real-time message push (WebSocket)
         # state_callback: Save state after each round
-        # message_callback: Real-time message push
 
-    async def run(self, state: AnalysisState, session_id: str):
-        # Iteratively execute analysis rounds
-        # Each round: PI planning → Agent execution → PI synthesis → Convergence check
+    async def run(self, state: AnalysisState):
+        # Iteratively execute analysis rounds with parallel branches
+        # Each round: PI planning → Parallel analysis → Aggregation → Literature → PI synthesis
 ```
 
-**Workflow:**
+**Workflow Graph Structure:**
 
-1. **PI Planning Phase**: PI Agent analyzes current state, assigns tasks to specialized Agents
-2. **Parallel Execution Phase**: Pathology/Bioinformatics/Biochemistry Agents work in parallel
-3. **Literature Support**: Literature Agent responds to queries from other Agents
-4. **PI Synthesis Phase**: PI Agent synthesizes all findings, detects conflicts, decides next steps
-5. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings (configurable)
+```
+initialize_round ◄────────────────────────┐
+      │                                   │
+      ▼                                   │
+  pi_planning                             │
+      │                                   │
+      ├───┬───┐ (Fan-out: parallel)       │
+      ▼   ▼   ▼                           │
+ pathology  bioinformatics  biochemistry  │
+      │   │   │                           │
+      └───┴───┘ (Fan-in)                  │
+      ▼                                   │
+  aggregate_results  ←── error tracking   │
+      │                                   │
+      ▼                                   │
+  literature_research                     │
+      │                                   │
+      ▼                                   │
+  pi_synthesis                            │
+      │                                   │
+  ┌───┴───┐                               │
+  │       │                               │
+(continue) (stop)                         │
+  │       │                               │
+  │       ▼                               │
+  │  generate_final_report                │
+  │       │                               │
+  │       ▼                               │
+  │  generate_graphic_abstract            │
+  │       │                               │
+  │       ▼                               │
+  │  generate_detailed_report             │
+  │       │                               │
+  │       ▼                               │
+  │      END                              │
+  │                                       │
+  └───► check_convergence ────────────────┘
+```
+
+**Key Features:**
+
+1. **Parallel Execution**: Pathology/Bioinformatics/Biochemistry Agents run in parallel (Fan-out/Fan-in pattern)
+2. **Retry Mechanism**: `@with_retry(max_retries=3)` decorator with exponential backoff
+3. **Structured Error Tracking**: Errors captured in `AgentError` model with agent, type, message, details
+4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
+5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval
+6. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
+
+**New Message Types:**
+
+| Type | Purpose |
+|------|---------|
+| `state_sync` | Version control and state synchronization |
+| `parallel_errors` | Structured error list from parallel execution |
+| `figure_review` | PI reviewing generated figures |
+| `graphic_abstract` | Painter Agent output |
 
 ### 2. Session Persistence
 
@@ -300,8 +371,71 @@ class OpenAICompatibleClient:
 
 ```typescript
 interface WebSocketMessage {
-  type: 'status' | 'progress' | 'message' | 'result' | 'error' | 'figure' | 'table';
-  data: any;
+  id: string;           // Unique message ID (for deduplication)
+  type: MessageType;    // See table below
+  agent?: AgentType;    // Source agent (if applicable)
+  content: any;         // Message payload
+  timestamp: string;    // ISO8601 timestamp
+}
+
+// Message Types
+type MessageType =
+  // System messages
+  | 'status'            // Status update
+  | 'state_sync'        // Version control sync (NEW)
+  | 'parallel_errors'   // Structured error list (NEW)
+  | 'completed'         // Analysis complete
+  // Analysis process
+  | 'message'           // General message
+  | 'progress'          // Progress update
+  | 'result'            // Analysis result
+  | 'error'             // Error message
+  // Results
+  | 'round_summary'     // Round summary
+  | 'integrated_report' // Integrated report
+  | 'graphic_abstract'  // Graphic abstract (NEW)
+  | 'detailed_report'   // Detailed report
+  // Figure review
+  | 'figure_review'     // PI reviewing figure (NEW)
+  | 'figure_approved'   // Figure approved (NEW)
+  | 'figure_revision'   // Revision requested (NEW)
+```
+
+**State Sync Message:**
+
+```json
+{
+  "type": "state_sync",
+  "content": {
+    "change_type": "round_complete|status_change|error_added",
+    "version": 5,
+    "status": "running",
+    "current_round": 2,
+    "timestamp": "2026-02-04T10:30:00Z",
+    "unresolved_errors": 0
+  }
+}
+```
+
+**Parallel Errors Message:**
+
+```json
+{
+  "type": "parallel_errors",
+  "content": {
+    "errors": [
+      {
+        "id": "uuid",
+        "agent": "pathology",
+        "error_type": "execution_error",
+        "message": "Image analysis failed",
+        "details": "...",
+        "round": 1
+      }
+    ],
+    "total_errors": 1,
+    "completed_agents": ["bioinformatics", "biochemistry"]
+  }
 }
 ```
 
@@ -311,25 +445,64 @@ interface WebSocketMessage {
 
 ```python
 class AnalysisState(BaseModel):
-    session_id: str
-    status: TaskStatus  # pending, running, completed, failed, paused
+    id: str
+    name: str
+    status: TaskStatus  # pending, running, completed, failed, paused, waiting_input
     initial_instruction: str
+
+    # Version control (NEW in v0.3.0)
+    state_version: int = 0
+    last_sync_timestamp: datetime
 
     # Data paths
     control_seq_path: Optional[str]
     treatment_seq_path: Optional[str]
+    control_loom_path: Optional[str]      # For RNA velocity
+    treatment_loom_path: Optional[str]
     pathology_images: List[PathologyImage]
     biochemistry_results: List[BiochemistryResult]
+    biochemistry_files: List[BiochemistryFile]
 
     # Analysis results
     round_results: List[RoundResult]
     messages: List[AgentMessage]
+    code_history: List[CodeExecution]
     final_summary: Optional[str]
 
+    # Publication outputs
+    publication_figures: List[PublicationFigure]
+    publication_tables: List[PublicationTable]
+    graphic_abstract: Optional[GraphicAbstract]  # NEW
+    integrated_report: Optional[str]
+
+    # Error tracking (NEW in v0.3.0)
+    agent_errors: List[AgentError]
+
     # Configuration
-    custom_prompts: Optional[AgentPrompts]
-    custom_models: Optional[ModelConfig]
-    language: str = "en"
+    custom_prompts: Dict[str, str]
+    custom_models: Dict[str, str]
+    custom_temperatures: Dict[str, float]
+
+    # Methods
+    def increment_version(self)
+    def add_error(agent, error_type, message, details) -> AgentError
+    def get_unresolved_errors() -> List[AgentError]
+    def resolve_error(error_id, resolution)
+```
+
+### AgentError (NEW in v0.3.0)
+
+```python
+class AgentError(BaseModel):
+    id: str                      # Unique ID
+    agent: AgentType             # Which agent failed
+    error_type: str              # execution_error, timeout, data_missing, llm_error
+    message: str                 # Error message (truncated to 200 chars)
+    details: Optional[str]       # Full error details
+    round_number: int            # Which round
+    timestamp: datetime
+    resolved: bool = False       # Resolution status
+    resolution: Optional[str]    # How it was resolved
 ```
 
 ### RoundResult (Single Round Result)
@@ -337,14 +510,25 @@ class AnalysisState(BaseModel):
 ```python
 class RoundResult(BaseModel):
     round_number: int
-    pathology_findings: Optional[str]
-    bioinformatics_findings: Optional[str]
-    biochemistry_findings: Optional[str]
-    literature_findings: Optional[str]
-    pi_synthesis: str
+    pathology_findings: List[str]
+    bioinformatics_findings: List[str]
+    biochemistry_findings: List[str]
+    literature_findings: List[str]
+    pi_summary: str
     next_steps: List[str]
-    conflicts: List[str]
+    conflicts: List[Dict[str, Any]]
+    new_findings: bool = True    # For convergence detection
     timestamp: datetime
+```
+
+### GraphicAbstract (NEW in v0.3.0)
+
+```python
+class GraphicAbstract(BaseModel):
+    id: str
+    prompt: str           # Generation prompt
+    image_base64: str     # Base64 encoded image
+    created_at: datetime
 ```
 
 ## Development Guide
@@ -493,13 +677,27 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 **3. WebSocket Disconnection**
 
-- Frontend implements auto-reconnect
+- Frontend implements auto-reconnect with exponential backoff (1s, 2s, 4s... max 30s)
+- Message history is automatically restored on reconnection
 - Check network connection and proxy settings
 
 **4. Code Execution Failure**
 
 - Check `states/{id}.ipynb` for execution history
 - Confirm required Python packages are installed
+
+**5. State Version Conflicts (NEW)**
+
+- If frontend shows outdated data, check `state_version` in session JSON
+- Frontend detects conflicts when received version < current version
+- Resolution: Trigger full session reload via `loadSession()`
+
+**6. Parallel Analysis Errors (NEW)**
+
+- Errors are tracked per-agent in `agent_errors` list
+- Check `AnalysisPanel` for error display
+- Errors persist until manually resolved
+- Debug via: `sessions/{id}.json` → `agent_errors` array
 
 ## Dependencies
 
@@ -526,10 +724,41 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 | decoupler | >=1.5 | Pathway activity |
 | gseapy | >=1.1 | GO/KEGG enrichment |
 
+## Key Code Locations
+
+### Backend
+
+| Feature | File | Line Numbers |
+|---------|------|--------------|
+| Workflow graph construction | `workflow.py` | 290-356 |
+| Parallel execution (Fan-out/Fan-in) | `workflow.py` | 310-322 |
+| Parallel results aggregation | `workflow.py` | 499-579 |
+| State sync method | `workflow.py` | 371-400 |
+| Retry decorator | `workflow.py` | 40-115 |
+| AgentError model | `schemas.py` | 38-49 |
+| Error management methods | `schemas.py` | 257-286 |
+| WebSocket message types | `schemas.py` | 339-362 |
+| Painter Agent | `painter_agent.py` | Full file |
+
+### Frontend
+
+| Feature | File | Line Numbers |
+|---------|------|--------------|
+| Global state definition | `appStore.ts` | 164-239 |
+| Version control state | `appStore.ts` | 229-231, 330-331 |
+| Error tracking state | `appStore.ts` | 232-238, 335-355 |
+| WebSocket hook | `useApi.ts` | 640-918 |
+| state_sync handling | `useApi.ts` | 770-787 |
+| parallel_errors handling | `useApi.ts` | 790-807 |
+| Reconnection recovery | `useApi.ts` | 700-760 |
+| Error display component | `AnalysisPanel.tsx` | 484-538 |
+| Agent status with errors | `AnalysisPanel.tsx` | 68-92 |
+
 ## Contact
 
 For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-01-29*
+*Document updated: 2026-02-04*
+*Version: 0.3.0*

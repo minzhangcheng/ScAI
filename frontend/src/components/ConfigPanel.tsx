@@ -7,22 +7,32 @@ import { Key, X, Check, AlertCircle, Loader2, Server } from 'lucide-react'
 interface ConfigPanelProps {
   onClose: () => void
   onSave: () => void
+  allowSkip?: boolean
+  onSkip?: () => void
 }
 
-export function ConfigPanel({ onClose, onSave }: ConfigPanelProps) {
-  const { apiConfig, setApiConfig, saveConfig, loading, error } = useConfig()
+export function ConfigPanel({ onClose, onSave, allowSkip = false, onSkip }: ConfigPanelProps) {
+  const { apiConfig, setApiConfig, saveConfig, loading, error, clearError } = useConfig()
   const { language } = useAppStore()
   const { t } = useTranslation(language)
   const [localError, setLocalError] = useState<string | null>(null)
 
+  // Clear errors when user modifies config
+  const handleConfigChange = (updates: Partial<typeof apiConfig>) => {
+    setApiConfig(updates)
+    setLocalError(null)
+    clearError()
+  }
+
   const handleSave = async () => {
     setLocalError(null)
-    
+    clearError()
+
     if (!apiConfig.apiKey) {
       setLocalError(language === 'zh' ? '请输入 API Key' : 'Please enter API Key')
       return
     }
-    
+
     try {
       await saveConfig()
       onSave()
@@ -66,7 +76,7 @@ export function ConfigPanel({ onClose, onSave }: ConfigPanelProps) {
             <input
               type="text"
               value={apiConfig.llmBaseUrl}
-              onChange={(e) => setApiConfig({ llmBaseUrl: e.target.value })}
+              onChange={(e) => handleConfigChange({ llmBaseUrl: e.target.value })}
               placeholder="https://openrouter.ai/api/v1"
               className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all font-mono text-sm"
             />
@@ -90,7 +100,7 @@ export function ConfigPanel({ onClose, onSave }: ConfigPanelProps) {
             <input
               type="password"
               value={apiConfig.apiKey}
-              onChange={(e) => setApiConfig({ apiKey: e.target.value })}
+              onChange={(e) => handleConfigChange({ apiKey: e.target.value })}
               placeholder="sk-or-v1-..."
               className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
             />
@@ -113,7 +123,7 @@ export function ConfigPanel({ onClose, onSave }: ConfigPanelProps) {
             <input
               type="password"
               value={apiConfig.googleApiKey}
-              onChange={(e) => setApiConfig({ googleApiKey: e.target.value })}
+              onChange={(e) => handleConfigChange({ googleApiKey: e.target.value })}
               placeholder="AIza..."
               className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
             />
@@ -136,7 +146,7 @@ export function ConfigPanel({ onClose, onSave }: ConfigPanelProps) {
             <input
               type="text"
               value={apiConfig.proxyUrl || ''}
-              onChange={(e) => setApiConfig({ proxyUrl: e.target.value })}
+              onChange={(e) => handleConfigChange({ proxyUrl: e.target.value })}
               placeholder="http://proxy.example.com:8080"
               className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
             />
@@ -157,25 +167,40 @@ export function ConfigPanel({ onClose, onSave }: ConfigPanelProps) {
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            className="px-5 py-2.5 text-slate-700 hover:bg-slate-200 rounded-xl font-medium transition-colors"
-          >
-            {t('cancel')}
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={loading}
-            className="px-5 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
-          >
-            {loading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Check className="w-4 h-4" />
+        <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-between">
+          <div>
+            {allowSkip && (
+              <button
+                onClick={() => {
+                  onSkip?.()
+                  onClose()
+                }}
+                className="px-5 py-2.5 text-slate-500 hover:text-slate-700 hover:bg-slate-200 rounded-xl font-medium transition-colors"
+              >
+                {language === 'zh' ? '稍后配置' : 'Skip for now'}
+              </button>
             )}
-            {t('saveConfig')}
-          </button>
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="px-5 py-2.5 text-slate-700 hover:bg-slate-200 rounded-xl font-medium transition-colors"
+            >
+              {t('cancel')}
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={loading}
+              className="px-5 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
+            >
+              {loading ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Check className="w-4 h-4" />
+              )}
+              {t('saveConfig')}
+            </button>
+          </div>
         </div>
       </div>
     </div>

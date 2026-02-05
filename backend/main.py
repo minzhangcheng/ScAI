@@ -1,5 +1,5 @@
 """
-FastAPI backend server for the Multi-Agent Liver Analysis System
+FastAPI backend server for the Multi-Agent Single-Cell Analysis System
 """
 import os
 import json
@@ -20,16 +20,21 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import (
-    SystemConfig,
+    SystemConfig, AgentTemperatures,
     DATA_BASE_DIR, UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR,
+    UPLOAD_CHUNK_SIZE, MAX_UPLOAD_SIZE, UPLOAD_TEMP_DIR,
     setup_logging
 )
 from .models.schemas import (
     AnalysisState, APIRequest, APIResponse, TaskStatus,
     WebSocketMessage, AgentType, PathologyImage, BiochemistryResult, BiochemistryFile
 )
-from .workflow import LiverAnalysisWorkflow
+from .workflow import SingleCellAnalysisWorkflow
 from .utils.llm_client import OpenAICompatibleClient
+from .utils.upload import ChunkedUploadManager, stream_save_file
+
+# Initialize upload manager for chunked uploads (supports up to 10GB files)
+upload_manager = ChunkedUploadManager(UPLOAD_TEMP_DIR, UPLOAD_CHUNK_SIZE)
 
 # Configure logging - must be called before any logging
 setup_logging()
@@ -54,25 +59,130 @@ app.add_middleware(
 
 # Global state with lock for thread-safe access
 sessions: Dict[str, AnalysisState] = {}
-workflows: Dict[str, LiverAnalysisWorkflow] = {}
+workflows: Dict[str, SingleCellAnalysisWorkflow] = {}
 websockets: Dict[str, WebSocket] = {}
 config: Optional[SystemConfig] = None
+# Track sessions that are being initialized (prevents concurrent workflow creation)
+_initializing_sessions: set = set()
 
 # Lock for protecting concurrent access to global dicts
 _state_lock = asyncio.Lock()
+
+# Memory management settings
+MAX_CACHED_SESSIONS = 50  # Maximum number of sessions to keep in memory
+SESSION_CACHE_TTL = 3600  # Seconds before an inactive session is evicted (1 hour)
+_session_access_times: Dict[str, float] = {}  # Track last access time for each session
+
+# Message buffer for WebSocket reconnection recovery
+MAX_MESSAGE_BUFFER_SIZE = 100  # Keep last N messages per session
+_message_buffers: Dict[str, List[Dict[str, Any]]] = {}  # session_id -> list of messages
+_message_buffer_lock = asyncio.Lock()
 
 # Log the data directory location (directories are created in config.py)
 logger.info(f"Data directory: {DATA_BASE_DIR.resolve()}")
 
 
+async def cleanup_stale_sessions():
+    """Background task to clean up stale sessions from memory"""
+    import time
+    while True:
+        try:
+            await asyncio.sleep(300)  # Run every 5 minutes
+
+            current_time = time.time()
+            sessions_to_evict = []
+
+            async with _state_lock:
+                # Find sessions that are not running and have been inactive
+                for session_id, last_access in list(_session_access_times.items()):
+                    if session_id in workflows:
+                        # Don't evict running sessions
+                        continue
+                    if current_time - last_access > SESSION_CACHE_TTL:
+                        sessions_to_evict.append(session_id)
+
+                # Also evict if we're over the limit (evict oldest first)
+                if len(sessions) > MAX_CACHED_SESSIONS:
+                    # Sort by access time, oldest first
+                    sorted_sessions = sorted(
+                        [(sid, _session_access_times.get(sid, 0))
+                         for sid in sessions.keys() if sid not in workflows],
+                        key=lambda x: x[1]
+                    )
+                    # Evict oldest sessions until we're under the limit
+                    evict_count = len(sessions) - MAX_CACHED_SESSIONS
+                    for sid, _ in sorted_sessions[:evict_count]:
+                        if sid not in sessions_to_evict:
+                            sessions_to_evict.append(sid)
+
+            # Evict sessions - release lock during I/O operations to prevent blocking
+            for session_id in sessions_to_evict:
+                async with _state_lock:
+                    if session_id in sessions:
+                        state_to_save = sessions[session_id]
+                        del sessions[session_id]
+                    else:
+                        state_to_save = None
+                    if session_id in _session_access_times:
+                        del _session_access_times[session_id]
+
+                # Also clean up message buffer for evicted session
+                async with _message_buffer_lock:
+                    if session_id in _message_buffers:
+                        del _message_buffers[session_id]
+
+                # Save to disk outside the lock using thread pool to avoid blocking
+                if state_to_save:
+                    try:
+                        await asyncio.to_thread(save_session_to_disk, session_id, state_to_save)
+                    except Exception as save_error:
+                        logger.error(f"Failed to save session {session_id} during eviction: {save_error}")
+
+            if sessions_to_evict:
+                logger.info(f"Evicted {len(sessions_to_evict)} stale sessions from memory")
+
+        except Exception as e:
+            logger.error(f"Error in session cleanup task: {e}")
+
+
+async def touch_session(session_id: str):
+    """Update the last access time for a session (thread-safe)"""
+    import time
+    async with _state_lock:
+        _session_access_times[session_id] = time.time()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks on application startup"""
+    asyncio.create_task(cleanup_stale_sessions())
+    logger.info("Started background session cleanup task")
+
+
 # Session persistence helpers
 def save_session_to_disk(session_id: str, state: AnalysisState):
-    """Save session state to disk for persistence"""
+    """Save session state to disk for persistence using atomic write"""
+    import tempfile
     try:
         session_file = SESSION_DIR / f"{session_id}.json"
-        with open(session_file, "w", encoding="utf-8") as f:
-            f.write(state.model_dump_json(indent=2))
-        logger.info(f"Session {session_id} saved to disk")
+        # Use atomic write: write to temp file first, then rename
+        # This prevents data corruption if the process crashes during write
+        fd, tmp_path = tempfile.mkstemp(
+            suffix='.json.tmp',
+            prefix=f'{session_id}_',
+            dir=SESSION_DIR
+        )
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(state.model_dump_json(indent=2))
+            # Atomic rename (on POSIX systems)
+            os.replace(tmp_path, session_file)
+            logger.info(f"Session {session_id} saved to disk")
+        except Exception:
+            # Clean up temp file on error
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
     except Exception as e:
         logger.error(f"Failed to save session {session_id}: {e}")
 
@@ -92,20 +202,33 @@ def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
     return None
 
 
-def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
-    """Ensure session is loaded into memory (from disk if necessary)"""
+async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
+    """Ensure session is loaded into memory (from disk if necessary)
+
+    Uses lock to prevent race conditions when multiple requests try to load
+    the same session simultaneously.
+    """
     global sessions
-    
-    # Check if already in memory
+
+    # Quick check without lock (optimization for common case)
     if session_id in sessions:
+        await touch_session(session_id)
         return sessions[session_id]
-    
-    # Try to load from disk
-    state = load_session_from_disk(session_id)
-    if state:
-        sessions[session_id] = state
-        return state
-    
+
+    # Use lock for the load operation to prevent race conditions
+    async with _state_lock:
+        # Double-check after acquiring lock (another coroutine might have loaded it)
+        if session_id in sessions:
+            await touch_session(session_id)
+            return sessions[session_id]
+
+        # Load from disk using thread pool to avoid blocking
+        state = await asyncio.to_thread(load_session_from_disk, session_id)
+        if state:
+            sessions[session_id] = state
+            await touch_session(session_id)
+            return state
+
     return None
 
 
@@ -152,28 +275,24 @@ class StartRequest(BaseModel):
 
 
 class PromptUpdateRequest(BaseModel):
-    session_id: str
     agent: str
     prompt: str
 
 
 class ModelUpdateRequest(BaseModel):
-    session_id: str
     agent: str
     model: str
 
 
 class TemperatureUpdateRequest(BaseModel):
-    session_id: str
     agent: str
     temperature: float
 
 
 class BiochemistryInput(BaseModel):
-    session_id: str
-    indicator: str
-    value: float
-    unit: str
+    indicator: str = Field(..., min_length=1, max_length=200, description="Biochemistry indicator name")
+    value: float = Field(..., description="Indicator value")
+    unit: str = Field(..., max_length=50, description="Measurement unit")
 
 
 # Endpoints
@@ -354,6 +473,62 @@ async def load_session(session_id: str):
         "custom_prompts": state.custom_prompts,
         "custom_models": state.custom_models,
         "custom_temperatures": state.custom_temperatures,
+        # State version control
+        "state_version": state.state_version,
+        "last_sync_timestamp": state.last_sync_timestamp.isoformat() if state.last_sync_timestamp else "",
+        # Agent errors tracking
+        "agent_errors": [
+            {
+                "id": err.id,
+                "agent": err.agent.value if hasattr(err.agent, 'value') else str(err.agent),
+                "error_type": err.error_type,
+                "message": err.message,
+                "details": err.details,
+                "round_number": err.round_number,
+                "timestamp": err.timestamp.isoformat() if err.timestamp else "",
+                "resolved": err.resolved,
+                "resolution": err.resolution
+            }
+            for err in state.agent_errors
+        ],
+        # Publication outputs
+        "publication_figures": [
+            {
+                "id": fig.id,
+                "name": fig.name,
+                "description": fig.description,
+                "figure_type": fig.figure_type,
+                "png_path": fig.png_path,
+                "pdf_path": fig.pdf_path,
+                "png_base64": fig.png_base64,
+                "review_status": fig.review_status.value if hasattr(fig.review_status, 'value') else str(fig.review_status),
+                "pi_feedback": fig.pi_feedback,
+                "revision_count": fig.revision_count,
+                "created_at": fig.created_at.isoformat() if fig.created_at else ""
+            }
+            for fig in state.publication_figures
+        ],
+        "publication_tables": [
+            {
+                "id": tbl.id,
+                "name": tbl.name,
+                "description": tbl.description,
+                "csv_path": tbl.csv_path,
+                "columns": tbl.columns,
+                "preview_data": tbl.preview_data,
+                "review_status": tbl.review_status.value if hasattr(tbl.review_status, 'value') else str(tbl.review_status),
+                "pi_feedback": tbl.pi_feedback,
+                "created_at": tbl.created_at.isoformat() if tbl.created_at else ""
+            }
+            for tbl in state.publication_tables
+        ],
+        "graphic_abstract": {
+            "id": state.graphic_abstract.id,
+            "prompt": state.graphic_abstract.prompt,
+            "image_base64": state.graphic_abstract.image_base64,
+            "created_at": state.graphic_abstract.created_at.isoformat() if state.graphic_abstract.created_at else ""
+        } if state.graphic_abstract else None,
+        "integrated_report": state.integrated_report,
     }
 
 
@@ -363,18 +538,23 @@ async def delete_session(session_id: str):
     # Remove from memory
     if session_id in sessions:
         del sessions[session_id]
-    
+
+    # Remove message buffer
+    async with _message_buffer_lock:
+        if session_id in _message_buffers:
+            del _message_buffers[session_id]
+
     # Remove from disk
     session_file = SESSION_DIR / f"{session_id}.json"
     if session_file.exists():
         session_file.unlink()
-    
+
     # Optionally remove uploaded files
     upload_dir = UPLOAD_DIR / session_id
     if upload_dir.exists():
         import shutil
         shutil.rmtree(upload_dir)
-    
+
     return APIResponse(
         success=True,
         message="Session deleted"
@@ -422,7 +602,7 @@ async def ensure_session(session_id: str, request: StartRequest):
 async def get_session(session_id: str):
     """Get session status"""
     # Ensure session is loaded (from disk if necessary)
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -450,7 +630,7 @@ async def upload_pathology(
     image_type: str = Form("H&E")
 ):
     """Upload pathology image"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -487,7 +667,7 @@ async def upload_generic_file(
     file: UploadFile = File(...)
 ):
     """Upload a generic file (for supplementary data)"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -513,7 +693,7 @@ async def upload_snrna_seq(
     group: str = Form("control")  # 'control' or 'treatment'
 ):
     """Upload snRNA-seq data file (h5ad or 10x format)"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -552,7 +732,7 @@ async def upload_loom(
     group: str = Form("control")  # 'control' or 'treatment'
 ):
     """Upload loom file for RNA velocity analysis"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -587,7 +767,7 @@ async def upload_loom(
 @app.post("/api/session/{session_id}/save")
 async def save_session(session_id: str):
     """Manually save session to disk"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     save_session_to_disk(session_id, state)
@@ -599,22 +779,33 @@ async def save_session(session_id: str):
 
 
 @app.post("/api/session/{session_id}/biochemistry")
-async def add_biochemistry(request: BiochemistryInput):
+async def add_biochemistry(session_id: str, request: BiochemistryInput):
     """Add biochemistry result"""
-    state = ensure_session_loaded(request.session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
+    # Validate value is a finite number (not NaN or Inf)
+    import math
+    if math.isnan(request.value) or math.isinf(request.value):
+        raise HTTPException(status_code=400, detail="Value must be a finite number (not NaN or Infinity)")
+
+    # Validate indicator and unit are not just whitespace
+    if not request.indicator.strip():
+        raise HTTPException(status_code=400, detail="Indicator name cannot be empty or whitespace")
+    if not request.unit.strip():
+        raise HTTPException(status_code=400, detail="Unit cannot be empty or whitespace")
+
     result = BiochemistryResult(
-        indicator=request.indicator,
+        indicator=request.indicator.strip(),
         value=request.value,
-        unit=request.unit
+        unit=request.unit.strip()
     )
-    
+
     state.biochemistry_results.append(result)
-    
+
     # Auto-save session
-    save_session_to_disk(request.session_id, state)
+    save_session_to_disk(session_id, state)
     
     return APIResponse(
         success=True,
@@ -630,7 +821,7 @@ async def upload_biochemistry_file(
     description: Optional[str] = Form(None)
 ):
     """Upload biochemistry file (image or data file like csv, xlsx, txt)"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -691,7 +882,7 @@ async def upload_biochemistry_file(
 @app.delete("/api/session/{session_id}/pathology/{image_id}")
 async def delete_pathology(session_id: str, image_id: str):
     """Delete a pathology image"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -722,7 +913,7 @@ async def delete_pathology(session_id: str, image_id: str):
 @app.delete("/api/session/{session_id}/biochemistry/file/{file_id}")
 async def delete_biochemistry_file(session_id: str, file_id: str):
     """Delete a biochemistry file"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -753,7 +944,7 @@ async def delete_biochemistry_file(session_id: str, file_id: str):
 @app.delete("/api/session/{session_id}/biochemistry/result/{result_id}")
 async def delete_biochemistry_result(session_id: str, result_id: str):
     """Delete a biochemistry result (manual entry)"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -776,7 +967,7 @@ async def delete_biochemistry_result(session_id: str, result_id: str):
 @app.delete("/api/session/{session_id}/sequencing/{group}")
 async def delete_sequencing(session_id: str, group: str):
     """Delete sequencing data (control or treatment)"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -815,7 +1006,7 @@ async def delete_sequencing(session_id: str, group: str):
 @app.delete("/api/session/{session_id}/loom/{group}")
 async def delete_loom(session_id: str, group: str):
     """Delete loom file (control or treatment)"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -852,16 +1043,16 @@ async def delete_loom(session_id: str, group: str):
 
 
 @app.post("/api/session/{session_id}/prompts")
-async def update_prompts(request: PromptUpdateRequest):
+async def update_prompts(session_id: str, request: PromptUpdateRequest):
     """Update agent prompts"""
-    state = ensure_session_loaded(request.session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
     state.custom_prompts[request.agent] = request.prompt
 
     # Save to disk
-    save_session_to_disk(request.session_id, state)
+    save_session_to_disk(session_id, state)
 
     return APIResponse(
         success=True,
@@ -874,7 +1065,7 @@ async def get_prompts(session_id: str):
     """Get current prompts"""
     global config
 
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -891,16 +1082,16 @@ async def get_prompts(session_id: str):
 
 
 @app.post("/api/session/{session_id}/models")
-async def update_models(request: ModelUpdateRequest):
+async def update_models(session_id: str, request: ModelUpdateRequest):
     """Update agent models"""
-    state = ensure_session_loaded(request.session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
     state.custom_models[request.agent] = request.model
 
     # Save to disk
-    save_session_to_disk(request.session_id, state)
+    save_session_to_disk(session_id, state)
 
     return APIResponse(
         success=True,
@@ -913,43 +1104,34 @@ async def get_models(session_id: str):
     """Get current models"""
     global config
 
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     # Merge default and custom models
     models = {
         "pi": state.custom_models.get("pi", config.models.pi_model if config else ""),
         "pathology": state.custom_models.get("pathology", config.models.pathology_model if config else ""),
         "bioinformatics": state.custom_models.get("bioinformatics", config.models.bioinformatics_model if config else ""),
         "biochemistry": state.custom_models.get("biochemistry", config.models.biochemistry_model if config else ""),
-        "literature": state.custom_models.get("literature", "google-deep-research")
+        "literature": state.custom_models.get("literature", "google-deep-research"),
+        "painter": state.custom_models.get("painter", config.models.painter_model if config else "gemini-2.0-flash-exp-image-generation")
     }
-    
+
     return models
 
 
-# Default temperatures
-DEFAULT_TEMPERATURES = {
-    "pi": 0.5,           # PI can be more creative in synthesis and planning
-    "pathology": 0.2,    # Pathology needs objective, consistent analysis
-    "bioinformatics": 0.1, # Bioinformatics must be highly deterministic
-    "biochemistry": 0.2,  # Biochemistry needs objective interpretation
-    "literature": 0.6    # Literature search can explore more broadly
-}
-
-
 @app.post("/api/session/{session_id}/temperatures")
-async def update_temperatures(request: TemperatureUpdateRequest):
+async def update_temperatures(session_id: str, request: TemperatureUpdateRequest):
     """Update agent temperature"""
-    state = ensure_session_loaded(request.session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
     state.custom_temperatures[request.agent] = request.temperature
 
     # Save to disk
-    save_session_to_disk(request.session_id, state)
+    save_session_to_disk(session_id, state)
 
     return APIResponse(
         success=True,
@@ -959,38 +1141,32 @@ async def update_temperatures(request: TemperatureUpdateRequest):
 
 @app.get("/api/session/{session_id}/temperatures")
 async def get_temperatures(session_id: str):
-    """Get current temperatures"""
-    state = ensure_session_loaded(session_id)
+    """Get current temperatures - uses centralized config with custom overrides"""
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Merge default and custom temperatures
-    temperatures = {
-        "pi": state.custom_temperatures.get("pi", DEFAULT_TEMPERATURES["pi"]),
-        "pathology": state.custom_temperatures.get("pathology", DEFAULT_TEMPERATURES["pathology"]),
-        "bioinformatics": state.custom_temperatures.get("bioinformatics", DEFAULT_TEMPERATURES["bioinformatics"]),
-        "biochemistry": state.custom_temperatures.get("biochemistry", DEFAULT_TEMPERATURES["biochemistry"]),
-        "literature": state.custom_temperatures.get("literature", DEFAULT_TEMPERATURES["literature"])
-    }
-    
-    return temperatures
+
+    # Use centralized config as base, merge with custom temperatures
+    base_temps = config.temperatures if config else AgentTemperatures()
+    merged = base_temps.merge_custom(state.custom_temperatures)
+
+    return merged.model_dump()
 
 
 class MaxRoundsRequest(BaseModel):
-    session_id: str
     max_rounds: int = Field(ge=1, le=50, default=3)
 
 
 @app.post("/api/session/{session_id}/max-rounds")
-async def update_max_rounds(request: MaxRoundsRequest):
+async def update_max_rounds(session_id: str, request: MaxRoundsRequest):
     """Update maximum analysis rounds"""
-    state = ensure_session_loaded(request.session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     state.max_rounds = request.max_rounds
-    
+
     # Auto-save session
-    save_session_to_disk(request.session_id, state)
+    save_session_to_disk(session_id, state)
     
     return APIResponse(
         success=True,
@@ -1001,7 +1177,7 @@ async def update_max_rounds(request: MaxRoundsRequest):
 @app.get("/api/session/{session_id}/max-rounds")
 async def get_max_rounds(session_id: str):
     """Get current max rounds setting"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"max_rounds": state.max_rounds}
@@ -1010,7 +1186,7 @@ async def get_max_rounds(session_id: str):
 @app.post("/api/session/{session_id}/run")
 async def run_analysis(session_id: str):
     """Start running analysis (use WebSocket for real-time updates)"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -1029,7 +1205,7 @@ async def run_analysis(session_id: str):
 @app.post("/api/session/{session_id}/pause")
 async def pause_analysis(session_id: str):
     """Pause running analysis"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -1050,7 +1226,7 @@ async def pause_analysis(session_id: str):
 @app.post("/api/session/{session_id}/resume")
 async def resume_analysis(session_id: str):
     """Resume paused or completed analysis (for re-analysis)"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -1090,7 +1266,7 @@ class HumanInputRequest(BaseModel):
 @app.post("/api/session/{session_id}/human-input")
 async def send_human_input(session_id: str, request: HumanInputRequest):
     """Send human input/intervention to the analysis"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -1135,7 +1311,7 @@ async def send_human_input(session_id: str, request: HumanInputRequest):
 @app.get("/api/session/{session_id}/human-input")
 async def get_human_input_status(session_id: str):
     """Check if system is waiting for human input"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -1149,7 +1325,7 @@ async def get_human_input_status(session_id: str):
 @app.post("/api/session/{session_id}/request-input")
 async def request_human_input(session_id: str):
     """Request human input (called by workflow when needing guidance)"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     state.human_input_requested = True
@@ -1174,7 +1350,7 @@ async def request_human_input(session_id: str):
 @app.post("/api/session/{session_id}/export")
 async def export_state(session_id: str):
     """Export session state including notebook and session dump"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -1297,7 +1473,7 @@ async def import_state(file: UploadFile = File(...)):
 @app.get("/api/session/{session_id}/code")
 async def get_code_history(session_id: str):
     """Get all executed code for reproducibility"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -1317,7 +1493,7 @@ async def get_code_history(session_id: str):
 @app.get("/api/session/{session_id}/report")
 async def get_report(session_id: str):
     """Get final analysis report"""
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -1349,7 +1525,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
     
     # Ensure session is loaded (from disk if necessary)
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         await websocket.send_json({"error": "Session not found"})
         await websocket.close()
@@ -1366,11 +1542,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # Use lock to prevent race condition between check and set
     async with _state_lock:
         workflow_running = session_id in workflows
-        if not workflow_running:
+        workflow_initializing = session_id in _initializing_sessions
+        if not workflow_running and not workflow_initializing:
             # Only set websocket reference if we're the main connection (not an observer)
             websockets[session_id] = websocket
+            # Mark as initializing to prevent concurrent workflow creation
+            _initializing_sessions.add(session_id)
 
-    if workflow_running:
+    if workflow_running or workflow_initializing:
         logger.info(f"Workflow already running for session {session_id}, observing...")
 
         # Send current status (but don't take over the websocket reference)
@@ -1381,8 +1560,22 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 "content": f"Analysis in progress (Round {state.current_round})...",
                 "timestamp": datetime.now().isoformat()
             })
+
+            # Send buffered messages to allow observer to catch up
+            async with _message_buffer_lock:
+                buffered_messages = _message_buffers.get(session_id, [])
+                if buffered_messages:
+                    logger.info(f"Sending {len(buffered_messages)} buffered messages to observer")
+                    await websocket.send_json({
+                        "type": "message_history",
+                        "content": {
+                            "messages": buffered_messages,
+                            "count": len(buffered_messages)
+                        },
+                        "timestamp": datetime.now().isoformat()
+                    })
         except Exception as e:
-            logger.error(f"Failed to send status to observer: {e}")
+            logger.error(f"Failed to send status/history to observer: {e}")
 
         # Wait for existing workflow to complete or for disconnect
         # Note: We don't update websockets[session_id] - let the main workflow keep control
@@ -1399,48 +1592,113 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             logger.info(f"WebSocket observer disconnected for session {session_id}")
         # Don't delete websockets[session_id] - we never owned it
         return
+
+    # Check if session is already completed - don't restart workflow
+    if state.status == TaskStatus.COMPLETED:
+        logger.info(f"Session {session_id} already completed, not restarting workflow")
+        # Update websocket reference for this completed session
+        websockets[session_id] = websocket
+        # Remove from initializing set since we're not starting a workflow
+        async with _state_lock:
+            _initializing_sessions.discard(session_id)
+
+        try:
+            await websocket.send_json({
+                "type": "completed",
+                "agent": None,
+                "content": "Analysis already completed. View results in the Reports tab.",
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"[{session_id}] Failed to send completed status: {e}")
+
+        # Keep connection open for potential client requests
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    pass
+        except WebSocketDisconnect:
+            logger.info(f"WebSocket disconnected for completed session {session_id}")
+        finally:
+            if websockets.get(session_id) == websocket:
+                del websockets[session_id]
+        return
     
     # Create message callback that uses the global websockets dict
     # This way, if the websocket reconnects, messages go to the new connection
-    # Track WebSocket closed state
+    # Track WebSocket closed state with lock for thread-safe access
     ws_closed = False
-    
+    ws_lock = asyncio.Lock()
+
     async def message_callback(msg: WebSocketMessage):
         nonlocal ws_closed
-        if ws_closed:
-            return  # Skip if WebSocket is closed
-        
-        current_ws = websockets.get(session_id)
+
+        msg_data = {
+            "type": msg.type,
+            "agent": msg.agent.value if msg.agent else None,
+            "content": msg.content,
+            "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
+            "id": msg.id  # Include message ID for deduplication on client
+        }
+
+        # Add to message buffer for reconnection recovery
+        async with _message_buffer_lock:
+            if session_id not in _message_buffers:
+                _message_buffers[session_id] = []
+            _message_buffers[session_id].append(msg_data)
+            # Trim buffer to max size
+            if len(_message_buffers[session_id]) > MAX_MESSAGE_BUFFER_SIZE:
+                _message_buffers[session_id] = _message_buffers[session_id][-MAX_MESSAGE_BUFFER_SIZE:]
+
+        # Get websocket reference atomically with ws_closed check
+        async with ws_lock:
+            if ws_closed:
+                # Check if a new websocket has connected (reset ws_closed if so)
+                current_ws = websockets.get(session_id)
+                if current_ws and current_ws != websocket:
+                    # New connection detected, reset closed state
+                    ws_closed = False
+                else:
+                    return  # Still closed, skip
+            else:
+                current_ws = websockets.get(session_id)
+
         if not current_ws:
-            logger.warning(f"[{session_id}] No WebSocket connection, skipping message: {msg.type}")
+            logger.warning(f"[{session_id}] No WebSocket connection, message buffered: {msg.type}")
             return
         try:
-            msg_data = {
-                "type": msg.type,
-                "agent": msg.agent.value if msg.agent else None,
-                "content": msg.content,
-                "timestamp": msg.timestamp.isoformat()
-            }
             await current_ws.send_json(msg_data)
         except Exception as e:
             # Mark as closed to prevent further attempts
-            ws_closed = True
+            async with ws_lock:
+                ws_closed = True
             logger.error(f"[{session_id}] Failed to send WS message, marking as closed: {e}")
-    
+
     # Helper to safely send JSON
     async def safe_send(data: dict):
         nonlocal ws_closed
-        if ws_closed:
-            return False
-        
-        current_ws = websockets.get(session_id)
+        # Get websocket reference atomically with ws_closed check
+        async with ws_lock:
+            if ws_closed:
+                # Check if a new websocket has connected
+                current_ws = websockets.get(session_id)
+                if current_ws and current_ws != websocket:
+                    ws_closed = False
+                else:
+                    return False
+            else:
+                current_ws = websockets.get(session_id)
+
         if not current_ws:
             return False
         try:
             await current_ws.send_json(data)
             return True
         except Exception:
-            ws_closed = True
+            async with ws_lock:
+                ws_closed = True
             return False
     
     # Send initial connection confirmation message
@@ -1457,15 +1715,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # State callback to save after each round
     async def state_callback(state: AnalysisState):
         sessions[session_id] = state
-        save_session_to_disk(session_id, state)
+        # Use thread pool for disk I/O to avoid blocking event loop
+        await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     # Create workflow with session_id for state persistence
-    workflow = LiverAnalysisWorkflow(
+    workflow = SingleCellAnalysisWorkflow(
         config=config,
         session_id=session_id,
         message_callback=message_callback,
         state_callback=state_callback
     )
+    # Add workflow to tracking dict (protected by lock to prevent race conditions)
     async with _state_lock:
         workflows[session_id] = workflow
     
@@ -1492,23 +1752,27 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     except WebSocketDisconnect:
         # Client disconnected - pause workflow
         logger.info(f"WebSocket disconnected for session {session_id}")
-        state.status = TaskStatus.PAUSED
-        sessions[session_id] = state
-        save_session_to_disk(session_id, state)
-        
+        # Get the latest state to avoid race condition
+        current_state = sessions.get(session_id, state)
+        current_state.status = TaskStatus.PAUSED
+        sessions[session_id] = current_state
+        save_session_to_disk(session_id, current_state)
+
     except Exception as e:
         # Log the full error traceback
         logger.error(f"Workflow error for session {session_id}: {e}")
         logger.error(traceback.format_exc())
-        
+
         # Try to send error, but don't fail if WebSocket is closed
         await safe_send({
             "type": "error",
             "content": str(e)
         })
-        state.status = TaskStatus.FAILED
-        sessions[session_id] = state
-        save_session_to_disk(session_id, state)
+        # Get the latest state to avoid race condition
+        current_state = sessions.get(session_id, state)
+        current_state.status = TaskStatus.FAILED
+        sessions[session_id] = current_state
+        save_session_to_disk(session_id, current_state)
         
     finally:
         # Clean up with lock protection
@@ -1522,6 +1786,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 del workflows[session_id]
             if session_id in websockets:
                 del websockets[session_id]
+            # Remove from initializing set
+            _initializing_sessions.discard(session_id)
 
 
 # Run with: uvicorn backend.main:app --reload --port 8000
@@ -1542,22 +1808,26 @@ report_websockets: Dict[str, WebSocket] = {}
 @app.get("/api/session/{session_id}/detailed-report")
 async def get_detailed_report(session_id: str):
     """Get existing detailed report for a session"""
-    # Ensure session is loaded (from disk if necessary)
-    state = ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
+    # First check memory cache
     if session_id in detailed_reports:
         return {"report": detailed_reports[session_id]}
-    
-    # Try to load from disk
+
+    # Try to load from disk first (avoid session loading overhead)
     report_path = REPORTS_DIR / session_id / "report.json"
     if report_path.exists():
-        with open(report_path, "r", encoding="utf-8") as f:
-            report = json.load(f)
-            detailed_reports[session_id] = report
-            return {"report": report}
-    
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                report = json.load(f)
+                detailed_reports[session_id] = report
+                return {"report": report}
+        except Exception as e:
+            logger.error(f"Failed to load report for {session_id}: {e}")
+
+    # Only check session exists if no report found
+    session_file = SESSION_DIR / f"{session_id}.json"
+    if not session_file.exists() and session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
     return {"report": None}
 
 
@@ -1565,7 +1835,7 @@ async def get_detailed_report(session_id: str):
 async def generate_detailed_report(session_id: str, background_tasks: BackgroundTasks):
     """Start generating a detailed report"""
     # Ensure session is loaded (from disk if necessary)
-    state = ensure_session_loaded(session_id)
+    state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -1604,8 +1874,8 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                     "type": "progress",
                     **data
                 })
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to send progress update for session {session_id}: {e}")
     
     # Create LLM client using global config
     if config is None:
@@ -1616,8 +1886,8 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                     "type": "error",
                     "message": "API configuration not set"
                 })
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to send error to WebSocket for session {session_id}: {e}")
         return
     
     llm_client = OpenAICompatibleClient(
@@ -1649,21 +1919,21 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                     "type": "complete",
                     "report": report
                 })
-            except:
-                pass
-                
+            except Exception as e:
+                logger.debug(f"Failed to send completion to WebSocket for session {session_id}: {e}")
+
     except Exception as e:
         logger.error(f"Report generation failed: {e}")
         logger.error(traceback.format_exc())
-        
+
         if session_id in report_websockets:
             try:
                 await report_websockets[session_id].send_json({
                     "type": "error",
                     "message": str(e)
                 })
-            except:
-                pass
+            except Exception as ws_error:
+                logger.debug(f"Failed to send error to WebSocket for session {session_id}: {ws_error}")
 
 
 @app.websocket("/ws/report/{session_id}")
@@ -1687,41 +1957,81 @@ async def report_websocket(websocket: WebSocket, session_id: str):
 async def get_file(path: str):
     """Serve a file from the filesystem"""
     # Security: only allow files in the data directory
-    allowed_prefixes = [
-        str(REPORTS_DIR) + os.sep,
-        str(UPLOAD_DIR) + os.sep,
-        str(STATE_DIR) + os.sep,
+    # Use Path.relative_to() for proper path containment check (handles symlinks correctly)
+    allowed_dirs = [
+        Path(REPORTS_DIR).resolve(),
+        Path(UPLOAD_DIR).resolve(),
+        Path(STATE_DIR).resolve(),
     ]
 
-    normalized_path = os.path.normpath(path)
-    if not any(normalized_path.startswith(prefix) for prefix in allowed_prefixes):
+    # Resolve the real path to prevent traversal attacks like /../../../etc/passwd
+    try:
+        real_path = Path(path).resolve()
+    except (ValueError, OSError):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    # Check if the resolved path is within any allowed directory using relative_to
+    # This properly handles symlinks that might point outside allowed directories
+    is_allowed = False
+    for allowed_dir in allowed_dirs:
+        try:
+            real_path.relative_to(allowed_dir)
+            is_allowed = True
+            break
+        except ValueError:
+            continue
+
+    if not is_allowed:
         raise HTTPException(status_code=403, detail="Access denied")
-    
-    if not os.path.exists(path):
+
+    if not real_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    
-    return FileResponse(path)
+
+    if not real_path.is_file():
+        raise HTTPException(status_code=400, detail="Not a file")
+
+    return FileResponse(str(real_path))
 
 
 @app.get("/api/download")
 async def download_file(path: str):
     """Download a file"""
-    # Security check - only allow files in the data directory
-    allowed_prefixes = [
-        str(REPORTS_DIR) + os.sep,
-        str(UPLOAD_DIR) + os.sep,
-        str(STATE_DIR) + os.sep,
+    # Security: only allow files in the data directory
+    # Use Path.relative_to() for proper path containment check (handles symlinks correctly)
+    allowed_dirs = [
+        Path(REPORTS_DIR).resolve(),
+        Path(UPLOAD_DIR).resolve(),
+        Path(STATE_DIR).resolve(),
     ]
-    normalized_path = os.path.normpath(path)
-    
-    if not any(normalized_path.startswith(prefix) for prefix in allowed_prefixes):
+
+    # Resolve the real path to prevent traversal attacks
+    try:
+        real_path = Path(path).resolve()
+    except (ValueError, OSError):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    # Check if the resolved path is within any allowed directory using relative_to
+    # This properly handles symlinks that might point outside allowed directories
+    is_allowed = False
+    for allowed_dir in allowed_dirs:
+        try:
+            real_path.relative_to(allowed_dir)
+            is_allowed = True
+            break
+        except ValueError:
+            continue
+
+    if not is_allowed:
         raise HTTPException(status_code=403, detail="Access denied")
-    
-    if not os.path.exists(path):
+
+    if not real_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    
-    filename = os.path.basename(path)
-    return FileResponse(path, filename=filename, media_type="application/octet-stream")
+
+    if not real_path.is_file():
+        raise HTTPException(status_code=400, detail="Not a file")
+
+    filename = real_path.name
+    return FileResponse(str(real_path), filename=filename, media_type="application/octet-stream")
 
 
 @app.post("/api/session/{session_id}/report/download-all-figures")
@@ -1812,10 +2122,10 @@ async def get_report_html(session_id: str):
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="HTML report not found")
 
+    # Don't set filename to avoid triggering download
     return FileResponse(
         html_path,
-        media_type="text/html",
-        filename=f"{session_id}_report.html"
+        media_type="text/html"
     )
 
 
@@ -1901,6 +2211,13 @@ async def get_report_figure(session_id: str, filename: str):
     )
 
 
+# Also handle "figures/" path for HTML relative URLs
+@app.get("/api/session/{session_id}/report/figures/{filename}")
+async def get_report_figure_alt(session_id: str, filename: str):
+    """Get a specific figure from the report (alternative path for HTML relative URLs)"""
+    return await get_report_figure(session_id, filename)
+
+
 @app.get("/api/session/{session_id}/report/table/{filename}")
 async def get_report_table(session_id: str, filename: str):
     """Get a specific table from the report"""
@@ -1914,3 +2231,429 @@ async def get_report_table(session_id: str, filename: str):
         media_type="text/csv",
         filename=filename
     )
+
+
+# Also handle "tables/" path for HTML relative URLs
+@app.get("/api/session/{session_id}/report/tables/{filename}")
+async def get_report_table_alt(session_id: str, filename: str):
+    """Get a specific table from the report (alternative path for HTML relative URLs)"""
+    return await get_report_table(session_id, filename)
+
+
+# ============================================
+# Publication Figures and Graphic Abstract Endpoints
+# ============================================
+
+@app.get("/api/session/{session_id}/graphic-abstract")
+async def get_graphic_abstract(session_id: str):
+    """Get the graphic abstract for a session"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if state.graphic_abstract:
+        return {
+            "success": True,
+            "graphic_abstract": {
+                "id": state.graphic_abstract.id,
+                "image_base64": state.graphic_abstract.image_base64,
+                "prompt": state.graphic_abstract.prompt,
+                "created_at": state.graphic_abstract.created_at.isoformat()
+            }
+        }
+
+    return {
+        "success": False,
+        "error": "Graphic abstract not generated yet",
+        "graphic_abstract": None
+    }
+
+
+@app.get("/api/session/{session_id}/publication-figures")
+async def get_publication_figures(session_id: str):
+    """Get all publication figures for a session"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    figures = [
+        {
+            "id": fig.id,
+            "name": fig.name,
+            "description": fig.description,
+            "figure_type": fig.figure_type,
+            "png_path": fig.png_path,
+            "pdf_path": fig.pdf_path,
+            "png_base64": fig.png_base64,
+            "review_status": fig.review_status.value,
+            "pi_feedback": fig.pi_feedback,
+            "revision_count": fig.revision_count,
+            "created_at": fig.created_at.isoformat()
+        }
+        for fig in state.publication_figures
+    ]
+
+    return {
+        "success": True,
+        "figures": figures,
+        "total": len(figures),
+        "approved": sum(1 for f in state.publication_figures if f.review_status.value == "approved")
+    }
+
+
+@app.get("/api/session/{session_id}/publication-tables")
+async def get_publication_tables(session_id: str):
+    """Get all publication tables for a session"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    tables = [
+        {
+            "id": tbl.id,
+            "name": tbl.name,
+            "description": tbl.description,
+            "csv_path": tbl.csv_path,
+            "columns": tbl.columns,
+            "preview_data": tbl.preview_data,
+            "review_status": tbl.review_status.value,
+            "pi_feedback": tbl.pi_feedback,
+            "created_at": tbl.created_at.isoformat()
+        }
+        for tbl in state.publication_tables
+    ]
+
+    return {
+        "success": True,
+        "tables": tables,
+        "total": len(tables)
+    }
+
+
+@app.get("/api/session/{session_id}/figure/{figure_id}/pdf")
+async def download_publication_figure_pdf(session_id: str, figure_id: str):
+    """Download a specific publication figure as PDF"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    figure = next((f for f in state.publication_figures if f.id == figure_id), None)
+    if figure is None:
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    if not figure.pdf_path:
+        raise HTTPException(status_code=404, detail="PDF not available for this figure")
+
+    pdf_path = Path(figure.pdf_path)
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="PDF file not found on disk")
+
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename=f"{figure.name}.pdf"
+    )
+
+
+@app.get("/api/session/{session_id}/figure/{figure_id}/png")
+async def download_publication_figure_png(session_id: str, figure_id: str):
+    """Download a specific publication figure as PNG"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    figure = next((f for f in state.publication_figures if f.id == figure_id), None)
+    if figure is None:
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    if not figure.png_path:
+        raise HTTPException(status_code=404, detail="PNG not available for this figure")
+
+    png_path = Path(figure.png_path)
+    if not png_path.exists():
+        raise HTTPException(status_code=404, detail="PNG file not found on disk")
+
+    return FileResponse(
+        png_path,
+        media_type="image/png",
+        filename=f"{figure.name}.png"
+    )
+
+
+@app.get("/api/session/{session_id}/integrated-report")
+async def get_integrated_report(session_id: str):
+    """Get the integrated report for a session"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if state.integrated_report:
+        return {
+            "success": True,
+            "report": state.integrated_report,
+            "figures_count": len(state.publication_figures),
+            "tables_count": len(state.publication_tables)
+        }
+
+    return {
+        "success": False,
+        "error": "Integrated report not generated yet",
+        "report": None
+    }
+
+
+# ============== Chunked Upload Endpoints (for large files up to 10GB) ==============
+
+class InitChunkedUploadRequest(BaseModel):
+    """Request to initialize a chunked upload"""
+    filename: str
+    total_size: int
+    total_chunks: int
+    file_type: str  # 'snrna_seq', 'loom', 'pathology', 'biochemistry'
+    group: Optional[str] = None  # 'control' or 'treatment' for seq data
+
+
+@app.post("/api/session/{session_id}/upload/init-chunked")
+async def init_chunked_upload(session_id: str, request: InitChunkedUploadRequest):
+    """Initialize a chunked upload for large files"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if request.total_size > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File size exceeds maximum allowed ({MAX_UPLOAD_SIZE / (1024**3):.1f}GB)"
+        )
+
+    upload_id = await upload_manager.init_upload(
+        session_id=session_id,
+        filename=request.filename,
+        total_size=request.total_size,
+        total_chunks=request.total_chunks,
+        file_type=request.file_type,
+        group=request.group
+    )
+
+    return {
+        "upload_id": upload_id,
+        "chunk_size": UPLOAD_CHUNK_SIZE,
+        "total_chunks": request.total_chunks
+    }
+
+
+@app.post("/api/session/{session_id}/upload/chunk/{upload_id}/{chunk_index}")
+async def upload_chunk(
+    session_id: str,
+    upload_id: str,
+    chunk_index: int,
+    file: UploadFile = File(...),
+    chunk_hash: Optional[str] = Form(None)
+):
+    """Upload a single chunk"""
+    chunk_data = await file.read()
+
+    result = await upload_manager.save_chunk(
+        upload_id=upload_id,
+        chunk_index=chunk_index,
+        chunk_data=chunk_data,
+        chunk_hash=chunk_hash
+    )
+
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    return result
+
+
+@app.post("/api/session/{session_id}/upload/complete-chunked/{upload_id}")
+async def complete_chunked_upload(
+    session_id: str,
+    upload_id: str,
+    file_type: str = Form(...),
+    group: Optional[str] = Form(None)
+):
+    """Complete chunked upload and assemble file"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Get upload metadata
+    status = await upload_manager.get_upload_status(upload_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    # Determine final path based on file type
+    filename = status["filename"]
+    if file_type == "snrna_seq":
+        final_path = UPLOAD_DIR / session_id / "snrna_seq" / (group or "control") / filename
+    elif file_type == "loom":
+        final_path = UPLOAD_DIR / session_id / "loom" / (group or "control") / filename
+    elif file_type == "pathology":
+        final_path = UPLOAD_DIR / session_id / "pathology" / filename
+    elif file_type == "biochemistry":
+        final_path = UPLOAD_DIR / session_id / "biochemistry" / filename
+    else:
+        final_path = UPLOAD_DIR / session_id / "files" / filename
+
+    # Complete upload
+    result = await upload_manager.complete_upload(upload_id, final_path.resolve())
+
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    # Update session state
+    if file_type == "snrna_seq":
+        if group == "treatment":
+            state.treatment_seq_path = str(final_path.resolve())
+        else:
+            state.control_seq_path = str(final_path.resolve())
+    elif file_type == "loom":
+        if group == "treatment":
+            state.treatment_loom_path = str(final_path.resolve())
+        else:
+            state.control_loom_path = str(final_path.resolve())
+    elif file_type == "pathology":
+        img = PathologyImage(
+            filename=filename,
+            image_type="uploaded",
+            original_path=str(final_path.resolve())
+        )
+        state.pathology_images.append(img)
+
+    save_session_to_disk(session_id, state)
+
+    return APIResponse(
+        success=True,
+        message=f"File uploaded successfully: {filename}",
+        data=result
+    )
+
+
+@app.get("/api/session/{session_id}/upload/status/{upload_id}")
+async def get_chunked_upload_status(session_id: str, upload_id: str):
+    """Get chunked upload progress"""
+    status = await upload_manager.get_upload_status(upload_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    return status
+
+
+@app.delete("/api/session/{session_id}/upload/cancel/{upload_id}")
+async def cancel_chunked_upload(session_id: str, upload_id: str):
+    """Cancel and cleanup a chunked upload"""
+    success = await upload_manager.cancel_upload(upload_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    return {"success": True, "message": "Upload cancelled"}
+
+
+# ============== Node Retry Endpoints ==============
+
+class RetryNodeRequest(BaseModel):
+    """Request to retry or skip a failed node"""
+    node_name: str
+    skip: bool = False  # If True, skip instead of retry
+
+
+@app.post("/api/session/{session_id}/retry-node")
+async def retry_node(session_id: str, request: RetryNodeRequest):
+    """Retry or skip a failed node"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if state.status != TaskStatus.FAILED:
+        raise HTTPException(status_code=400, detail="Session is not in failed state")
+
+    # Note: The actual retry/skip logic is handled by the workflow's with_retry decorator
+    # This endpoint just updates the state to allow resumption
+
+    if request.skip:
+        # Store skip_nodes in sandbox_state (used by workflow on resume)
+        if state.sandbox_state is None:
+            state.sandbox_state = {}
+        if "skip_nodes" not in state.sandbox_state:
+            state.sandbox_state["skip_nodes"] = []
+        if request.node_name not in state.sandbox_state["skip_nodes"]:
+            state.sandbox_state["skip_nodes"].append(request.node_name)
+        message = f"Node {request.node_name} will be skipped on resume"
+    else:
+        # Clear failed status for retry
+        state.status = TaskStatus.PAUSED  # Allow resumption
+        message = f"Session ready to retry from node {request.node_name}"
+
+    save_session_to_disk(session_id, state)
+
+    return APIResponse(
+        success=True,
+        message=message,
+        data={"node": request.node_name, "action": "skip" if request.skip else "retry"}
+    )
+
+
+@app.get("/api/session/{session_id}/failed-node")
+async def get_failed_node(session_id: str):
+    """Get information about the failed node"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Check if we have workflow state with error info
+    if session_id in workflows:
+        workflow = workflows[session_id]
+        config = {"configurable": {"thread_id": session_id}}
+        try:
+            graph_state = await workflow.compiled_graph.aget_state(config)
+            if graph_state and graph_state.values:
+                return {
+                    "failed_node": graph_state.values.get("failed_node"),
+                    "node_errors": graph_state.values.get("node_errors", {}),
+                    "retry_counts": graph_state.values.get("node_retry_count", {})
+                }
+        except Exception as e:
+            logger.error(f"Error getting workflow state: {e}")
+
+    # Fallback: check sandbox_state
+    if state.sandbox_state:
+        return {
+            "failed_node": state.sandbox_state.get("failed_node"),
+            "node_errors": state.sandbox_state.get("node_errors", {}),
+            "retry_counts": state.sandbox_state.get("node_retry_count", {})
+        }
+
+    return {"failed_node": None, "node_errors": {}, "retry_counts": {}}
+
+
+# ============== Bioinformatics Resume Endpoint ==============
+
+@app.post("/api/session/{session_id}/resume-bioinformatics")
+async def resume_bioinformatics(session_id: str):
+    """Resume bioinformatics analysis from last checkpoint"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Check for checkpoint
+    checkpoint_path = STATE_DIR / f"{session_id}_bioinfo_checkpoint.json"
+    if not checkpoint_path.exists():
+        raise HTTPException(status_code=404, detail="No bioinformatics checkpoint found")
+
+    # Read checkpoint info
+    try:
+        with open(checkpoint_path, 'r') as f:
+            checkpoint = json.load(f)
+        return APIResponse(
+            success=True,
+            message=f"Checkpoint found at step {checkpoint.get('step_number', 0)}. Connect to WebSocket to resume.",
+            data={
+                "has_checkpoint": True,
+                "step_number": checkpoint.get("step_number", 0),
+                "total_steps": checkpoint.get("total_steps", 80),
+                "findings_count": len(checkpoint.get("findings", [])),
+                "figures_count": len(checkpoint.get("figures", []))
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error reading checkpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Error reading checkpoint: {str(e)}")

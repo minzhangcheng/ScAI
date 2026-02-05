@@ -3,15 +3,60 @@ import { persist } from 'zustand/middleware'
 import { Language, getDefaultPrompts } from '../i18n/translations'
 
 // Types
-export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature'
+export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter'
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input'
+export type FigureReviewStatus = 'pending' | 'approved' | 'revision_requested'
 
 export interface Message {
   id: string
-  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings'
+  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors'
   agent?: AgentType
   content: any
   timestamp: string
+}
+
+export interface AgentError {
+  id: string
+  agent: AgentType
+  errorType: string
+  message: string
+  details?: string
+  round: number
+  timestamp: string
+  resolved: boolean
+}
+
+export interface PublicationFigure {
+  id: string
+  name: string
+  description: string
+  figureType: string
+  pngPath: string
+  pdfPath: string
+  pngBase64?: string
+  reviewStatus: FigureReviewStatus
+  piFeedback?: string
+  revisionCount: number
+  createdAt: string
+}
+
+export interface PublicationTable {
+  id: string
+  name: string
+  description: string
+  csvPath: string
+  columns: string[]
+  previewData: Record<string, any>[]
+  reviewStatus: FigureReviewStatus
+  piFeedback?: string
+  createdAt: string
+}
+
+export interface GraphicAbstract {
+  id: string
+  prompt: string
+  imageBase64: string
+  createdAt: string
 }
 
 export interface PathologyImage {
@@ -60,6 +105,11 @@ export interface Session {
   biochemistryFiles?: BiochemistryFile[]  // Uploaded files/images for biochemistry
   roundResults: RoundResult[]
   finalSummary?: string
+  // Publication-quality outputs
+  publicationFigures?: PublicationFigure[]
+  publicationTables?: PublicationTable[]
+  graphicAbstract?: GraphicAbstract
+  integratedReport?: string
 }
 
 export interface AgentPrompts {
@@ -68,6 +118,7 @@ export interface AgentPrompts {
   bioinformatics: string
   biochemistry: string
   literature: string
+  painter: string
 }
 
 export interface AgentModels {
@@ -76,6 +127,7 @@ export interface AgentModels {
   bioinformatics: string
   biochemistry: string
   literature: string
+  painter: string
 }
 
 export interface AgentTemperatures {
@@ -84,6 +136,7 @@ export interface AgentTemperatures {
   bioinformatics: number
   biochemistry: number
   literature: number
+  painter: number
 }
 
 // Default models
@@ -92,7 +145,8 @@ export const DEFAULT_MODELS: AgentModels = {
   pathology: 'google/gemini-3-pro-preview',
   bioinformatics: 'anthropic/claude-opus-4.5',
   biochemistry: 'google/gemini-3-pro-preview',
-  literature: 'google/gemini-3-pro-preview'
+  literature: 'google/gemini-3-pro-preview',
+  painter: 'gemini-2.0-flash-exp-image-generation'  // Must match backend config.py painter_model
 }
 
 // Default temperatures
@@ -103,7 +157,8 @@ export const DEFAULT_TEMPERATURES: AgentTemperatures = {
   pathology: 0.2,    // Pathology needs objective, consistent analysis
   bioinformatics: 0.1, // Bioinformatics must be highly deterministic
   biochemistry: 0.2,  // Biochemistry needs objective interpretation
-  literature: 0.6    // Literature search can explore more broadly
+  literature: 0.6,   // Literature search can explore more broadly
+  painter: 0.7       // Painter benefits from creative variation in image generation
 }
 
 interface AppState {
@@ -169,6 +224,22 @@ interface AppState {
   // WebSocket
   wsConnected: boolean
   setWsConnected: (connected: boolean) => void
+
+  // State version control for synchronization
+  stateVersion: number
+  setStateVersion: (version: number) => void
+
+  // Agent errors tracking
+  agentErrors: AgentError[]
+  addAgentError: (error: AgentError) => void
+  clearAgentErrors: () => void
+  resolveError: (errorId: string) => void
+  getUnresolvedErrors: () => AgentError[]
+  getErrorsByAgent: (agent: AgentType) => AgentError[]
+
+  // Config panel trigger callback (set by App.tsx)
+  showConfigPanel: (() => void) | null
+  setShowConfigPanelCallback: (callback: (() => void) | null) => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -257,7 +328,33 @@ export const useAppStore = create<AppState>()(
 
       // WebSocket
       wsConnected: false,
-      setWsConnected: (connected) => set({ wsConnected: connected })
+      setWsConnected: (connected) => set({ wsConnected: connected }),
+
+      // State version control
+      stateVersion: 0,
+      setStateVersion: (version) => set({ stateVersion: version }),
+
+      // Agent errors tracking
+      agentErrors: [],
+      addAgentError: (error) => set((state) => ({
+        agentErrors: [...state.agentErrors, error]
+      })),
+      clearAgentErrors: () => set({ agentErrors: [] }),
+      resolveError: (errorId) => set((state) => ({
+        agentErrors: state.agentErrors.map(e =>
+          e.id === errorId ? { ...e, resolved: true } : e
+        )
+      })),
+      getUnresolvedErrors: () => {
+        return get().agentErrors.filter(e => !e.resolved)
+      },
+      getErrorsByAgent: (agent) => {
+        return get().agentErrors.filter(e => e.agent === agent && !e.resolved)
+      },
+
+      // Config panel trigger callback
+      showConfigPanel: null,
+      setShowConfigPanelCallback: (callback) => set({ showConfigPanel: callback })
     }),
     {
       name: 'intesc-storage',

@@ -64,8 +64,12 @@ export function useConfig() {
       return { configured: false, has_api_key: false, has_google: false }
     }
   }, [])
-  
-  return { apiConfig, setApiConfig, saveConfig, checkStatus, loading, error }
+
+  const clearError = useCallback(() => {
+    setError(null)
+  }, [])
+
+  return { apiConfig, setApiConfig, saveConfig, checkStatus, loading, error, clearError }
 }
 
 // Session hook
@@ -120,11 +124,28 @@ export function useSession() {
     
     try {
       const data = await apiFetch<any>(`/session/${sessionId}/load`)
-      
+
+      // Transform round_results from snake_case to camelCase with defensive null checks
+      const transformedRoundResults = (data.round_results || []).map((r: any) => {
+        if (!r) return null
+        return {
+          round: r.round ?? 0,
+          summary: r.pi_summary || r.summary || '',
+          pathologyFindings: Array.isArray(r.pathology_findings) ? r.pathology_findings : [],
+          bioinformaticsFindings: Array.isArray(r.bioinformatics_findings) ? r.bioinformatics_findings : [],
+          biochemistryFindings: Array.isArray(r.biochemistry_findings) ? r.biochemistry_findings : [],
+          literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
+        }
+      }).filter((r: any) => r !== null)
+
+      // Validate status is a known value
+      const validStatuses = ['pending', 'running', 'paused', 'waiting_input', 'completed', 'failed'] as const
+      const status = validStatuses.includes(data.status) ? data.status : 'pending'
+
       const session: Session = {
         id: data.session_id,
         name: data.name,
-        status: data.status as any,
+        status: status as Session['status'],
         currentRound: data.current_round || 0,
         createdAt: data.created_at || new Date().toISOString(),
         instruction: data.initial_instruction || '',
@@ -135,11 +156,40 @@ export function useSession() {
         treatmentSeqPath: data.treatment_seq_path,
         controlLoomPath: data.control_loom_path,
         treatmentLoomPath: data.treatment_loom_path,
-        roundResults: data.round_results || [],
+        roundResults: transformedRoundResults,
         finalSummary: data.final_summary,
+        // Publication outputs
+        publicationFigures: data.publication_figures || [],
+        publicationTables: data.publication_tables || [],
+        graphicAbstract: data.graphic_abstract || undefined,
+        integratedReport: data.integrated_report || undefined,
       }
-      
+
       setCurrentSession(session)
+
+      // Restore state version
+      if (data.state_version !== undefined) {
+        useAppStore.getState().setStateVersion(data.state_version)
+      }
+
+      // Restore agent errors
+      useAppStore.getState().clearAgentErrors()
+      if (data.agent_errors && Array.isArray(data.agent_errors)) {
+        for (const err of data.agent_errors) {
+          if (!err.resolved) {
+            useAppStore.getState().addAgentError({
+              id: err.id,
+              agent: err.agent as AgentType,
+              errorType: err.error_type,
+              message: err.message,
+              details: err.details,
+              round: err.round_number,
+              timestamp: err.timestamp,
+              resolved: false
+            })
+          }
+        }
+      }
       
       // Load messages history
       if (data.messages && Array.isArray(data.messages)) {
@@ -221,29 +271,33 @@ export function useSession() {
   }, [currentSession])
 
   const uploadPathology = useCallback(async (file: File, imageType: string) => {
-    if (!currentSession) throw new Error('No active session')
-    
+    // Get fresh session state to avoid closure issues
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+
     // Ensure session exists first
     await ensureSession()
-    
+
     const formData = new FormData()
     formData.append('file', file)
     formData.append('image_type', imageType)
-    
+
     const response = await fetch(
-      `${API_BASE}/session/${currentSession.id}/upload/pathology`,
+      `${API_BASE}/session/${session.id}/upload/pathology`,
       { method: 'POST', body: formData }
     )
-    
+
     if (!response.ok) {
       throw new Error('Failed to upload pathology image')
     }
-    
+
     const data = await response.json()
-    
-    updateSession({
+
+    // Get latest session state for update
+    const latestSession = useAppStore.getState().currentSession
+    useAppStore.getState().updateSession({
       pathologyImages: [
-        ...currentSession.pathologyImages,
+        ...(latestSession?.pathologyImages || []),
         {
           id: data.data.image_id,
           filename: file.name,
@@ -252,92 +306,100 @@ export function useSession() {
         },
       ],
     })
-    
+
     return data
-  }, [currentSession, updateSession, ensureSession])
+  }, [ensureSession])
   
   const uploadSnRNASeq = useCallback(async (file: File, group: 'control' | 'treatment') => {
-    if (!currentSession) throw new Error('No active session')
-    
+    // Get fresh session state to avoid closure issues
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+
     // Ensure session exists first
     await ensureSession()
-    
+
     const formData = new FormData()
     formData.append('file', file)
     formData.append('group', group)
-    
+
     const response = await fetch(
-      `${API_BASE}/session/${currentSession.id}/upload/snrna_seq`,
+      `${API_BASE}/session/${session.id}/upload/snrna_seq`,
       { method: 'POST', body: formData }
     )
-    
+
     if (!response.ok) {
       throw new Error('Failed to upload snRNA-seq data')
     }
-    
+
     const data = await response.json()
-    
+
     // Update the appropriate path based on group
     if (group === 'control') {
-      updateSession({ controlSeqPath: data.data.path })
+      useAppStore.getState().updateSession({ controlSeqPath: data.data.path })
     } else {
-      updateSession({ treatmentSeqPath: data.data.path })
+      useAppStore.getState().updateSession({ treatmentSeqPath: data.data.path })
     }
-    
+
     return data
-  }, [currentSession, updateSession, ensureSession])
+  }, [ensureSession])
   
   const uploadLoom = useCallback(async (file: File, group: 'control' | 'treatment') => {
-    if (!currentSession) throw new Error('No active session')
-    
+    // Get fresh session state to avoid closure issues
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+
     // Ensure session exists first
     await ensureSession()
-    
+
     const formData = new FormData()
     formData.append('file', file)
     formData.append('group', group)
-    
+
     const response = await fetch(
-      `${API_BASE}/session/${currentSession.id}/upload/loom`,
+      `${API_BASE}/session/${session.id}/upload/loom`,
       { method: 'POST', body: formData }
     )
-    
+
     if (!response.ok) {
       throw new Error('Failed to upload loom file')
     }
-    
+
     const data = await response.json()
-    
+
     // Update the appropriate path based on group
     if (group === 'control') {
-      updateSession({ controlLoomPath: data.data.path })
+      useAppStore.getState().updateSession({ controlLoomPath: data.data.path })
     } else {
-      updateSession({ treatmentLoomPath: data.data.path })
+      useAppStore.getState().updateSession({ treatmentLoomPath: data.data.path })
     }
-    
+
     return data
-  }, [currentSession, updateSession, ensureSession])
+  }, [ensureSession])
   
   const addBiochemistry = useCallback(async (
     indicator: string,
     value: number,
     unit: string
   ) => {
-    if (!currentSession) throw new Error('No active session')
-    
-    const response = await apiFetch<any>(`/session/${currentSession.id}/biochemistry`, {
+    // Get fresh session state to avoid closure issues
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+
+    const response = await apiFetch<any>(`/session/${session.id}/biochemistry`, {
       method: 'POST',
       body: JSON.stringify({
-        session_id: currentSession.id,
+        session_id: session.id,
         indicator,
         value,
         unit,
       }),
     })
-    
-    updateSession({
+
+    // Get latest session state for update
+    const latestSession = useAppStore.getState().currentSession
+    useAppStore.getState().updateSession({
       biochemistryResults: [
-        ...currentSession.biochemistryResults,
+        ...(latestSession?.biochemistryResults || []),
         {
           id: response.data.result_id,
           indicator,
@@ -346,54 +408,59 @@ export function useSession() {
         },
       ],
     })
-    
+
     return response
-  }, [currentSession, updateSession])
+  }, [])
   
   const uploadBiochemistryFile = useCallback(async (
     file: File,
     description?: string
   ) => {
-    if (!currentSession) throw new Error('No active session')
-    
+    // Get fresh session state to avoid closure issues
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+
+    // Ensure session exists first
+    await ensureSession()
+
     const formData = new FormData()
     formData.append('file', file)
     if (description) {
       formData.append('description', description)
     }
-    
+
     const response = await fetch(
-      `${API_BASE}/session/${currentSession.id}/upload/biochemistry`,
+      `${API_BASE}/session/${session.id}/upload/biochemistry`,
       {
         method: 'POST',
         body: formData,
       }
     )
-    
+
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: 'Upload failed' }))
       throw new Error(error.detail || 'Upload failed')
     }
-    
+
     const data = await response.json()
-    
+
     // Get latest session state to avoid closure issues
     const latestSession = useAppStore.getState().currentSession
     const existingFiles = latestSession?.biochemistryFiles || []
-    
+
     const newFile = {
       id: data.data.file_id,
       filename: file.name,
       fileType: data.data.file_type as 'image' | 'file',
     }
-    
+
     // Update session with new file using store's method directly
     useAppStore.getState().updateSession({
       biochemistryFiles: [...existingFiles, newFile],
     })
-    
+
     return data
-  }, [currentSession])
+  }, [ensureSession])
   
   const startAnalysis = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
@@ -402,7 +469,7 @@ export function useSession() {
     const { models, prompts, temperatures } = useAppStore.getState()
     
     // Sync all models to backend before starting
-    for (const agent of ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature'] as const) {
+    for (const agent of ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature', 'painter'] as const) {
       try {
         await apiFetch(`/session/${currentSession.id}/models`, {
           method: 'POST',
@@ -418,7 +485,7 @@ export function useSession() {
     }
     
     // Sync all prompts to backend before starting
-    for (const agent of ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature'] as const) {
+    for (const agent of ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature', 'painter'] as const) {
       try {
         await apiFetch(`/session/${currentSession.id}/prompts`, {
           method: 'POST',
@@ -434,7 +501,7 @@ export function useSession() {
     }
     
     // Sync all temperatures to backend before starting
-    for (const agent of ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature'] as const) {
+    for (const agent of ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature', 'painter'] as const) {
       try {
         await apiFetch(`/session/${currentSession.id}/temperatures`, {
           method: 'POST',
@@ -609,11 +676,12 @@ export function useSession() {
 
 // WebSocket hook
 export function useWebSocket() {
-  const { currentSession, addMessage, updateSession, setWsConnected } = useAppStore()
+  const { currentSession, addMessage, updateSession, setWsConnected, setMessages, addAgentError, setStateVersion } = useAppStore()
   const wsRef = useRef<WebSocket | null>(null)
   const connectingRef = useRef<boolean>(false)  // Prevent multiple simultaneous connect attempts
+  const reconnectCountRef = useRef<number>(0)  // Track reconnection attempts for history recovery
   const [connected, setConnected] = useState(false)
-  
+
   // Generate UUID compatible with all browsers (including non-HTTPS)
   const generateId = () => {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -622,13 +690,13 @@ export function useWebSocket() {
       return v.toString(16)
     })
   }
-  
+
   const connect = useCallback(() => {
     if (!currentSession) {
       console.log('WebSocket: No current session, skipping connect')
       return
     }
-    
+
     // Check all connection states
     if (wsRef.current) {
       const state = wsRef.current.readyState
@@ -639,47 +707,171 @@ export function useWebSocket() {
       // If CLOSING or CLOSED, clear the ref
       wsRef.current = null
     }
-    
+
     if (connectingRef.current) {
       console.log('WebSocket: Connection already in progress, skipping')
       return
     }
-    
+
     connectingRef.current = true
-    
+    const isReconnect = reconnectCountRef.current > 0
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}/ws/${currentSession.id}`
-    
-    console.log(`WebSocket: Connecting to ${wsUrl}`)
-    
+
+    console.log(`WebSocket: Connecting to ${wsUrl}${isReconnect ? ' (reconnect #' + reconnectCountRef.current + ')' : ''}`)
+
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
-    
-    ws.onopen = () => {
+
+    ws.onopen = async () => {
       connectingRef.current = false
       setConnected(true)
       setWsConnected(true)
       console.log('WebSocket: Connected successfully')
+
+      // On reconnect, restore message history from server
+      if (isReconnect && currentSession) {
+        try {
+          console.log('WebSocket: Reconnect detected, loading message history...')
+          // Mark that we're loading history to prevent race conditions
+          const loadingSessionId = currentSession.id
+          const response = await fetch(`${API_BASE}/session/${currentSession.id}/load`)
+
+          // Verify session hasn't changed during fetch (race condition protection)
+          const currentState = useAppStore.getState()
+          if (currentState.currentSession?.id !== loadingSessionId) {
+            console.log('WebSocket: Session changed during reconnect, skipping history merge')
+            reconnectCountRef.current = 0
+            return
+          }
+
+          if (response.ok) {
+            const data = await response.json()
+
+            if (data.messages && Array.isArray(data.messages)) {
+              // Get current local messages
+              const localMessages = currentState.messages
+
+              // Convert server messages to frontend format
+              const serverMessages: Message[] = data.messages.map((msg: any) => ({
+                id: msg.id || generateId(),
+                type: msg.type || 'message',
+                agent: msg.agent as AgentType | undefined,
+                content: msg.content,
+                timestamp: msg.timestamp || new Date().toISOString(),
+              }))
+
+              // Create composite key for robust deduplication (handles ID regeneration on server restart)
+              // Include content fingerprint to avoid collision when same agent/type/timestamp
+              const createMsgKey = (m: Message) => {
+                const contentStr = typeof m.content === 'string'
+                  ? m.content.slice(0, 50)
+                  : JSON.stringify(m.content).slice(0, 50)
+                return `${m.agent || 'system'}-${m.type}-${m.timestamp}-${contentStr.length}`
+              }
+              const serverMsgKeySet = new Set(serverMessages.map(createMsgKey))
+              const serverMsgIdSet = new Set(serverMessages.map(m => m.id))
+
+              // Filter local messages that don't exist on server (by composite key OR id)
+              const localOnlyMessages = localMessages.filter(m =>
+                !serverMsgIdSet.has(m.id) && !serverMsgKeySet.has(createMsgKey(m))
+              )
+
+              // Combine and sort by timestamp
+              const mergedMessages = [...serverMessages, ...localOnlyMessages]
+                .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+
+              setMessages(mergedMessages)
+              console.log(`WebSocket: Restored ${serverMessages.length} messages, merged ${localOnlyMessages.length} local-only`)
+            }
+
+            // Also restore agent errors if present
+            if (data.agent_errors && Array.isArray(data.agent_errors)) {
+              useAppStore.getState().clearAgentErrors()
+              for (const err of data.agent_errors) {
+                if (!err.resolved) {
+                  useAppStore.getState().addAgentError({
+                    id: err.id,
+                    agent: err.agent,
+                    errorType: err.error_type,
+                    message: err.message,
+                    details: err.details,
+                    round: err.round_number,
+                    timestamp: err.timestamp,
+                    resolved: false
+                  })
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error('WebSocket: Failed to restore message history:', e)
+        }
+      }
+
+      // Reset reconnect count on successful connection
+      reconnectCountRef.current = 0
     }
     
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
-        
+
         // Skip error messages that indicate session/config issues
         if (data.error) {
           console.error('WebSocket: Server error:', data.error)
           return
         }
-        
+
+        // Handle state_sync messages - version control and state synchronization
+        if (data.type === 'state_sync') {
+          const syncContent = data.content
+          const currentVersion = useAppStore.getState().stateVersion
+
+          // Check for version conflict
+          if (syncContent.version < currentVersion) {
+            console.warn('WebSocket: Received outdated state sync, current:', currentVersion, 'received:', syncContent.version)
+            // Could trigger full state reload here if needed
+          } else {
+            // Update state version and session status
+            setStateVersion(syncContent.version)
+            updateSession({
+              status: syncContent.status,
+              currentRound: syncContent.current_round
+            })
+          }
+          return  // Don't add state_sync to message stream
+        }
+
+        // Handle parallel_errors messages - structured error tracking
+        if (data.type === 'parallel_errors') {
+          const errorContent = data.content
+          if (errorContent.errors && Array.isArray(errorContent.errors)) {
+            for (const err of errorContent.errors) {
+              addAgentError({
+                id: err.id,
+                agent: err.agent as AgentType,
+                errorType: err.error_type || 'execution_error',
+                message: err.message,
+                details: err.details,
+                round: err.round,
+                timestamp: data.timestamp || new Date().toISOString(),
+                resolved: false
+              })
+            }
+          }
+          // Also add to message stream for visibility
+        }
+
         const message: Message = {
-          id: generateId(),
+          id: data.id || generateId(),
           type: data.type || 'message',
           agent: data.agent as AgentType | undefined,
           content: data.content,
           timestamp: data.timestamp || new Date().toISOString(),
         }
-        
+
         addMessage(message)
         
         // Update session status based on message
@@ -709,6 +901,42 @@ export function useWebSocket() {
         if (data.type === 'result' && data.content?.round) {
           updateSession({ currentRound: data.content.round })
         }
+
+        // Handle round_summary messages to update roundResults
+        if (data.type === 'round_summary' && data.content) {
+          const roundData = data.content
+          const latestSession = useAppStore.getState().currentSession
+          if (latestSession) {
+            const existingRounds = latestSession.roundResults || []
+            // Check if this round already exists
+            const existingIndex = existingRounds.findIndex((r: any) => r.round === roundData.round)
+
+            const newRoundResult = {
+              round: roundData.round,
+              summary: roundData.summary || '',
+              pathologyFindings: roundData.pathology_findings || [],
+              bioinformaticsFindings: roundData.bioinformatics_findings || [],
+              biochemistryFindings: roundData.biochemistry_findings || [],
+              literatureFindings: roundData.literature_findings || [],
+            }
+
+            let updatedRounds
+            if (existingIndex >= 0) {
+              // Update existing round
+              updatedRounds = [...existingRounds]
+              updatedRounds[existingIndex] = newRoundResult
+            } else {
+              // Add new round
+              updatedRounds = [...existingRounds, newRoundResult]
+            }
+
+            updateSession({
+              roundResults: updatedRounds,
+              currentRound: roundData.round,
+              status: roundData.status === 'waiting_input' ? 'waiting_input' : latestSession.status,
+            })
+          }
+        }
       } catch (e) {
         console.error('WebSocket: Failed to parse message:', e)
       }
@@ -724,9 +952,36 @@ export function useWebSocket() {
       setConnected(false)
       setWsConnected(false)
       wsRef.current = null
+      reconnectCountRef.current += 1  // Track reconnect for history recovery
       console.log('WebSocket: Disconnected, code:', event.code, 'reason:', event.reason)
+
+      // Auto-reconnect if session is still running (not manually disconnected)
+      const latestSession = useAppStore.getState().currentSession
+      if (latestSession &&
+          (latestSession.status === 'running' || latestSession.status === 'waiting_input') &&
+          event.code !== 1000) {  // Not a normal close
+        if (reconnectCountRef.current < 5) {  // Max 5 reconnect attempts
+          const delay = Math.min(1000 * Math.pow(2, reconnectCountRef.current - 1), 10000)  // Exponential backoff, max 10s
+          console.log(`WebSocket: Auto-reconnecting in ${delay}ms (attempt ${reconnectCountRef.current})...`)
+          setTimeout(() => {
+            if (!wsRef.current && !connectingRef.current) {
+              connect()
+            }
+          }, delay)
+        } else {
+          // Max reconnect attempts reached - notify user
+          console.error('WebSocket: Max reconnection attempts reached, giving up')
+          addMessage({
+            id: `ws-error-${Date.now()}`,
+            type: 'error',
+            agent: undefined,
+            content: 'WebSocket connection lost. Please refresh the page or click reconnect.',
+            timestamp: new Date().toISOString()
+          })
+        }
+      }
     }
-  }, [currentSession, addMessage, updateSession, setWsConnected])
+  }, [currentSession, addMessage, updateSession, setWsConnected, setMessages, addAgentError, setStateVersion])
   
   const disconnect = useCallback(() => {
     if (wsRef.current) {

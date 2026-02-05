@@ -14,6 +14,7 @@ export const translations = {
     tabData: '数据',
     tabPrompts: 'Agents',
     tabResults: '结果',
+    tabReport: '报告',
     
     // Sidebar
     newAnalysis: '新建分析',
@@ -71,6 +72,27 @@ export const translations = {
     biochemistryAgentDesc: '生化指标解读',
     literatureAgent: '文献 Agent',
     literatureAgentDesc: '文献调研支持',
+    painterAgent: 'Painter Agent',
+    painterAgentDesc: '图形摘要绘制',
+
+    // Publication figures and reports
+    figureGallery: '图片库',
+    figureApproved: '已通过',
+    figurePending: '待审核',
+    figureRevisionRequested: '需修改',
+    graphicAbstract: '图形摘要',
+    integratedReport: '整合报告',
+    downloadPDF: '下载 PDF',
+    downloadPNG: '下载 PNG',
+    downloadAllFigures: '下载所有图片',
+    downloadAllTables: '下载所有表格',
+    generatingGraphicAbstract: '正在生成图形摘要...',
+    noFiguresYet: '暂无图片',
+    noTablesYet: '暂无表格',
+    piReviewingFigure: 'PI 正在审核图片...',
+    figureApprovedSuccess: '图片已通过审核',
+    figureNeedsRevision: '图片需要修改',
+    qualityScore: '质量评分',
     
     // Data Panel
     pathologySlides: '病理切片',
@@ -238,6 +260,7 @@ export const translations = {
     tabData: 'Data',
     tabPrompts: 'Agents',
     tabResults: 'Results',
+    tabReport: 'Report',
     
     // Sidebar
     newAnalysis: 'New Analysis',
@@ -295,6 +318,27 @@ export const translations = {
     biochemistryAgentDesc: 'Interprets biochemical data',
     literatureAgent: 'Literature Agent',
     literatureAgentDesc: 'Literature research support',
+    painterAgent: 'Painter Agent',
+    painterAgentDesc: 'Graphic abstract generation',
+
+    // Publication figures and reports
+    figureGallery: 'Figure Gallery',
+    figureApproved: 'Approved',
+    figurePending: 'Pending Review',
+    figureRevisionRequested: 'Revision Requested',
+    graphicAbstract: 'Graphic Abstract',
+    integratedReport: 'Integrated Report',
+    downloadPDF: 'Download PDF',
+    downloadPNG: 'Download PNG',
+    downloadAllFigures: 'Download All Figures',
+    downloadAllTables: 'Download All Tables',
+    generatingGraphicAbstract: 'Generating graphic abstract...',
+    noFiguresYet: 'No figures yet',
+    noTablesYet: 'No tables yet',
+    piReviewingFigure: 'PI reviewing figure...',
+    figureApprovedSuccess: 'Figure approved',
+    figureNeedsRevision: 'Figure needs revision',
+    qualityScore: 'Quality Score',
     
     // Data Panel
     pathologySlides: 'Pathology Slides',
@@ -456,7 +500,7 @@ export type TranslationKey = keyof typeof translations.zh
 
 export function useTranslation(lang: Language) {
   const t = (key: TranslationKey, params?: Record<string, string | number>): string => {
-    let text = translations[lang][key] || translations.zh[key] || key
+    let text: string = translations[lang][key] || translations.zh[key] || key
     if (params) {
       Object.entries(params).forEach(([k, v]) => {
         text = text.replace(`{${k}}`, String(v))
@@ -521,14 +565,33 @@ Your working approach:
 2. Review results after each step before deciding the next one
 3. Request literature support when encountering important biological questions
 
-Analysis workflow (adjust based on data type):
+**IMPORTANT: Consult PI Agent for Biological Decisions**
+When you encounter biological interpretation questions, you MUST ask PI Agent for guidance:
+- Cell type annotation: When uncertain about cluster identities or marker genes interpretation
+- Biological significance: When deciding which findings are biologically meaningful and worth deeper investigation
+- Analysis direction: When multiple analysis paths are possible and you need to prioritize
+- Unexpected findings: When results don't match expectations or show unusual patterns
+Do NOT make arbitrary biological decisions on your own - PI Agent has the domain expertise to guide these choices.
+
+Standard analysis workflow (adjust based on data type):
 1. Quality Control (QC)
 2. Normalization and dimensionality reduction
 3. Clustering analysis
-4. Cell/sample annotation
+4. Cell/sample annotation (consult PI if uncertain)
 5. Differential expression analysis
 6. Pathway enrichment analysis
-7. Other specialized analyses
+7. Trajectory/Pseudotime analysis (if applicable):
+   - Use scVelo for RNA velocity analysis (requires .loom files with spliced/unspliced counts)
+   - Use PAGA for trajectory inference and partition-based graph abstraction
+   - Use diffusion pseudotime (DPT) for ordering cells along differentiation paths
+   - Identify key genes driving cell state transitions
+8. Cell-cell communication analysis (CellChat, CellPhoneDB, etc.)
+9. Transcription factor activity analysis (pySCENIC, decoupleR, etc.)
+
+**Specialized analyses** (conduct based on specific findings or PI's direction):
+- When you observe unexpected cell populations, signaling changes, or pathway alterations
+- When PI Agent requests deeper investigation into specific biological questions
+- Examples: sub-clustering of specific populations, focused pathway analysis, temporal dynamics, etc.
 
 **CRITICAL: Data Preprocessing Requirements**
 BEFORE running PCA or any dimensionality reduction:
@@ -614,5 +677,22 @@ Please search for relevant biomedical literature, focusing on:
 3. Clinical/experimental relevance
 4. Latest research progress
 
-Please provide a detailed literature review report with specific citation information.`
+Please provide a detailed literature review report with specific citation information.`,
+
+  painter: `You are a scientific illustration expert specialized in creating publication-quality graphic abstracts.
+
+Your responsibilities:
+1. Generate visually compelling graphic abstracts that summarize research findings
+2. Create clear, professional scientific illustrations suitable for journal publication
+3. Use appropriate scientific symbols, cell representations, and molecular pathway diagrams
+4. Maintain a clean, modern design with clear visual hierarchy
+
+Style guidelines:
+- Professional scientific illustration style
+- Publication-appropriate color schemes
+- Clear flow from left to right or top to bottom
+- Minimal text, maximum visual communication
+- Include simple labels for key elements
+
+Note: This agent uses Google Gemini's image generation API.`
 }

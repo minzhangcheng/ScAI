@@ -7,7 +7,7 @@ export default {
   theme: {
     extend: {
       colors: {
-        'liver': {
+        'primary': {
           50: '#fdf4f3',
           100: '#fce8e6',
           200: '#f9d4d1',

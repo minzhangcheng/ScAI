@@ -16,20 +16,21 @@ import {
   FileText,
   Settings,
   BarChart3,
+  FileBarChart,
   Menu,
   X,
   Wifi,
   WifiOff,
-  FileSpreadsheet,
   GripVertical
 } from 'lucide-react'
 
 function App() {
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth } = useAppStore()
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback } = useAppStore()
   const { checkStatus } = useConfig()
   const { connect, connected } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
+  const [configSkipped, setConfigSkipped] = useState(false)
   const { t } = useTranslation(language)
 
   // Resizable panel state
@@ -84,15 +85,31 @@ function App() {
     })
   }, [checkStatus])
 
-  // Auto-reconnect WebSocket if session is running (with debounce to prevent race conditions)
+  // Register the showConfigPanel callback for other components (e.g., AnalysisPanel)
+  useEffect(() => {
+    setShowConfigPanelCallback(() => setShowConfig(true))
+    return () => setShowConfigPanelCallback(null)
+  }, [setShowConfigPanelCallback])
+
+  // Auto-reconnect WebSocket if session is running (with exponential backoff)
+  const reconnectAttemptRef = useRef(0)
+  const maxReconnectDelay = 30000 // Max 30 seconds between attempts
+
   useEffect(() => {
     if (currentSession && currentSession.status === 'running' && !connected && !wsConnected) {
-      // Debounce to let initial connection complete
+      // Calculate delay with exponential backoff: 1s, 2s, 4s, 8s... up to maxReconnectDelay
+      const baseDelay = 1000
+      const delay = Math.min(baseDelay * Math.pow(2, reconnectAttemptRef.current), maxReconnectDelay)
+
       const timer = setTimeout(() => {
-        console.log('App: Session is running but not connected, attempting reconnect...')
+        console.log(`App: Session is running but not connected, attempting reconnect (attempt ${reconnectAttemptRef.current + 1}, delay ${delay}ms)...`)
+        reconnectAttemptRef.current += 1
         connect()
-      }, 1000)
+      }, delay)
       return () => clearTimeout(timer)
+    } else if (connected || wsConnected) {
+      // Reset reconnect attempts on successful connection
+      reconnectAttemptRef.current = 0
     }
   }, [currentSession?.id, currentSession?.status, connected, wsConnected, connect])
 
@@ -109,20 +126,25 @@ function App() {
     { id: 'prompts', label: t('tabPrompts'), icon: Settings },
     { id: 'analysis', label: t('tabAnalysis'), icon: Beaker },
     { id: 'results', label: t('tabResults'), icon: BarChart3 },
-    { id: 'report', label: language === 'zh' ? '报告' : 'Report', icon: FileSpreadsheet },
+    { id: 'report', label: t('tabReport'), icon: FileBarChart },
   ] as const
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-50">
       {/* Config Modal */}
       {showConfig && (
-        <ConfigPanel 
+        <ConfigPanel
           onClose={() => {
-            if (configured) setShowConfig(false)
+            if (configured || configSkipped) setShowConfig(false)
           }}
           onSave={() => {
             setConfigured(true)
+            setConfigSkipped(false)
             setShowConfig(false)
+          }}
+          allowSkip={!configured}
+          onSkip={() => {
+            setConfigSkipped(true)
           }}
         />
       )}
@@ -201,14 +223,24 @@ function App() {
           <div ref={containerRef} className="flex-1 flex overflow-hidden">
             {/* Left Panel - Tab Content */}
             <div
-              className="overflow-auto p-6"
+              className="flex flex-col"
               style={{ width: currentSession ? `${100 - messagePanelWidth}%` : '100%' }}
             >
-              {activeTab === 'analysis' && <AnalysisPanel />}
-              {activeTab === 'data' && <DataPanel />}
-              {activeTab === 'prompts' && <PromptsPanel />}
-              {activeTab === 'results' && <ResultsPanel />}
-              {activeTab === 'report' && <ReportPanel />}
+              <div className="flex-1 overflow-auto p-6" style={{ display: activeTab === 'analysis' ? 'block' : 'none' }}>
+                <AnalysisPanel />
+              </div>
+              <div className="flex-1 overflow-auto p-6" style={{ display: activeTab === 'data' ? 'block' : 'none' }}>
+                <DataPanel />
+              </div>
+              <div className="flex-1 overflow-auto p-6" style={{ display: activeTab === 'prompts' ? 'block' : 'none' }}>
+                <PromptsPanel />
+              </div>
+              <div className="flex-1 overflow-auto p-6" style={{ display: activeTab === 'results' ? 'block' : 'none' }}>
+                <ResultsPanel />
+              </div>
+              <div className="flex-1 flex flex-col min-h-0" style={{ display: activeTab === 'report' ? 'flex' : 'none' }}>
+                <ReportPanel />
+              </div>
             </div>
 
             {/* Resizable Divider */}

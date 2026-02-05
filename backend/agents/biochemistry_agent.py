@@ -34,7 +34,7 @@ class BiochemistryAgent(BaseAgent):
         # General metabolic markers
         "Glucose": {"min": 70, "max": 110, "unit": "mg/dL", "name": "Blood Glucose"},
         "Lactate": {"min": 0.5, "max": 2.2, "unit": "mmol/L", "name": "Lactate"},
-        # Liver function (if applicable)
+        # Tissue function markers (context-dependent)
         "ALT": {"min": 20, "max": 60, "unit": "U/L", "name": "Alanine Aminotransferase"},
         "AST": {"min": 50, "max": 150, "unit": "U/L", "name": "Aspartate Aminotransferase"},
         "ALP": {"min": 40, "max": 150, "unit": "U/L", "name": "Alkaline Phosphatase"},
@@ -54,13 +54,16 @@ class BiochemistryAgent(BaseAgent):
         self,
         llm_client: OpenAICompatibleClient,
         model: str,
-        system_prompt: str
+        system_prompt: str,
+        config: Optional['AgentConfig'] = None
     ):
+        from .base import AgentConfig
         super().__init__(
             agent_type=AgentType.BIOCHEMISTRY,
             llm_client=llm_client,
             model=model,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            config=config or AgentConfig()
         )
         
     async def process(
@@ -86,12 +89,20 @@ class BiochemistryAgent(BaseAgent):
                         # Add extracted results to state
                         if extracted and "results" in extracted:
                             for r in extracted["results"]:
-                                await self.add_result(
-                                    indicator=r.get("indicator", "Unknown"),
-                                    value=float(r.get("value", 0)),
-                                    unit=r.get("unit", ""),
-                                    state=state
-                                )
+                                try:
+                                    value = float(r.get("value", 0))
+                                    # Validate the value is a real number
+                                    if not (value == value and value not in (float('inf'), float('-inf'))):
+                                        logger.warning(f"Invalid value for {r.get('indicator')}: {r.get('value')}, using 0")
+                                        value = 0.0
+                                    await self.add_result(
+                                        indicator=r.get("indicator", "Unknown"),
+                                        value=value,
+                                        unit=r.get("unit", ""),
+                                        state=state
+                                    )
+                                except (ValueError, TypeError) as e:
+                                    logger.warning(f"Failed to convert value for {r.get('indicator')}: {r.get('value')} - {e}")
                     except Exception as e:
                         logger.error(f"Failed to process biochemistry file {bio_file.filename}: {e}")
                         bio_file.extracted_data = {"error": str(e)}
@@ -132,14 +143,24 @@ class BiochemistryAgent(BaseAgent):
     
     async def _extract_from_image(self, bio_file: BiochemistryFile) -> Dict[str, Any]:
         """Extract biochemistry data from an image using vision model"""
-        
+
         if not os.path.exists(bio_file.file_path):
             return {"error": f"File not found: {bio_file.file_path}"}
-        
-        # Read and encode image
-        with open(bio_file.file_path, "rb") as f:
-            image_data = base64.b64encode(f.read()).decode("utf-8")
-        
+
+        # Use image_utils to load and preprocess image (same as PathologyAgent)
+        # This ensures the image is properly resized to avoid API issues with large images
+        from ..utils.image_utils import load_image, create_overview_image
+
+        try:
+            # Load image with PIL and create a properly sized version
+            img = load_image(bio_file.file_path)
+            # Use create_overview_image to resize (max 1536px for better text readability) and encode to base64
+            image_data = create_overview_image(img, max_size=1536)
+            logger.info(f"[BiochemistryAgent] Preprocessed image {bio_file.filename}: original {img.size}, resized for API")
+        except Exception as e:
+            logger.error(f"[BiochemistryAgent] Failed to load/process image {bio_file.file_path}: {e}")
+            return {"error": f"Image processing failed: {str(e)}", "results": []}
+
         # Set LLM context
         self._set_llm_context()
         
@@ -312,19 +333,37 @@ Notes:
         # Parse response
         results = []
         try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response)
             if json_match:
                 data = json.loads(json_match.group())
                 for item in data.get("results", []):
+                    # Safe access with .get() to avoid KeyError
+                    indicator = item.get("indicator")
+                    value = item.get("value")
+                    unit = item.get("unit", "")
+
+                    if indicator is None or value is None:
+                        logger.warning(f"Skipping incomplete result item: {item}")
+                        continue
+
+                    try:
+                        value = float(value)
+                        if not (value == value and value not in (float('inf'), float('-inf'))):
+                            logger.warning(f"Invalid value for {indicator}: {item.get('value')}, skipping")
+                            continue
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Failed to convert value for {indicator}: {value} - {e}")
+                        continue
+
                     result = await self.add_result(
-                        item["indicator"],
-                        item["value"],
-                        item["unit"],
+                        indicator,
+                        value,
+                        unit,
                         state
                     )
                     results.append(result)
-        except (json.JSONDecodeError, KeyError):
-            pass
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON from response: {e}")
         
         return results
     
@@ -388,25 +427,15 @@ Reply in JSON format:
 """
         
         response = await self.chat(prompt, temperature=0.3)
-        
-        try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                data = json.loads(json_match.group())
-                return {
-                    "findings": data.get("findings", []),
-                    "abnormal_markers": abnormal_markers,
-                    "mechanisms": data.get("mechanisms", []),
-                    "suggested_experiments": data.get("suggested_experiments", [])
-                }
-        except json.JSONDecodeError:
-            pass
-        
+
+        # Use the safer JSON extraction
+        data = self._parse_json_response(response)
+
         return {
-            "findings": [],
+            "findings": data.get("findings", []),
             "abnormal_markers": abnormal_markers,
-            "mechanisms": [],
-            "suggested_experiments": []
+            "mechanisms": data.get("mechanisms", []),
+            "suggested_experiments": data.get("suggested_experiments", [])
         }
     
     async def _generate_interpretation(
@@ -458,17 +487,18 @@ Please generate a concise comprehensive interpretation (2-3 paragraphs), focusin
     
     async def correlate_with_pathology(
         self,
-        pathology_findings: List[str]
+        pathology_findings: List[str],
+        state: AnalysisState
     ) -> Dict[str, Any]:
         """Correlate biochemistry results with pathology findings"""
-        
+
         prompt = f"""
 Pathology findings:
 {json.dumps(pathology_findings, ensure_ascii=False)}
 
 Biochemistry results:
-{json.dumps([{"indicator": r.indicator, "value": r.value, "interpretation": r.interpretation} 
-             for r in self.current_results], ensure_ascii=False)}
+{json.dumps([{"indicator": r.indicator, "value": r.value, "interpretation": r.interpretation}
+             for r in state.biochemistry_results], ensure_ascii=False)}
 
 Please analyze the consistency between pathology and biochemistry findings:
 1. Which findings corroborate each other
@@ -482,15 +512,32 @@ Reply in JSON format.
         return self._parse_json_response(response)
     
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
-        """Parse JSON from response"""
+        """Parse JSON from response using non-greedy extraction"""
         # Handle None or empty response
         if not response:
             return {"raw_response": "", "error": "Empty response from LLM"}
-        
+
         try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
+            # Try to find balanced JSON object (handles nested objects)
+            # Find the first { and then count brackets to find matching }
+            start = response.find('{')
+            if start == -1:
+                return {"raw_response": response}
+
+            depth = 0
+            end = start
+            for i, c in enumerate(response[start:], start):
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+
+            if depth == 0 and end > start:
+                json_str = response[start:end]
+                return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON from response: {e}")
         return {"raw_response": response}

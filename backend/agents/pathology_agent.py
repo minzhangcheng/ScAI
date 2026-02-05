@@ -36,13 +36,16 @@ class PathologyAgent(BaseAgent):
         model: str,
         system_prompt: str,
         tile_size: int = 1024,
-        max_tiles: int = 50
+        max_tiles: int = 50,
+        config: Optional['AgentConfig'] = None
     ):
+        from .base import AgentConfig
         super().__init__(
             agent_type=AgentType.PATHOLOGY,
             llm_client=llm_client,
             model=model,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            config=config or AgentConfig()
         )
         self.tile_size = tile_size
         self.max_tiles = max_tiles
@@ -259,11 +262,13 @@ Be concise but thorough for each tile.
                             "findings": batch_content or "No findings"
                         })
                 except Exception as e:
-                    # If parsing fails, store raw content
+                    # If parsing fails, log warning and store error info
+                    logger.warning(f"[PathologyAgent] Failed to parse batch {batch_num} response: {e}")
                     tile_findings.append({
                         "tile_index": start_idx,
-                        "findings": batch_content or "Analysis failed",
-                        "parse_error": str(e)
+                        "findings": batch_content[:500] if batch_content else "Analysis failed",
+                        "parse_error": str(e),
+                        "is_error": True
                     })
             
             logger.info(f"[PathologyAgent] All batches complete, synthesizing findings...")

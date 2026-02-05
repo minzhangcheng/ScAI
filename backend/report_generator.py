@@ -1188,7 +1188,7 @@ print("Data loader ready. Use load_data(file_path) to load data files.")
             "annotated_adata.h5ad",      # Best: has cell type annotations
             "processed_adata_markers.h5ad",  # Has marker genes
             "processed_adata.h5ad",      # Basic processed
-            "hepatocytes_subset_scored.h5ad",  # Subset with scores
+            "subset_scored.h5ad",        # Subset with scores
         ]
 
         # Find available processed files
