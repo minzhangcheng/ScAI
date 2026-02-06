@@ -200,6 +200,9 @@ class AnalysisState(BaseModel):
     
     # Agent messages history
     messages: List[AgentMessage] = Field(default_factory=list)
+
+    # Realtime messages for WebSocket (persisted for session restoration)
+    realtime_messages: List["WebSocketMessage"] = Field(default_factory=list)
     
     # Code execution history (for reproducibility)
     code_history: List[CodeExecution] = Field(default_factory=list)

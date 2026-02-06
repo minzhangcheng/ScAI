@@ -143,7 +143,7 @@ export interface AgentTemperatures {
 export const DEFAULT_MODELS: AgentModels = {
   pi: 'google/gemini-3-pro-preview',
   pathology: 'google/gemini-3-pro-preview',
-  bioinformatics: 'anthropic/claude-opus-4.5',
+  bioinformatics: 'anthropic/claude-opus-4.6',
   biochemistry: 'google/gemini-3-pro-preview',
   literature: 'google/gemini-3-pro-preview',
   painter: 'google/gemini-3-pro-image-preview'  // Image generation model via OpenRouter
@@ -368,7 +368,7 @@ export const useAppStore = create<AppState>()(
         messagePanelWidth: state.messagePanelWidth,
         // Persist session and messages for page refresh recovery
         currentSession: state.currentSession,
-        messages: state.messages.slice(-200), // Keep last 200 messages
+        messages: state.messages, // Keep all messages (no limit)
       })
     }
   )

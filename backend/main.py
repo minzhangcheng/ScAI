@@ -458,16 +458,16 @@ async def load_session(session_id: str):
             for r in state.round_results
         ],
         "final_summary": state.final_summary,
-        # Messages history (realtime messages)
+        # Messages history (realtime WebSocket messages for UI restoration)
         "messages": [
             {
-                "agent": msg.agent.value if hasattr(msg.agent, 'value') else str(msg.agent),
-                "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role),
+                "id": msg.id,
+                "type": msg.type,
+                "agent": msg.agent.value if hasattr(msg.agent, 'value') else (str(msg.agent) if msg.agent else None),
                 "content": msg.content,
                 "timestamp": msg.timestamp.isoformat() if msg.timestamp else "",
-                "metadata": msg.metadata
             }
-            for msg in state.messages
+            for msg in state.realtime_messages
         ],
         # Custom settings
         "custom_prompts": state.custom_prompts,
@@ -1635,6 +1635,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     async def message_callback(msg: WebSocketMessage):
         nonlocal ws_closed
 
+        # Save message to state.realtime_messages for session restoration
+        state.realtime_messages.append(msg)
+
         msg_data = {
             "type": msg.type,
             "agent": msg.agent.value if msg.agent else None,
@@ -1897,7 +1900,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     
     # Get models from state or use defaults
     pi_model = state.custom_models.get("pi", "google/gemini-2.5-pro-preview-05-06")
-    bio_model = state.custom_models.get("bioinformatics", "anthropic/claude-sonnet-4")
+    bio_model = state.custom_models.get("bioinformatics", "anthropic/claude-opus-4.6")
     
     try:
         generator = DetailedReportGenerator(

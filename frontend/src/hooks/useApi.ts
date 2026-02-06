@@ -191,14 +191,14 @@ export function useSession() {
         }
       }
       
-      // Load messages history
+      // Load realtime messages history (WebSocket messages)
       if (data.messages && Array.isArray(data.messages)) {
-        const messages = data.messages.map((msg: any) => ({
-          agent: msg.agent,
-          role: msg.role,
+        const messages: Message[] = data.messages.map((msg: any) => ({
+          id: msg.id || crypto.randomUUID(),
+          type: msg.type || 'message',
+          agent: msg.agent as AgentType | undefined,
           content: msg.content,
-          timestamp: msg.timestamp,
-          metadata: msg.metadata || {}
+          timestamp: msg.timestamp || new Date().toISOString(),
         }))
         setMessages(messages)
       } else {

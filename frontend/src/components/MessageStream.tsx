@@ -100,7 +100,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
       case 'status':
         return (
           <div className="flex items-center gap-2 text-sm text-slate-600">
-            <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+            <CheckCircle2 className="w-4 h-4 text-blue-500" />
             <span>{typeof message.content === 'string' ? message.content : JSON.stringify(message.content)}</span>
           </div>
         )
@@ -308,7 +308,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
         // 进度更新
         return (
           <div className="flex items-center gap-2 text-sm text-blue-600">
-            <Loader2 className="w-4 h-4 animate-spin" />
+            <CheckCircle2 className="w-4 h-4" />
             <span>{typeof message.content === 'string' ? message.content : `${message.content}%`}</span>
           </div>
         )
@@ -614,17 +614,40 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
          prevProps.language === nextProps.language
 })
 
-const VISIBLE_MESSAGE_LIMIT = 100
+const COLLAPSED_MESSAGE_THRESHOLD = 20  // Only expand recent 20 messages
 
 export function MessageStream() {
   const { messages, language } = useAppStore()
   const containerRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
+  const [showCollapsed, setShowCollapsed] = useState(false)
+  const [agentFilter, setAgentFilter] = useState<AgentType | 'all'>('all')
 
-  // Limit rendered messages for performance
-  const visibleMessages = useMemo(() => {
-    if (messages.length <= VISIBLE_MESSAGE_LIMIT) return messages
-    return messages.slice(-VISIBLE_MESSAGE_LIMIT)
+  // Filter messages by agent
+  const filteredMessages = useMemo(() => {
+    if (agentFilter === 'all') return messages
+    return messages.filter(msg => msg.agent === agentFilter || !msg.agent)
+  }, [messages, agentFilter])
+
+  // Split messages into collapsed (older) and visible (recent 20)
+  const { collapsedMessages, visibleMessages } = useMemo(() => {
+    if (filteredMessages.length <= COLLAPSED_MESSAGE_THRESHOLD) {
+      return { collapsedMessages: [], visibleMessages: filteredMessages }
+    }
+    const splitIndex = filteredMessages.length - COLLAPSED_MESSAGE_THRESHOLD
+    return {
+      collapsedMessages: filteredMessages.slice(0, splitIndex),
+      visibleMessages: filteredMessages.slice(splitIndex)
+    }
+  }, [filteredMessages])
+
+  // Get unique agents from messages for filter dropdown
+  const availableAgents = useMemo(() => {
+    const agents = new Set<AgentType>()
+    messages.forEach(msg => {
+      if (msg.agent) agents.add(msg.agent)
+    })
+    return Array.from(agents)
   }, [messages])
 
   // Auto-scroll to bottom on new messages
@@ -657,6 +680,15 @@ export function MessageStream() {
     )
   }
 
+  const agentNames: Record<AgentType, string> = {
+    pi: 'PI Agent',
+    pathology: language === 'zh' ? '病理 Agent' : 'Pathology',
+    bioinformatics: language === 'zh' ? '生信 Agent' : 'Bioinformatics',
+    biochemistry: language === 'zh' ? '生化 Agent' : 'Biochemistry',
+    literature: language === 'zh' ? '文献 Agent' : 'Literature',
+    painter: 'Painter',
+  }
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Header */}
@@ -667,30 +699,77 @@ export function MessageStream() {
             {language === 'zh' ? '实时消息' : 'Real-time Messages'}
           </span>
           <span className="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">
-            {messages.length}
+            {filteredMessages.length}
           </span>
         </div>
-        {!autoScroll && (
-          <button
-            onClick={() => {
-              setAutoScroll(true)
-              if (containerRef.current) {
-                containerRef.current.scrollTop = containerRef.current.scrollHeight
-              }
-            }}
-            className="text-xs text-blue-600 hover:text-blue-700"
+        <div className="flex items-center gap-3">
+          {/* Agent Filter */}
+          <select
+            value={agentFilter}
+            onChange={(e) => setAgentFilter(e.target.value as AgentType | 'all')}
+            className="text-xs border border-slate-200 rounded px-2 py-1 bg-white text-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-400"
           >
-            {language === 'zh' ? '↓ 滚动到底部' : '↓ Scroll to bottom'}
-          </button>
-        )}
+            <option value="all">{language === 'zh' ? '全部 Agent' : 'All Agents'}</option>
+            {availableAgents.map(agent => (
+              <option key={agent} value={agent}>{agentNames[agent]}</option>
+            ))}
+          </select>
+          {!autoScroll && (
+            <button
+              onClick={() => {
+                setAutoScroll(true)
+                if (containerRef.current) {
+                  containerRef.current.scrollTop = containerRef.current.scrollHeight
+                }
+              }}
+              className="text-xs text-blue-600 hover:text-blue-700"
+            >
+              {language === 'zh' ? '↓ 滚动到底部' : '↓ Scroll to bottom'}
+            </button>
+          )}
+        </div>
       </div>
-      
+
       {/* Messages */}
       <div
         ref={containerRef}
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-100"
       >
+        {/* Collapsed older messages */}
+        {collapsedMessages.length > 0 && (
+          <div className="mb-2">
+            <button
+              onClick={() => setShowCollapsed(!showCollapsed)}
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-slate-200 hover:bg-slate-300 rounded-lg text-sm text-slate-600 transition-colors"
+            >
+              {showCollapsed ? (
+                <>
+                  <ChevronDown className="w-4 h-4" />
+                  {language === 'zh'
+                    ? `收起 ${collapsedMessages.length} 条旧消息`
+                    : `Hide ${collapsedMessages.length} older messages`}
+                </>
+              ) : (
+                <>
+                  <ChevronRight className="w-4 h-4" />
+                  {language === 'zh'
+                    ? `展开 ${collapsedMessages.length} 条旧消息`
+                    : `Show ${collapsedMessages.length} older messages`}
+                </>
+              )}
+            </button>
+            {showCollapsed && (
+              <div className="mt-2 space-y-2">
+                {collapsedMessages.map((msg) => (
+                  <MessageItem key={msg.id} message={msg} language={language} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Recent visible messages */}
         {visibleMessages.map((msg) => (
           <MessageItem key={msg.id} message={msg} language={language} />
         ))}
