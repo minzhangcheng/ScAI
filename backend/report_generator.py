@@ -10,7 +10,9 @@ Report Structure:
 import os
 import io
 import base64
+import html as html_module
 import json
+from urllib.parse import quote as url_quote
 import uuid
 import asyncio
 import logging
@@ -133,10 +135,51 @@ def categorize_figures(figures_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
     return categories
 
 
+def _safe_parse_json(response: str) -> Optional[dict]:
+    """Parse JSON from LLM response using balanced bracket matching (avoids greedy regex)."""
+    if not response:
+        return None
+    start = response.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    end = start
+    for i, c in enumerate(response[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if c == '\\' and in_string:
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if depth == 0 and end > start:
+        try:
+            return json.loads(response[start:end])
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 def markdown_to_html(text: str) -> str:
     """Convert basic markdown formatting to HTML"""
     if not text:
         return ""
+
+    # Escape HTML entities first to prevent XSS
+    text = html_module.escape(text)
 
     # Bold: **text** or __text__
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
@@ -828,9 +871,8 @@ Be strict but fair. For a publication-quality report:
         response = await self._pi_chat(prompt, temperature=0.3)
 
         try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                result = json.loads(json_match.group())
+            result = _safe_parse_json(response)
+            if result:
                 return {
                     "satisfied": result.get("satisfied", False),
                     "quality_score": result.get("quality_score", 5),
@@ -1151,7 +1193,7 @@ def load_data(file_path):
             data = pd.read_csv(file_path)
             print(f"Loaded as CSV: {{data.shape}}")
             return data
-        except:
+        except Exception:
             print("Failed to load data")
             return None
 
@@ -1467,9 +1509,8 @@ Return JSON with this EXACT structure:
         response = await self._pi_chat(prompt, temperature=0.4)
 
         try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                plan = json.loads(json_match.group())
+            plan = _safe_parse_json(response)
+            if plan:
                 logger.info(f"Report plan: {len(plan.get('sections', []))} sections with existing figures")
 
                 # Ensure all sections have analysis_type
@@ -1638,9 +1679,8 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 
         # Parse the response
         try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                content = json.loads(json_match.group())
+            content = _safe_parse_json(response)
+            if content:
                 narrative = content.get("narrative", "")
                 figure_details = content.get("figures", [])
 
@@ -1922,7 +1962,7 @@ Instructions:
                                 df_preview = pd.read_csv(csv_file, nrows=20)
                                 columns = list(df_preview.columns)
                                 preview_data = df_preview.to_dict('records')
-                            except:
+                            except Exception:
                                 columns = []
                                 preview_data = []
 
@@ -2237,7 +2277,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             type_label = ("通用分析" if zh else "General") if analysis_type == "general" else ("特定分析" if zh else "Specific")
 
             toc_items.append(
-                f'<li><a href="#{section["id"]}">{section["title"]}</a>'
+                f'<li><a href="#{html_module.escape(section["id"])}">{html_module.escape(section["title"])}</a>'
                 f'<span class="section-type {type_class}">{type_label}</span></li>'
             )
 
@@ -2252,10 +2292,10 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             content_html = markdown_to_html(section.get("content", ""))
 
             section_html = f'''
-            <div class="section" id="{section["id"]}">
+            <div class="section" id="{html_module.escape(section["id"])}">
                 <div class="section-header">
                     <h2>
-                        {section["title"]}
+                        {html_module.escape(section["title"])}
                         <span class="analysis-type-badge {type_class}">{type_label}</span>
                     </h2>
                 </div>
@@ -2298,8 +2338,8 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 png_path = figure.get("png_path", "")
                 pdf_path = figure.get("pdf_path", "")
 
-                png_filename = os.path.basename(png_path) if png_path else ""
-                pdf_filename = os.path.basename(pdf_path) if pdf_path else ""
+                png_filename = url_quote(os.path.basename(png_path)) if png_path else ""
+                pdf_filename = url_quote(os.path.basename(pdf_path)) if pdf_path else ""
 
                 # Check if image file exists
                 image_exists = png_path and os.path.exists(png_path)
@@ -2319,7 +2359,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 fig_interpretation = figure.get("interpretation", "")
                 fig_interpretation_html = markdown_to_html(fig_interpretation) if fig_interpretation else ""
 
-                img_tag = f"<img src='{img_src}' alt='{fig_name}' />" if img_src else ("<p>" + ("图片不可用" if zh else "Image not available") + "</p>")
+                img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else ("<p>" + ("图片不可用" if zh else "Image not available") + "</p>")
 
                 # Build interpretation section if available
                 interpretation_section = ""
@@ -2336,7 +2376,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                             {img_tag}
                         </div>
                         <div class="figure-caption">
-                            <h4>{fig_label}: {fig_name}</h4>
+                            <h4>{html_module.escape(fig_label)}: {html_module.escape(fig_name)}</h4>
                             {"<p><em>" + fig_caption_html + "</em></p>" if fig_caption_html else ""}
                             {interpretation_section}
                             <div class="figure-actions">
@@ -2356,19 +2396,19 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 columns = table.get("columns", [])
                 preview_data = table.get("preview_data", [])
 
-                csv_filename = os.path.basename(csv_path) if csv_path else ""
+                csv_filename = url_quote(os.path.basename(csv_path)) if csv_path else ""
 
                 # Build table HTML
-                table_header = "".join([f"<th>{col}</th>" for col in columns])
+                table_header = "".join([f"<th>{html_module.escape(str(col))}</th>" for col in columns])
                 table_rows = ""
                 for row in preview_data[:10]:
-                    row_cells = "".join([f"<td>{row.get(col, '-')}</td>" for col in columns])
+                    row_cells = "".join([f"<td>{html_module.escape(str(row.get(col, '-')))}</td>" for col in columns])
                     table_rows += f"<tr>{row_cells}</tr>"
 
                 section_html += f'''
                     <div class="table-container">
                         <div class="table-header">
-                            <h4>{tbl_name}</h4>
+                            <h4>{html_module.escape(tbl_name)}</h4>
                             <a href="tables/{csv_filename}" download class="download-btn csv">
                                 {"下载 CSV" if zh else "Download CSV"}
                             </a>
@@ -2419,11 +2459,11 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 fig_name = fig_info["name"].replace("_", " ").title()
                 png_path = fig_info["png_path"]
                 pdf_path = fig_info["pdf_path"]
-                png_filename = os.path.basename(png_path)
-                pdf_filename = os.path.basename(pdf_path) if pdf_path else ""
+                png_filename = url_quote(os.path.basename(png_path))
+                pdf_filename = url_quote(os.path.basename(pdf_path)) if pdf_path else ""
 
                 img_src = compress_image_to_base64(png_path, max_width=900, quality=85) if os.path.exists(png_path) else ""
-                img_tag = f"<img src='{img_src}' alt='{fig_name}' />" if img_src else ("<p>" + ("图片不可用" if zh else "Image not available") + "</p>")
+                img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else ("<p>" + ("图片不可用" if zh else "Image not available") + "</p>")
 
                 supp_section_html += f'''
                     <div class="figure-container" id="fig-supp-{idx}">
@@ -2431,7 +2471,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                             {img_tag}
                         </div>
                         <div class="figure-caption">
-                            <h4>{"补充图" if zh else "Supp. Fig."} {idx}: {fig_name}</h4>
+                            <h4>{"补充图" if zh else "Supp. Fig."} {idx}: {html_module.escape(fig_name)}</h4>
                             <div class="figure-actions">
                                 <a href="figures/{png_filename}" download class="download-btn png">
                                     {"下载 PNG" if zh else "Download PNG"}
@@ -2452,18 +2492,22 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         abstract_html = markdown_to_html(report.get("abstract", ""))
         conclusions_html = markdown_to_html(report.get("conclusions", ""))
 
+        # Escape curly braces in content to prevent str.format() crash on LLM output
+        def _safe_format_value(v: str) -> str:
+            return v.replace("{", "{{").replace("}", "}}")
+
         # Build full HTML
         html_content = HTML_TEMPLATE.format(
             language="zh" if zh else "en",
-            title=report.get("title", "Analysis Report"),
+            title=_safe_format_value(report.get("title", "Analysis Report")),
             generated_at=("生成时间: " if zh else "Generated: ") + report.get("generated_at", ""),
             toc_title="目录" if zh else "Table of Contents",
-            toc_items="\n".join(toc_items),
+            toc_items=_safe_format_value("\n".join(toc_items)),
             abstract_title="摘要" if zh else "Abstract",
-            abstract=abstract_html,
-            sections_html="\n".join(sections_html),
+            abstract=_safe_format_value(abstract_html),
+            sections_html=_safe_format_value("\n".join(sections_html)),
             conclusions_title="结论" if zh else "Conclusions",
-            conclusions=conclusions_html
+            conclusions=_safe_format_value(conclusions_html)
         )
 
         # Save HTML file

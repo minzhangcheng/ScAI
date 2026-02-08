@@ -529,6 +529,13 @@ Please provide comprehensive analysis in JSON format:
             if response and response.strip():
                 break
             logger.warning(f"[PI] Empty response on synthesis attempt {attempt + 1}, retrying...")
+            # Remove failed attempt from history to avoid pollution
+            # Verify the last two messages are assistant+user before popping
+            if (len(self.message_history) >= 2
+                    and self.message_history[-1].get("role") == "assistant"
+                    and self.message_history[-2].get("role") == "user"):
+                self.message_history.pop()  # empty assistant
+                self.message_history.pop()  # duplicate user
             await asyncio.sleep(1)  # Brief delay before retry
 
         # Use base class safe JSON parser
@@ -617,6 +624,11 @@ Please write in academic paper style.
             if response and response.strip():
                 return response
             logger.warning(f"[PI] Empty response on final summary attempt {attempt + 1}, retrying...")
+            if (len(self.message_history) >= 2
+                    and self.message_history[-1].get("role") == "assistant"
+                    and self.message_history[-2].get("role") == "user"):
+                self.message_history.pop()
+                self.message_history.pop()
             await asyncio.sleep(1)
 
         # If all retries failed, generate a basic summary from round results
@@ -1066,7 +1078,7 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
                 images=[image_base64],
                 temperature=0.3
             )
-            response_text = response.content
+            response_text = response.content if response and response.content else ""
         except Exception as e:
             # Fallback to text-only if vision not available
             logger.warning(f"[PI] Vision API failed, using text-only review: {e}")
@@ -1194,6 +1206,11 @@ Generate a comprehensive research report in Markdown format suitable for publica
             if report and report.strip():
                 return report.strip()
             logger.warning(f"[PI] Empty response on integrated report attempt {attempt + 1}, retrying...")
+            if (len(self.message_history) >= 2
+                    and self.message_history[-1].get("role") == "assistant"
+                    and self.message_history[-2].get("role") == "user"):
+                self.message_history.pop()
+                self.message_history.pop()
             await asyncio.sleep(1)
 
         # Fallback if all retries failed
@@ -1263,6 +1280,11 @@ Return ONLY the summary text, no additional formatting.
             if summary and summary.strip():
                 return summary.strip()
             logger.warning(f"[PI] Empty response on graphic abstract prompt attempt {attempt + 1}, retrying...")
+            if (len(self.message_history) >= 2
+                    and self.message_history[-1].get("role") == "assistant"
+                    and self.message_history[-2].get("role") == "user"):
+                self.message_history.pop()
+                self.message_history.pop()
             await asyncio.sleep(1)
 
         # Fallback if all retries failed

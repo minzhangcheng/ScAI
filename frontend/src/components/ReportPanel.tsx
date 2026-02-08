@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import {
@@ -85,7 +85,7 @@ export function ReportPanel() {
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
-  const [_ws, setWs] = useState<WebSocket | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
   const [viewMode, setViewMode] = useState<'preview' | 'detail'>('preview')
 
   // Load existing report on mount and when analysis completes
@@ -169,14 +169,14 @@ export function ReportPanel() {
       setGenerating(false)
     }
 
-    setWs(websocket)
+    wsRef.current = websocket
 
     return () => {
       isMounted = false
       if (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING) {
         websocket.close()
       }
-      setWs(null)
+      wsRef.current = null
     }
   }, [generating, currentSession?.id])
 

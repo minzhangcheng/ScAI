@@ -686,20 +686,29 @@ print(f"Session saved: {{len(_session_data)}} variables")
         await self.save_session()
     
     async def stop(self):
-        """Stop the kernel and save state"""
-        # Save session before stopping
-        await self.save_session()
-        self.notebook_state.save()
-        
-        if self.kc is not None:
-            self.kc.stop_channels()
-            self.kc = None
-        
-        if self.km is not None:
-            self.km.shutdown_kernel(now=True)
-            self.km = None
-        
-        logger.info(f"Kernel stopped for session {self.session_id}")
+        """Stop the kernel and save state. Always shuts down kernel even if save fails."""
+        # Try to save session before stopping, but don't let failure prevent kernel cleanup
+        try:
+            await self.save_session()
+            self.notebook_state.save()
+        except Exception as e:
+            logger.error(f"Failed to save session during stop for {self.session_id}: {e}")
+        finally:
+            if self.kc is not None:
+                try:
+                    self.kc.stop_channels()
+                except Exception as e:
+                    logger.error(f"Error stopping kernel channels for {self.session_id}: {e}")
+                self.kc = None
+
+            if self.km is not None:
+                try:
+                    self.km.shutdown_kernel(now=True)
+                except Exception as e:
+                    logger.error(f"Error shutting down kernel for {self.session_id}: {e}")
+                self.km = None
+
+            logger.info(f"Kernel stopped for session {self.session_id}")
     
     async def restart(self):
         """Restart kernel and restore state"""

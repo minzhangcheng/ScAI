@@ -114,6 +114,7 @@ class LiteratureAgent(BaseAgent):
 
         except Exception as e:
             # Fallback to quick search if deep research fails
+            logger.warning(f"[Literature] Deep research failed, falling back to quick search: {e}")
             return await self._quick_search(topic, state)
     
     async def _quick_search(
@@ -184,7 +185,7 @@ Note: If you are not certain about specific citation information, please clearly
         # Add relevant keywords based on initial instruction (if state provided)
         initial_instruction = state.initial_instruction if state else ""
         if initial_instruction:
-            if "knockout" in initial_instruction.lower() or "KO" in initial_instruction:
+            if "knockout" in initial_instruction.lower() or re.search(r'\bKO\b', initial_instruction):
                 context_parts.append("knockout mouse model phenotype")
 
         if "single cell" in topic.lower() or "scRNA" in topic.lower() or "snRNA" in topic.lower():
@@ -258,13 +259,13 @@ Please return in JSON format:
         response = await self.chat(prompt, temperature=0.2)
 
         try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return json.loads(json_match.group())
+            result = self._safe_parse_json(response)
+            if result:
+                return result
             else:
                 logger.warning(f"[Literature] No JSON found in get_cell_markers response for {cell_type}")
-        except json.JSONDecodeError as e:
-            logger.warning(f"[Literature] Failed to parse JSON in get_cell_markers for {cell_type}: {e}")
+        except Exception as e:
+            logger.warning(f"[Literature] Failed to parse get_cell_markers for {cell_type}: {e}")
 
         return {
             "cell_type": cell_type,
@@ -322,13 +323,13 @@ Reply in JSON format:
         response = await self.chat(prompt, temperature=0.3)
 
         try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return json.loads(json_match.group())
+            result = self._safe_parse_json(response)
+            if result:
+                return result
             else:
                 logger.warning(f"[Literature] No JSON found in validate_pathway response for {pathway_name}")
-        except json.JSONDecodeError as e:
-            logger.warning(f"[Literature] Failed to parse JSON in validate_pathway for {pathway_name}: {e}")
+        except Exception as e:
+            logger.warning(f"[Literature] Failed to parse validate_pathway for {pathway_name}: {e}")
 
         return {
             "pathway": pathway_name,

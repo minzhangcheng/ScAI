@@ -49,6 +49,7 @@ NODE_TO_RESULT_KEY = {
 def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
     """
     Decorator to add retry logic to workflow nodes.
+    Retries the node function internally before propagating failure.
 
     Args:
         node_name: Name of the node (for logging and tracking)
@@ -60,68 +61,49 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
     def decorator(func):
         @wraps(func)
         async def wrapper(self, state: 'WorkflowState') -> 'WorkflowState':
-            # Create a copy to avoid mutating the original state dict
-            retry_counts = dict(state.get("node_retry_count", {}))
-            current_retries = retry_counts.get(node_name, 0)
-
             # Check if node should be skipped
             if node_name in state.get("skip_nodes", []):
                 logger.info(f"[{self.session_id}] Skipping node {node_name}")
                 return state
 
-            try:
-                result = await func(self, state)
-                # Clear retry count on success
-                if node_name in retry_counts:
-                    del retry_counts[node_name]
-                result["node_retry_count"] = retry_counts
-                # Clear failed_node if this was the one that failed
-                if result.get("failed_node") == node_name:
-                    result["failed_node"] = None
-                return result
+            last_error = None
+            for attempt in range(max_retries + 1):
+                try:
+                    if attempt > 0:
+                        await self._send_message(
+                            "status",
+                            f"Retrying {node_name} (attempt {attempt + 1}/{max_retries + 1})...",
+                            AgentType.PI
+                        )
+                        # Brief delay before retry
+                        await asyncio.sleep(2)
 
-            except Exception as e:
-                error_detail = traceback.format_exc()
-                logger.error(f"[{self.session_id}] Node {node_name} failed: {error_detail}")
+                    result = await func(self, state)
+                    return result
 
-                retry_counts[node_name] = current_retries + 1
-                node_errors = state.get("node_errors", {})
-                node_errors[node_name] = str(e)
-
-                if current_retries < max_retries:
-                    # Mark for retry but continue workflow
+                except Exception as e:
+                    last_error = e
+                    error_detail = traceback.format_exc()
+                    logger.error(
+                        f"[{self.session_id}] Node {node_name} failed "
+                        f"(attempt {attempt + 1}/{max_retries + 1}): {error_detail}"
+                    )
                     await self._send_message(
                         "error",
-                        f"Node {node_name} failed (attempt {current_retries + 1}/{max_retries}): {str(e)}",
+                        f"Node {node_name} failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}",
                         AgentType.PI
                     )
-                    # Return state with error info but allow workflow to continue
-                    analysis_state = state["analysis_state"]
-                    # Use mapping to get correct result key name
-                    result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
-                    return {
-                        **state,
-                        "analysis_state": analysis_state,
-                        "failed_node": node_name,
-                        "node_retry_count": retry_counts,
-                        "node_errors": node_errors,
-                        result_key: {"error": str(e), "findings": []}
-                    }
-                else:
-                    # Max retries exceeded - mark as failed
-                    await self._send_message(
-                        "error",
-                        f"Node {node_name} failed after {max_retries} retries: {str(e)}",
-                        AgentType.PI
-                    )
-                    state["analysis_state"].status = TaskStatus.FAILED
-                    return {
-                        **state,
-                        "failed_node": node_name,
-                        "node_retry_count": retry_counts,
-                        "node_errors": node_errors,
-                        "should_continue": False
-                    }
+
+            # All retries exhausted - return error state to allow workflow to continue
+            logger.error(
+                f"[{self.session_id}] Node {node_name} failed after {max_retries + 1} attempts"
+            )
+            result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
+            return {
+                **state,
+                "failed_node": node_name,
+                result_key: {"error": str(last_error), "findings": []}
+            }
         return wrapper
     return decorator
 
@@ -660,7 +642,7 @@ Be specific and actionable in your response."""
             # Subsequent rounds - based on previous results
             last_round = analysis_state.get_latest_round()
             instructions = {
-                "pathology_tasks": last_round.next_steps if last_round else [],
+                "pathology_tasks": [],
                 "bioinformatics_tasks": [],
                 "biochemistry_tasks": [],
                 "literature_topics": []
@@ -724,54 +706,30 @@ Be specific and actionable in your response."""
             AgentType.PATHOLOGY
         )
         
-        try:
-            result = await self.pathology_agent.process(
-                analysis_state,
-                "\n".join(tasks)
-            )
-            
-            await self._send_message(
-                "result",
-                result,
-                AgentType.PATHOLOGY
-            )
+        # Let exceptions propagate to @with_retry decorator for proper retry handling
+        result = await self.pathology_agent.process(
+            analysis_state,
+            "\n".join(tasks)
+        )
 
-            # Add message to state
-            analysis_state.add_message(
-                AgentType.PATHOLOGY,
-                MessageRole.ASSISTANT,
-                json.dumps(result, ensure_ascii=False)
-            )
+        await self._send_message(
+            "result",
+            result,
+            AgentType.PATHOLOGY
+        )
 
-            return {
-                **state,
-                "analysis_state": analysis_state,
-                "pathology_result": result
-            }
+        # Add message to state
+        analysis_state.add_message(
+            AgentType.PATHOLOGY,
+            MessageRole.ASSISTANT,
+            json.dumps(result, ensure_ascii=False)
+        )
 
-        except Exception as e:
-            import traceback
-            error_detail = traceback.format_exc()
-            logger.error(f"Pathology analysis failed: {error_detail}")
-
-            error_result = {
-                "status": "error",
-                "message": f"Pathology analysis failed: {str(e)}",
-                "findings": [],
-                "error": str(e)
-            }
-
-            await self._send_message(
-                "error",
-                f"Pathology analysis error: {str(e)}",
-                AgentType.PATHOLOGY
-            )
-
-            return {
-                **state,
-                "analysis_state": analysis_state,
-                "pathology_result": error_result
-            }
+        return {
+            **state,
+            "analysis_state": analysis_state,
+            "pathology_result": result
+        }
     
     @with_retry("bioinformatics_analysis")
     async def _bioinformatics_analysis(self, state: WorkflowState) -> WorkflowState:
@@ -804,10 +762,10 @@ Be specific and actionable in your response."""
             }
         
         # Check for pending human input and incorporate it
+        # Note: human input is consumed and cleared in _initialize_round, not here
         human_guidance = ""
         if analysis_state.pending_human_input:
             human_guidance = f"\n\nHuman researcher guidance: {analysis_state.pending_human_input}"
-            analysis_state.pending_human_input = None  # Clear after using
         
         # Step 1: PI provides analysis goals
         await self._send_message("status", "PI is defining analysis goals...", AgentType.PI)
@@ -945,8 +903,8 @@ Report key findings when you complete each major analysis phase."""
         logger.info(f"[{self.session_id}] Starting literature research with topics: {topics}")
         if not topics:
             # Default topics based on other findings
-            path_findings = state["pathology_result"].get("findings", []) if state["pathology_result"] else []
-            bio_findings = state["bioinformatics_result"].get("findings", []) if state["bioinformatics_result"] else []
+            path_findings = state.get("pathology_result", {}).get("findings", []) if state.get("pathology_result") else []
+            bio_findings = state.get("bioinformatics_result", {}).get("findings", []) if state.get("bioinformatics_result") else []
 
             if path_findings or bio_findings:
                 # Use findings as search topics (context from actual analysis)
@@ -1004,10 +962,10 @@ Report key findings when you complete each major analysis phase."""
         await self._send_message("status", "PI is synthesizing analysis results...", AgentType.PI)
         
         # Extract findings from each agent
-        path_findings = state["pathology_result"].get("findings", []) if state["pathology_result"] else []
-        bio_findings = state["bioinformatics_result"].get("findings", []) if state["bioinformatics_result"] else []
-        chem_findings = state["biochemistry_result"].get("findings", []) if state["biochemistry_result"] else []
-        lit_findings = state["literature_result"].get("findings", []) if state["literature_result"] else []
+        path_findings = state.get("pathology_result", {}).get("findings", []) if state.get("pathology_result") else []
+        bio_findings = state.get("bioinformatics_result", {}).get("findings", []) if state.get("bioinformatics_result") else []
+        chem_findings = state.get("biochemistry_result", {}).get("findings", []) if state.get("biochemistry_result") else []
+        lit_findings = state.get("literature_result", {}).get("findings", []) if state.get("literature_result") else []
         
         round_result = await self.pi_agent.synthesize_round(
             analysis_state,
@@ -1029,10 +987,14 @@ Report key findings when you complete each major analysis phase."""
                 logger.error(f"Failed to save state after round: {e}")
         
         # Extract data requests from PI
-        data_requests = await self.pi_agent.identify_data_needs(
-            analysis_state,
-            round_result
-        )
+        try:
+            data_requests = await self.pi_agent.identify_data_needs(
+                analysis_state,
+                round_result
+            )
+        except Exception as e:
+            logger.warning(f"Failed to identify data needs: {e}")
+            data_requests = []
         
         # Send round summary with data requests
         round_summary = {
@@ -1437,16 +1399,35 @@ Report key findings when you complete each major analysis phase."""
     
     async def resume(
         self,
-        thread_id: str
+        thread_id: str,
+        analysis_state: Optional[AnalysisState] = None
     ) -> AnalysisState:
-        """Resume a paused workflow"""
+        """Resume a paused workflow
+
+        Args:
+            thread_id: Thread ID for checkpointing
+            analysis_state: Optional analysis state to restore custom config from
+        """
         logger.info(f"[{self.session_id}] Resuming workflow for thread {thread_id}")
+
+        # Re-initialize agents and components if not already initialized
+        if self.compiled_graph is None:
+            # Restore custom models/prompts/temperatures from analysis state
+            if analysis_state:
+                self._custom_models = analysis_state.custom_models
+                self._custom_prompts = analysis_state.custom_prompts
+                self._custom_temperatures = analysis_state.custom_temperatures
+            logger.info(f"[{self.session_id}] Re-initializing workflow components for resume")
+            await self.initialize()
+
         config = {"configurable": {"thread_id": thread_id}}
 
         # Get current state
         state = await self.compiled_graph.aget_state(config)
 
         if state and state.values:
+            # Restore _current_analysis_state for callbacks
+            self._current_analysis_state = state.values.get("analysis_state")
             # Resume from checkpoint
             logger.info(f"[{self.session_id}] Found saved state, resuming execution")
             final_state = await self.compiled_graph.ainvoke(
@@ -1482,12 +1463,18 @@ Report key findings when you complete each major analysis phase."""
         """Clean up resources and save state"""
         logger.info(f"[{self.session_id}] Closing workflow and cleaning up resources")
         if self.sandbox:
-            # This will save the notebook state before stopping
-            await self.sandbox.stop()
-            logger.info(f"[{self.session_id}] Sandbox stopped")
+            try:
+                # This will save the notebook state before stopping
+                await self.sandbox.stop()
+                logger.info(f"[{self.session_id}] Sandbox stopped")
+            except Exception as e:
+                logger.error(f"[{self.session_id}] Error stopping sandbox: {e}")
         if self.llm_manager:
-            await self.llm_manager.close()
-            logger.info(f"[{self.session_id}] LLM manager closed")
+            try:
+                await self.llm_manager.close()
+                logger.info(f"[{self.session_id}] LLM manager closed")
+            except Exception as e:
+                logger.error(f"[{self.session_id}] Error closing LLM manager: {e}")
     
     def get_notebook_path(self) -> Optional[str]:
         """Get path to the saved Jupyter notebook"""

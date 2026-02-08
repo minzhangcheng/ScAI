@@ -653,7 +653,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
                     is_safe, security_error = self._validate_code(code)
                     if not is_safe:
                         error_msg = f"Code validation failed: {security_error}"
-                        logger.warning(f"[{self.session_id}][Bioinformatics] {error_msg}")
+                        logger.warning(f"[Bioinformatics] {error_msg}")
                         await self._notify("error", error_msg)
                         messages.append({
                             "role": "assistant",
@@ -676,6 +676,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
 
                     # === Wrap code to auto-save figures in PNG + PDF ===
                     figures_dir = Path(self.sandbox.working_dir) / "figures"
+                    figures_dir_repr = repr(str(figures_dir))
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                     wrapped_code = f'''
@@ -690,7 +691,7 @@ plt.rcParams.update({{
 }})
 
 # Create figures directory
-_figures_dir = Path("{figures_dir}")
+_figures_dir = Path({figures_dir_repr})
 _figures_dir.mkdir(exist_ok=True)
 
 # Execute user code
@@ -891,8 +892,9 @@ plt.close('all')
         status = "completed" if completed else "max_steps_reached"
         logger.info(f"[Bioinformatics] Analysis {status}: {step_count} steps executed, {len(all_findings)} findings, {len(all_figures)} figures")
 
-        # Clear checkpoint on successful completion
-        checkpoint_mgr.clear()
+        # Clear checkpoint only on successful completion (preserve for resume on max_steps_reached)
+        if completed:
+            checkpoint_mgr.clear()
 
         return {
             "status": status,
@@ -909,6 +911,11 @@ plt.close('all')
     
     async def process(self, state: AnalysisState, instruction: str, **kwargs) -> Dict[str, Any]:
         """Main entry point for workflow"""
+        # Reset per-run state to avoid pollution from previous rounds
+        self.code_history = []
+        self.analysis_context = {}
+        self.last_result = None
+
         if not state.control_seq_path and not state.treatment_seq_path:
             return {
                 "status": "waiting_input",
@@ -992,6 +999,11 @@ plt.close('all')
         """
         logger.info(f"[Bioinformatics] Generating publication figure: {figure_name}")
 
+        # Validate code before execution
+        is_valid, error_msg = self._validate_code(code)
+        if not is_valid:
+            return f"Error: Code validation failed - {error_msg}"
+
         # Ensure figures directory exists
         figures_dir = Path(self.sandbox.working_dir) / "figures"
 
@@ -1000,7 +1012,10 @@ plt.close('all')
         png_path = figures_dir / f"{safe_name}.png"
         pdf_path = figures_dir / f"{safe_name}.pdf"
 
-        # Wrap code to save both PNG and PDF
+        # Wrap code to save both PNG and PDF (use repr() for paths to prevent injection)
+        figures_dir_repr = repr(str(figures_dir))
+        png_path_repr = repr(str(png_path))
+        pdf_path_repr = repr(str(pdf_path))
         wrapped_code = f'''
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -1016,7 +1031,8 @@ plt.rcParams.update({{
 }})
 
 # Create figures directory
-Path("{figures_dir}").mkdir(exist_ok=True)
+_figures_dir = {figures_dir_repr}
+Path(_figures_dir).mkdir(exist_ok=True)
 
 # Execute the plotting code
 {code}
@@ -1024,13 +1040,16 @@ Path("{figures_dir}").mkdir(exist_ok=True)
 # Get current figure
 fig = plt.gcf()
 
+_png_path = {png_path_repr}
+_pdf_path = {pdf_path_repr}
+
 # Save PNG thumbnail (lower DPI for preview)
-fig.savefig("{png_path}", dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
-print(f"Saved PNG: {png_path}")
+fig.savefig(_png_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
+print(f"Saved PNG: {{_png_path}}")
 
 # Save high-res PDF
-fig.savefig("{pdf_path}", dpi=300, bbox_inches='tight', format='pdf')
-print(f"Saved PDF: {pdf_path}")
+fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+print(f"Saved PDF: {{_pdf_path}}")
 
 plt.close()
 '''
@@ -1106,8 +1125,40 @@ plt.close()
                         current_code, feedback, suggestions, must_fix, figure_type
                     )
 
-                    # Re-execute with revised code
-                    revised_wrapped = wrapped_code.replace(code, revised_code)
+                    # Validate revised code before execution
+                    is_valid, error_msg = self._validate_code(revised_code)
+                    if not is_valid:
+                        logger.warning(f"[Bioinformatics] Revised code failed validation: {error_msg}")
+                        break
+
+                    # Re-execute with revised code (rebuild wrapper instead of str.replace to avoid corruption)
+                    revised_wrapped = f'''
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+plt.rcParams.update({{
+    'figure.dpi': 300,
+    'savefig.dpi': 300,
+    'font.size': 10,
+    'axes.linewidth': 1.2,
+    'pdf.fonttype': 42,
+    'ps.fonttype': 42,
+}})
+
+_figures_dir = {figures_dir_repr}
+Path(_figures_dir).mkdir(exist_ok=True)
+
+{revised_code}
+
+fig = plt.gcf()
+
+_png_path = {png_path_repr}
+_pdf_path = {pdf_path_repr}
+
+fig.savefig(_png_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
+fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+plt.close()
+'''
                     result = await self.sandbox.execute(revised_wrapped)
 
                     if not result.error and png_path.exists():
@@ -1250,7 +1301,10 @@ Return only the Python code:"""
             max_tokens=2048
         )
 
-        response_text = response.content
+        response_text = response.content if response and response.content else None
+        if not response_text:
+            logger.warning("[Bioinformatics] Empty response from LLM for code revision")
+            return original_code  # Return unchanged code
 
         # Extract code from response with safe bounds checking
         code = response_text

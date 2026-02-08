@@ -11,6 +11,8 @@ import json
 import base64
 import uuid
 import re
+import html as html_module
+from urllib.parse import quote as url_quote
 from pathlib import Path
 from datetime import datetime
 
@@ -111,6 +113,9 @@ def markdown_to_html(text: str) -> str:
     """Convert basic markdown formatting to HTML"""
     if not text:
         return ""
+
+    # Escape HTML entities first to prevent XSS
+    text = html_module.escape(text)
 
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
@@ -561,10 +566,10 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     for section in report.get("sections", []):
         analysis_type = section.get("analysis_type", "general")
         type_class = "general" if analysis_type == "general" else "specific"
-        type_label = ("General" if analysis_type == "general" else "Specific")
+        type_label = ("通用分析" if zh else "General") if analysis_type == "general" else ("特定分析" if zh else "Specific")
 
         toc_items.append(
-            f'<li><a href="#{section["id"]}">{section["title"]}</a>'
+            f'<li><a href="#{html_module.escape(section["id"])}">{html_module.escape(section["title"])}</a>'
             f'<span class="section-type {type_class}">{type_label}</span></li>'
         )
 
@@ -573,15 +578,15 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     for section in report.get("sections", []):
         analysis_type = section.get("analysis_type", "general")
         type_class = "general" if analysis_type == "general" else "specific"
-        type_label = ("General" if analysis_type == "general" else "Specific")
+        type_label = ("通用分析" if zh else "General") if analysis_type == "general" else ("特定分析" if zh else "Specific")
 
         content_html = markdown_to_html(section.get("content", ""))
 
         section_html = f'''
-        <div class="section" id="{section["id"]}">
+        <div class="section" id="{html_module.escape(section["id"])}">
             <div class="section-header">
                 <h2>
-                    {section["title"]}
+                    {html_module.escape(section["title"])}
                     <span class="analysis-type-badge {type_class}">{type_label}</span>
                 </h2>
             </div>
@@ -624,8 +629,8 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             png_path = figure.get("png_path", "")
             pdf_path = figure.get("pdf_path", "")
 
-            png_filename = os.path.basename(png_path) if png_path else ""
-            pdf_filename = os.path.basename(pdf_path) if pdf_path else ""
+            png_filename = url_quote(os.path.basename(png_path)) if png_path else ""
+            pdf_filename = url_quote(os.path.basename(pdf_path)) if pdf_path else ""
 
             image_exists = png_path and os.path.exists(png_path)
             img_src = ""
@@ -638,7 +643,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             fig_caption = figure.get("caption", "")
             fig_caption_html = markdown_to_html(fig_caption) if fig_caption else ""
 
-            img_tag = f"<img src='{img_src}' alt='{fig_name}' />" if img_src else "<p>Image not available</p>"
+            img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else "<p>Image not available</p>"
 
             section_html += f'''
                 <div class="figure-container" id="fig-{fig_id}">
@@ -646,13 +651,13 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                         {img_tag}
                     </div>
                     <div class="figure-caption">
-                        <h4>{fig_label}: {fig_name}</h4>
+                        <h4>{html_module.escape(fig_label)}: {html_module.escape(fig_name)}</h4>
                         {"<p>" + fig_caption_html + "</p>" if fig_caption_html else ""}
                         <div class="figure-actions">
                             <a href="figures/{png_filename}" download class="download-btn png">
-                                Download PNG
+                                {"下载 PNG" if zh else "Download PNG"}
                             </a>
-                            {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>Download PDF</a>" if pdf_path and os.path.exists(pdf_path) else ""}
+                            {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("下载 PDF" if zh else "Download PDF") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
                         </div>
                     </div>
                 </div>
@@ -668,20 +673,20 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             columns = table.get("columns", [])
             preview_data = table.get("preview_data", [])
 
-            csv_filename = os.path.basename(csv_path) if csv_path else ""
+            csv_filename = url_quote(os.path.basename(csv_path)) if csv_path else ""
 
-            table_header = "".join([f"<th>{col}</th>" for col in columns])
+            table_header = "".join([f"<th>{html_module.escape(str(col))}</th>" for col in columns])
             table_rows = ""
             for row in preview_data[:10]:
-                row_cells = "".join([f"<td>{row.get(col, '-')}</td>" for col in columns])
+                row_cells = "".join([f"<td>{html_module.escape(str(row.get(col, '-')))}</td>" for col in columns])
                 table_rows += f"<tr>{row_cells}</tr>"
 
             section_html += f'''
                 <div class="table-container">
                     <div class="table-header">
-                        <h4>{tbl_name}</h4>
+                        <h4>{html_module.escape(tbl_name)}</h4>
                         <a href="tables/{csv_filename}" download class="download-btn csv">
-                            Download CSV
+                            {"下载 CSV" if zh else "Download CSV"}
                         </a>
                     </div>
                     <div class="table-wrapper">
@@ -690,7 +695,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                             <tbody>{table_rows}</tbody>
                         </table>
                     </div>
-                    {"<div class='table-info'>Showing 10 of " + str(len(preview_data)) + " rows</div>" if len(preview_data) > 10 else ""}
+                    {"<div class='table-info'>" + ("显示 10 / " if zh else "Showing 10 of ") + str(len(preview_data)) + (" 行" if zh else " rows") + "</div>" if len(preview_data) > 10 else ""}
                 </div>
             '''
 
@@ -709,10 +714,11 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
 
     if remaining_figures:
         print(f"  Adding {len(remaining_figures)} supplementary figures...")
-        supp_title = "Supplementary Figures"
+        supp_title = "补充图表" if zh else "Supplementary Figures"
+        supp_badge = "补充" if zh else "Supplementary"
         toc_items.append(
             f'<li><a href="#supplementary_figures">{supp_title}</a>'
-            f'<span class="section-type specific">Supplementary</span></li>'
+            f'<span class="section-type specific">{supp_badge}</span></li>'
         )
 
         supp_section_html = f'''
@@ -720,11 +726,11 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             <div class="section-header">
                 <h2>
                     {supp_title}
-                    <span class="analysis-type-badge specific">Supplementary</span>
+                    <span class="analysis-type-badge specific">{supp_badge}</span>
                 </h2>
             </div>
             <div class="section-content">
-                <p>The following figures were generated during the analysis and are provided for reference.</p>
+                <p>{"以下是分析过程中生成的其他图表，供参考。" if zh else "The following figures were generated during the analysis and are provided for reference."}</p>
                 <div class="figure-grid">
         '''
 
@@ -732,12 +738,12 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             fig_name = fig_info["name"].replace("_", " ").title()
             png_path = fig_info["png_path"]
             pdf_path = fig_info["pdf_path"]
-            png_filename = os.path.basename(png_path)
-            pdf_filename = os.path.basename(pdf_path) if pdf_path else ""
+            png_filename = url_quote(os.path.basename(png_path))
+            pdf_filename = url_quote(os.path.basename(pdf_path)) if pdf_path else ""
 
-            print(f"  Embedding supplementary: {png_filename}")
+            print(f"  Embedding supplementary: {os.path.basename(png_path)}")
             img_src = compress_image_to_base64(png_path, max_width=900, quality=85) if os.path.exists(png_path) else ""
-            img_tag = f"<img src='{img_src}' alt='{fig_name}' />" if img_src else "<p>Image not available</p>"
+            img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else "<p>Image not available</p>"
 
             supp_section_html += f'''
                 <div class="figure-container" id="fig-supp-{idx}">
@@ -745,12 +751,12 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                         {img_tag}
                     </div>
                     <div class="figure-caption">
-                        <h4>Supp. Fig. {idx}: {fig_name}</h4>
+                        <h4>{"补充图" if zh else "Supp. Fig."} {idx}: {html_module.escape(fig_name)}</h4>
                         <div class="figure-actions">
                             <a href="figures/{png_filename}" download class="download-btn png">
-                                Download PNG
+                                {"下载 PNG" if zh else "Download PNG"}
                             </a>
-                            {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>Download PDF</a>" if pdf_path and os.path.exists(pdf_path) else ""}
+                            {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("下载 PDF" if zh else "Download PDF") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
                         </div>
                     </div>
                 </div>
@@ -767,18 +773,23 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     abstract_html = markdown_to_html(report.get("abstract", ""))
     conclusions_html = markdown_to_html(report.get("conclusions", ""))
 
+    # Escape curly braces in content to prevent str.format() crash on LLM output
+    def _safe_format_value(v: str) -> str:
+        return v.replace("{", "{{").replace("}", "}}")
+
     # Build full HTML
+    zh = language == "zh"
     html_content = HTML_TEMPLATE.format(
-        language="en",
-        title=report.get("title", "Analysis Report"),
-        generated_at="Generated: " + report.get("generated_at", datetime.now().isoformat()),
-        toc_title="Table of Contents",
-        toc_items="\n".join(toc_items),
-        abstract_title="Abstract",
-        abstract=abstract_html,
-        sections_html="\n".join(sections_html),
-        conclusions_title="Conclusions",
-        conclusions=conclusions_html
+        language=language,
+        title=_safe_format_value(report.get("title", "分析报告" if zh else "Analysis Report")),
+        generated_at=("生成时间: " if zh else "Generated: ") + report.get("generated_at", datetime.now().isoformat()),
+        toc_title="目录" if zh else "Table of Contents",
+        toc_items=_safe_format_value("\n".join(toc_items)),
+        abstract_title="摘要" if zh else "Abstract",
+        abstract=_safe_format_value(abstract_html),
+        sections_html=_safe_format_value("\n".join(sections_html)),
+        conclusions_title="结论" if zh else "Conclusions",
+        conclusions=_safe_format_value(conclusions_html)
     )
 
     # Save HTML file

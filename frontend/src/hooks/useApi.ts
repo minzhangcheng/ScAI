@@ -333,16 +333,16 @@ export function useSession() {
 
     const data = await response.json()
 
-    // Update the appropriate path based on group
+    // Update session state with the uploaded file path
     if (group === 'control') {
-      useAppStore.getState().updateSession({ controlSeqPath: data.data.path })
+      useAppStore.getState().updateSession({ controlSeqPath: data.data.file_path })
     } else {
-      useAppStore.getState().updateSession({ treatmentSeqPath: data.data.path })
+      useAppStore.getState().updateSession({ treatmentSeqPath: data.data.file_path })
     }
 
     return data
   }, [ensureSession])
-  
+
   const uploadLoom = useCallback(async (file: File, group: 'control' | 'treatment') => {
     // Get fresh session state to avoid closure issues
     const session = useAppStore.getState().currentSession
@@ -366,11 +366,11 @@ export function useSession() {
 
     const data = await response.json()
 
-    // Update the appropriate path based on group
+    // Update session state with the uploaded file path
     if (group === 'control') {
-      useAppStore.getState().updateSession({ controlLoomPath: data.data.path })
+      useAppStore.getState().updateSession({ controlLoomPath: data.data.file_path })
     } else {
-      useAppStore.getState().updateSession({ treatmentLoomPath: data.data.path })
+      useAppStore.getState().updateSession({ treatmentLoomPath: data.data.file_path })
     }
 
     return data
@@ -587,6 +587,9 @@ export function useSession() {
     })
     
     const latestSession = useAppStore.getState().currentSession
+    // Revoke blob URL to prevent memory leak
+    const removed = latestSession?.pathologyImages.find(img => img.id === imageId)
+    if (removed?.preview) URL.revokeObjectURL(removed.preview)
     useAppStore.getState().updateSession({
       pathologyImages: latestSession?.pathologyImages.filter(img => img.id !== imageId) || [],
     })
@@ -730,13 +733,16 @@ export function useWebSocket() {
       setWsConnected(true)
       console.log('WebSocket: Connected successfully')
 
+      // Use fresh state to avoid stale closure
+      const freshSession = useAppStore.getState().currentSession
+
       // On reconnect, restore message history from server
-      if (isReconnect && currentSession) {
+      if (isReconnect && freshSession) {
         try {
           console.log('WebSocket: Reconnect detected, loading message history...')
           // Mark that we're loading history to prevent race conditions
-          const loadingSessionId = currentSession.id
-          const response = await fetch(`${API_BASE}/session/${currentSession.id}/load`)
+          const loadingSessionId = freshSession.id
+          const response = await fetch(`${API_BASE}/session/${freshSession.id}/load`)
 
           // Verify session hasn't changed during fetch (race condition protection)
           const currentState = useAppStore.getState()
@@ -766,9 +772,9 @@ export function useWebSocket() {
               // Include content fingerprint to avoid collision when same agent/type/timestamp
               const createMsgKey = (m: Message) => {
                 const contentStr = typeof m.content === 'string'
-                  ? m.content.slice(0, 50)
-                  : JSON.stringify(m.content).slice(0, 50)
-                return `${m.agent || 'system'}-${m.type}-${m.timestamp}-${contentStr.length}`
+                  ? m.content.slice(0, 80)
+                  : JSON.stringify(m.content).slice(0, 80)
+                return `${m.agent || 'system'}-${m.type}-${m.timestamp}-${contentStr}`
               }
               const serverMsgKeySet = new Set(serverMessages.map(createMsgKey))
               const serverMsgIdSet = new Set(serverMessages.map(m => m.id))

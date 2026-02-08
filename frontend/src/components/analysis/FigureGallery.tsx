@@ -126,7 +126,7 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
             >
               {figure.pngBase64 ? (
                 <img
-                  src={`data:image/jpeg;base64,${figure.pngBase64}`}
+                  src={`data:image/png;base64,${figure.pngBase64}`}
                   alt={figure.name}
                   className="w-full h-full object-contain"
                 />
@@ -227,7 +227,7 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
             <div className="p-4 max-h-[60vh] overflow-auto bg-slate-50">
               {selectedFigure.pngBase64 ? (
                 <img
-                  src={`data:image/jpeg;base64,${selectedFigure.pngBase64}`}
+                  src={`data:image/png;base64,${selectedFigure.pngBase64}`}
                   alt={selectedFigure.name}
                   className="max-w-full h-auto mx-auto"
                 />

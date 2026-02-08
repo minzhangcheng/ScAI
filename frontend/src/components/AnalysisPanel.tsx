@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
-import { useAppStore, PublicationFigure, PublicationTable, GraphicAbstract as GraphicAbstractType, AgentError } from '../stores/appStore'
-import { useSession, useWebSocket, useConfig } from '../hooks/useApi'
+import { useAppStore, PublicationFigure, PublicationTable, GraphicAbstract as GraphicAbstractType } from '../stores/appStore'
+import { useSession, useConfig } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import { FigureGallery, IntegratedReport, GraphicAbstract, DownloadButtons } from './analysis'
 import {
@@ -38,9 +38,8 @@ interface RoundSummary {
 }
 
 export function AnalysisPanel() {
-  const { currentSession, messages, language, showConfigPanel } = useAppStore()
+  const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors } = useAppStore()
   const { startAnalysis, resumeAnalysis } = useSession()
-  const { connect, disconnect, connected } = useWebSocket()
   const { checkStatus } = useConfig()
   const { t } = useTranslation(language)
   
@@ -66,38 +65,41 @@ export function AnalysisPanel() {
     { id: 'painter', name: t('painterAgent'), icon: Palette, color: 'pink' },
   ]
 
-  // Get unresolved errors for display
-  const getUnresolvedErrors = (): AgentError[] => {
-    return useAppStore.getState().agentErrors.filter(e => !e.resolved)
-  }
+  // Memoize unresolved errors to avoid recalculation
+  const unresolvedErrors = useMemo(
+    () => agentErrors.filter(e => !e.resolved),
+    [agentErrors]
+  )
+
+  // Memoize per-agent last message lookup to avoid O(n) filter per agent per render
+  const agentLastMessages = useMemo(() => {
+    const map: Record<string, typeof messages[0] | undefined> = {}
+    for (const msg of messages) {
+      if (msg.agent) {
+        map[msg.agent] = msg
+      }
+    }
+    return map
+  }, [messages])
 
   // Get latest status for each agent - balances persistent errors with recovery
   const getAgentStatus = (agentId: string) => {
-    const agentMessages = messages.filter(m => m.agent === agentId)
-    const unresolvedErrors = useAppStore.getState().agentErrors
-      .filter(e => e.agent === agentId && !e.resolved)
+    const lastMessage = agentLastMessages[agentId]
+    const agentErrors = unresolvedErrors.filter(e => e.agent === agentId)
 
-    if (agentMessages.length === 0) {
-      // No messages yet - show error if there are unresolved errors, otherwise idle
-      return unresolvedErrors.length > 0 ? 'error' : 'idle'
+    if (!lastMessage) {
+      return agentErrors.length > 0 ? 'error' : 'idle'
     }
 
-    const lastMessage = agentMessages[agentMessages.length - 1]
-
-    // If the last message is a result (success), the agent has recovered from any previous errors
-    // Clear error state visually when agent succeeds
     if (lastMessage.type === 'result') {
       return 'done'
     }
 
-    // Check for unresolved errors, but only if the latest message isn't showing progress
-    if (unresolvedErrors.length > 0) {
-      // If agent is currently working (has recent status message), show working state
-      // This allows error recovery to be visible
+    if (agentErrors.length > 0) {
       if (lastMessage.type === 'status') {
         return 'working'
       }
-      return 'error'  // Persistent error state
+      return 'error'
     }
 
     if (lastMessage.type === 'status') return 'working'
@@ -161,7 +163,7 @@ export function AnalysisPanel() {
       }
 
       await startAnalysis()
-      setTimeout(() => connect(), 100)
+      setTimeout(() => wsConnect?.(), 100)
     } catch (e) {
       console.error('Failed to start analysis:', e)
     }
@@ -199,8 +201,8 @@ export function AnalysisPanel() {
       if (response.ok) {
         // Resume analysis
         await resumeAnalysis()
-        if (!connected) {
-          setTimeout(() => connect(), 100)
+        if (!wsConnected) {
+          setTimeout(() => wsConnect?.(), 100)
         }
       }
     } catch (e) {
@@ -309,8 +311,8 @@ export function AnalysisPanel() {
         // Resume analysis if paused or completed (for re-analysis)
         if (currentSession.status === 'paused' || currentSession.status === 'waiting_input' || currentSession.status === 'completed') {
           await resumeAnalysis()
-          if (!connected) {
-            setTimeout(() => connect(), 100)
+          if (!wsConnected) {
+            setTimeout(() => wsConnect?.(), 100)
           }
         }
       }
@@ -321,20 +323,16 @@ export function AnalysisPanel() {
     }
   }
 
-  // Clean up on unmount
-  useEffect(() => {
-    return () => disconnect()
-  }, [disconnect])
-
   // Auto-connect WebSocket when session is running and not connected
+  // Uses wsConnect from the store (managed by App.tsx) to avoid duplicate WebSocket instances
   useEffect(() => {
-    if (currentSession && 
-        (currentSession.status === 'running' || currentSession.status === 'waiting_input') && 
-        !connected) {
-      console.log('Auto-connecting WebSocket for running session')
-      connect()
+    if (currentSession &&
+        (currentSession.status === 'running' || currentSession.status === 'waiting_input') &&
+        !wsConnected && wsConnect) {
+      console.log('AnalysisPanel: Auto-connecting WebSocket for running session')
+      wsConnect()
     }
-  }, [currentSession, connected, connect])
+  }, [currentSession?.id, currentSession?.status, wsConnected, wsConnect])
 
   // Auto-expand latest round
   useEffect(() => {
@@ -500,7 +498,6 @@ export function AnalysisPanel() {
 
       {/* Agent Errors Display */}
       {(() => {
-        const unresolvedErrors = getUnresolvedErrors()
         if (unresolvedErrors.length === 0) return null
 
         return (
@@ -611,7 +608,7 @@ export function AnalysisPanel() {
                       Round {round.round}
                     </span>
                     <span className="text-sm text-slate-600 line-clamp-1">
-                      {round.summary.substring(0, 80)}...
+                      {(round.summary || '').substring(0, 80)}...
                     </span>
                   </div>
                   {expandedRound === round.round ? (
@@ -876,7 +873,7 @@ export function AnalysisPanel() {
                 className="flex-1 px-4 py-3 bg-white border border-slate-200 rounded-lg text-sm resize-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
                 rows={3}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && e.metaKey) {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                     sendUserInput()
                   }
                 }}
@@ -895,7 +892,7 @@ export function AnalysisPanel() {
             </div>
             
             <p className="text-xs text-slate-400 mt-2">
-              {language === 'zh' ? '按 ⌘+Enter 发送' : 'Press ⌘+Enter to send'}
+              {language === 'zh' ? '按 Ctrl/⌘+Enter 发送' : 'Press Ctrl/⌘+Enter to send'}
             </p>
           </div>
         </div>

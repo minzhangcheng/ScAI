@@ -36,6 +36,30 @@ from .utils.upload import ChunkedUploadManager, stream_save_file
 # Initialize upload manager for chunked uploads (supports up to 10GB files)
 upload_manager = ChunkedUploadManager(UPLOAD_TEMP_DIR, UPLOAD_CHUNK_SIZE)
 
+
+def safe_filename(filename: str) -> str:
+    """Extract safe base filename, preventing path traversal. Returns empty string for invalid input."""
+    name = Path(filename).name
+    # Reject hidden files and names that are just dots
+    if not name or name.startswith('.'):
+        return ""
+    return name
+
+
+def validate_session_id(session_id: str) -> None:
+    """Validate session ID to prevent path traversal"""
+    if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+
+
+def validate_path_within(path: Path, parent: Path) -> Path:
+    """Validate that resolved path stays within expected parent directory"""
+    resolved = path.resolve()
+    parent_resolved = parent.resolve()
+    if not str(resolved).startswith(str(parent_resolved) + os.sep) and resolved != parent_resolved:
+        raise HTTPException(status_code=400, detail="Invalid path: path traversal detected")
+    return resolved
+
 # Configure logging - must be called before any logging
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -210,23 +234,30 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     """
     global sessions
 
+    # Validate session_id to prevent path traversal
+    validate_session_id(session_id)
+
+    import time
+
     # Quick check without lock (optimization for common case)
     if session_id in sessions:
-        await touch_session(session_id)
-        return sessions[session_id]
+        # Update access time directly instead of calling touch_session() to avoid deadlock
+        async with _state_lock:
+            _session_access_times[session_id] = time.time()
+        return sessions.get(session_id)  # use .get() for safety against eviction race
 
     # Use lock for the load operation to prevent race conditions
     async with _state_lock:
         # Double-check after acquiring lock (another coroutine might have loaded it)
         if session_id in sessions:
-            await touch_session(session_id)
+            _session_access_times[session_id] = time.time()
             return sessions[session_id]
 
         # Load from disk using thread pool to avoid blocking
         state = await asyncio.to_thread(load_session_from_disk, session_id)
         if state:
             sessions[session_id] = state
-            await touch_session(session_id)
+            _session_access_times[session_id] = time.time()
             return state
 
     return None
@@ -370,7 +401,7 @@ async def start_session(request: StartRequest):
     sessions[session_id] = state
     
     # Save to disk for persistence
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
@@ -386,12 +417,14 @@ async def list_sessions():
     # Get sessions from disk
     disk_sessions = list_saved_sessions()
     
-    # Also include any in-memory sessions not yet saved
-    memory_session_ids = set(sessions.keys())
+    # Also include any in-memory sessions not yet saved (snapshot keys to avoid race)
+    memory_session_ids = set(list(sessions.keys()))
     disk_session_ids = {s["id"] for s in disk_sessions}
-    
+
     for session_id in memory_session_ids - disk_session_ids:
-        state = sessions[session_id]
+        state = sessions.get(session_id)
+        if state is None:
+            continue
         disk_sessions.append({
             "id": session_id,
             "name": state.name,
@@ -413,12 +446,13 @@ async def list_sessions():
 @app.get("/api/session/{session_id}/load")
 async def load_session(session_id: str):
     """Load a session by ID (from memory or disk)"""
+    validate_session_id(session_id)
     # First check memory
     if session_id in sessions:
         state = sessions[session_id]
     else:
         # Try to load from disk
-        state = load_session_from_disk(session_id)
+        state = await asyncio.to_thread(load_session_from_disk, session_id)
         if state is None:
             raise HTTPException(status_code=404, detail="Session not found")
         # Put in memory
@@ -535,25 +569,31 @@ async def load_session(session_id: str):
 @app.delete("/api/session/{session_id}")
 async def delete_session(session_id: str):
     """Delete a session completely"""
-    # Remove from memory
-    if session_id in sessions:
-        del sessions[session_id]
+    validate_session_id(session_id)
+
+    # Atomically check workflow status and remove session from memory
+    async with _state_lock:
+        if session_id in workflows or session_id in _initializing_sessions:
+            raise HTTPException(status_code=409, detail="Cannot delete a running session. Stop the analysis first.")
+        # Remove from memory while holding lock
+        sessions.pop(session_id, None)
+        _session_access_times.pop(session_id, None)
 
     # Remove message buffer
     async with _message_buffer_lock:
-        if session_id in _message_buffers:
-            del _message_buffers[session_id]
+        _message_buffers.pop(session_id, None)
 
-    # Remove from disk
-    session_file = SESSION_DIR / f"{session_id}.json"
-    if session_file.exists():
-        session_file.unlink()
+    # Remove from disk (use thread pool for blocking I/O)
+    def _delete_from_disk():
+        session_file = SESSION_DIR / f"{session_id}.json"
+        if session_file.exists():
+            session_file.unlink()
+        upload_dir = UPLOAD_DIR / session_id
+        if upload_dir.exists():
+            import shutil
+            shutil.rmtree(upload_dir)
 
-    # Optionally remove uploaded files
-    upload_dir = UPLOAD_DIR / session_id
-    if upload_dir.exists():
-        import shutil
-        shutil.rmtree(upload_dir)
+    await asyncio.to_thread(_delete_from_disk)
 
     return APIResponse(
         success=True,
@@ -565,11 +605,12 @@ async def delete_session(session_id: str):
 async def ensure_session(session_id: str, request: StartRequest):
     """Ensure session exists, create if not found (for recovering after server restart)"""
     global config
-    
+    validate_session_id(session_id)
+
     if config is None:
         raise HTTPException(status_code=400, detail="API configuration not set")
-    
-    # If session already exists, just return it
+
+    # If session already exists in memory, just return it
     if session_id in sessions:
         state = sessions[session_id]
         return APIResponse(
@@ -578,7 +619,17 @@ async def ensure_session(session_id: str, request: StartRequest):
             session_id=session_id,
             data={"name": state.name, "created": False}
         )
-    
+
+    # Try loading from disk first (session may exist from previous server run)
+    existing = await ensure_session_loaded(session_id)
+    if existing:
+        return APIResponse(
+            success=True,
+            message="Session loaded from disk",
+            session_id=session_id,
+            data={"name": existing.name, "created": False}
+        )
+
     # Create new session with the provided ID
     state = AnalysisState(
         id=session_id,
@@ -634,17 +685,20 @@ async def upload_pathology(
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # Save file with absolute path
-    file_path = (UPLOAD_DIR / session_id / "pathology" / file.filename).resolve()
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(file_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
-    
+    # Save file with absolute path (sanitize filename to prevent path traversal)
+    sanitized_name = safe_filename(file.filename)
+    if not sanitized_name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    upload_parent = UPLOAD_DIR / session_id / "pathology"
+    file_path = upload_parent / sanitized_name
+    upload_parent.mkdir(parents=True, exist_ok=True)
+    validate_path_within(file_path, upload_parent)
+
+    await stream_save_file(file, file_path)
+
     # Create PathologyImage record with absolute path
     img = PathologyImage(
-        filename=file.filename,
+        filename=sanitized_name,
         image_type=image_type,
         original_path=str(file_path)
     )
@@ -652,11 +706,11 @@ async def upload_pathology(
     state.pathology_images.append(img)
     
     # Auto-save session
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
-        message=f"Pathology image uploaded: {file.filename}",
+        message=f"Pathology image uploaded: {sanitized_name}",
         data={"image_id": img.id, "image_type": image_type}
     )
 
@@ -671,18 +725,23 @@ async def upload_generic_file(
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # Save file with absolute path
-    file_path = (UPLOAD_DIR / session_id / "files" / file.filename).resolve()
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    
+    # Save file with absolute path (sanitize filename to prevent path traversal)
+    sanitized_name = safe_filename(file.filename)
+    if not sanitized_name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    upload_parent = UPLOAD_DIR / session_id / "files"
+    file_path = upload_parent / sanitized_name
+    upload_parent.mkdir(parents=True, exist_ok=True)
+    validate_path_within(file_path, upload_parent)
+
     with open(file_path, "wb") as f:
         content = await file.read()
         f.write(content)
-    
+
     return APIResponse(
         success=True,
-        message=f"File uploaded: {file.filename}",
-        data={"filename": file.filename, "path": str(file_path)}
+        message=f"File uploaded: {sanitized_name}",
+        data={"filename": sanitized_name}
     )
 
 
@@ -701,14 +760,17 @@ async def upload_snrna_seq(
     if group not in ["control", "treatment"]:
         raise HTTPException(status_code=400, detail="Invalid group. Must be 'control' or 'treatment'")
     
-    # Save file with absolute path
-    file_path = (UPLOAD_DIR / session_id / "snrna_seq" / group / file.filename).resolve()
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(file_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
-    
+    # Save file with absolute path (sanitize filename to prevent path traversal)
+    sanitized_name = safe_filename(file.filename)
+    if not sanitized_name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    upload_parent = UPLOAD_DIR / session_id / "snrna_seq" / group
+    file_path = upload_parent / sanitized_name
+    upload_parent.mkdir(parents=True, exist_ok=True)
+    validate_path_within(file_path, upload_parent)
+
+    await stream_save_file(file, file_path)
+
     # Update the appropriate path based on group (use absolute path)
     if group == "control":
         state.control_seq_path = str(file_path)
@@ -716,12 +778,12 @@ async def upload_snrna_seq(
         state.treatment_seq_path = str(file_path)
     
     # Auto-save session
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
-        message=f"{group.capitalize()} snRNA-seq data uploaded: {file.filename}",
-        data={"path": str(file_path), "group": group}
+        message=f"{group.capitalize()} snRNA-seq data uploaded: {sanitized_name}",
+        data={"group": group, "file_path": str(file_path)}
     )
 
 
@@ -740,14 +802,17 @@ async def upload_loom(
     if group not in ["control", "treatment"]:
         raise HTTPException(status_code=400, detail="Invalid group. Must be 'control' or 'treatment'")
     
-    # Save file with absolute path
-    file_path = (UPLOAD_DIR / session_id / "loom" / group / file.filename).resolve()
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(file_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
-    
+    # Save file with absolute path (sanitize filename to prevent path traversal)
+    sanitized_name = safe_filename(file.filename)
+    if not sanitized_name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    upload_parent = UPLOAD_DIR / session_id / "loom" / group
+    file_path = upload_parent / sanitized_name
+    upload_parent.mkdir(parents=True, exist_ok=True)
+    validate_path_within(file_path, upload_parent)
+
+    await stream_save_file(file, file_path)
+
     # Update the appropriate path based on group (use absolute path)
     if group == "control":
         state.control_loom_path = str(file_path)
@@ -755,12 +820,12 @@ async def upload_loom(
         state.treatment_loom_path = str(file_path)
     
     # Auto-save session
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
-        message=f"{group.capitalize()} loom file uploaded: {file.filename}",
-        data={"path": str(file_path), "group": group}
+        message=f"{group.capitalize()} loom file uploaded: {sanitized_name}",
+        data={"group": group, "file_path": str(file_path)}
     )
 
 
@@ -770,7 +835,7 @@ async def save_session(session_id: str):
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
@@ -805,7 +870,7 @@ async def add_biochemistry(session_id: str, request: BiochemistryInput):
     state.biochemistry_results.append(result)
 
     # Auto-save session
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
@@ -826,23 +891,28 @@ async def upload_biochemistry_file(
         raise HTTPException(status_code=404, detail="Session not found")
     
     # Determine file type
-    filename_lower = file.filename.lower()
+    sanitized_name = safe_filename(file.filename)
+    if not sanitized_name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    filename_lower = sanitized_name.lower()
     if filename_lower.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')):
         file_type = 'image'
     else:
         file_type = 'file'
-    
-    # Save file
-    file_path = (UPLOAD_DIR / session_id / "biochemistry" / file.filename).resolve()
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
+    # Save file (sanitize filename to prevent path traversal)
+    upload_parent = UPLOAD_DIR / session_id / "biochemistry"
+    file_path = upload_parent / sanitized_name
+    upload_parent.mkdir(parents=True, exist_ok=True)
+    validate_path_within(file_path, upload_parent)
+
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
-    
+
     # Create biochemistry file record
     bio_file = BiochemistryFile(
-        filename=file.filename,
+        filename=sanitized_name,
         file_type=file_type,
         file_path=str(file_path),
         description=description
@@ -856,7 +926,7 @@ async def upload_biochemistry_file(
             await websockets[session_id].send_json({
                 "type": "data_uploaded",
                 "data_type": "biochemistry_file",
-                "message": f"Biochemistry {file_type} uploaded: {file.filename}",
+                "message": f"Biochemistry {file_type} uploaded: {sanitized_name}",
                 "file_id": bio_file.id,
                 "file_type": file_type
             })
@@ -864,15 +934,14 @@ async def upload_biochemistry_file(
             pass  # WebSocket may not be connected
     
     # Auto-save session
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
-        message=f"Biochemistry {file_type} uploaded: {file.filename}",
+        message=f"Biochemistry {file_type} uploaded: {sanitized_name}",
         data={
             "file_id": bio_file.id,
-            "file_type": file_type,
-            "path": str(file_path)
+            "file_type": file_type
         }
     )
 
@@ -900,7 +969,7 @@ async def delete_pathology(session_id: str, image_id: str):
             state.pathology_images.pop(i)
             
             # Auto-save session
-            save_session_to_disk(session_id, state)
+            await asyncio.to_thread(save_session_to_disk, session_id, state)
             
             return APIResponse(
                 success=True,
@@ -931,7 +1000,7 @@ async def delete_biochemistry_file(session_id: str, file_id: str):
             state.biochemistry_files.pop(i)
             
             # Auto-save session
-            save_session_to_disk(session_id, state)
+            await asyncio.to_thread(save_session_to_disk, session_id, state)
             
             return APIResponse(
                 success=True,
@@ -954,7 +1023,7 @@ async def delete_biochemistry_result(session_id: str, result_id: str):
             state.biochemistry_results.pop(i)
             
             # Auto-save session
-            save_session_to_disk(session_id, state)
+            await asyncio.to_thread(save_session_to_disk, session_id, state)
             
             return APIResponse(
                 success=True,
@@ -995,7 +1064,7 @@ async def delete_sequencing(session_id: str, group: str):
             state.treatment_seq_path = None
     
     # Auto-save session
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
@@ -1034,7 +1103,7 @@ async def delete_loom(session_id: str, group: str):
             state.treatment_loom_path = None
     
     # Auto-save session
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
@@ -1052,7 +1121,7 @@ async def update_prompts(session_id: str, request: PromptUpdateRequest):
     state.custom_prompts[request.agent] = request.prompt
 
     # Save to disk
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
 
     return APIResponse(
         success=True,
@@ -1091,7 +1160,7 @@ async def update_models(session_id: str, request: ModelUpdateRequest):
     state.custom_models[request.agent] = request.model
 
     # Save to disk
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
 
     return APIResponse(
         success=True,
@@ -1131,7 +1200,7 @@ async def update_temperatures(session_id: str, request: TemperatureUpdateRequest
     state.custom_temperatures[request.agent] = request.temperature
 
     # Save to disk
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
 
     return APIResponse(
         success=True,
@@ -1166,7 +1235,7 @@ async def update_max_rounds(session_id: str, request: MaxRoundsRequest):
     state.max_rounds = request.max_rounds
 
     # Auto-save session
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     
     return APIResponse(
         success=True,
@@ -1414,7 +1483,11 @@ async def import_state(file: UploadFile = File(...)):
                 raise HTTPException(status_code=400, detail="Empty zip file")
             
             session_id = namelist[0].split('/')[0]
-            
+
+            # Validate session_id from zip to prevent path traversal
+            if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
+                raise HTTPException(status_code=400, detail="Invalid session ID in archive")
+
             # Extract state.json
             state_json_path = f"{session_id}/state.json"
             if state_json_path not in namelist:
@@ -1430,33 +1503,40 @@ async def import_state(file: UploadFile = File(...)):
                 dest_notebook = STATE_DIR / f"{session_id}.ipynb"
                 dest_notebook.write_bytes(notebook_content)
             
-            # Extract session dump if exists
+            # Skip session.pkl - pickle deserialization of untrusted data is unsafe
             session_pkl_path = f"{session_id}/session.pkl"
             if session_pkl_path in namelist:
-                pkl_content = zf.read(session_pkl_path)
-                dest_pkl = STATE_DIR / f"{session_id}_session.pkl"
-                dest_pkl.write_bytes(pkl_content)
-            
+                logger.warning(f"Skipping session.pkl import for security (pickle deserialization of untrusted data)")
+
             # Extract metadata if exists
             metadata_path = f"{session_id}/metadata.json"
             if metadata_path in namelist:
                 metadata_content = zf.read(metadata_path)
                 dest_metadata = STATE_DIR / f"{session_id}_state.json"
                 dest_metadata.write_bytes(metadata_content)
-            
-            # Extract workspace files if exist
+
+            # Extract workspace files if exist (with path traversal protection)
+            workspace_parent = (WORKSPACE_DIR / session_id).resolve()
             workspace_files = [n for n in namelist if n.startswith(f"{session_id}/workspace/")]
             for wf in workspace_files:
                 if not wf.endswith('/'):  # Skip directories
                     relative_path = wf.replace(f"{session_id}/workspace/", "")
-                    dest_path = WORKSPACE_DIR / session_id / relative_path
+                    dest_path = (WORKSPACE_DIR / session_id / relative_path).resolve()
+                    # Validate path stays within workspace directory
+                    if not str(dest_path).startswith(str(workspace_parent) + os.sep):
+                        logger.warning(f"Skipping zip entry with path traversal: {wf}")
+                        continue
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                     dest_path.write_bytes(zf.read(wf))
     else:
         # Handle plain JSON (backward compatibility)
         state_data = json.loads(content.decode('utf-8'))
         state = AnalysisState(**state_data)
-    
+
+    # Validate imported session ID to prevent path traversal
+    if not state.id or '/' in state.id or '\\' in state.id or '..' in state.id:
+        raise HTTPException(status_code=400, detail="Invalid session ID in imported data")
+
     sessions[state.id] = state
     
     return APIResponse(
@@ -1714,13 +1794,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         })
     except Exception as e:
         logger.error(f"[{session_id}] Failed to send initial message: {e}")
-    
+
     # State callback to save after each round
     async def state_callback(state: AnalysisState):
         sessions[session_id] = state
         # Use thread pool for disk I/O to avoid blocking event loop
         await asyncio.to_thread(save_session_to_disk, session_id, state)
-    
+
     # Create workflow with session_id for state persistence
     workflow = SingleCellAnalysisWorkflow(
         config=config,
@@ -1731,17 +1811,35 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # Add workflow to tracking dict (protected by lock to prevent race conditions)
     async with _state_lock:
         workflows[session_id] = workflow
-    
+
+    # Background task to monitor WebSocket for client disconnect
+    async def monitor_websocket():
+        """Listen for WebSocket disconnect while workflow is running"""
+        nonlocal ws_closed
+        try:
+            while True:
+                await websocket.receive_text()
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            logger.info(f"[{session_id}] Client disconnected during workflow execution")
+            async with ws_lock:
+                ws_closed = True
+        except Exception as e:
+            logger.error(f"[{session_id}] Unexpected WebSocket monitor error: {e}")
+            async with ws_lock:
+                ws_closed = True
+
+    monitor_task = asyncio.create_task(monitor_websocket())
+
     try:
         # Run workflow
         logger.info(f"Starting workflow for session {session_id}")
         final_state = await workflow.run(state, session_id)
         sessions[session_id] = final_state
         logger.info(f"Workflow completed for session {session_id}")
-        
-        # Save completed state to disk
-        save_session_to_disk(session_id, final_state)
-        
+
+        # Save completed state to disk (use thread pool for I/O)
+        await asyncio.to_thread(save_session_to_disk, session_id, final_state)
+
         # Send completion message (safely)
         await safe_send({
             "type": "completed",
@@ -1751,15 +1849,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 "final_summary": final_state.final_summary
             }
         })
-        
-    except WebSocketDisconnect:
-        # Client disconnected - pause workflow
-        logger.info(f"WebSocket disconnected for session {session_id}")
-        # Get the latest state to avoid race condition
-        current_state = sessions.get(session_id, state)
-        current_state.status = TaskStatus.PAUSED
-        sessions[session_id] = current_state
-        save_session_to_disk(session_id, current_state)
 
     except Exception as e:
         # Log the full error traceback
@@ -1775,9 +1864,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         current_state = sessions.get(session_id, state)
         current_state.status = TaskStatus.FAILED
         sessions[session_id] = current_state
-        save_session_to_disk(session_id, current_state)
-        
+        await asyncio.to_thread(save_session_to_disk, session_id, current_state)
+
     finally:
+        # Cancel the WebSocket monitor task
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+
         # Clean up with lock protection
         logger.info(f"Cleaning up session {session_id}")
         try:
@@ -1942,6 +2038,9 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
 @app.websocket("/ws/report/{session_id}")
 async def report_websocket(websocket: WebSocket, session_id: str):
     """WebSocket for report generation progress"""
+    if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
+        await websocket.close(code=1008, reason="Invalid session ID")
+        return
     await websocket.accept()
     report_websockets[session_id] = websocket
     
@@ -2040,6 +2139,7 @@ async def download_file(path: str):
 @app.post("/api/session/{session_id}/report/download-all-figures")
 async def download_all_figures(session_id: str):
     """Download all figures as a ZIP file"""
+    validate_session_id(session_id)
     figures_dir = REPORTS_DIR / session_id / "figures"
     
     if not figures_dir.exists():
@@ -2064,6 +2164,7 @@ async def download_all_figures(session_id: str):
 @app.post("/api/session/{session_id}/report/download-all-tables")
 async def download_all_tables(session_id: str):
     """Download all tables as a ZIP file"""
+    validate_session_id(session_id)
     tables_dir = REPORTS_DIR / session_id / "tables"
     
     if not tables_dir.exists():
@@ -2088,6 +2189,7 @@ async def download_all_tables(session_id: str):
 @app.post("/api/session/{session_id}/report/download-full")
 async def download_full_report(session_id: str):
     """Download full report including figures, tables, and report JSON"""
+    validate_session_id(session_id)
     report_dir = REPORTS_DIR / session_id
     
     if not report_dir.exists():
@@ -2119,6 +2221,7 @@ async def download_full_report(session_id: str):
 @app.get("/api/session/{session_id}/report/html")
 async def get_report_html(session_id: str):
     """Get the HTML report for preview"""
+    validate_session_id(session_id)
     report_dir = REPORTS_DIR / session_id
     html_path = report_dir / "report.html"
 
@@ -2135,6 +2238,7 @@ async def get_report_html(session_id: str):
 @app.get("/api/session/{session_id}/report/preview")
 async def preview_report(session_id: str):
     """Get report preview data including HTML content and metadata"""
+    validate_session_id(session_id)
     report_dir = REPORTS_DIR / session_id
 
     if not report_dir.exists():
@@ -2192,7 +2296,10 @@ async def preview_report(session_id: str):
 @app.get("/api/session/{session_id}/report/figure/{filename}")
 async def get_report_figure(session_id: str, filename: str):
     """Get a specific figure from the report"""
-    figure_path = REPORTS_DIR / session_id / "figures" / filename
+    safe_name = safe_filename(filename)
+    figure_parent = REPORTS_DIR / session_id / "figures"
+    figure_path = figure_parent / safe_name
+    validate_path_within(figure_path, figure_parent)
 
     if not figure_path.exists():
         raise HTTPException(status_code=404, detail="Figure not found")
@@ -2224,7 +2331,10 @@ async def get_report_figure_alt(session_id: str, filename: str):
 @app.get("/api/session/{session_id}/report/table/{filename}")
 async def get_report_table(session_id: str, filename: str):
     """Get a specific table from the report"""
-    table_path = REPORTS_DIR / session_id / "tables" / filename
+    safe_name = safe_filename(filename)
+    table_parent = REPORTS_DIR / session_id / "tables"
+    table_path = table_parent / safe_name
+    validate_path_within(table_path, table_parent)
 
     if not table_path.exists():
         raise HTTPException(status_code=404, detail="Table not found")
@@ -2351,6 +2461,12 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str):
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="PDF file not found on disk")
 
+    # Validate path is within allowed directories
+    resolved = pdf_path.resolve()
+    allowed_parents = [REPORTS_DIR.resolve(), WORKSPACE_DIR.resolve(), UPLOAD_DIR.resolve()]
+    if not any(str(resolved).startswith(str(p) + os.sep) or resolved == p for p in allowed_parents):
+        raise HTTPException(status_code=403, detail="Access denied: file outside allowed directories")
+
     return FileResponse(
         pdf_path,
         media_type="application/pdf",
@@ -2375,6 +2491,12 @@ async def download_publication_figure_png(session_id: str, figure_id: str):
     png_path = Path(figure.png_path)
     if not png_path.exists():
         raise HTTPException(status_code=404, detail="PNG file not found on disk")
+
+    # Validate path is within allowed directories
+    resolved = png_path.resolve()
+    allowed_parents = [REPORTS_DIR.resolve(), WORKSPACE_DIR.resolve(), UPLOAD_DIR.resolve()]
+    if not any(str(resolved).startswith(str(p) + os.sep) or resolved == p for p in allowed_parents):
+        raise HTTPException(status_code=403, detail="Access denied: file outside allowed directories")
 
     return FileResponse(
         png_path,
@@ -2473,7 +2595,7 @@ async def upload_chunk(
 async def complete_chunked_upload(
     session_id: str,
     upload_id: str,
-    file_type: str = Form(...),
+    file_type: str = Form(None),
     group: Optional[str] = Form(None)
 ):
     """Complete chunked upload and assemble file"""
@@ -2486,8 +2608,14 @@ async def complete_chunked_upload(
     if status is None:
         raise HTTPException(status_code=404, detail="Upload not found")
 
+    # Use metadata values (set at init), not client-overridable form params
+    file_type = status.get("file_type") or file_type
+    group = status.get("group") or group
+
     # Determine final path based on file type
-    filename = status["filename"]
+    filename = safe_filename(status["filename"])
+    if not filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
     if file_type == "snrna_seq":
         final_path = UPLOAD_DIR / session_id / "snrna_seq" / (group or "control") / filename
     elif file_type == "loom":
@@ -2524,7 +2652,7 @@ async def complete_chunked_upload(
         )
         state.pathology_images.append(img)
 
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
 
     return APIResponse(
         success=True,
@@ -2586,7 +2714,7 @@ async def retry_node(session_id: str, request: RetryNodeRequest):
         state.status = TaskStatus.PAUSED  # Allow resumption
         message = f"Session ready to retry from node {request.node_name}"
 
-    save_session_to_disk(session_id, state)
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
 
     return APIResponse(
         success=True,

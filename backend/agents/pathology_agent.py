@@ -3,6 +3,7 @@ Pathology Agent - Analyzes histology images
 """
 from typing import Dict, Any, List, Optional
 import json
+import os
 import re
 import logging
 
@@ -128,8 +129,6 @@ class PathologyAgent(BaseAgent):
         Returns:
             Analysis results
         """
-        import os
-
         # Set LLM context before vision calls (client is shared between agents)
         self._set_llm_context()
         
@@ -263,7 +262,7 @@ Be concise but thorough for each tile.
                         })
                 except Exception as e:
                     # If parsing fails, log warning and store error info
-                    logger.warning(f"[PathologyAgent] Failed to parse batch {batch_num} response: {e}")
+                    logger.warning(f"[PathologyAgent] Failed to parse batch {batch_idx} response: {e}")
                     tile_findings.append({
                         "tile_index": start_idx,
                         "findings": batch_content[:500] if batch_content else "Analysis failed",
@@ -375,13 +374,24 @@ Please provide comprehensive analysis and reply in JSON format:
     ) -> Dict[str, Any]:
         """
         Perform targeted analysis based on specific question
-        
+
         Used when PI requests specific pathology verification
         """
-        # Set LLM context before vision calls (client is shared between agents)
-        self._set_llm_context()
-        
-        prompt = f"""
+        try:
+            # Set LLM context before vision calls (client is shared between agents)
+            self._set_llm_context()
+
+            # Validate file exists
+            if not os.path.exists(image_info.original_path):
+                logger.warning(f"[PathologyAgent] Image not found: {image_info.original_path}")
+                return {
+                    "question": specific_question,
+                    "answer": "Image file not found for targeted analysis",
+                    "image_id": image_info.id,
+                    "error": "file_not_found"
+                }
+
+            prompt = f"""
 Perform pathology slide analysis for the following specific question:
 
 Question: {specific_question}
@@ -394,37 +404,47 @@ Please carefully observe the slide and answer:
 
 Please reply in structured format.
 """
-        
-        # Process image
-        tiles = process_pathology_image(
-            image_info.original_path,
-            tile_size=self.tile_size,
-            max_tiles=10  # Fewer tiles for targeted analysis
-        )
-        
-        result = await self.llm_client.chat_with_vision(
-            model=self.model,
-            text_prompt=prompt,
-            images=tiles,
-            temperature=0.3
-        )
-        
-        return {
-            "question": specific_question,
-            "answer": result.content,
-            "image_id": image_info.id
-        }
+
+            # Process image
+            tiles = process_pathology_image(
+                image_info.original_path,
+                tile_size=self.tile_size,
+                max_tiles=10  # Fewer tiles for targeted analysis
+            )
+
+            if not tiles:
+                return {
+                    "question": specific_question,
+                    "answer": "Image appears to be blank or too small for analysis",
+                    "image_id": image_info.id
+                }
+
+            result = await self.llm_client.chat_with_vision(
+                model=self.model,
+                text_prompt=prompt,
+                images=tiles,
+                temperature=0.3
+            )
+
+            return {
+                "question": specific_question,
+                "answer": result.content if result and result.content else "Analysis failed to generate a response",
+                "image_id": image_info.id
+            }
+        except Exception as e:
+            logger.error(f"[PathologyAgent] Targeted analysis failed: {e}")
+            return {
+                "question": specific_question,
+                "answer": f"Targeted analysis failed: {str(e)}",
+                "image_id": image_info.id,
+                "error": str(e)
+            }
     
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
-        """Parse JSON from response"""
+        """Parse JSON from response using safe balanced bracket matching from base class"""
         # Handle None or empty response
         if not response:
             return {"raw_response": "", "error": "Empty response from LLM"}
-        
-        try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
-        return {"raw_response": response}
+
+        result = self._safe_parse_json(response, default={"raw_response": response})
+        return result

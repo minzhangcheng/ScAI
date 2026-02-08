@@ -9,8 +9,12 @@ from PIL import Image
 import numpy as np
 
 
+# Set PIL decompression bomb limit at module level to protect all Image.open() calls
+Image.MAX_IMAGE_PIXELS = 200_000_000  # ~200 megapixels
+
+
 def load_image(image_path: str) -> Image.Image:
-    """Load an image from file path"""
+    """Load an image from file path with size safety check"""
     return Image.open(image_path)
 
 

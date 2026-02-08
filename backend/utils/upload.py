@@ -38,6 +38,14 @@ class ChunkedUploadManager:
         self.temp_dir = Path(temp_dir)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.chunk_size = chunk_size
+        # Per-upload locks to prevent concurrent metadata read/write race conditions
+        self._upload_locks: Dict[str, asyncio.Lock] = {}
+
+    def _get_upload_lock(self, upload_id: str) -> asyncio.Lock:
+        """Get or create a lock for a specific upload"""
+        if upload_id not in self._upload_locks:
+            self._upload_locks[upload_id] = asyncio.Lock()
+        return self._upload_locks[upload_id]
 
     def _get_upload_meta_path(self, upload_id: str) -> Path:
         """Get path to upload metadata file"""
@@ -135,22 +143,23 @@ class ChunkedUploadManager:
         async with aiofiles.open(chunk_path, 'wb') as f:
             await f.write(chunk_data)
 
-        # Update metadata
-        meta_path = self._get_upload_meta_path(upload_id)
-        if not meta_path.exists():
-            return {"success": False, "error": "Upload not found"}
+        # Update metadata with lock to prevent concurrent read-modify-write race
+        async with self._get_upload_lock(upload_id):
+            meta_path = self._get_upload_meta_path(upload_id)
+            if not meta_path.exists():
+                return {"success": False, "error": "Upload not found"}
 
-        async with aiofiles.open(meta_path, 'r') as f:
-            meta = json.loads(await f.read())
+            async with aiofiles.open(meta_path, 'r') as f:
+                meta = json.loads(await f.read())
 
-        if chunk_index not in meta["received_chunks"]:
-            meta["received_chunks"].append(chunk_index)
-            meta["received_chunks"].sort()
+            if chunk_index not in meta["received_chunks"]:
+                meta["received_chunks"].append(chunk_index)
+                meta["received_chunks"].sort()
 
-        meta["updated_at"] = datetime.now().isoformat()
+            meta["updated_at"] = datetime.now().isoformat()
 
-        async with aiofiles.open(meta_path, 'w') as f:
-            await f.write(json.dumps(meta, indent=2))
+            async with aiofiles.open(meta_path, 'w') as f:
+                await f.write(json.dumps(meta, indent=2))
 
         logger.debug(f"Saved chunk {chunk_index}/{meta['total_chunks']} for upload {upload_id}")
 
@@ -159,7 +168,7 @@ class ChunkedUploadManager:
             "chunk_index": chunk_index,
             "received_count": len(meta["received_chunks"]),
             "total_chunks": meta["total_chunks"],
-            "progress": len(meta["received_chunks"]) / meta["total_chunks"] * 100
+            "progress": (len(meta["received_chunks"]) / meta["total_chunks"] * 100) if meta["total_chunks"] > 0 else 0
         }
 
     async def complete_upload(self, upload_id: str, final_path: Path) -> Dict[str, Any]:
@@ -178,8 +187,10 @@ class ChunkedUploadManager:
         if not meta_path.exists():
             return {"success": False, "error": "Upload not found"}
 
-        async with aiofiles.open(meta_path, 'r') as f:
-            meta = json.loads(await f.read())
+        # Read metadata under lock to avoid race with concurrent save_chunk
+        async with self._get_upload_lock(upload_id):
+            async with aiofiles.open(meta_path, 'r') as f:
+                meta = json.loads(await f.read())
 
         # Verify all chunks received
         expected_chunks = set(range(meta["total_chunks"]))
@@ -265,6 +276,8 @@ class ChunkedUploadManager:
 
                 # Delete metadata file
                 meta_path.unlink()
+                # Clean up per-upload lock
+                self._upload_locks.pop(upload_id, None)
                 logger.info(f"Cleaned up upload {upload_id}")
             except Exception as e:
                 logger.warning(f"Error cleaning up upload {upload_id}: {e}")
@@ -284,8 +297,10 @@ class ChunkedUploadManager:
         if not meta_path.exists():
             return None
 
-        async with aiofiles.open(meta_path, 'r') as f:
-            meta = json.loads(await f.read())
+        # Read metadata under lock to avoid race with concurrent save_chunk
+        async with self._get_upload_lock(upload_id):
+            async with aiofiles.open(meta_path, 'r') as f:
+                meta = json.loads(await f.read())
 
         received_count = len(meta["received_chunks"])
         total_chunks = meta["total_chunks"]

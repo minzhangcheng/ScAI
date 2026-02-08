@@ -240,6 +240,11 @@ interface AppState {
   // Config panel trigger callback (set by App.tsx)
   showConfigPanel: (() => void) | null
   setShowConfigPanelCallback: (callback: (() => void) | null) => void
+
+  // WebSocket connect/disconnect callbacks (set by App.tsx, consumed by AnalysisPanel)
+  wsConnect: (() => void) | null
+  wsDisconnect: (() => void) | null
+  setWsCallbacks: (connect: (() => void) | null, disconnect: (() => void) | null) => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -354,7 +359,12 @@ export const useAppStore = create<AppState>()(
 
       // Config panel trigger callback
       showConfigPanel: null,
-      setShowConfigPanelCallback: (callback) => set({ showConfigPanel: callback })
+      setShowConfigPanelCallback: (callback) => set({ showConfigPanel: callback }),
+
+      // WebSocket connect/disconnect callbacks
+      wsConnect: null,
+      wsDisconnect: null,
+      setWsCallbacks: (connect, disconnect) => set({ wsConnect: connect, wsDisconnect: disconnect })
     }),
     {
       name: 'intesc-storage',
@@ -368,7 +378,20 @@ export const useAppStore = create<AppState>()(
         messagePanelWidth: state.messagePanelWidth,
         // Persist session and messages for page refresh recovery
         currentSession: state.currentSession,
-        messages: state.messages, // Keep all messages (no limit)
+        // Limit persisted messages and strip base64 content to prevent localStorage overflow
+        messages: state.messages.slice(-200).map(msg => {
+          // Strip base64 figure data from content to prevent localStorage overflow
+          if (msg.content?.figures && Array.isArray(msg.content.figures) && msg.content.figures.length > 0) {
+            return {
+              ...msg,
+              content: {
+                ...msg.content,
+                figures: msg.content.figures.map((f: any) => f ? { ...f, data: undefined, pngBase64: undefined } : f)
+              }
+            }
+          }
+          return msg
+        }),
       })
     }
   )

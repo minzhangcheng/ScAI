@@ -343,7 +343,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               )}
               {figureContent.png_base64 && (
                 <img
-                  src={`data:image/jpeg;base64,${figureContent.png_base64}`}
+                  src={`data:image/png;base64,${figureContent.png_base64}`}
                   alt={figureContent.figure_name || 'Figure'}
                   className="mt-2 max-w-xs rounded border border-slate-200"
                 />

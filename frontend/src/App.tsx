@@ -25,9 +25,9 @@ import {
 } from 'lucide-react'
 
 function App() {
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback } = useAppStore()
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks } = useAppStore()
   const { checkStatus } = useConfig()
-  const { connect, connected } = useWebSocket()
+  const { connect, disconnect, connected } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
   const [configSkipped, setConfigSkipped] = useState(false)
@@ -90,6 +90,12 @@ function App() {
     setShowConfigPanelCallback(() => setShowConfig(true))
     return () => setShowConfigPanelCallback(null)
   }, [setShowConfigPanelCallback])
+
+  // Register WebSocket connect/disconnect callbacks for child components (e.g., AnalysisPanel)
+  useEffect(() => {
+    setWsCallbacks(connect, disconnect)
+    return () => setWsCallbacks(null, null)
+  }, [connect, disconnect, setWsCallbacks])
 
   // Auto-reconnect WebSocket if session is running (with exponential backoff)
   const reconnectAttemptRef = useRef(0)

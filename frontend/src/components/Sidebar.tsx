@@ -299,7 +299,7 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
               />
               <div className="flex justify-between text-xs text-indigo-400 mt-1">
                 <span>1</span>
-                <span>{language === 'zh' ? '默认: 10' : 'Default: 10'}</span>
+                <span>{language === 'zh' ? '默认: 3' : 'Default: 3'}</span>
                 <span>30</span>
               </div>
               <p className="text-xs text-indigo-500 mt-2 leading-relaxed">
