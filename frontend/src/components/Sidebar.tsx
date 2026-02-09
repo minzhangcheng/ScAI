@@ -20,7 +20,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
-  const { currentSession, setCurrentSession, clearMessages, language, maxRounds, setMaxRounds, reportGenerated } = useAppStore()
+  const { currentSession, setCurrentSession, clearMessages, language, maxRounds, setMaxRounds, reportGenerated, setOpenSessionBrowserCallback } = useAppStore()
   const { createSession, loadSession, listSessions, deleteSession } = useSession()
   const { t } = useTranslation(language)
   const [showNewSession, setShowNewSession] = useState(false)
@@ -36,6 +36,12 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   
   const [instruction, setInstruction] = useState(DEFAULT_PROJECT_DESCRIPTION)
   const [sessionName, setSessionName] = useState(DEFAULT_PROJECT_NAME)
+
+  // Register session browser callback for external components (e.g., ConfigPanel's Read Mode)
+  useEffect(() => {
+    setOpenSessionBrowserCallback(() => setShowSessionBrowser(true))
+    return () => setOpenSessionBrowserCallback(null)
+  }, [setOpenSessionBrowserCallback])
 
   // Fetch sessions when browser is opened
   useEffect(() => {

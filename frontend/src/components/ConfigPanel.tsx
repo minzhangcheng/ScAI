@@ -2,20 +2,21 @@ import { useState } from 'react'
 import { useConfig } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
-import { Key, X, Check, AlertCircle, Loader2, Server } from 'lucide-react'
+import { Key, X, Check, AlertCircle, Loader2, Server, BookOpen, Eye, EyeOff } from 'lucide-react'
 
 interface ConfigPanelProps {
   onClose: () => void
   onSave: () => void
-  allowSkip?: boolean
-  onSkip?: () => void
+  onReadMode?: () => void
 }
 
-export function ConfigPanel({ onClose, onSave, allowSkip = false, onSkip }: ConfigPanelProps) {
+export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
   const { apiConfig, setApiConfig, saveConfig, loading, error, clearError } = useConfig()
   const { language } = useAppStore()
   const { t } = useTranslation(language)
   const [localError, setLocalError] = useState<string | null>(null)
+  const [showApiKey, setShowApiKey] = useState(false)
+  const [showGoogleKey, setShowGoogleKey] = useState(false)
 
   // Clear errors when user modifies config
   const handleConfigChange = (updates: Partial<typeof apiConfig>) => {
@@ -97,13 +98,23 @@ export function ConfigPanel({ onClose, onSave, allowSkip = false, onSkip }: Conf
             <label className="block text-sm font-medium text-slate-700 mb-2">
               API Key <span className="text-red-500">*</span>
             </label>
-            <input
-              type="password"
-              value={apiConfig.apiKey}
-              onChange={(e) => handleConfigChange({ apiKey: e.target.value })}
-              placeholder="sk-or-v1-..."
-              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
-            />
+            <div className="relative">
+              <input
+                type={showApiKey ? 'text' : 'password'}
+                value={apiConfig.apiKey}
+                onChange={(e) => handleConfigChange({ apiKey: e.target.value })}
+                placeholder="sk-or-v1-..."
+                className="w-full px-4 py-3 pr-12 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
+              />
+              <button
+                type="button"
+                onClick={() => setShowApiKey(!showApiKey)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition-colors"
+                title={showApiKey ? (language === 'zh' ? '隐藏' : 'Hide') : (language === 'zh' ? '显示' : 'Show')}
+              >
+                {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
             <p className="text-xs text-slate-500 mt-1.5">
               {language === 'zh' ? '用于 LLM 服务的 API 密钥' : 'API key for LLM service'} · 
               <a href="https://openrouter.ai/keys" target="_blank" className="text-violet-600 hover:underline">
@@ -120,13 +131,23 @@ export function ConfigPanel({ onClose, onSave, allowSkip = false, onSkip }: Conf
                 ({language === 'zh' ? '可选' : 'Optional'})
               </span>
             </label>
-            <input
-              type="password"
-              value={apiConfig.googleApiKey}
-              onChange={(e) => handleConfigChange({ googleApiKey: e.target.value })}
-              placeholder="AIza..."
-              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
-            />
+            <div className="relative">
+              <input
+                type={showGoogleKey ? 'text' : 'password'}
+                value={apiConfig.googleApiKey}
+                onChange={(e) => handleConfigChange({ googleApiKey: e.target.value })}
+                placeholder="AIza..."
+                className="w-full px-4 py-3 pr-12 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
+              />
+              <button
+                type="button"
+                onClick={() => setShowGoogleKey(!showGoogleKey)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition-colors"
+                title={showGoogleKey ? (language === 'zh' ? '隐藏' : 'Hide') : (language === 'zh' ? '显示' : 'Show')}
+              >
+                {showGoogleKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
             <p className="text-xs text-slate-500 mt-1.5">
               {t('googleDesc')} · 
               <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-violet-600 hover:underline">
@@ -169,25 +190,19 @@ export function ConfigPanel({ onClose, onSave, allowSkip = false, onSkip }: Conf
         {/* Footer */}
         <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-between">
           <div>
-            {allowSkip && (
+            {onReadMode && (
               <button
                 onClick={() => {
-                  onSkip?.()
-                  onClose()
+                  onReadMode()
                 }}
-                className="px-5 py-2.5 text-slate-500 hover:text-slate-700 hover:bg-slate-200 rounded-xl font-medium transition-colors"
+                className="flex items-center gap-2 px-5 py-2.5 text-slate-500 hover:text-slate-700 hover:bg-slate-200 rounded-xl font-medium transition-colors"
               >
-                {language === 'zh' ? '稍后配置' : 'Skip for now'}
+                <BookOpen className="w-4 h-4" />
+                {t('readMode')}
               </button>
             )}
           </div>
           <div className="flex gap-3">
-            <button
-              onClick={onClose}
-              className="px-5 py-2.5 text-slate-700 hover:bg-slate-200 rounded-xl font-medium transition-colors"
-            >
-              {t('cancel')}
-            </button>
             <button
               onClick={handleSave}
               disabled={loading}

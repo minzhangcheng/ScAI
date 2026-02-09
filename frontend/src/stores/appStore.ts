@@ -245,6 +245,14 @@ interface AppState {
   wsConnect: (() => void) | null
   wsDisconnect: (() => void) | null
   setWsCallbacks: (connect: (() => void) | null, disconnect: (() => void) | null) => void
+
+  // Read mode - restricts user from starting new analyses (not persisted)
+  readMode: boolean
+  setReadMode: (mode: boolean) => void
+
+  // Session browser callback (set by Sidebar, invoked by ConfigPanel's Read Mode)
+  openSessionBrowser: (() => void) | null
+  setOpenSessionBrowserCallback: (callback: (() => void) | null) => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -364,7 +372,15 @@ export const useAppStore = create<AppState>()(
       // WebSocket connect/disconnect callbacks
       wsConnect: null,
       wsDisconnect: null,
-      setWsCallbacks: (connect, disconnect) => set({ wsConnect: connect, wsDisconnect: disconnect })
+      setWsCallbacks: (connect, disconnect) => set({ wsConnect: connect, wsDisconnect: disconnect }),
+
+      // Read mode
+      readMode: false,
+      setReadMode: (mode) => set({ readMode: mode }),
+
+      // Session browser callback
+      openSessionBrowser: null,
+      setOpenSessionBrowserCallback: (callback) => set({ openSessionBrowser: callback }),
     }),
     {
       name: 'intesc-storage',

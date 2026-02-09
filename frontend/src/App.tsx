@@ -147,11 +147,16 @@ function App() {
             setConfigured(true)
             setConfigSkipped(false)
             setShowConfig(false)
+            useAppStore.getState().setReadMode(false)
           }}
-          allowSkip={!configured}
-          onSkip={() => {
+          onReadMode={!configured ? () => {
             setConfigSkipped(true)
-          }}
+            setShowConfig(false)
+            useAppStore.getState().setReadMode(true)
+            setTimeout(() => {
+              useAppStore.getState().openSessionBrowser?.()
+            }, 100)
+          } : undefined}
         />
       )}
 

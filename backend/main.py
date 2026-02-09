@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 import uuid
+import httpx
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -300,6 +301,12 @@ class ConfigRequest(BaseModel):
     proxy_url: Optional[str] = None
 
 
+class ValidateKeyRequest(BaseModel):
+    api_key: str
+    llm_base_url: str = "https://openrouter.ai/api/v1"
+    proxy_url: Optional[str] = None
+
+
 class StartRequest(BaseModel):
     instruction: str
     session_name: Optional[str] = None
@@ -379,6 +386,60 @@ async def config_status():
         "has_api_key": bool(config.api.api_key),
         "has_google": bool(config.api.google_api_key)
     }
+
+
+@app.post("/api/config/validate")
+async def validate_api_key(request: ValidateKeyRequest):
+    """Validate API key by attempting to list models from the LLM endpoint"""
+    base_url = request.llm_base_url.rstrip('/')
+    models_url = f"{base_url}/models"
+
+    headers = {
+        "Authorization": f"Bearer {request.api_key}",
+        "Content-Type": "application/json",
+    }
+
+    proxy = request.proxy_url if request.proxy_url else None
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            proxy=proxy,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(models_url, headers=headers)
+
+            if response.status_code == 200:
+                return {"valid": True, "message": "API key is valid"}
+            elif response.status_code in (401, 403):
+                return {
+                    "valid": False,
+                    "message": f"Invalid API key or insufficient permissions (HTTP {response.status_code})",
+                }
+            else:
+                return {
+                    "valid": False,
+                    "message": f"Unexpected response from LLM server (HTTP {response.status_code})",
+                    "uncertain": True,
+                }
+    except httpx.TimeoutException:
+        return {
+            "valid": False,
+            "message": "Connection timed out while validating API key",
+            "uncertain": True,
+        }
+    except httpx.ConnectError as e:
+        return {
+            "valid": False,
+            "message": f"Could not connect to LLM server: {str(e)}",
+            "uncertain": True,
+        }
+    except Exception as e:
+        return {
+            "valid": False,
+            "message": f"Validation error: {str(e)}",
+            "uncertain": True,
+        }
 
 
 @app.post("/api/session/start")

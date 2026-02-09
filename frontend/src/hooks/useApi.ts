@@ -65,11 +65,36 @@ export function useConfig() {
     }
   }, [])
 
+  const validateApiKey = useCallback(async () => {
+    try {
+      const result = await apiFetch<{
+        valid: boolean
+        message: string
+        status_code?: number
+        uncertain?: boolean
+      }>('/config/validate', {
+        method: 'POST',
+        body: JSON.stringify({
+          api_key: apiConfig.apiKey,
+          llm_base_url: apiConfig.llmBaseUrl,
+          proxy_url: apiConfig.proxyUrl || null,
+        }),
+      })
+      return result
+    } catch {
+      return {
+        valid: false,
+        message: 'Failed to reach validation endpoint',
+        uncertain: true,
+      }
+    }
+  }, [apiConfig])
+
   const clearError = useCallback(() => {
     setError(null)
   }, [])
 
-  return { apiConfig, setApiConfig, saveConfig, checkStatus, loading, error, clearError }
+  return { apiConfig, setApiConfig, saveConfig, checkStatus, validateApiKey, loading, error, clearError }
 }
 
 // Session hook

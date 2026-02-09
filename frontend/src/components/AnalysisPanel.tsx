@@ -38,17 +38,23 @@ interface RoundSummary {
 }
 
 export function AnalysisPanel() {
-  const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors } = useAppStore()
+  const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors, readMode } = useAppStore()
   const { startAnalysis, resumeAnalysis } = useSession()
-  const { checkStatus } = useConfig()
+  const { checkStatus, validateApiKey } = useConfig()
   const { t } = useTranslation(language)
-  
+
   // User input state
   const [userInput, setUserInput] = useState('')
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([])
   const [sending, setSending] = useState(false)
   const [expandedRound, setExpandedRound] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // API validation state
+  const [validating, setValidating] = useState(false)
+  const [showValidationDialog, setShowValidationDialog] = useState(false)
+  const [validationMessage, setValidationMessage] = useState('')
+  const [validationUncertain, setValidationUncertain] = useState(false)
 
   // Publication outputs state
   const [publicationFigures, setPublicationFigures] = useState<PublicationFigure[]>([])
@@ -151,21 +157,58 @@ export function AnalysisPanel() {
   }, [messages, currentSession?.roundResults])
 
   const handleStart = async () => {
+    // Block in read mode
+    if (readMode) {
+      alert(t('readModeRestriction'))
+      return
+    }
+
     try {
-      // Check if API is configured before starting
+      // Step 1: Check if API key exists at all
+      const { apiConfig } = useAppStore.getState()
       const status = await checkStatus()
-      if (!status.configured) {
-        // Show config panel if not configured
+      if (!status.configured || !apiConfig.apiKey) {
         if (showConfigPanel) {
           showConfigPanel()
         }
         return
       }
 
+      // Step 2: Validate the API key via actual API call
+      setValidating(true)
+      const validation = await validateApiKey()
+      setValidating(false)
+
+      if (validation.valid) {
+        // Key is valid - proceed
+        await startAnalysis()
+        setTimeout(() => wsConnect?.(), 100)
+      } else {
+        // Key is invalid or uncertain - show dialog
+        setValidationMessage(validation.message)
+        setValidationUncertain(validation.uncertain || false)
+        setShowValidationDialog(true)
+      }
+    } catch (e) {
+      setValidating(false)
+      console.error('Failed to start analysis:', e)
+    }
+  }
+
+  const handleIgnoreValidationError = async () => {
+    setShowValidationDialog(false)
+    try {
       await startAnalysis()
       setTimeout(() => wsConnect?.(), 100)
     } catch (e) {
       console.error('Failed to start analysis:', e)
+    }
+  }
+
+  const handleReconfigureFromValidation = () => {
+    setShowValidationDialog(false)
+    if (showConfigPanel) {
+      showConfigPanel()
     }
   }
 
@@ -419,6 +462,58 @@ export function AnalysisPanel() {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Validating spinner overlay */}
+      {validating && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-lg p-6 flex items-center gap-3">
+            <Loader2 className="w-5 h-5 animate-spin text-violet-600" />
+            <span className="text-slate-700 font-medium">
+              {t('validatingApiKey')}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Validation failure dialog */}
+      {showValidationDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 bg-red-100 rounded-full">
+                  <AlertCircle className="w-6 h-6 text-red-600" />
+                </div>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  {validationUncertain ? t('apiKeyValidationUncertain') : t('apiKeyInvalid')}
+                </h3>
+              </div>
+              <p className="text-sm text-slate-600 mb-2">
+                {validationMessage}
+              </p>
+              <p className="text-xs text-slate-400">
+                {validationUncertain
+                  ? t('apiKeyValidationUncertainDesc')
+                  : t('apiKeyInvalidDesc')}
+              </p>
+            </div>
+            <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                onClick={handleIgnoreValidationError}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-200 rounded-lg font-medium transition-colors text-sm"
+              >
+                {t('ignoreError')}
+              </button>
+              <button
+                onClick={handleReconfigureFromValidation}
+                className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg font-medium transition-colors text-sm"
+              >
+                {t('reconfigureApiKey')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header - Compact */}
       <div className="flex items-center justify-between pb-4 border-b border-slate-200">
         <div>
@@ -432,7 +527,13 @@ export function AnalysisPanel() {
           {currentSession.status === 'pending' && (
             <button
               onClick={handleStart}
-              className="flex items-center gap-2 px-5 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-xl font-medium transition-colors"
+              disabled={readMode}
+              className={`flex items-center gap-2 px-5 py-2.5 text-white rounded-xl font-medium transition-colors ${
+                readMode
+                  ? 'bg-slate-400 cursor-not-allowed'
+                  : 'bg-green-600 hover:bg-green-700'
+              }`}
+              title={readMode ? t('readModeRestriction') : undefined}
             >
               <Play className="w-4 h-4" />
               {t('startAnalysis')}

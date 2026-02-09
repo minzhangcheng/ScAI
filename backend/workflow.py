@@ -795,7 +795,7 @@ Report key findings when you complete each major analysis phase."""
         result = await self.bioinformatics_agent.run_autonomous_analysis(
             analysis_state,
             instruction,
-            max_steps=80,  # Increased to accommodate figure review loops
+            max_steps=200,  # Allow sufficient steps for full analysis + figure review loops
             figure_review_callback=self._figure_review_callback
         )
 

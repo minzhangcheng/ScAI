@@ -445,7 +445,7 @@ class BioinformaticsAgent(BaseAgent):
         self,
         state: AnalysisState,
         initial_instruction: str,
-        max_steps: int = 80,
+        max_steps: int = 200,
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
         resume_from_checkpoint: bool = True
     ) -> Dict[str, Any]:
@@ -455,7 +455,7 @@ class BioinformaticsAgent(BaseAgent):
         Args:
             state: Current analysis state
             initial_instruction: The instruction to execute
-            max_steps: Maximum number of steps (default 80 to accommodate figure review loops)
+            max_steps: Maximum number of steps (default 200 to accommodate full analysis + figure review loops)
             figure_review_callback: Optional callback for PI to review generated figures
             resume_from_checkpoint: Whether to attempt resuming from checkpoint (default True)
 
@@ -586,8 +586,10 @@ Before running sc.tl.pca() or any dimensionality reduction:
             all_findings = checkpoint.get('findings', [])
             all_figures = checkpoint.get('figures', [])
             step_count = checkpoint.get('step_number', 0)
+            # Fix: extend max_steps from the resume point so the agent gets a full budget of new steps
+            max_steps = step_count + max_steps
             self.analysis_context = checkpoint.get('analysis_context', {})
-            logger.info(f"[Bioinformatics] Restored state: step={step_count}, findings={len(all_findings)}, figures={len(all_figures)}")
+            logger.info(f"[Bioinformatics] Restored state: step={step_count}, findings={len(all_findings)}, figures={len(all_figures)}, new max_steps={max_steps}")
         else:
             messages = [
                 {"role": "system", "content": system_prompt},

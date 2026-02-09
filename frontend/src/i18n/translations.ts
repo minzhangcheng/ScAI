@@ -35,6 +35,16 @@ export const translations = {
     saveConfig: '保存配置',
     saving: '保存中...',
     saved: '已保存',
+    readMode: '阅读模式',
+    readModeDesc: '浏览已有分析结果（无需 API Key）',
+    validatingApiKey: '正在验证 API Key...',
+    apiKeyInvalid: 'API Key 验证失败',
+    apiKeyInvalidDesc: '无法通过 API Key 连接到 LLM 服务器。可能是 Key 无效或服务器不可达。',
+    apiKeyValidationUncertain: '无法确认 API Key 是否有效',
+    apiKeyValidationUncertainDesc: '无法连接到 LLM 服务器进行验证，但这可能是网络问题。',
+    reconfigureApiKey: '重新设置 API Key',
+    ignoreError: '忽略错误',
+    readModeRestriction: '阅读模式下无法启动新分析，请先配置 API Key',
     
     // New Session Modal
     createAnalysis: '新建分析',
@@ -281,6 +291,16 @@ export const translations = {
     saveConfig: 'Save Config',
     saving: 'Saving...',
     saved: 'Saved',
+    readMode: 'Read Mode',
+    readModeDesc: 'Browse existing analyses (no API Key needed)',
+    validatingApiKey: 'Validating API Key...',
+    apiKeyInvalid: 'API Key Validation Failed',
+    apiKeyInvalidDesc: 'Could not connect to the LLM server with this API Key. The key may be invalid or the server unreachable.',
+    apiKeyValidationUncertain: 'Unable to Verify API Key',
+    apiKeyValidationUncertainDesc: 'Could not connect to the LLM server for validation, but this may be a network issue.',
+    reconfigureApiKey: 'Reconfigure API Key',
+    ignoreError: 'Ignore Error',
+    readModeRestriction: 'Cannot start new analysis in Read Mode. Please configure API Key first.',
     
     // New Session Modal
     createAnalysis: 'New Analysis',

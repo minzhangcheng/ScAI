@@ -225,7 +225,7 @@ class LocalJupyterSandbox:
         session_id: str,
         state_dir: str = "states",
         working_dir: str = "workspace",
-        timeout: int = 300
+        timeout: int = 1200
     ):
         self.session_id = session_id
         self.state_dir = state_dir
