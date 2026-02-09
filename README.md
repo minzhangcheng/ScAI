@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.5.4
+**Version**: 0.6.0
 
 ## Core Features
 
@@ -15,9 +15,11 @@
 - **Literature Agent**: Provides literature support (using Google Deep Research)
 - **Painter Agent**: Generates graphic abstracts using Google Gemini image generation
 
-### Iterative Analysis Workflow
+### Iterative Analysis Workflow with Human-in-the-Loop
 
 - Multi-round collaboration, progressively deepening analysis
+- **Round Feedback Dialog**: After each round, a modal shows per-agent findings and a 2-minute countdown timer. Users can provide guidance, upload additional data (targeted to specific agents), or skip to auto-continue
+- User input on the last round automatically extends analysis by one additional round
 - Automatic conflict detection and resolution
 - Convergence detection for automatic stopping
 
@@ -214,8 +216,9 @@ Click "Start Analysis", the system will:
 
 1. PI creates analysis plan
 2. Each Agent executes tasks in parallel
-3. PI synthesizes results and decides next steps
-4. Repeat until convergence (default max 3 rounds)
+3. PI synthesizes results
+4. **Round Feedback Dialog** appears — review findings, provide guidance or upload additional data, or skip
+5. Repeat until convergence (default max 3 rounds, extendable via user input)
 
 ### 5. View Results
 
@@ -279,13 +282,14 @@ intesc/                         # Code directory
 │   ├── src/
 │   │   ├── App.tsx             # Main application
 │   │   ├── components/         # React components
-│   │   │   ├── AnalysisPanel.tsx   # Analysis control + error display
-│   │   │   ├── DataPanel.tsx       # Data upload
-│   │   │   ├── PromptsPanel.tsx    # Agent configuration
-│   │   │   ├── ResultsPanel.tsx    # Round results
-│   │   │   ├── ReportPanel.tsx     # Report generation
-│   │   │   ├── MessageStream.tsx   # Real-time messages
-│   │   │   └── analysis/           # Report sub-components
+│   │   │   ├── AnalysisPanel.tsx         # Analysis control + error display
+│   │   │   ├── RoundFeedbackDialog.tsx  # Round-end feedback modal
+│   │   │   ├── DataPanel.tsx            # Data upload
+│   │   │   ├── PromptsPanel.tsx         # Agent configuration
+│   │   │   ├── ResultsPanel.tsx         # Round results
+│   │   │   ├── ReportPanel.tsx          # Report generation
+│   │   │   ├── MessageStream.tsx        # Real-time messages
+│   │   │   └── analysis/               # Report sub-components
 │   │   ├── stores/             # Zustand state (agentErrors, stateVersion)
 │   │   ├── hooks/              # API hooks (WebSocket reconnection)
 │   │   ├── i18n/               # Internationalization
@@ -358,6 +362,24 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.6.0 (2026-02-09)
+
+- **Human-in-the-Loop Round Feedback**: New `RoundFeedbackDialog` modal appears after each analysis round with 2-minute countdown timer
+  - Displays per-agent findings (Pathology, Bioinformatics, Biochemistry, Literature)
+  - Users can provide text guidance and upload additional data files targeted to specific agents
+  - Timer auto-pauses when user starts typing; auto-continues on expiry
+  - User input on the last round extends max_rounds by 1
+- **Workflow `wait_for_user_input` node**: Backend blocks between rounds via `asyncio.Event`, with 10-minute safety timeout
+- **Cell type annotation improvements**: Strengthened bioinformatics agent prompt for mandatory cell type annotation with UMAP visualization
+- **Report generator fixes**: Now searches workspace directory for annotated data; supports both `adata_annotated.h5ad` and `annotated_adata.h5ad` filenames
+- **WebSocket reconnection fix**: Completed sessions now send full round_results and message_history on reconnect
+- **Report loading retry**: ReportPanel retries loading after 3 seconds if report is null
+
+### v0.5.5 (2026-02-09)
+
+- Bug fixes for cell annotation workflow and report data loading
+- WebSocket reconnection sends full session data for completed sessions
 
 ### v0.5.4 (2026-02-09)
 

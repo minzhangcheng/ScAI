@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.5.4
+**Version**: 0.6.0
 **Last Updated**: 2026-02-09
 
 ## Project Overview
@@ -61,16 +61,17 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~1180 lines)
+│   ├── main.py                 # FastAPI entry point (~2920 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
 │   │                           # - Chunked file upload (10GB support)
 │   │                           # - Report generation task scheduling
 │   │
-│   ├── workflow.py             # LangGraph workflow (~1200 lines)
+│   ├── workflow.py             # LangGraph workflow (~1528 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
+│   │                           # - Human-in-the-loop (wait_for_user_input)
 │   │                           # - Retry with exponential backoff
 │   │                           # - Convergence detection
 │   │                           # - State version sync callbacks
@@ -82,7 +83,7 @@ intesc/                         # Code directory
 │   │
 │   ├── regenerate_report_html.py # Report HTML regeneration utility
 │   │
-│   ├── config.py               # Configuration management
+│   ├── config.py               # Configuration management (~282 lines)
 │   │                           # - APIConfig: LLM keys + proxy
 │   │                           # - ModelConfig: Model selection per agent
 │   │                           # - AgentTemperatures: Per-agent temperatures
@@ -191,6 +192,9 @@ initialize_round ◄────────────────────
       ▼                                   │
   pi_synthesis                            │
       │                                   │
+      ▼                                   │
+  wait_for_user_input  ◄── 2min timer     │
+      │                    (frontend)     │
   ┌───┴───┐                               │
   │       │                               │
 (continue) (stop)                         │
@@ -218,6 +222,7 @@ initialize_round ◄────────────────────
 4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
 5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval
 6. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
+7. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with 2-minute countdown. Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend has 10-minute safety timeout. User input on the last round extends `max_rounds` by 1.
 
 **WebSocket Message Types:**
 
@@ -237,7 +242,8 @@ initialize_round ◄────────────────────
 | `figure_review` | PI reviewing generated figures |
 | `figure_approved` | Figure approved |
 | `figure_revision` | Revision requested |
-| `completed` | Analysis complete |
+| `completed` | Analysis complete (includes round_results + final_summary on reconnect) |
+| `message_history` | Batch message restore (reconnect to completed session) |
 
 ### 1.1 Biochemistry Agent (v2 - 3-Step Workflow)
 
@@ -386,6 +392,7 @@ class OpenAICompatibleClient:
 | `/api/session/{id}/report/download-all-figures` | POST | Download all figures |
 | `/api/session/{id}/report/download-all-tables` | POST | Download all tables |
 | `/api/session/{id}/report/download-full` | POST | Download complete report |
+| `/api/session/{id}/resume` | POST | Resume analysis (paused/completed/waiting_input) |
 | `/api/config` | GET/POST | Get/save configuration |
 | `/api/file` | GET | Get file content |
 
@@ -413,7 +420,8 @@ type MessageType =
   | 'status'            // Status update
   | 'state_sync'        // Version control sync
   | 'parallel_errors'   // Structured error list
-  | 'completed'         // Analysis complete
+  | 'completed'         // Analysis complete (with round_results on reconnect)
+  | 'message_history'   // Batch message restore (reconnect)
   // Analysis process
   | 'message'           // General message
   | 'progress'          // Progress update
@@ -476,7 +484,7 @@ type MessageType =
 class AnalysisState(BaseModel):
     id: str
     name: str
-    status: TaskStatus  # pending, running, completed, failed, paused, waiting_input
+    status: TaskStatus  # pending, running, completed, failed, paused, waiting_input (new in v0.6.0)
     initial_instruction: str
 
     # Version control
@@ -506,6 +514,10 @@ class AnalysisState(BaseModel):
 
     # Error tracking
     agent_errors: List[AgentError]
+
+    # Human-in-the-loop
+    pending_human_input: Optional[str]  # User message waiting to be processed
+    max_rounds: int = 0                 # Dynamic max rounds (0 = use config default)
 
     # Configuration
     custom_prompts: Dict[str, str]
@@ -688,7 +700,7 @@ uvicorn stdout      # API logs
 |--------|---------|-------------|
 | `max_rounds` | 3 | Max analysis rounds |
 | `convergence_rounds` | 2 | Consecutive rounds without new findings |
-| `sandbox_timeout` | 300 | Code execution timeout (seconds) |
+| `sandbox_timeout` | 1200 | Code execution timeout (seconds) |
 | `image_tile_size` | 1024 | Pathology image tile size |
 | `image_overlap` | 64 | Tile overlap pixels |
 | `blank_threshold` | 0.95 | Threshold for detecting blank tiles |
@@ -807,8 +819,8 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| Workflow graph & orchestration | `workflow.py` | ~1200 lines |
-| FastAPI server & session mgmt | `main.py` | ~1180 lines |
+| Workflow graph & orchestration | `workflow.py` | ~1528 lines |
+| FastAPI server & session mgmt | `main.py` | ~2920 lines |
 | Bioinformatics Agent (autonomous) | `bioinformatics_agent.py` | ~1370 lines |
 | PI Agent (coordinator + reviewer) | `pi_agent.py` | ~1303 lines |
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
@@ -824,7 +836,8 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| Analysis control + error display | `AnalysisPanel.tsx` | ~1003 lines |
+| Analysis control + error display | `AnalysisPanel.tsx` | ~800 lines |
+| Round feedback dialog | `RoundFeedbackDialog.tsx` | ~475 lines |
 | Data upload interface | `DataPanel.tsx` | ~965 lines |
 | Real-time message streaming | `MessageStream.tsx` | ~779 lines |
 | Report generation & download | `ReportPanel.tsx` | ~770 lines |
@@ -856,6 +869,8 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.6.0 | 2026-02-09 | Human-in-the-loop round feedback dialog, workflow wait_for_user_input node, cell annotation + report fixes |
+| 0.5.5 | 2026-02-09 | WebSocket reconnect with full session data, report loading retry, annotation workflow improvements |
 | 0.5.4 | 2026-02-09 | Bug fixes (bioinformatics, session handling, sandbox, UI) |
 | 0.5.3 | 2026-02-09 | Report generation and bioinformatics enhancements |
 | 0.5.1 | 2026-02-08 | Biochemistry Agent v2 (3-step workflow), major refactoring |
@@ -873,4 +888,4 @@ For issues, please contact the project maintainers.
 ---
 
 *Document updated: 2026-02-09*
-*Version: 0.5.4*
+*Version: 0.6.0*
