@@ -173,7 +173,14 @@ class SingleCellAnalysisWorkflow:
 
         # Current analysis state for callbacks (updated during workflow execution)
         self._current_analysis_state: Optional[AnalysisState] = None
+
+        # Event for blocking between rounds (wait for user input or continue signal)
+        self._continue_event = asyncio.Event()
         
+    def signal_continue(self):
+        """Signal the workflow to continue from wait_for_user_input"""
+        self._continue_event.set()
+
     async def initialize(self):
         """Initialize all components"""
         logger.info(f"[{self.session_id}] Initializing workflow components")
@@ -288,6 +295,7 @@ class SingleCellAnalysisWorkflow:
         self.graph.add_node("biochemistry_analysis", self._biochemistry_analysis)
         self.graph.add_node("literature_research", self._literature_research)
         self.graph.add_node("pi_synthesis", self._pi_synthesis)
+        self.graph.add_node("wait_for_user_input", self._wait_for_user_input)
         self.graph.add_node("check_convergence", self._check_convergence)
         self.graph.add_node("generate_final_report", self._generate_final_report)
         self.graph.add_node("generate_graphic_abstract", self._generate_graphic_abstract)
@@ -303,9 +311,12 @@ class SingleCellAnalysisWorkflow:
         self.graph.add_edge("biochemistry_analysis", "literature_research")
         self.graph.add_edge("literature_research", "pi_synthesis")
 
-        # After synthesis, check if we should continue
+        # After synthesis, wait for user input (blocks until frontend signals continue)
+        self.graph.add_edge("pi_synthesis", "wait_for_user_input")
+
+        # After user input wait, check if we should continue
         self.graph.add_conditional_edges(
-            "pi_synthesis",
+            "wait_for_user_input",
             self._should_continue,
             {
                 "continue": "check_convergence",
@@ -1049,7 +1060,41 @@ Report key findings when you complete each major analysis phase."""
             "round_result": round_result,
             "data_requests": data_requests
         }
-    
+
+    async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
+        """Block between rounds, waiting for user input or continue signal from frontend.
+
+        Frontend manages a 2-minute visual countdown timer. When timer expires,
+        user clicks skip, or user sends input, frontend calls the resume API
+        which signals this event to unblock.
+        Backend uses a 10-minute safety timeout to prevent infinite hangs.
+        """
+        analysis_state = state["analysis_state"]
+
+        # Clear the event for this wait cycle
+        self._continue_event.clear()
+
+        logger.info(f"[{self.session_id}] Waiting for user input (round {analysis_state.current_round})")
+
+        # Wait for signal from frontend (via resume API) or safety timeout
+        try:
+            await asyncio.wait_for(self._continue_event.wait(), timeout=600)
+            logger.info(f"[{self.session_id}] Continue signal received")
+        except asyncio.TimeoutError:
+            logger.info(f"[{self.session_id}] Wait timeout (10min safety), auto-proceeding")
+
+        # If user provided real input on the last round, extend max_rounds to allow one more
+        has_real_input = (
+            analysis_state.pending_human_input
+            and analysis_state.pending_human_input.strip() not in ('', '[CONTINUE]')
+        )
+        max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
+        if has_real_input and analysis_state.current_round >= max_rounds:
+            analysis_state.max_rounds = analysis_state.current_round + 1
+            logger.info(f"[{self.session_id}] User input on last round, extending max_rounds to {analysis_state.max_rounds}")
+
+        return {**state, "analysis_state": analysis_state}
+
     def _should_continue(self, state: WorkflowState) -> str:
         """Determine if analysis should continue"""
         round_result = state.get("round_result")

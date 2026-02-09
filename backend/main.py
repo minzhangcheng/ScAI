@@ -1369,6 +1369,16 @@ async def resume_analysis(session_id: str):
             success=True,
             message="Re-analysis started"
         )
+    elif state.status == TaskStatus.WAITING_INPUT:
+        # Continue from round-end wait (user sent input or skipped)
+        state.status = TaskStatus.RUNNING
+        # Signal the workflow to continue from _wait_for_user_input
+        if session_id in workflows:
+            workflows[session_id].signal_continue()
+        return APIResponse(
+            success=True,
+            message="Continuing analysis"
+        )
     elif state.status == TaskStatus.PAUSED:
         state.status = TaskStatus.RUNNING
         return APIResponse(
@@ -1376,7 +1386,7 @@ async def resume_analysis(session_id: str):
             message="Analysis resumed"
         )
     else:
-        raise HTTPException(status_code=400, detail="Analysis not paused or completed")
+        raise HTTPException(status_code=400, detail="Analysis not paused, waiting, or completed")
 
 
 class UploadedFileInfo(BaseModel):

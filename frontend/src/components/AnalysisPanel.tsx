@@ -1,8 +1,9 @@
-import { useEffect, useState, useRef, useMemo } from 'react'
+import { useEffect, useState, useMemo, useCallback } from 'react'
 import { useAppStore, PublicationFigure, PublicationTable, GraphicAbstract as GraphicAbstractType } from '../stores/appStore'
 import { useSession, useConfig } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import { FigureGallery, IntegratedReport, GraphicAbstract, DownloadButtons } from './analysis'
+import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
 import {
   Play,
   AlertCircle,
@@ -13,11 +14,6 @@ import {
   Code2,
   FlaskConical,
   BookOpen,
-  Send,
-  Upload,
-  X,
-  Image as ImageIcon,
-  FileText,
   ChevronDown,
   ChevronUp,
   Palette
@@ -25,7 +21,7 @@ import {
 
 const API_BASE = '/api'
 
-interface RoundSummary {
+export interface RoundSummary {
   round: number
   summary: string
   findings: string[]
@@ -35,20 +31,24 @@ interface RoundSummary {
     other: string[]
   }
   status: 'analyzing' | 'waiting_input' | 'completed'
+  pathologyFindings?: string[]
+  bioinformaticsFindings?: string[]
+  biochemistryFindings?: string[]
+  literatureFindings?: string[]
 }
 
 export function AnalysisPanel() {
   const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors, readMode } = useAppStore()
-  const { startAnalysis, resumeAnalysis } = useSession()
+  const { startAnalysis, resumeAnalysis, continueRound } = useSession()
   const { checkStatus, validateApiKey } = useConfig()
   const { t } = useTranslation(language)
 
-  // User input state
-  const [userInput, setUserInput] = useState('')
-  const [uploadedFiles, setUploadedFiles] = useState<File[]>([])
-  const [sending, setSending] = useState(false)
+  // Round results state
   const [expandedRound, setExpandedRound] = useState<number | null>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Round feedback dialog state
+  const [showFeedbackDialog, setShowFeedbackDialog] = useState(false)
+  const [feedbackRoundData, setFeedbackRoundData] = useState<RoundSummary | null>(null)
 
   // API validation state
   const [validating, setValidating] = useState(false)
@@ -128,7 +128,11 @@ export function AnalysisPanel() {
           summary: content.summary || '',
           findings: content.findings || [],
           dataRequests: content.data_requests || { pathology: [], biochemistry: [], other: [] },
-          status: content.status || 'completed'
+          status: content.status || 'completed',
+          pathologyFindings: content.pathology_findings || [],
+          bioinformaticsFindings: content.bioinformatics_findings || [],
+          biochemistryFindings: content.biochemistry_findings || [],
+          literatureFindings: content.literature_findings || [],
         })
       }
     }
@@ -147,7 +151,11 @@ export function AnalysisPanel() {
               ...(round.biochemistryFindings || [])
             ],
             dataRequests: { pathology: [], biochemistry: [], other: [] },
-            status: 'completed'
+            status: 'completed',
+            pathologyFindings: round.pathologyFindings || [],
+            bioinformaticsFindings: round.bioinformaticsFindings || [],
+            biochemistryFindings: round.biochemistryFindings || [],
+            literatureFindings: round.literatureFindings || [],
           })
         }
       }
@@ -212,159 +220,78 @@ export function AnalysisPanel() {
     }
   }
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || [])
-    setUploadedFiles(prev => [...prev, ...files])
-  }
-
-  const removeFile = (index: number) => {
-    setUploadedFiles(prev => prev.filter((_, i) => i !== index))
-  }
-
-  // Continue analysis without additional input (just add one more round)
-  const continueAnalysis = async () => {
+  // Dialog handler: Send user input with files (uploaded to agent-specific endpoints)
+  const handleDialogSend = useCallback(async (message: string, files: UploadedFileWithAgent[]) => {
     if (!currentSession) return
 
-    setSending(true)
-    try {
-      // Send a simple continue message
-      const response = await fetch(
-        `${API_BASE}/session/${currentSession.id}/human-input`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: '[CONTINUE]',  // Special marker for continue without new instructions
-            uploaded_files: [],
-            target_agent: 'pi'
-          })
-        }
-      )
+    // Upload files to their respective agent endpoints
+    const uploadedData: Array<{ type: string; filename: string; id?: string }> = []
 
-      if (response.ok) {
-        // Resume analysis
-        await resumeAnalysis()
-        if (!wsConnected) {
-          setTimeout(() => wsConnect?.(), 100)
-        }
-      }
-    } catch (e) {
-      console.error('Failed to continue analysis:', e)
-    } finally {
-      setSending(false)
-    }
-  }
-
-  // Send user input with optional files
-  const sendUserInput = async () => {
-    if (!currentSession || (!userInput.trim() && uploadedFiles.length === 0)) return
-
-    setSending(true)
-    try {
-      // First upload any files
-      const uploadResults: Array<{ file: File; success: boolean; error?: string; data?: { type: string; filename: string; id?: string } }> = []
-
-      for (const file of uploadedFiles) {
+    for (const { file, targetAgent } of files) {
+      try {
         const formData = new FormData()
         formData.append('file', file)
 
-        // Determine file type and endpoint
-        const isImage = file.type.startsWith('image/')
-
-        try {
-          if (isImage) {
-            // Upload as pathology image (PI will classify it)
-            formData.append('image_type', 'user_upload')
-            const response = await fetch(
-              `${API_BASE}/session/${currentSession.id}/upload/pathology`,
-              { method: 'POST', body: formData }
-            )
-            if (response.ok) {
-              const data = await response.json()
-              uploadResults.push({
-                file,
-                success: true,
-                data: {
-                  type: 'image',
-                  filename: file.name,
-                  id: data.data?.image_id
-                }
-              })
-            } else {
-              uploadResults.push({ file, success: false, error: `HTTP ${response.status}` })
-            }
-          } else {
-            // Upload as generic file
-            const response = await fetch(
-              `${API_BASE}/session/${currentSession.id}/upload/file`,
-              { method: 'POST', body: formData }
-            )
-            if (response.ok) {
-              uploadResults.push({
-                file,
-                success: true,
-                data: { type: 'file', filename: file.name }
-              })
-            } else {
-              uploadResults.push({ file, success: false, error: `HTTP ${response.status}` })
-            }
-          }
-        } catch (err) {
-          uploadResults.push({ file, success: false, error: String(err) })
+        let endpoint: string
+        if (targetAgent === 'pathology') {
+          formData.append('image_type', 'user_upload')
+          endpoint = `${API_BASE}/session/${currentSession.id}/upload/pathology`
+        } else if (targetAgent === 'biochemistry') {
+          endpoint = `${API_BASE}/session/${currentSession.id}/upload/biochemistry`
+        } else {
+          endpoint = `${API_BASE}/session/${currentSession.id}/upload/file`
         }
-      }
 
-      // Check for failures and notify user
-      const failures = uploadResults.filter(r => !r.success)
-      if (failures.length > 0) {
-        const failedNames = failures.map(f => f.file.name).join(', ')
-        alert(language === 'zh'
-          ? `以下文件上传失败: ${failedNames}`
-          : `Failed to upload: ${failedNames}`)
-      }
-
-      // Get successfully uploaded data
-      const uploadedData: Array<{ type: string; filename: string; id?: string }> = []
-      for (const r of uploadResults) {
-        if (r.success && r.data) {
-          uploadedData.push(r.data)
+        const response = await fetch(endpoint, { method: 'POST', body: formData })
+        if (response.ok) {
+          const data = await response.json()
+          uploadedData.push({
+            type: file.type.startsWith('image/') ? 'image' : 'file',
+            filename: file.name,
+            id: data.data?.file_id || data.data?.image_id,
+          })
         }
+      } catch (err) {
+        console.error(`Failed to upload ${file.name}:`, err)
       }
+    }
 
-      // Then send the message with file references
-      const message = {
-        message: userInput,
-        uploaded_files: uploadedData,
-        target_agent: 'pi'
-      }
+    // Send human-input with message + file references
+    try {
+      await fetch(`${API_BASE}/session/${currentSession.id}/human-input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          uploaded_files: uploadedData,
+          target_agent: 'pi',
+        }),
+      })
 
-      const response = await fetch(
-        `${API_BASE}/session/${currentSession.id}/human-input`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(message)
-        }
-      )
-
-      if (response.ok) {
-        setUserInput('')
-        setUploadedFiles([])
-
-        // Resume analysis if paused or completed (for re-analysis)
-        if (currentSession.status === 'paused' || currentSession.status === 'waiting_input' || currentSession.status === 'completed') {
-          await resumeAnalysis()
-          if (!wsConnected) {
-            setTimeout(() => wsConnect?.(), 100)
-          }
-        }
+      // Resume (signals backend workflow to continue)
+      await resumeAnalysis()
+      if (!wsConnected) {
+        setTimeout(() => wsConnect?.(), 100)
       }
     } catch (e) {
       console.error('Failed to send input:', e)
-    } finally {
-      setSending(false)
     }
-  }
+
+    setShowFeedbackDialog(false)
+  }, [currentSession, resumeAnalysis, wsConnected, wsConnect])
+
+  // Dialog handler: Skip (auto-proceed without input)
+  const handleDialogSkip = useCallback(async () => {
+    try {
+      await continueRound()
+      if (!wsConnected) {
+        setTimeout(() => wsConnect?.(), 100)
+      }
+    } catch (e) {
+      console.error('Failed to continue round:', e)
+    }
+    setShowFeedbackDialog(false)
+  }, [continueRound, wsConnected, wsConnect])
 
   // Auto-connect WebSocket when session is running and not connected
   // Uses wsConnect from the store (managed by App.tsx) to avoid duplicate WebSocket instances
@@ -377,12 +304,26 @@ export function AnalysisPanel() {
     }
   }, [currentSession?.id, currentSession?.status, wsConnected, wsConnect])
 
-  // Auto-expand latest round
+  // Auto-expand latest round + show feedback dialog when round completes with waiting_input
   useEffect(() => {
     if (roundSummaries.length > 0) {
-      setExpandedRound(roundSummaries[roundSummaries.length - 1].round)
+      const latest = roundSummaries[roundSummaries.length - 1]
+      setExpandedRound(latest.round)
+
+      // Show feedback dialog when a round completes and is waiting for input
+      if (latest.status === 'waiting_input' && currentSession?.status === 'waiting_input') {
+        setFeedbackRoundData(latest)
+        setShowFeedbackDialog(true)
+      }
     }
-  }, [roundSummaries])
+  }, [roundSummaries, currentSession?.status])
+
+  // Auto-dismiss dialog when analysis resumes
+  useEffect(() => {
+    if (currentSession?.status === 'running' && showFeedbackDialog) {
+      setShowFeedbackDialog(false)
+    }
+  }, [currentSession?.status, showFeedbackDialog])
 
   // Extract publication outputs from messages and session
   useEffect(() => {
@@ -840,163 +781,16 @@ export function AnalysisPanel() {
         )}
       </div>
 
-      {/* User Input Area - Fixed at Bottom */}
-      {currentSession.status !== 'pending' && (
-        <div className="border-t border-slate-200 pt-4 bg-white">
-          <div className={`p-4 rounded-xl ${isCompleted ? 'bg-green-50' : 'bg-slate-50'}`}>
-            <div className="flex items-start gap-3 mb-3">
-              <Users className={`w-5 h-5 mt-0.5 ${isCompleted ? 'text-green-600' : 'text-violet-600'}`} />
-              <div>
-                <h4 className="font-medium text-slate-900">
-                  {language === 'zh' ? '与 PI Agent 交流' : 'Communicate with PI Agent'}
-                </h4>
-                <p className="text-sm text-slate-500">
-                  {isCompleted
-                    ? (language === 'zh'
-                        ? '分析已完成。如不满意，可以补充数据或要求重新分析'
-                        : 'Analysis completed. You can add data or request re-analysis if needed')
-                    : isWaitingInput
-                    ? (language === 'zh'
-                        ? '请上传补充数据或提供新的指导意见'
-                        : 'Please upload additional data or provide guidance')
-                    : (language === 'zh'
-                        ? '您可以随时上传数据或调整分析方向'
-                        : 'You can upload data or adjust analysis direction anytime')}
-                </p>
-              </div>
-            </div>
-
-            {/* Quick Actions */}
-            <div className="flex flex-wrap gap-2 mb-3">
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-full transition-colors"
-              >
-                <Upload className="w-3.5 h-3.5" />
-                {language === 'zh' ? '上传图片/文件' : 'Upload Files'}
-              </button>
-              {isCompleted ? (
-                <>
-                  <button
-                    onClick={continueAnalysis}
-                    disabled={sending}
-                    className="px-3 py-1.5 text-xs bg-green-50 hover:bg-green-100 disabled:opacity-50 text-green-700 rounded-full transition-colors"
-                  >
-                    ▶️ {language === 'zh' ? '继续分析' : 'Continue'}
-                  </button>
-                  <button
-                    onClick={() => setUserInput(language === 'zh' ? '我对分析结果不满意，请根据以下建议重新分析：' : 'I am not satisfied with the results. Please re-analyze with the following guidance:')}
-                    className="px-3 py-1.5 text-xs bg-violet-50 hover:bg-violet-100 text-violet-700 rounded-full transition-colors"
-                  >
-                    🔄 {language === 'zh' ? '重新分析' : 'Re-analyze'}
-                  </button>
-                  <button
-                    onClick={() => setUserInput(language === 'zh' ? '请补充以下数据后继续分析：' : 'Please continue analysis with additional data:')}
-                    className="px-3 py-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-full transition-colors"
-                  >
-                    ➕ {language === 'zh' ? '补充数据继续' : 'Add Data & Continue'}
-                  </button>
-                  <button
-                    onClick={() => setUserInput(language === 'zh' ? '请针对以下方面进行更深入的分析：' : 'Please provide deeper analysis on the following aspects:')}
-                    className="px-3 py-1.5 text-xs bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-full transition-colors"
-                  >
-                    🔍 {language === 'zh' ? '深入分析' : 'Deeper Analysis'}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={() => setUserInput(language === 'zh' ? '补充染色结果：' : 'Additional staining results:')}
-                    className="px-3 py-1.5 text-xs bg-red-50 hover:bg-red-100 text-red-700 rounded-full transition-colors"
-                  >
-                    🔬 {language === 'zh' ? '补充染色' : 'Add Staining'}
-                  </button>
-                  <button
-                    onClick={() => setUserInput(language === 'zh' ? '补充生化指标：' : 'Additional biochemistry data:')}
-                    className="px-3 py-1.5 text-xs bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-full transition-colors"
-                  >
-                    🧪 {language === 'zh' ? '补充生化' : 'Add Biochem'}
-                  </button>
-                  <button
-                    onClick={() => setUserInput(language === 'zh' ? '请继续下一轮分析' : 'Please continue to next round')}
-                    className="px-3 py-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-full transition-colors"
-                  >
-                    ▶️ {language === 'zh' ? '继续分析' : 'Continue'}
-                  </button>
-                  <button
-                    onClick={() => setUserInput(language === 'zh' ? '请结束分析并生成最终报告' : 'Please conclude and generate final report')}
-                    className="px-3 py-1.5 text-xs bg-green-50 hover:bg-green-100 text-green-700 rounded-full transition-colors"
-                  >
-                    🏁 {language === 'zh' ? '结束分析' : 'Conclude'}
-                  </button>
-                </>
-              )}
-            </div>
-            
-            {/* Uploaded Files Preview */}
-            {uploadedFiles.length > 0 && (
-              <div className="flex flex-wrap gap-2 mb-3">
-                {uploadedFiles.map((file, idx) => (
-                  <div key={idx} className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-sm">
-                    {file.type.startsWith('image/') ? (
-                      <ImageIcon className="w-4 h-4 text-blue-500" />
-                    ) : (
-                      <FileText className="w-4 h-4 text-slate-500" />
-                    )}
-                    <span className="max-w-[150px] truncate">{file.name}</span>
-                    <button
-                      onClick={() => removeFile(idx)}
-                      className="text-slate-400 hover:text-red-500"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            
-            {/* Input Area */}
-            <div className="flex gap-2">
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept="image/*,.txt,.csv,.json"
-                className="hidden"
-                onChange={handleFileSelect}
-              />
-              <textarea
-                value={userInput}
-                onChange={(e) => setUserInput(e.target.value)}
-                placeholder={language === 'zh'
-                  ? '输入您的指令或描述补充数据...\n例如：\n• 已上传免疫组化染色结果\n• 补充生化指标数据\n• 请重点分析某一细胞类型'
-                  : 'Enter your instructions or describe additional data...\ne.g.:\n• Uploaded immunohistochemistry staining results\n• Additional biochemistry markers\n• Please focus on specific cell type analysis'}
-                className="flex-1 px-4 py-3 bg-white border border-slate-200 rounded-lg text-sm resize-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
-                rows={3}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                    sendUserInput()
-                  }
-                }}
-              />
-              <button
-                onClick={sendUserInput}
-                disabled={sending || (!userInput.trim() && uploadedFiles.length === 0)}
-                className="px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:bg-violet-300 text-white rounded-lg font-medium transition-colors self-end"
-              >
-                {sending ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <Send className="w-5 h-5" />
-                )}
-              </button>
-            </div>
-            
-            <p className="text-xs text-slate-400 mt-2">
-              {language === 'zh' ? '按 Ctrl/⌘+Enter 发送' : 'Press Ctrl/⌘+Enter to send'}
-            </p>
-          </div>
-        </div>
+      {/* Round Feedback Dialog — shown after each round completes */}
+      {showFeedbackDialog && feedbackRoundData && currentSession && (
+        <RoundFeedbackDialog
+          roundNumber={feedbackRoundData.round}
+          maxRounds={useAppStore.getState().maxRounds}
+          roundSummary={feedbackRoundData}
+          language={language}
+          onSend={handleDialogSend}
+          onSkip={handleDialogSkip}
+        />
       )}
     </div>
   )

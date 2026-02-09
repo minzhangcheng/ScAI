@@ -568,10 +568,17 @@ export function useSession() {
   
   const resumeAnalysis = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
-    
+
     await apiFetch(`/session/${currentSession.id}/resume`, { method: 'POST' })
     updateSession({ status: 'running' })
   }, [currentSession, updateSession])
+
+  const continueRound = useCallback(async () => {
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+    await apiFetch(`/session/${session.id}/resume`, { method: 'POST' })
+    useAppStore.getState().updateSession({ status: 'running' })
+  }, [])
   
   const exportState = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
@@ -696,6 +703,7 @@ export function useSession() {
     startAnalysis,
     pauseAnalysis,
     resumeAnalysis,
+    continueRound,
     exportState,
     getReport,
     updateSession,

@@ -257,8 +257,28 @@ export const translations = {
 4. 最新的研究进展
 
 请提供详细的文献综述报告，包含具体的引用信息。`,
+
+    // Round Feedback Dialog
+    roundComplete: '第 {round} 轮分析完成',
+    roundSummaryTitle: '本轮总结',
+    keyFindings: '主要发现',
+    additionalDataSuggested: '建议补充的数据',
+    noFindings: '本轮无发现',
+    autoProceeding: '即将自动继续...',
+    timerPaused: '计时已暂停',
+    skipRound: '跳过',
+    pauseTimer: '暂停',
+    resumeTimer: '继续',
+    sendInput: '发送',
+    sendingInput: '发送中...',
+    lastRoundNotice: '这是最后一轮分析。提供输入将触发额外的分析轮次。',
+    selectTargetAgent: '目标 Agent',
+    uploadFilesDialog: '上传文件',
+    roundInputPlaceholder: '输入补充说明或对下一步分析的指导意见...',
+    fileUploadedTo: '发送给',
+    removeFile: '移除',
   },
-  
+
   en: {
     // App
     appName: 'InteSc',
@@ -513,6 +533,26 @@ Please search relevant biomedical literature, focusing on:
 4. Latest research developments
 
 Please provide a detailed literature review report with specific citations.`,
+
+    // Round Feedback Dialog
+    roundComplete: 'Round {round} Complete',
+    roundSummaryTitle: 'Round Summary',
+    keyFindings: 'Key Findings',
+    additionalDataSuggested: 'Suggested Additional Data',
+    noFindings: 'No findings this round',
+    autoProceeding: 'Auto-proceeding...',
+    timerPaused: 'Timer paused',
+    skipRound: 'Skip',
+    pauseTimer: 'Pause',
+    resumeTimer: 'Resume',
+    sendInput: 'Send',
+    sendingInput: 'Sending...',
+    lastRoundNotice: 'This is the last round. Providing input will trigger an extra analysis round.',
+    selectTargetAgent: 'Target Agent',
+    uploadFilesDialog: 'Upload Files',
+    roundInputPlaceholder: 'Enter additional guidance or instructions for the next round...',
+    fileUploadedTo: 'Send to',
+    removeFile: 'Remove',
   }
 } as const
 
