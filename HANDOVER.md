@@ -2,12 +2,12 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.3.0
-**Last Updated**: 2026-02-04
+**Version**: 0.5.4
+**Last Updated**: 2026-02-09
 
 ## Project Overview
 
-**InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of six specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, and Painter), it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, and structured error tracking.
+**InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of six specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, and Painter), it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, structured error tracking, and optimized real-time communication.
 
 ## Technical Architecture
 
@@ -61,27 +61,32 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point
+│   ├── main.py                 # FastAPI entry point (~1180 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
-│   │                           # - Session management
+│   │                           # - Session management & persistence
+│   │                           # - Chunked file upload (10GB support)
 │   │                           # - Report generation task scheduling
 │   │
-│   ├── workflow.py             # LangGraph workflow
+│   ├── workflow.py             # LangGraph workflow (~1200 lines)
 │   │                           # - Multi-Agent coordination
-│   │                           # - Iterative analysis logic
+│   │                           # - Parallel execution (Fan-out/Fan-in)
+│   │                           # - Retry with exponential backoff
 │   │                           # - Convergence detection
-│   │                           # - State callbacks
+│   │                           # - State version sync callbacks
 │   │
 │   ├── report_generator.py     # Report generator
 │   │                           # - 9 chapters, 40+ analysis items
 │   │                           # - Jupyter code execution
-│   │                           # - Chart/table generation
+│   │                           # - Chart/table generation (PNG/PDF/CSV)
+│   │
+│   ├── regenerate_report_html.py # Report HTML regeneration utility
 │   │
 │   ├── config.py               # Configuration management
-│   │                           # - APIConfig: LLM keys
-│   │                           # - ModelConfig: Model selection
-│   │                           # - AgentPrompts: System prompts
+│   │                           # - APIConfig: LLM keys + proxy
+│   │                           # - ModelConfig: Model selection per agent
+│   │                           # - AgentTemperatures: Per-agent temperatures
+│   │                           # - AgentPrompts: System prompts (English)
 │   │                           # - SystemConfig: System parameters
 │   │                           # - Data directory path definitions
 │   │
@@ -90,15 +95,18 @@ intesc/                         # Code directory
 │   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer)
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous)
 │   │   ├── pathology_agent.py  # Pathology Agent
-│   │   ├── biochemistry_agent.py    # Biochemistry Agent
-│   │   ├── literature_agent.py # Literature Agent
+│   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2)
+│   │   ├── literature_agent.py # Literature Agent (Google Deep Research)
 │   │   └── painter_agent.py    # Painter Agent (graphic abstract)
 │   │
 │   ├── models/
 │   │   └── schemas.py          # Pydantic data models
+│   │                           # - AnalysisState: Core state with version control
 │   │                           # - AgentError: Structured error tracking
-│   │                           # - state_version: Version control
-│   │                           # - WebSocketMessage: New types (state_sync, parallel_errors)
+│   │                           # - BiochemistryResult/File: Biochemistry data models
+│   │                           # - PublicationFigure/Table: Publication outputs
+│   │                           # - GraphicAbstract: Painter agent output
+│   │                           # - BioinformaticsCheckpoint: Step-level recovery
 │   │
 │   ├── utils/
 │   │   ├── llm_client.py       # LLM client
@@ -211,14 +219,35 @@ initialize_round ◄────────────────────
 5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval
 6. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
 
-**New Message Types:**
+**WebSocket Message Types:**
 
 | Type | Purpose |
 |------|---------|
+| `status` | Status updates |
 | `state_sync` | Version control and state synchronization |
 | `parallel_errors` | Structured error list from parallel execution |
-| `figure_review` | PI reviewing generated figures |
+| `message` | General agent messages |
+| `progress` | Progress updates |
+| `result` | Analysis results |
+| `error` | Error messages |
+| `round_summary` | End-of-round summary |
+| `integrated_report` | Complete analysis report |
 | `graphic_abstract` | Painter Agent output |
+| `detailed_report` | Detailed report output |
+| `figure_review` | PI reviewing generated figures |
+| `figure_approved` | Figure approved |
+| `figure_revision` | Revision requested |
+| `completed` | Analysis complete |
+
+### 1.1 Biochemistry Agent (v2 - 3-Step Workflow)
+
+Since v0.5.1, the biochemistry agent uses a 3-step analysis pipeline:
+
+1. **Step 1**: Process structured indicators and data files (CSV/XLSX)
+2. **Step 2**: Full visual analysis of images (comprehensive prompt, not strict JSON extraction)
+3. **Step 3**: Summarize findings, draw conclusions, and suggest follow-up experiments
+
+This approach is more robust against vision API inconsistencies (see Known Issues).
 
 ### 2. Session Persistence
 
@@ -382,8 +411,8 @@ interface WebSocketMessage {
 type MessageType =
   // System messages
   | 'status'            // Status update
-  | 'state_sync'        // Version control sync (NEW)
-  | 'parallel_errors'   // Structured error list (NEW)
+  | 'state_sync'        // Version control sync
+  | 'parallel_errors'   // Structured error list
   | 'completed'         // Analysis complete
   // Analysis process
   | 'message'           // General message
@@ -393,12 +422,12 @@ type MessageType =
   // Results
   | 'round_summary'     // Round summary
   | 'integrated_report' // Integrated report
-  | 'graphic_abstract'  // Graphic abstract (NEW)
+  | 'graphic_abstract'  // Graphic abstract
   | 'detailed_report'   // Detailed report
   // Figure review
-  | 'figure_review'     // PI reviewing figure (NEW)
-  | 'figure_approved'   // Figure approved (NEW)
-  | 'figure_revision'   // Revision requested (NEW)
+  | 'figure_review'     // PI reviewing figure
+  | 'figure_approved'   // Figure approved
+  | 'figure_revision'   // Revision requested
 ```
 
 **State Sync Message:**
@@ -450,7 +479,7 @@ class AnalysisState(BaseModel):
     status: TaskStatus  # pending, running, completed, failed, paused, waiting_input
     initial_instruction: str
 
-    # Version control (NEW in v0.3.0)
+    # Version control
     state_version: int = 0
     last_sync_timestamp: datetime
 
@@ -472,10 +501,10 @@ class AnalysisState(BaseModel):
     # Publication outputs
     publication_figures: List[PublicationFigure]
     publication_tables: List[PublicationTable]
-    graphic_abstract: Optional[GraphicAbstract]  # NEW
+    graphic_abstract: Optional[GraphicAbstract]
     integrated_report: Optional[str]
 
-    # Error tracking (NEW in v0.3.0)
+    # Error tracking
     agent_errors: List[AgentError]
 
     # Configuration
@@ -490,7 +519,7 @@ class AnalysisState(BaseModel):
     def resolve_error(error_id, resolution)
 ```
 
-### AgentError (NEW in v0.3.0)
+### AgentError
 
 ```python
 class AgentError(BaseModel):
@@ -521,7 +550,7 @@ class RoundResult(BaseModel):
     timestamp: datetime
 ```
 
-### GraphicAbstract (NEW in v0.3.0)
+### GraphicAbstract
 
 ```python
 class GraphicAbstract(BaseModel):
@@ -660,8 +689,31 @@ uvicorn stdout      # API logs
 | `max_rounds` | 3 | Max analysis rounds |
 | `convergence_rounds` | 2 | Consecutive rounds without new findings |
 | `sandbox_timeout` | 300 | Code execution timeout (seconds) |
-| `tile_size` | 1024 | Pathology image tile size |
-| `tile_overlap` | 64 | Tile overlap pixels |
+| `image_tile_size` | 1024 | Pathology image tile size |
+| `image_overlap` | 64 | Tile overlap pixels |
+| `blank_threshold` | 0.95 | Threshold for detecting blank tiles |
+
+**LLM Model Defaults:**
+
+| Agent | Default Model |
+|-------|--------------|
+| PI | `google/gemini-3-pro-preview` |
+| Pathology | `google/gemini-3-pro-preview` |
+| Bioinformatics | `anthropic/claude-opus-4.6` |
+| Biochemistry | `google/gemini-3-pro-preview` |
+| Painter | `google/gemini-3-pro-image-preview` |
+| Literature | Google Gemini Deep Research API (direct) |
+
+**Agent Temperatures:**
+
+| Agent | Default | Rationale |
+|-------|---------|-----------|
+| PI | 0.5 | Balanced creativity for synthesis |
+| Pathology | 0.2 | Objective, consistent analysis |
+| Bioinformatics | 0.1 | Highly deterministic code generation |
+| Biochemistry | 0.2 | Objective interpretation |
+| Literature | 0.6 | Broader exploration |
+| Painter | 0.7 | Creative image generation |
 
 ### Common Issues
 
@@ -686,18 +738,25 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 - Check `states/{id}.ipynb` for execution history
 - Confirm required Python packages are installed
 
-**5. State Version Conflicts (NEW)**
+**5. State Version Conflicts**
 
 - If frontend shows outdated data, check `state_version` in session JSON
 - Frontend detects conflicts when received version < current version
 - Resolution: Trigger full session reload via `loadSession()`
 
-**6. Parallel Analysis Errors (NEW)**
+**6. Parallel Analysis Errors**
 
 - Errors are tracked per-agent in `agent_errors` list
 - Check `AnalysisPanel` for error display
 - Errors persist until manually resolved
 - Debug via: `sessions/{id}.json` → `agent_errors` array
+
+**7. Vision API Empty Responses**
+
+- Gemini via OpenRouter may return empty content with high token count
+- Affects pathology and biochemistry image analysis
+- Biochemistry Agent v2 mitigates this with comprehensive prompts
+- Check `intesc_data/logs/error.log` for details
 
 ## Dependencies
 
@@ -705,54 +764,107 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| fastapi | >=0.100 | Web framework |
-| langgraph | >=0.0.20 | Workflow orchestration |
-| openai | >=1.0 | LLM API |
-| pydantic | >=2.0 | Data models |
-| jupyter_client | >=8.0 | Code execution |
-| dill | >=0.3 | State serialization |
+| fastapi | >=0.109.0 | Web framework |
+| langgraph | >=0.0.40 | Workflow orchestration |
+| openai | >=1.12.0 | LLM API (OpenAI-compatible) |
+| pydantic | >=2.5.0 | Data models |
+| jupyter_client | 8.6.0 | Code execution |
+| dill | >=0.3.7 | State serialization |
 
 ### Bioinformatics Dependencies
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| scanpy | >=1.9 | Single-cell analysis core |
-| anndata | >=0.9 | Data structures |
-| liana | >=1.0 | Cell communication analysis |
-| scvelo | >=0.3 | RNA velocity |
-| cellrank | >=2.0 | Cell fate analysis |
-| decoupler | >=1.5 | Pathway activity |
-| gseapy | >=1.1 | GO/KEGG enrichment |
+| scanpy | >=1.9.6 | Single-cell analysis core |
+| anndata | >=0.10.3 | Data structures |
+| muon | >=0.1.5 | Multi-omics data |
+| liana | >=1.0.0 | Cell communication analysis |
+| scvelo | >=0.3.1 | RNA velocity |
+| cellrank | >=2.0.0 | Cell fate analysis |
+| decoupler | >=1.5.0 | Pathway activity |
+| gseapy | >=1.1.0 | GO/KEGG enrichment |
+| celltypist | >=1.6.0 | Cell annotation |
+| scvi-tools | >=1.0.0 | Deep learning models |
+| pySCENIC | >=0.12.0 | Gene regulation |
+
+### Frontend Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| react | ^18.2.0 | UI framework |
+| typescript | ^5.3.3 | Type safety |
+| zustand | ^4.5.0 | State management |
+| vite | ^5.0.12 | Build tool |
+| tailwindcss | ^3.4.1 | Styling |
+| recharts | ^2.10.4 | Charts |
+| react-markdown | ^9.0.1 | Markdown rendering |
+| react-syntax-highlighter | ^15.5.0 | Code highlighting |
+| react-dropzone | ^14.2.3 | File upload |
 
 ## Key Code Locations
 
 ### Backend
 
-| Feature | File | Line Numbers |
-|---------|------|--------------|
-| Workflow graph construction | `workflow.py` | 290-356 |
-| Parallel execution (Fan-out/Fan-in) | `workflow.py` | 310-322 |
-| Parallel results aggregation | `workflow.py` | 499-579 |
-| State sync method | `workflow.py` | 371-400 |
-| Retry decorator | `workflow.py` | 40-115 |
-| AgentError model | `schemas.py` | 38-49 |
-| Error management methods | `schemas.py` | 257-286 |
-| WebSocket message types | `schemas.py` | 339-362 |
-| Painter Agent | `painter_agent.py` | Full file |
+| Feature | File | Approximate Size |
+|---------|------|-----------------|
+| Workflow graph & orchestration | `workflow.py` | ~1200 lines |
+| FastAPI server & session mgmt | `main.py` | ~1180 lines |
+| Bioinformatics Agent (autonomous) | `bioinformatics_agent.py` | ~1370 lines |
+| PI Agent (coordinator + reviewer) | `pi_agent.py` | ~1303 lines |
+| Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
+| Pathology Agent | `pathology_agent.py` | ~450 lines |
+| Literature Agent (Deep Research) | `literature_agent.py` | ~365 lines |
+| Painter Agent (graphic abstract) | `painter_agent.py` | ~326 lines |
+| Configuration & prompts | `config.py` | ~278 lines |
+| Agent base class | `base.py` | ~246 lines |
+| Jupyter sandbox | `sandbox.py` | See utils/ |
+| Chunked upload manager | `upload.py` | See utils/ |
 
 ### Frontend
 
-| Feature | File | Line Numbers |
-|---------|------|--------------|
-| Global state definition | `appStore.ts` | 164-239 |
-| Version control state | `appStore.ts` | 229-231, 330-331 |
-| Error tracking state | `appStore.ts` | 232-238, 335-355 |
-| WebSocket hook | `useApi.ts` | 640-918 |
-| state_sync handling | `useApi.ts` | 770-787 |
-| parallel_errors handling | `useApi.ts` | 790-807 |
-| Reconnection recovery | `useApi.ts` | 700-760 |
-| Error display component | `AnalysisPanel.tsx` | 484-538 |
-| Agent status with errors | `AnalysisPanel.tsx` | 68-92 |
+| Feature | File | Approximate Size |
+|---------|------|-----------------|
+| Analysis control + error display | `AnalysisPanel.tsx` | ~1003 lines |
+| Data upload interface | `DataPanel.tsx` | ~965 lines |
+| Real-time message streaming | `MessageStream.tsx` | ~779 lines |
+| Report generation & download | `ReportPanel.tsx` | ~770 lines |
+| API hooks + WebSocket | `useApi.ts` | ~850 lines |
+| Session management sidebar | `Sidebar.tsx` | ~402 lines |
+| Agent prompt customization | `PromptsPanel.tsx` | ~377 lines |
+| Main application | `App.tsx` | ~303 lines |
+| Round results display | `ResultsPanel.tsx` | ~265 lines |
+| Zustand global state | `appStore.ts` | ~240 lines |
+| API configuration | `ConfigPanel.tsx` | ~223 lines |
+
+## Known Issues
+
+### 1. Vision API Empty Content
+
+**Symptom**: Gemini via OpenRouter sometimes returns empty content despite high completion token count (e.g., 4093 tokens but content=None).
+
+**Affected Agents**: Pathology, Biochemistry (image analysis steps)
+
+**Root Cause**: Likely OpenRouter relay or response format mismatch with Gemini vision API.
+
+**Workaround**: Biochemistry Agent v2 uses comprehensive prompts instead of strict JSON extraction for more robustness. Retry mechanisms with exponential backoff help mitigate intermittent failures.
+
+### 2. Large Memory Usage
+
+Single-cell datasets can be very large. The local Jupyter kernel may require significant memory (8GB+) for larger datasets. dill serialization of the full Python environment can also produce large `.pkl` files.
+
+## Version History
+
+| Version | Date | Key Changes |
+|---------|------|-------------|
+| 0.5.4 | 2026-02-09 | Bug fixes (bioinformatics, session handling, sandbox, UI) |
+| 0.5.3 | 2026-02-09 | Report generation and bioinformatics enhancements |
+| 0.5.1 | 2026-02-08 | Biochemistry Agent v2 (3-step workflow), major refactoring |
+| 0.5.0 | 2026-02-06 | Real-time message optimization |
+| 0.4.1 | 2026-02-05 | Painter agent improvements, bug fixes |
+| 0.4.0 | 2026-02-05 | Report generation rebuilt |
+| 0.3.0 | 2026-02-04 | Parallel execution, Painter Agent, state versioning, error tracking |
+| 0.2.x | 2026-01 | Report features development |
+| 0.1.x | 2026-01 | Initial functional version |
 
 ## Contact
 
@@ -760,5 +872,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-02-04*
-*Version: 0.3.0*
+*Document updated: 2026-02-09*
+*Version: 0.5.4*

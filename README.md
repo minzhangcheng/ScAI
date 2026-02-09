@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.3.0
+**Version**: 0.5.4
 
 ## Core Features
 
@@ -11,7 +11,7 @@
 - **PI Agent**: Project coordinator, manages overall workflow, makes decisions, and reviews publication-quality figures
 - **Pathology Agent**: Analyzes histological sections (supports H&E, Sirius Red, Prussian Blue, and other staining types)
 - **Bioinformatics Agent**: Performs autonomous high-throughput sequencing data analysis (scRNA-seq, snRNA-seq, bulk RNA-seq) with checkpoint recovery
-- **Biochemistry Agent**: Interprets biochemical experimental results
+- **Biochemistry Agent**: Interprets biochemical experimental results (3-step analysis: structured indicators → visual image analysis → synthesis & conclusions)
 - **Literature Agent**: Provides literature support (using Google Deep Research)
 - **Painter Agent**: Generates graphic abstracts using Google Gemini image generation
 
@@ -51,6 +51,13 @@ The system supports generating comprehensive reports with 9 chapters and 40+ ana
 7. **Cell-Cell Communication Analysis**: Communication heatmaps, ligand-receptor analysis (built-in 100+ ligand-receptor pairs database)
 8. **Trajectory Analysis**: PAGA graphs, trajectory analysis
 9. **Targeted Analysis**: Custom analysis based on research objectives
+
+### Real-time Communication
+
+- Optimized WebSocket message streaming with deduplication
+- State version control for frontend-backend consistency
+- Automatic reconnection with exponential backoff
+- Message history restoration after connection loss
 
 ### Multi-language Support
 
@@ -144,6 +151,8 @@ Configure the following API keys in the web interface:
 
 - **Google AI API Key**: For Gemini Deep Research (optional)
   - Get it at: https://aistudio.google.com/app/apikey
+
+- **Proxy URL** (optional): HTTP/HTTPS proxy for API requests
 
 **Note**: Code execution uses local Jupyter kernel, no additional sandbox service configuration needed.
 
@@ -324,9 +333,9 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 
 ### LLM
 
-- **Main Models**: Gemini 3 Pro, Claude Opus 4.5 (via OpenRouter)
+- **Main Models**: Gemini 3 Pro Preview, Claude Opus 4.6 (via OpenRouter)
 - **Literature Research**: Google Gemini Deep Research
-- **Image Generation**: Gemini 2.0 Flash (Imagen) for graphic abstracts
+- **Image Generation**: Gemini 3 Pro Image Preview for graphic abstracts
 
 ### Bioinformatics
 
@@ -348,7 +357,39 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 8. Analysis errors are tracked per-agent and displayed persistently until resolved
 9. State version conflicts are detected automatically to ensure data consistency
 
-## New in v0.3.0
+## Changelog
+
+### v0.5.4 (2026-02-09)
+
+- Bug fixes for bioinformatics agent analysis logic
+- Improved session handling and sandbox timeout configuration
+- Enhanced workflow state management
+- UI improvements across AnalysisPanel, ConfigPanel, PromptsPanel, Sidebar
+- WebSocket hook stability improvements
+- i18n translation updates
+
+### v0.5.3 (2026-02-09)
+
+- Report generation and bioinformatics agent enhancements
+
+### v0.5.1 (2026-02-08)
+
+- **Biochemistry Agent v2**: Rebuilt with 3-step analysis workflow (structured indicators → visual image analysis → synthesis & conclusions)
+- Major refactoring (1,325 insertions, 723 deletions)
+- Improved image analysis using comprehensive prompts instead of strict JSON extraction
+
+### v0.5.0 (2026-02-06)
+
+- **Real-time Message Optimization**: Improved WebSocket message streaming and deduplication
+- Enhanced frontend-backend state synchronization
+
+### v0.4.0 - v0.4.1 (2026-02-05)
+
+- **Report Generation Rebuilt**: Complete overhaul of the detailed report generation system
+- Painter Agent improvements
+- Various bug fixes
+
+### v0.3.0 (2026-02-04)
 
 - **Painter Agent**: Generates publication-quality graphic abstracts using Google Gemini image generation
 - **State Version Control**: Atomic state versioning prevents frontend-backend synchronization issues

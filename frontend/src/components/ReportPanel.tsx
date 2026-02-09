@@ -87,6 +87,7 @@ export function ReportPanel() {
   const [error, setError] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
   const wsRef = useRef<WebSocket | null>(null)
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [viewMode, setViewMode] = useState<'preview' | 'detail'>('preview')
 
   // Load existing report on mount and when analysis completes
@@ -94,7 +95,25 @@ export function ReportPanel() {
     if (currentSession?.id && currentSession?.status === 'completed') {
       loadReport()
     }
+    return () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current)
+      }
+    }
   }, [currentSession?.id, currentSession?.status])
+
+  // Retry loading if report is null after initial load (handles race condition)
+  useEffect(() => {
+    if (currentSession?.status === 'completed' && !report && !loading && !generating) {
+      retryTimerRef.current = setTimeout(() => {
+        console.log('ReportPanel: Retrying report load...')
+        loadReport()
+      }, 3000)
+      return () => {
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+      }
+    }
+  }, [currentSession?.status, report, loading, generating])
 
   // WebSocket for real-time progress
   useEffect(() => {

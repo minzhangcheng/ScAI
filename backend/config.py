@@ -201,7 +201,11 @@ Standard analysis workflow (adjust based on data type):
 1. Quality Control (QC)
 2. Normalization and dimensionality reduction
 3. Clustering analysis
-4. Cell/sample annotation (consult PI if uncertain)
+4. Cell type annotation (REQUIRED for single-cell data):
+   a. After clustering, ALWAYS consult PI Agent for cell type annotation guidance
+   b. Apply the annotation to create a 'celltype' column in adata.obs
+   c. Generate a UMAP figure colored by cell type labels (not just cluster numbers)
+   d. Save the annotated data as 'adata_annotated.h5ad' in the working directory
 5. Differential expression analysis
 6. Pathway enrichment analysis
 7. Trajectory/Pseudotime analysis (if applicable):
@@ -220,6 +224,7 @@ Code requirements:
 - Set random_state=42 for reproducibility
 - Generate visualization results for each step
 - Save key intermediate results
+- After cell type annotation, always generate a UMAP showing cell type labels as the primary clustering visualization
 
 Please reply analysis conclusions in the same language as the user's input. Code comments should be in English."""
 

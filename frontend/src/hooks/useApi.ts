@@ -875,6 +875,22 @@ export function useWebSocket() {
           return  // Don't add state_sync to message stream
         }
 
+        // Handle message_history - batch restore messages (e.g. reconnect to completed session)
+        if (data.type === 'message_history') {
+          if (data.content?.messages && Array.isArray(data.content.messages)) {
+            const serverMessages: Message[] = data.content.messages.map((msg: any) => ({
+              id: msg.id || generateId(),
+              type: msg.type || 'message',
+              agent: msg.agent as AgentType | undefined,
+              content: msg.content,
+              timestamp: msg.timestamp || new Date().toISOString(),
+            }))
+            setMessages(serverMessages)
+            console.log(`WebSocket: Restored ${serverMessages.length} messages from history`)
+          }
+          return  // Don't add message_history itself to the message stream
+        }
+
         // Handle parallel_errors messages - structured error tracking
         if (data.type === 'parallel_errors') {
           const errorContent = data.content
@@ -907,10 +923,23 @@ export function useWebSocket() {
         
         // Update session status based on message
         if (data.type === 'completed') {
-          updateSession({
-            status: 'completed',
+          const updates: Partial<Session> = {
+            status: 'completed' as const,
             finalSummary: data.content?.final_summary,
-          })
+          }
+          // Extract round_results if provided (for completed session reconnect)
+          const roundResults = data.content?.round_results
+          if (roundResults && Array.isArray(roundResults)) {
+            updates.roundResults = roundResults.map((r: any) => ({
+              round: r.round ?? 0,
+              summary: r.pi_summary || r.summary || '',
+              pathologyFindings: Array.isArray(r.pathology_findings) ? r.pathology_findings : [],
+              bioinformaticsFindings: Array.isArray(r.bioinformatics_findings) ? r.bioinformatics_findings : [],
+              biochemistryFindings: Array.isArray(r.biochemistry_findings) ? r.biochemistry_findings : [],
+              literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
+            }))
+          }
+          updateSession(updates)
         } else if (data.type === 'error' && !data.agent) {
           // Only mark as failed if it's a system error, not an agent error
           updateSession({ status: 'failed' })

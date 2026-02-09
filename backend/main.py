@@ -1744,12 +1744,50 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             _initializing_sessions.discard(session_id)
 
         try:
+            # Send completed message with full session data for UI restoration
             await websocket.send_json({
                 "type": "completed",
                 "agent": None,
-                "content": "Analysis already completed. View results in the Reports tab.",
+                "content": {
+                    "status": "completed",
+                    "message": "Analysis already completed. View results in the Reports tab.",
+                    "final_summary": state.final_summary,
+                    "round_results": [
+                        {
+                            "round": r.round_number,
+                            "summary": r.pi_summary,
+                            "pathology_findings": r.pathology_findings,
+                            "bioinformatics_findings": r.bioinformatics_findings,
+                            "biochemistry_findings": r.biochemistry_findings,
+                            "literature_findings": r.literature_findings,
+                        }
+                        for r in state.round_results
+                    ],
+                },
                 "timestamp": datetime.now().isoformat()
             })
+
+            # Send message_history for UI message stream restoration
+            if state.realtime_messages:
+                msg_data_list = [
+                    {
+                        "id": msg.id,
+                        "type": msg.type,
+                        "agent": msg.agent.value if hasattr(msg.agent, 'value') else (str(msg.agent) if msg.agent else None),
+                        "content": msg.content,
+                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
+                    }
+                    for msg in state.realtime_messages[-500:]  # Limit to prevent oversized payload
+                ]
+                await websocket.send_json({
+                    "type": "message_history",
+                    "content": {
+                        "messages": msg_data_list,
+                        "count": len(msg_data_list)
+                    },
+                    "timestamp": datetime.now().isoformat()
+                })
+                logger.info(f"[{session_id}] Sent {len(msg_data_list)} messages from history to reconnecting client")
         except Exception as e:
             logger.error(f"[{session_id}] Failed to send completed status: {e}")
 

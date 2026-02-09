@@ -13,7 +13,6 @@ import {
   Image as ImageIcon,
   AlertCircle,
   CheckCircle2,
-  Loader2,
   MessageSquare,
   Bot,
   Sparkles,

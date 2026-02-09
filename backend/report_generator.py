@@ -111,6 +111,8 @@ def categorize_figures(figures_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
         # Categorize based on filename
         if "qc" in filename or "quality" in filename:
             categories["qc"].append(fig_info)
+        elif "celltype" in filename or "cell_type" in filename or "annotation" in filename:
+            categories["umap"].append(fig_info)  # Cell type annotation UMAPs grouped with UMAP
         elif "umap" in filename:
             categories["umap"].append(fig_info)
         elif "cluster" in filename or "leiden" in filename:
@@ -1260,38 +1262,53 @@ print("Data loader ready. Use load_data(file_path) to load data files.")
         """
         Automatically load processed data from analysis phase.
         This ensures report generation can use the analyzed data with clustering, annotations, etc.
+        Searches both the workspace directory (where bioinformatics agent saves output)
+        and the upload directory (where raw data resides).
         """
         import os
+        from .config import WORKSPACE_DIR
 
-        # Determine the session's upload directory
+        # Build list of directories to search
+        search_dirs = []
+
+        # 1. Workspace directory (bioinformatics agent output - highest priority)
+        workspace_session_dir = WORKSPACE_DIR / state.id
+        if workspace_session_dir.exists():
+            search_dirs.append(workspace_session_dir)
+
+        # 2. Upload directory (original data + possible processed files)
         upload_dir = None
         if state.control_seq_path:
             upload_dir = Path(state.control_seq_path).parent
         elif state.treatment_seq_path:
             upload_dir = Path(state.treatment_seq_path).parent
+        if upload_dir and upload_dir.exists():
+            search_dirs.append(upload_dir)
 
-        if not upload_dir or not upload_dir.exists():
-            logger.warning("Could not determine upload directory for processed data")
+        if not search_dirs:
+            logger.warning("No directories to search for processed data")
             return
 
-        # Priority order for loading processed data
-        processed_files = [
-            "annotated_adata.h5ad",      # Best: has cell type annotations
+        # Priority order for loading processed data (both naming conventions)
+        processed_filenames = [
+            "adata_annotated.h5ad",          # Best: agent saves annotated data as this
+            "annotated_adata.h5ad",          # Alternative naming convention
             "processed_adata_markers.h5ad",  # Has marker genes
-            "processed_adata.h5ad",      # Basic processed
-            "subset_scored.h5ad",        # Subset with scores
+            "processed_adata.h5ad",          # Basic processed
+            "subset_scored.h5ad",            # Subset with scores
         ]
 
-        # Find available processed files
+        # Search all directories for processed files (priority: workspace first, then uploads)
         available_files = []
-        for fname in processed_files:
-            fpath = upload_dir / fname
-            if fpath.exists():
-                available_files.append(str(fpath))
-                logger.info(f"Found processed data: {fpath}")
+        for search_dir in search_dirs:
+            for fname in processed_filenames:
+                fpath = search_dir / fname
+                if fpath.exists() and str(fpath) not in available_files:
+                    available_files.append(str(fpath))
+                    logger.info(f"Found processed data: {fpath}")
 
         if not available_files:
-            logger.warning(f"No processed data found in {upload_dir}")
+            logger.warning(f"No processed data found in {search_dirs}")
             # Fall back to showing available data paths
             info_code = f"""
 print("\\n=== Available Data Files ===")
@@ -1398,7 +1415,9 @@ print(f"\\nOther available processed files: {{AVAILABLE_PROCESSED_FILES}}")
 
             # Infer figure type from filename
             fig_type = "unknown"
-            if "umap" in filename:
+            if "celltype" in filename or "cell_type" in filename or "annotation" in filename:
+                fig_type = "annotation"
+            elif "umap" in filename:
                 fig_type = "umap"
             elif "violin" in filename:
                 fig_type = "violin"
@@ -2309,10 +2328,10 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         # Map section IDs to figure categories
         section_figure_map = {
             "qc_overview": ["qc"],
-            "clustering_overview": ["umap", "clustering"],
+            "clustering_overview": ["umap", "clustering", "annotation"],
             "marker_genes": ["markers", "heatmap"],
             "differential_expression": ["de", "violin"],
-            "key_findings": ["de", "violin", "heatmap", "other"]
+            "key_findings": ["de", "violin", "heatmap", "annotation", "other"]
         }
 
         # Track which figures have been used
