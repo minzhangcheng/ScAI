@@ -1904,21 +1904,42 @@ detailed_reports: Dict[str, Any] = {}
 report_websockets: Dict[str, WebSocket] = {}
 
 
+def _sanitize_nan(obj):
+    """Recursively replace NaN/Infinity float values with None for JSON compliance."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nan(v) for v in obj]
+    return obj
+
+
 @app.get("/api/session/{session_id}/detailed-report")
 async def get_detailed_report(session_id: str):
     """Get existing detailed report for a session"""
     # First check memory cache
     if session_id in detailed_reports:
-        return {"report": detailed_reports[session_id]}
+        return {"report": _sanitize_nan(detailed_reports[session_id])}
 
     # Try to load from disk first (avoid session loading overhead)
     report_path = REPORTS_DIR / session_id / "report.json"
     if report_path.exists():
         try:
+            # Use parse_float to handle NaN/Infinity in JSON text
+            import re as _re
             with open(report_path, "r", encoding="utf-8") as f:
-                report = json.load(f)
-                detailed_reports[session_id] = report
-                return {"report": report}
+                raw = f.read()
+            # Replace bare NaN/Infinity tokens with null before parsing
+            raw = _re.sub(r'\bNaN\b', 'null', raw)
+            raw = _re.sub(r'\b-?Infinity\b', 'null', raw)
+            report = json.loads(raw)
+            report = _sanitize_nan(report)
+            detailed_reports[session_id] = report
+            return {"report": report}
         except Exception as e:
             logger.error(f"Failed to load report for {session_id}: {e}")
 

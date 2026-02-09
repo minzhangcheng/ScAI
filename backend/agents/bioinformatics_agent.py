@@ -598,6 +598,8 @@ Before running sc.tl.pca() or any dimensionality reduction:
             step_count = 0
 
         completed = False
+        text_response_count = 0
+        MAX_TEXT_RESPONSES = 2
 
         while step_count < max_steps and not completed:
             step_count += 1
@@ -638,7 +640,20 @@ Before running sc.tl.pca() or any dimensionality reduction:
                 if response.content:
                     await self._notify("response", response.content)
                     messages.append({"role": "assistant", "content": response.content})
-                break
+
+                text_response_count += 1
+                if text_response_count >= MAX_TEXT_RESPONSES:
+                    logger.info(f"[Bioinformatics] {MAX_TEXT_RESPONSES} text-only responses, exiting loop")
+                    break
+
+                # Ask the LLM to continue with tools instead of text
+                messages.append({
+                    "role": "user",
+                    "content": "Please continue the analysis. If you have completed your analysis, "
+                               "call the report_findings tool with your key findings. "
+                               "Do NOT respond with text only - you must use a tool."
+                })
+                continue
             
             for tool_call in response.tool_calls:
                 tool_name = tool_call.name
@@ -862,17 +877,30 @@ plt.close('all')
                     description = args.get("description", "")
                     figure_type = args.get("figure_type", "other")
 
-                    await self._notify("status", f"Generating publication figure: {figure_name}")
+                    # Track figure generation attempts to prevent infinite retry loops
+                    if "_figure_attempts" not in self.analysis_context:
+                        self.analysis_context["_figure_attempts"] = {}
+                    fig_attempts = self.analysis_context["_figure_attempts"]
+                    fig_attempts[figure_name] = fig_attempts.get(figure_name, 0) + 1
 
-                    # Generate the figure with PI review
-                    tool_result = await self._handle_generate_publication_figure(
-                        code=code,
-                        figure_name=figure_name,
-                        description=description,
-                        figure_type=figure_type,
-                        state=state,
-                        review_callback=review_callback
-                    )
+                    if fig_attempts[figure_name] > 3:
+                        logger.warning(f"[Bioinformatics] Skipping figure {figure_name}: exceeded 3 attempts")
+                        tool_result = (
+                            f"Figure {figure_name} has been skipped after {fig_attempts[figure_name]-1} failed attempts. "
+                            "Please move on to the next analysis step or generate a different figure."
+                        )
+                    else:
+                        await self._notify("status", f"Generating publication figure: {figure_name} (attempt {fig_attempts[figure_name]})")
+
+                        # Generate the figure with PI review
+                        tool_result = await self._handle_generate_publication_figure(
+                            code=code,
+                            figure_name=figure_name,
+                            description=description,
+                            figure_type=figure_type,
+                            state=state,
+                            review_callback=review_callback
+                        )
 
                     messages.append({
                         "role": "assistant",
@@ -890,10 +918,24 @@ plt.close('all')
                     })
 
         status = "completed" if completed else "max_steps_reached"
+
+        # Fallback: extract findings from last assistant text if report_findings was never called
+        if not all_findings and not completed:
+            logger.warning("[Bioinformatics] No findings reported, attempting fallback extraction...")
+            last_assistant_content = None
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant" and msg.get("content"):
+                    last_assistant_content = msg["content"]
+                    break
+            if last_assistant_content:
+                all_findings.append(last_assistant_content[:3000])
+                status = "completed"
+                logger.info("[Bioinformatics] Extracted findings from last text response")
+
         logger.info(f"[Bioinformatics] Analysis {status}: {step_count} steps executed, {len(all_findings)} findings, {len(all_figures)} figures")
 
         # Clear checkpoint only on successful completion (preserve for resume on max_steps_reached)
-        if completed:
+        if completed or status == "completed":
             checkpoint_mgr.clear()
 
         return {
@@ -1168,6 +1210,7 @@ plt.close()
                         current_code = revised_code
                     else:
                         logger.warning(f"[Bioinformatics] Revision failed: {result.error}")
+                        break  # Don't review the same unchanged figure again
 
             # After 3 attempts, save with revision_requested status
             figure.review_status = FigureReviewStatus.REVISION_REQUESTED

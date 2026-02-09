@@ -57,6 +57,7 @@ interface DetailedReport {
   conclusions: string
   figures: ReportFigure[]
   tables: ReportTable[]
+  graphic_abstract_path?: string
   generated_at: string
   status: 'pending' | 'generating' | 'completed' | 'failed'
   progress: number
@@ -589,6 +590,21 @@ export function ReportPanel() {
                   {new Date(report.generated_at).toLocaleString()}
                 </p>
               </div>
+
+              {/* Graphic Abstract */}
+              {report.graphic_abstract_path && (
+                <div className="bg-gradient-to-r from-pink-50 to-fuchsia-50 rounded-xl p-6 border border-pink-100 shadow-sm text-center">
+                  <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center justify-center gap-2">
+                    <span className="w-1 h-6 bg-pink-500 rounded-full" />
+                    {language === 'zh' ? '图形摘要' : 'Graphic Abstract'}
+                  </h2>
+                  <img
+                    src={`${API_BASE}/file?path=${encodeURIComponent(report.graphic_abstract_path)}`}
+                    alt="Graphic Abstract"
+                    className="max-w-full h-auto mx-auto rounded-lg shadow-md"
+                  />
+                </div>
+              )}
 
               {/* Abstract */}
               {report.abstract && (

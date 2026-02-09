@@ -1054,17 +1054,22 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
 {{
     "approved": true/false,
     "quality_score": 1-10,
-    "feedback": "Overall assessment in 1-2 sentences",
+    "feedback": "Detailed assessment: describe EXACTLY what is wrong and what the expected result should look like. Reference specific visual elements (axis labels, color scheme, legend, font size, layout, etc.)",
     "strengths": ["strength 1", "strength 2"],
-    "issues": ["issue 1", "issue 2"],
-    "suggestions": ["specific improvement 1", "specific improvement 2"],
-    "must_fix": ["critical issue that must be fixed before approval"]
+    "issues": ["Specific issue with exact description, e.g., 'X-axis label font size is too small (appears ~6pt, should be >=10pt)'"],
+    "suggestions": ["Actionable code-level fix, e.g., 'Add plt.xlabel(..., fontsize=12)' or 'Change colormap from viridis to tab20 for discrete clusters'"],
+    "must_fix": ["Critical issue that MUST be fixed. Be specific: what is wrong AND what it should look like instead"]
 }}
 ```
 
-**Important:**
+**Critical review instructions:**
+- Your feedback will be used to automatically revise the plotting code. Every issue MUST be described precisely enough for a programmer to fix it.
+- BAD feedback: "The figure is not clear enough"
+- GOOD feedback: "The cluster labels overlap in the upper-right quadrant. Use adjustText or reduce font size from 12 to 8."
+- BAD feedback: "Colors are not good"
+- GOOD feedback: "Clusters 3 and 7 use nearly identical shades of blue, making them indistinguishable. Use a qualitative palette like tab20."
 - Be strict but fair. Only approve figures that meet publication standards.
-- If this is a revision (revision_count > 0), consider if previous issues were addressed.
+- If this is a revision (revision_count > 0), focus on whether previous issues were actually addressed. Be more lenient on minor aesthetic issues after 2+ revisions.
 - For UMAP/clustering plots: check color distinctness, label clarity, legend placement.
 - For heatmaps: check color scale, row/column labels, clustering dendrograms if applicable.
 - For violin/dotplots: check group comparisons, statistical annotations if needed.

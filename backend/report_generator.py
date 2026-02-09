@@ -320,6 +320,26 @@ HTML_TEMPLATE = """
             color: #dc2626;
         }}
 
+        .graphic-abstract {{
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px 24px;
+            background: linear-gradient(135deg, #fdf2f8 0%, #fce7f3 100%);
+            border-left: 4px solid #ec4899;
+            border-radius: 0 8px 8px 0;
+        }}
+
+        .graphic-abstract h2 {{
+            color: #be185d;
+            margin-bottom: 16px;
+        }}
+
+        .graphic-abstract img {{
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }}
+
         .abstract {{
             background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
             border-left: 4px solid #0ea5e9;
@@ -602,6 +622,9 @@ HTML_TEMPLATE = """
                     {toc_items}
                 </ul>
             </div>
+
+            <!-- Graphic Abstract -->
+            {graphic_abstract_html}
 
             <!-- Abstract -->
             <div class="abstract">
@@ -1009,6 +1032,19 @@ Be specific and actionable. Include:
             await self._report_progress(92, "撰写结论..." if language == "zh" else "Writing conclusions...")
             conclusions = await self._generate_conclusions(state, sections, findings, language)
 
+            # Save graphic abstract image to figures dir if available
+            graphic_abstract_path = None
+            if state.graphic_abstract and state.graphic_abstract.image_base64:
+                try:
+                    import base64 as b64mod
+                    ga_png = self.figures_dir / "graphic_abstract.png"
+                    with open(ga_png, "wb") as ga_f:
+                        ga_f.write(b64mod.b64decode(state.graphic_abstract.image_base64))
+                    graphic_abstract_path = str(ga_png)
+                    logger.info(f"Saved graphic abstract to {ga_png}")
+                except Exception as e:
+                    logger.error(f"Failed to save graphic abstract: {e}")
+
             report = {
                 "id": report_id,
                 "session_id": state.id,
@@ -1018,11 +1054,24 @@ Be specific and actionable. Include:
                 "conclusions": conclusions,
                 "figures": self.generated_figures,
                 "tables": self.generated_tables,
+                "graphic_abstract_path": graphic_abstract_path,
                 "generated_at": datetime.now().isoformat(),
                 "status": "completed",
                 "progress": 100,
                 "current_step": "完成" if language == "zh" else "Complete"
             }
+
+            # Sanitize NaN/Infinity values before saving (pandas data can contain these)
+            def _sanitize(obj):
+                import math
+                if isinstance(obj, float):
+                    return None if (math.isnan(obj) or math.isinf(obj)) else obj
+                if isinstance(obj, dict):
+                    return {k: _sanitize(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_sanitize(v) for v in obj]
+                return obj
+            report = _sanitize(report)
 
             # Save report metadata
             report_path = self.output_dir / "report.json"
@@ -2492,6 +2541,22 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         abstract_html = markdown_to_html(report.get("abstract", ""))
         conclusions_html = markdown_to_html(report.get("conclusions", ""))
 
+        # Build graphic abstract HTML
+        ga_html = ""
+        ga_path = report.get("graphic_abstract_path")
+        if ga_path and os.path.exists(ga_path):
+            try:
+                ga_b64 = compress_image_to_base64(ga_path, max_width=1200, quality=90)
+                ga_title = "图形摘要" if zh else "Graphic Abstract"
+                ga_html = f'''
+            <div class="graphic-abstract">
+                <h2>{ga_title}</h2>
+                <img src="{ga_b64}" alt="{ga_title}" />
+            </div>
+'''
+            except Exception as e:
+                logger.error(f"Failed to embed graphic abstract in HTML: {e}")
+
         # Escape curly braces in content to prevent str.format() crash on LLM output
         def _safe_format_value(v: str) -> str:
             return v.replace("{", "{{").replace("}", "}}")
@@ -2503,6 +2568,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             generated_at=("生成时间: " if zh else "Generated: ") + report.get("generated_at", ""),
             toc_title="目录" if zh else "Table of Contents",
             toc_items=_safe_format_value("\n".join(toc_items)),
+            graphic_abstract_html=_safe_format_value(ga_html),
             abstract_title="摘要" if zh else "Abstract",
             abstract=_safe_format_value(abstract_html),
             sections_html=_safe_format_value("\n".join(sections_html)),

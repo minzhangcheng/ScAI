@@ -30,7 +30,9 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   
   // Default project - pre-filled for convenience, users can modify
   const DEFAULT_PROJECT_NAME = 'Ctr1/ZnT1 DKO mouse liver'
-  const DEFAULT_PROJECT_DESCRIPTION = `We focus on the impact of copper ions on cellular metabolism and cell death. Previously, we identified both Ctr1 and ZnT1 as copper ion transporters. Therefore, using the Alb-cre driver, we knocked out the Ctr1 and ZnT1 genes in mouse liver cells. We performed histological sectioning and H&E staining on the mouse liver tissues and conducted single-nucleus RNA sequencing (snRNA-Seq). Please integrate the analysis of the pathological sections and snRNA-Seq data from the Ctr1/ZnT1 DKO mice to summarize the effects on the mouse liver, covering both phenotypic and mechanistic aspects.`
+  const DEFAULT_PROJECT_DESCRIPTION = `Our research group focuses on the metabolic crosstalk between copper and iron ions. We are specifically investigating the impact of these ions on cellular metabolism and cell death. Previously, we identified ZnT1 as a non-canonical copper transporter. In our functional assays, liver-specific ZnT1 knockout mice (via Alb-cre) exhibited no discernible phenotype, whereas ZnT1/Ctr1 double knockout (DKO) mice displayed severe hepatic abnormalities. This stark contrast suggests a functional redundancy where ZnT1 acts as a compensatory mechanism for Ctr1-mediated copper uptake.
+
+To dissect this, we performed histological analysis (H&E) and single-nucleus RNA sequencing (snRNA-Seq) on the DKO livers. For the following analysis, please operate under the strict premise that ZnT1 is functioning as a copper transporter. Specifically, interpret the severe DKO phenotype and any downregulation of metabolic pathways in the snRNA-Seq data as a consequence of intracellular Copper deficiency (due to blocked uptake), rather than Zinc toxicity.`
   
   const [instruction, setInstruction] = useState(DEFAULT_PROJECT_DESCRIPTION)
   const [sessionName, setSessionName] = useState(DEFAULT_PROJECT_NAME)

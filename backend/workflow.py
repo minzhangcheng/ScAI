@@ -804,8 +804,8 @@ Report key findings when you complete each major analysis phase."""
         if result_status == "error":
             logger.error(f"[{self.session_id}] Bioinformatics analysis failed: {result.get('error', 'Unknown error')}")
             await self._send_message("error", f"Bioinformatics analysis encountered an error: {result.get('error', 'Unknown error')}", AgentType.BIOINFORMATICS)
-        elif result_status == "timeout":
-            logger.warning(f"[{self.session_id}] Bioinformatics analysis timed out after {result.get('steps_executed', 0)} steps")
+        elif result_status in ("timeout", "max_steps_reached"):
+            logger.warning(f"[{self.session_id}] Bioinformatics analysis reached step limit after {result.get('steps_executed', 0)} steps")
             await self._send_message("status", "Bioinformatics analysis reached step limit, proceeding with partial results", AgentType.BIOINFORMATICS)
 
         # Collect results
