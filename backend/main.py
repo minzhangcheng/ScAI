@@ -765,10 +765,19 @@ async def upload_pathology(
     )
     
     state.pathology_images.append(img)
-    
+
+    # If workflow is waiting for input or completed, register as pending file
+    # so the next round will process this image through the PI agent
+    if state.status in (TaskStatus.WAITING_INPUT, TaskStatus.COMPLETED):
+        state.pending_uploaded_files.append({
+            "type": "image",
+            "filename": sanitized_name,
+            "id": img.id
+        })
+
     # Auto-save session
     await asyncio.to_thread(save_session_to_disk, session_id, state)
-    
+
     return APIResponse(
         success=True,
         message=f"Pathology image uploaded: {sanitized_name}",

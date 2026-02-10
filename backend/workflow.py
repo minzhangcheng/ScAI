@@ -1083,15 +1083,16 @@ Report key findings when you complete each major analysis phase."""
         except asyncio.TimeoutError:
             logger.info(f"[{self.session_id}] Wait timeout (10min safety), auto-proceeding")
 
-        # If user provided real input on the last round, extend max_rounds to allow one more
-        has_real_input = (
+        # If user provided real input (text or files) on the last round, extend max_rounds to allow one more
+        has_real_text = (
             analysis_state.pending_human_input
             and analysis_state.pending_human_input.strip() not in ('', '[CONTINUE]')
         )
+        has_uploaded_files = bool(analysis_state.pending_uploaded_files)
         max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
-        if has_real_input and analysis_state.current_round >= max_rounds:
+        if (has_real_text or has_uploaded_files) and analysis_state.current_round >= max_rounds:
             analysis_state.max_rounds = analysis_state.current_round + 1
-            logger.info(f"[{self.session_id}] User input on last round, extending max_rounds to {analysis_state.max_rounds}")
+            logger.info(f"[{self.session_id}] User input on last round (text={has_real_text}, files={has_uploaded_files}), extending max_rounds to {analysis_state.max_rounds}")
 
         return {**state, "analysis_state": analysis_state}
 
