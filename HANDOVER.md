@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.6.0
-**Last Updated**: 2026-02-09
+**Version**: 0.6.1
+**Last Updated**: 2026-02-10
 
 ## Project Overview
 
@@ -61,29 +61,32 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~2920 lines)
+│   ├── main.py                 # FastAPI entry point (~2992 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
 │   │                           # - Chunked file upload (10GB support)
 │   │                           # - Report generation task scheduling
+│   │                           # - Base64 stripping for message optimization
 │   │
-│   ├── workflow.py             # LangGraph workflow (~1528 lines)
+│   ├── workflow.py             # LangGraph workflow (~1686 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
 │   │                           # - Retry with exponential backoff
 │   │                           # - Convergence detection
 │   │                           # - State version sync callbacks
+│   │                           # - File upload handling during pause
 │   │
-│   ├── report_generator.py     # Report generator
+│   ├── report_generator.py     # Report generator (~2691 lines)
 │   │                           # - 9 chapters, 40+ analysis items
 │   │                           # - Jupyter code execution
 │   │                           # - Chart/table generation (PNG/PDF/CSV)
+│   │                           # - Cluster annotation table extraction
 │   │
 │   ├── regenerate_report_html.py # Report HTML regeneration utility
 │   │
-│   ├── config.py               # Configuration management (~282 lines)
+│   ├── config.py               # Configuration management (~288 lines)
 │   │                           # - APIConfig: LLM keys + proxy
 │   │                           # - ModelConfig: Model selection per agent
 │   │                           # - AgentTemperatures: Per-agent temperatures
@@ -97,7 +100,7 @@ intesc/                         # Code directory
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2)
-│   │   ├── literature_agent.py # Literature Agent (Google Deep Research)
+│   │   ├── literature_agent.py # Literature Agent (3 research modes, ~1014 lines)
 │   │   └── painter_agent.py    # Painter Agent (graphic abstract)
 │   │
 │   ├── models/
@@ -110,10 +113,10 @@ intesc/                         # Code directory
 │   │                           # - BioinformaticsCheckpoint: Step-level recovery
 │   │
 │   ├── utils/
-│   │   ├── llm_client.py       # LLM client
-│   │   ├── sandbox.py          # Jupyter execution environment
+│   │   ├── llm_client.py       # LLM client (~838 lines, OpenRouter + Google DR)
+│   │   ├── sandbox.py          # Jupyter execution environment (~763 lines)
 │   │   ├── image_utils.py      # Image processing
-│   │   ├── upload.py           # Chunked upload manager (10GB support)
+│   │   ├── upload.py           # Chunked upload manager (~398 lines)
 │   │   └── llm_logger.py       # LLM logging
 │   │
 │   └── static/                 # Static files (backup)
@@ -222,7 +225,8 @@ initialize_round ◄────────────────────
 4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
 5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval
 6. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
-7. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with 2-minute countdown. Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend has 10-minute safety timeout. User input on the last round extends `max_rounds` by 1.
+7. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with 2-minute countdown. Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend has 10-minute safety timeout. User input or file uploads on the last round extends `max_rounds` by 1.
+8. **File Upload During Pause**: Users can upload pathology images while workflow is in `waiting_input` or `completed` state. Files are tracked in `pending_uploaded_files` and processed in the next round.
 
 **WebSocket Message Types:**
 
@@ -244,6 +248,9 @@ initialize_round ◄────────────────────
 | `figure_revision` | Revision requested |
 | `completed` | Analysis complete (includes round_results + final_summary on reconnect) |
 | `message_history` | Batch message restore (reconnect to completed session) |
+| `human_input_requested` | Workflow waiting for user input (round feedback) |
+| `human_input_received` | User input received, continuing workflow |
+| `data_request` | Agent requesting additional data |
 
 ### 1.1 Biochemistry Agent (v2 - 3-Step Workflow)
 
@@ -254,6 +261,27 @@ Since v0.5.1, the biochemistry agent uses a 3-step analysis pipeline:
 3. **Step 3**: Summarize findings, draw conclusions, and suggest follow-up experiments
 
 This approach is more robust against vision API inconsistencies (see Known Issues).
+
+### 1.2 Literature Agent (3 Research Modes, ~1014 lines)
+
+The Literature Agent supports 3 research modes with automatic fallback:
+
+| Mode | API | Model/Endpoint | Max Runtime |
+|------|-----|----------------|-------------|
+| `gemini_deep_research` | Google Interactions API | `deep-research-pro-preview-12-2025` | 30 min |
+| `openrouter_deep_research` (default) | OpenRouter chat/completions | `openai/o4-mini-deep-research` | 10 min |
+| `pubmed_llm` | NCBI E-utilities + LLM | PubMed search + any LLM model | ~2 min |
+
+**Fallback chain**: Configured mode → PubMed + LLM → Quick search (LLM knowledge only)
+
+**Multi-round search**: All 3 modes support iterative refinement (configurable 1-20 rounds). After each round, LLM evaluates whether results are sufficient and generates refined queries if needed.
+
+**Key methods:**
+- `_multi_round_gemini()`: Google Interactions API (start + poll, 5s interval)
+- `_multi_round_openrouter()`: Standard chat completions with `timeout=660s`, `max_tokens=16384`
+- `_multi_round_pubmed()`: E-Search → E-Fetch → XML parsing → LLM synthesis
+- `_evaluate_search_results()` / `_evaluate_pubmed_results()`: LLM judges sufficiency
+- `annotate_clusters()`: Called by bioinformatics agent for cell type annotation
 
 ### 2. Session Persistence
 
@@ -314,9 +342,9 @@ class LocalJupyterSandbox:
 - dill serialization supports pause/resume
 - Fixed random seed (42) ensures reproducibility
 
-### 4. Report Generator (report_generator.py)
+### 4. Report Generator (report_generator.py, ~2691 lines)
 
-**9 Chapters:**
+**9 Chapters + Cluster Annotation Table:**
 
 | Chapter | Analysis Items |
 |---------|---------------|
@@ -353,25 +381,48 @@ class DetailedReportGenerator:
         final_conclusions = await self._generate_final_conclusions(...)
 ```
 
-### 5. LLM Client (llm_client.py)
+**Cluster Annotation Extraction**: After loading adata in `_auto_load_processed_data()`, runs sandbox code to extract `leiden → cell_type` mapping from `obs` columns. Stored in `self.cluster_annotations` dict, rendered as HTML table in report, and included in LLM prompts so narrative uses cell type names instead of cluster numbers.
+
+### 5. LLM Client (llm_client.py, ~838 lines)
+
+**Two client classes:**
 
 ```python
 class OpenAICompatibleClient:
-    def __init__(self, api_key, base_url, model):
-        # Supports OpenRouter, OpenAI, and other compatible APIs
+    """Primary LLM client for OpenRouter/OpenAI-compatible APIs"""
+    DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
-    async def chat(self, messages, tools=None) -> str:
-        # Single conversation
-
-    async def chat_stream(self, messages, tools=None):
+    async def chat(self, model, messages, temperature=0.7, max_tokens=4096,
+                   stream=False, timeout=None) -> LLMResponse:
+        # Standard chat with per-request timeout override
+    async def chat_with_tools(self, model, messages, tools, ...) -> LLMResponse:
+        # Function calling support
+    async def chat_stream(self, model, messages, ...) -> AsyncGenerator:
         # Streaming response
+    async def chat_with_vision(self, model, text_prompt, images, ...) -> LLMResponse:
+        # Vision/multimodal support
+
+class GoogleDeepResearchClient:
+    """Client for Google Gemini Deep Research via Interactions API"""
+    BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+    async def start_research(self, query) -> str:
+        # Start background research task, returns interaction_id
+    async def poll_research(self, interaction_id, poll_interval=5.0, max_wait=1800.0):
+        # Poll until completed/failed (30min max)
+    async def research(self, query) -> Dict:
+        # Convenience: start + poll, returns {report, sources, thinking}
+
+class LLMManager:
+    """Manager wrapper, provides .llm / .openrouter aliases"""
 ```
 
-**Retry Logic:**
+**Key Features:**
 
-- Max retries: 3
-- Exponential backoff: 1s, 2s, 4s
-- Supports function calling (tools)
+- `_model_supports_temperature()`: Skips temperature for reasoning models (o1/o3/o4 series)
+- `retry_with_backoff()`: Max 3 retries with exponential backoff (2x delay), rate limit handling
+- Per-request `timeout` override: Deep research models pass `timeout=660.0` without changing client default (120s)
+- `_extract_content_from_message()`: Handles string, list, None, reasoning model responses
 
 ## API Endpoints
 
@@ -517,7 +568,11 @@ class AnalysisState(BaseModel):
 
     # Human-in-the-loop
     pending_human_input: Optional[str]  # User message waiting to be processed
+    pending_uploaded_files: List[Dict]  # Files uploaded during pause
     max_rounds: int = 0                 # Dynamic max rounds (0 = use config default)
+
+    # Literature config
+    literature_config: Dict[str, Any]   # mode, google_api_key, search_model, pubmed_email, max_search_rounds
 
     # Configuration
     custom_prompts: Dict[str, str]
@@ -714,7 +769,7 @@ uvicorn stdout      # API logs
 | Bioinformatics | `anthropic/claude-opus-4.6` |
 | Biochemistry | `google/gemini-3-pro-preview` |
 | Painter | `google/gemini-3-pro-image-preview` |
-| Literature | Google Gemini Deep Research API (direct) |
+| Literature | `google/gemini-3-pro-preview` (chat); Deep Research via mode config |
 
 **Agent Temperatures:**
 
@@ -770,6 +825,18 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 - Biochemistry Agent v2 mitigates this with comprehensive prompts
 - Check `intesc_data/logs/error.log` for details
 
+**8. Stale Session After Server Restart**
+
+- If browser shows blank/error state after server restart, the session may no longer exist on server
+- v0.6.1+ auto-detects this and clears stale session from localStorage
+- Manual fix: Clear localStorage in browser DevTools → Application → Local Storage → delete `intesc-storage`
+
+**9. Deep Research Timeout**
+
+- OpenRouter deep research models can take up to 10 minutes per request
+- v0.6.1+ uses per-request `timeout=660s` for deep research calls (vs default 120s)
+- If timeout errors persist, check network/proxy connection and OpenRouter service status
+
 ## Dependencies
 
 ### Core Dependencies
@@ -819,35 +886,37 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| Workflow graph & orchestration | `workflow.py` | ~1528 lines |
-| FastAPI server & session mgmt | `main.py` | ~2920 lines |
-| Bioinformatics Agent (autonomous) | `bioinformatics_agent.py` | ~1370 lines |
-| PI Agent (coordinator + reviewer) | `pi_agent.py` | ~1303 lines |
+| FastAPI server & session mgmt | `main.py` | ~2992 lines |
+| Report generator (9 chapters) | `report_generator.py` | ~2691 lines |
+| Workflow graph & orchestration | `workflow.py` | ~1686 lines |
+| Bioinformatics Agent (autonomous) | `bioinformatics_agent.py` | ~1496 lines |
+| PI Agent (coordinator + reviewer) | `pi_agent.py` | ~1330 lines |
+| Literature Agent (3 research modes) | `literature_agent.py` | ~1014 lines |
+| LLM client (OpenRouter + Google DR) | `llm_client.py` | ~838 lines |
+| Jupyter sandbox | `sandbox.py` | ~763 lines |
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
 | Pathology Agent | `pathology_agent.py` | ~450 lines |
-| Literature Agent (Deep Research) | `literature_agent.py` | ~365 lines |
+| Chunked upload manager | `upload.py` | ~398 lines |
 | Painter Agent (graphic abstract) | `painter_agent.py` | ~326 lines |
-| Configuration & prompts | `config.py` | ~278 lines |
+| Configuration & prompts | `config.py` | ~288 lines |
 | Agent base class | `base.py` | ~246 lines |
-| Jupyter sandbox | `sandbox.py` | See utils/ |
-| Chunked upload manager | `upload.py` | See utils/ |
 
 ### Frontend
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| Analysis control + error display | `AnalysisPanel.tsx` | ~800 lines |
-| Round feedback dialog | `RoundFeedbackDialog.tsx` | ~475 lines |
+| API hooks + WebSocket | `useApi.ts` | ~1173 lines |
 | Data upload interface | `DataPanel.tsx` | ~965 lines |
-| Real-time message streaming | `MessageStream.tsx` | ~779 lines |
-| Report generation & download | `ReportPanel.tsx` | ~770 lines |
-| API hooks + WebSocket | `useApi.ts` | ~850 lines |
-| Session management sidebar | `Sidebar.tsx` | ~402 lines |
-| Agent prompt customization | `PromptsPanel.tsx` | ~377 lines |
+| Analysis control + error display | `AnalysisPanel.tsx` | ~797 lines |
+| Report generation & download | `ReportPanel.tsx` | ~789 lines |
+| Real-time message streaming | `MessageStream.tsx` | ~778 lines |
+| Agent prompt customization | `PromptsPanel.tsx` | ~585 lines |
+| Round feedback dialog | `RoundFeedbackDialog.tsx` | ~474 lines |
+| Zustand global state | `appStore.ts` | ~461 lines |
+| Session management sidebar | `Sidebar.tsx` | ~417 lines |
 | Main application | `App.tsx` | ~303 lines |
 | Round results display | `ResultsPanel.tsx` | ~265 lines |
-| Zustand global state | `appStore.ts` | ~240 lines |
-| API configuration | `ConfigPanel.tsx` | ~223 lines |
+| API configuration | `ConfigPanel.tsx` | ~189 lines |
 
 ## Known Issues
 
@@ -865,10 +934,27 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 Single-cell datasets can be very large. The local Jupyter kernel may require significant memory (8GB+) for larger datasets. dill serialization of the full Python environment can also produce large `.pkl` files.
 
+### 3. localStorage Overflow (Fixed in v0.6.1)
+
+**Symptom**: Page refresh fails to load session; browser console shows `QuotaExceededError`.
+
+**Root Cause**: Zustand persist stores state to localStorage (5MB limit). Large sessions with many base64 images overflow.
+
+**Fix**: Base64 data is now stripped from persisted messages and session objects in `appStore.ts` partialize function. API response also strips base64 via `_strip_message_base64()` in `main.py`.
+
+### 4. Stale Session 404 Loop (Fixed in v0.6.1)
+
+**Symptom**: After server restart or session cleanup, frontend enters infinite 404 + WebSocket reconnect loop.
+
+**Root Cause**: Browser localStorage has a session ID that no longer exists on server. Every API call returns 404, WebSocket gets "Session not found" error, reconnect fires, repeat.
+
+**Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
+
 ## Version History
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.6.1 | 2026-02-10 | Literature Agent 3 research modes, Gemini DR API fix, OpenRouter timeout fix, cluster annotations in report, session recovery, localStorage overflow fix, read mode |
 | 0.6.0 | 2026-02-09 | Human-in-the-loop round feedback dialog, workflow wait_for_user_input node, cell annotation + report fixes |
 | 0.5.5 | 2026-02-09 | WebSocket reconnect with full session data, report loading retry, annotation workflow improvements |
 | 0.5.4 | 2026-02-09 | Bug fixes (bioinformatics, session handling, sandbox, UI) |
@@ -887,5 +973,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-02-09*
-*Version: 0.6.0*
+*Document updated: 2026-02-10*
+*Version: 0.6.1*

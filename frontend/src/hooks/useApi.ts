@@ -3,8 +3,8 @@ import { useAppStore, Message, Session, AgentType } from '../stores/appStore'
 
 const API_BASE = '/api'
 
-// Generic fetch wrapper
-async function apiFetch<T>(
+// Generic fetch wrapper (exported for direct use)
+export async function apiFetch<T>(
   endpoint: string,
   options?: RequestInit
 ): Promise<T> {
@@ -39,7 +39,6 @@ export function useConfig() {
         method: 'POST',
         body: JSON.stringify({
           api_key: apiConfig.apiKey,
-          google_api_key: apiConfig.googleApiKey,
           llm_base_url: apiConfig.llmBaseUrl,
           proxy_url: apiConfig.proxyUrl || null,
         }),
@@ -57,11 +56,10 @@ export function useConfig() {
       const status = await apiFetch<{
         configured: boolean
         has_api_key: boolean
-        has_google: boolean
       }>('/config/status')
       return status
     } catch {
-      return { configured: false, has_api_key: false, has_google: false }
+      return { configured: false, has_api_key: false }
     }
   }, [])
 
@@ -554,7 +552,24 @@ export function useSession() {
     } catch (e) {
       console.error('Failed to sync max rounds:', e)
     }
-    
+
+    // Sync literature config to backend before starting
+    const { literatureMode, googleApiKey, literatureSearchModel, pubmedEmail, literatureMaxSearchRounds } = useAppStore.getState()
+    try {
+      await apiFetch(`/session/${currentSession.id}/literature-config`, {
+        method: 'POST',
+        body: JSON.stringify({
+          mode: literatureMode,
+          google_api_key: googleApiKey,
+          search_model: literatureSearchModel,
+          pubmed_email: pubmedEmail,
+          max_search_rounds: literatureMaxSearchRounds,
+        }),
+      })
+    } catch (e) {
+      console.error('Failed to sync literature config:', e)
+    }
+
     await apiFetch(`/session/${currentSession.id}/run`, { method: 'POST' })
     updateSession({ status: 'running' })
   }, [currentSession, updateSession])
@@ -843,6 +858,13 @@ export function useWebSocket() {
                 }
               }
             }
+          } else if (response.status === 404) {
+            // Session no longer exists on server - clear stale session to stop reconnect loop
+            console.warn('WebSocket: Session not found on server (404), clearing stale session')
+            useAppStore.getState().setCurrentSession(null)
+            useAppStore.getState().clearMessages()
+            ws.close()
+            return
           }
         } catch (e) {
           console.error('WebSocket: Failed to restore message history:', e)
@@ -857,9 +879,19 @@ export function useWebSocket() {
       try {
         const data = JSON.parse(event.data)
 
-        // Skip error messages that indicate session/config issues
+        // Handle error messages that indicate session/config issues
         if (data.error) {
           console.error('WebSocket: Server error:', data.error)
+          // If session not found, clear stale session to stop reconnect loop
+          // Match specific backend error pattern: "Session {id} not found" or "Session not found"
+          if (typeof data.error === 'string' && /session\b.*\bnot found/i.test(data.error)) {
+            const currentSessionId = useAppStore.getState().currentSession?.id
+            if (currentSessionId) {
+              console.warn(`WebSocket: Session ${currentSessionId} not found on server, clearing stale session`)
+              useAppStore.getState().setCurrentSession(null)
+              useAppStore.getState().clearMessages()
+            }
+          }
           return
         }
 

@@ -296,9 +296,9 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
 # Request/Response models
 class ConfigRequest(BaseModel):
     api_key: str  # Main LLM API key
-    google_api_key: str = ""
     llm_base_url: str = "https://openrouter.ai/api/v1"
     proxy_url: Optional[str] = None
+    google_api_key: str = ""  # Deprecated: kept for backward compat, now in literature_config
 
 
 class ValidateKeyRequest(BaseModel):
@@ -327,6 +327,14 @@ class TemperatureUpdateRequest(BaseModel):
     temperature: float
 
 
+class LiteratureConfigRequest(BaseModel):
+    mode: str = Field(default="openrouter_deep_research")
+    google_api_key: str = ""
+    search_model: str = "openai/o4-mini-deep-research"
+    pubmed_email: str = ""
+    max_search_rounds: int = Field(default=5, ge=1, le=20)
+
+
 class BiochemistryInput(BaseModel):
     indicator: str = Field(..., min_length=1, max_length=200, description="Biochemistry indicator name")
     value: float = Field(..., description="Indicator value")
@@ -352,7 +360,6 @@ async def set_config(request: ConfigRequest):
     
     config = SystemConfig()
     config.api.api_key = request.api_key
-    config.api.google_api_key = request.google_api_key
     config.api.llm_base_url = request.llm_base_url
     config.api.proxy_url = request.proxy_url
     
@@ -384,7 +391,6 @@ async def config_status():
     return {
         "configured": True,
         "has_api_key": bool(config.api.api_key),
-        "has_google": bool(config.api.google_api_key)
     }
 
 
@@ -504,6 +510,29 @@ async def list_sessions():
     return {"sessions": disk_sessions}
 
 
+def _strip_message_base64(msg_type: str, content) -> any:
+    """Strip large base64 image data from message content to reduce response size."""
+    # figure type: content is raw base64 string
+    if msg_type == "figure" and isinstance(content, str) and len(content) > 1000:
+        return "[image]"
+    # graphic_abstract type: content has image_base64
+    if msg_type == "graphic_abstract" and isinstance(content, dict):
+        return {k: v for k, v in content.items() if k not in ("image_base64", "imageBase64")}
+    # figure_review / figure_approved / figure_revision: content has png_base64
+    if msg_type in ("figure_review", "figure_approved", "figure_revision") and isinstance(content, dict):
+        return {k: v for k, v in content.items() if k not in ("png_base64", "pngBase64")}
+    # Strip base64 from figures arrays in result/integrated_report messages
+    if isinstance(content, dict) and "figures" in content and isinstance(content.get("figures"), list):
+        stripped_figures = []
+        for f in content["figures"]:
+            if isinstance(f, dict):
+                stripped_figures.append({k: v for k, v in f.items() if k not in ("data", "pngBase64", "png_base64")})
+            else:
+                stripped_figures.append(f)
+        return {**content, "figures": stripped_figures}
+    return content
+
+
 @app.get("/api/session/{session_id}/load")
 async def load_session(session_id: str):
     """Load a session by ID (from memory or disk)"""
@@ -554,12 +583,13 @@ async def load_session(session_id: str):
         ],
         "final_summary": state.final_summary,
         # Messages history (realtime WebSocket messages for UI restoration)
+        # Strip large base64 image data from messages to reduce response size
         "messages": [
             {
                 "id": msg.id,
                 "type": msg.type,
                 "agent": msg.agent.value if hasattr(msg.agent, 'value') else (str(msg.agent) if msg.agent else None),
-                "content": msg.content,
+                "content": _strip_message_base64(msg.type, msg.content),
                 "timestamp": msg.timestamp.isoformat() if msg.timestamp else "",
             }
             for msg in state.realtime_messages
@@ -1253,7 +1283,7 @@ async def get_models(session_id: str):
         "pathology": state.custom_models.get("pathology", config.models.pathology_model if config else ""),
         "bioinformatics": state.custom_models.get("bioinformatics", config.models.bioinformatics_model if config else ""),
         "biochemistry": state.custom_models.get("biochemistry", config.models.biochemistry_model if config else ""),
-        "literature": state.custom_models.get("literature", "google-deep-research"),
+        "literature": state.custom_models.get("literature", config.models.pi_model if config else "google/gemini-3-pro-preview"),
         "painter": state.custom_models.get("painter", config.models.painter_model if config else "gemini-2.0-flash-exp-image-generation")
     }
 
@@ -1320,6 +1350,39 @@ async def get_max_rounds(session_id: str):
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"max_rounds": state.max_rounds}
+
+
+@app.post("/api/session/{session_id}/literature-config")
+async def update_literature_config(session_id: str, request: LiteratureConfigRequest):
+    """Update literature agent configuration"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    state.literature_config = {
+        "mode": request.mode,
+        "google_api_key": request.google_api_key,
+        "search_model": request.search_model,
+        "pubmed_email": request.pubmed_email,
+        "max_search_rounds": request.max_search_rounds,
+    }
+
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+
+    return APIResponse(
+        success=True,
+        message=f"Literature config updated: mode={request.mode}"
+    )
+
+
+@app.get("/api/session/{session_id}/literature-config")
+async def get_literature_config(session_id: str):
+    """Get current literature agent configuration"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return state.literature_config
 
 
 @app.post("/api/session/{session_id}/run")

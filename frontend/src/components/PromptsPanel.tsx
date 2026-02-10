@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { usePrompts } from '../hooks/useApi'
 import { useAppStore, AgentType, DEFAULT_MODELS, DEFAULT_TEMPERATURES } from '../stores/appStore'
 import { useTranslation, getDefaultPrompts } from '../i18n/translations'
+import { apiFetch } from '../hooks/useApi'
 import {
   Users,
   Microscope,
@@ -12,11 +13,24 @@ import {
   Save,
   RotateCcw,
   Cpu,
-  Thermometer
+  Thermometer,
+  Search,
+  Eye,
+  EyeOff
 } from 'lucide-react'
 
 export function PromptsPanel() {
-  const { currentSession, language, prompts, setPrompt, models, setModel, temperatures, setTemperature } = useAppStore()
+  const {
+    currentSession, language,
+    prompts, setPrompt,
+    models, setModel,
+    temperatures, setTemperature,
+    literatureMode, setLiteratureMode,
+    googleApiKey, setGoogleApiKey,
+    literatureSearchModel, setLiteratureSearchModel,
+    pubmedEmail, setPubmedEmail,
+    literatureMaxSearchRounds, setLiteratureMaxSearchRounds,
+  } = useAppStore()
   const { savePrompt, saveModel, saveTemperature } = usePrompts()
   const { t } = useTranslation(language)
   const defaultPrompts = getDefaultPrompts(language)
@@ -26,6 +40,7 @@ export function PromptsPanel() {
   const [editedTemperature, setEditedTemperature] = useState(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [showGoogleKey, setShowGoogleKey] = useState(false)
 
   // Update edited prompt, model, and temperature when selected agent changes
   useEffect(() => {
@@ -159,6 +174,24 @@ export function PromptsPanel() {
         await savePrompt(selectedAgent, editedPrompt)
         await saveModel(selectedAgent, editedModel)
         await saveTemperature(selectedAgent, editedTemperature)
+
+        // Also save literature config if on literature agent
+        if (selectedAgent === 'literature') {
+          try {
+            await apiFetch(`/session/${currentSession.id}/literature-config`, {
+              method: 'POST',
+              body: JSON.stringify({
+                mode: literatureMode,
+                google_api_key: googleApiKey,
+                search_model: literatureSearchModel,
+                pubmed_email: pubmedEmail,
+                max_search_rounds: literatureMaxSearchRounds,
+              }),
+            })
+          } catch (e) {
+            console.error('Failed to save literature config:', e)
+          }
+        }
       } else {
         setPrompt(selectedAgent, editedPrompt)
         setModel(selectedAgent, editedModel)
@@ -184,6 +217,16 @@ export function PromptsPanel() {
     // Reset temperature to default
     setEditedTemperature(DEFAULT_TEMPERATURES[selectedAgent])
     setTemperature(selectedAgent, DEFAULT_TEMPERATURES[selectedAgent])
+
+    // Reset literature config if on literature agent
+    if (selectedAgent === 'literature') {
+      setLiteratureMode('openrouter_deep_research')
+      setGoogleApiKey('')
+      setLiteratureSearchModel('openai/o4-mini-deep-research')
+      setPubmedEmail('')
+      setLiteratureMaxSearchRounds(5)
+    }
+
     setSaved(false)
   }
 
@@ -253,7 +296,7 @@ export function PromptsPanel() {
               <p className="text-sm text-slate-500">{selectedConfig.description}</p>
             </div>
           </div>
-          
+
           <div className="flex items-center gap-2">
             <button
               onClick={handleReset}
@@ -276,6 +319,171 @@ export function PromptsPanel() {
             </button>
           </div>
         </div>
+
+        {/* Literature Agent: Research Mode Selector */}
+        {selectedAgent === 'literature' && (
+          <>
+            {/* PubMed Settings - always visible (all modes fallback to PubMed) */}
+            <div className="mb-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-sm font-medium text-slate-700">
+                  {t('literaturePubmedSettings')}
+                </label>
+                <span className="text-xs text-slate-400">{t('literaturePubmedSettingsNote')}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-medium text-slate-600">
+                    {t('literaturePubmedEmailLabel')}
+                  </label>
+                  <input
+                    type="email"
+                    value={pubmedEmail}
+                    onChange={(e) => { setPubmedEmail(e.target.value); setSaved(false) }}
+                    placeholder="your@email.com"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <p className="text-xs text-slate-400">{t('literaturePubmedEmailNote')}</p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-medium text-slate-600">
+                    {t('literatureMaxSearchRounds')}
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={literatureMaxSearchRounds}
+                    onChange={(e) => {
+                      setLiteratureMaxSearchRounds(parseInt(e.target.value) || 5)
+                      setSaved(false)
+                    }}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <p className="text-xs text-slate-400">{t('literatureMaxSearchRoundsNote')}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Research Mode Selector */}
+            <div className="mb-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100">
+              <div className="flex items-center gap-2 mb-3">
+                <Search className="w-4 h-4 text-blue-600" />
+                <label className="text-sm font-medium text-slate-700">
+                  {t('literatureResearchMode')}
+                </label>
+              </div>
+
+              <div className="space-y-2">
+                {/* Gemini Deep Research */}
+                <div className={`rounded-lg transition-all ${
+                  literatureMode === 'gemini_deep_research' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
+                }`}>
+                  <label className="flex items-start gap-3 p-3 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="literatureMode"
+                      value="gemini_deep_research"
+                      checked={literatureMode === 'gemini_deep_research'}
+                      onChange={() => { setLiteratureMode('gemini_deep_research'); setSaved(false) }}
+                      className="mt-0.5 accent-blue-600"
+                    />
+                    <div className="flex-1">
+                      <span className="text-sm font-medium text-slate-800">{t('literatureGeminiDeepResearch')}</span>
+                      <p className="text-xs text-slate-500 mt-0.5">{t('literatureGeminiDesc')}</p>
+                    </div>
+                  </label>
+                  {literatureMode === 'gemini_deep_research' && (
+                    <div className="px-3 pb-3 ml-7 space-y-2">
+                      <label className="block text-xs font-medium text-slate-600">
+                        {t('literatureGoogleApiKey')}
+                      </label>
+                      <div className="relative">
+                        <input
+                          type={showGoogleKey ? 'text' : 'password'}
+                          value={googleApiKey}
+                          onChange={(e) => { setGoogleApiKey(e.target.value); setSaved(false) }}
+                          placeholder="AIza..."
+                          className="w-full px-3 py-2 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowGoogleKey(!showGoogleKey)}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
+                        >
+                          {showGoogleKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                      <p className="text-xs text-blue-600">
+                        {t('literatureGeminiNote')} ·{' '}
+                        <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="underline hover:no-underline">
+                          {language === 'zh' ? '获取 Key' : 'Get Key'}
+                        </a>
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* OpenRouter Deep Research */}
+                <div className={`rounded-lg transition-all ${
+                  literatureMode === 'openrouter_deep_research' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
+                }`}>
+                  <label className="flex items-start gap-3 p-3 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="literatureMode"
+                      value="openrouter_deep_research"
+                      checked={literatureMode === 'openrouter_deep_research'}
+                      onChange={() => { setLiteratureMode('openrouter_deep_research'); setSaved(false) }}
+                      className="mt-0.5 accent-blue-600"
+                    />
+                    <div className="flex-1">
+                      <span className="text-sm font-medium text-slate-800">{t('literatureOpenrouterDeepResearch')}</span>
+                      <p className="text-xs text-slate-500 mt-0.5">{t('literatureOpenrouterDesc')}</p>
+                    </div>
+                  </label>
+                  {literatureMode === 'openrouter_deep_research' && (
+                    <div className="px-3 pb-3 ml-7 space-y-2">
+                      <label className="block text-xs font-medium text-slate-600">
+                        {t('literatureSearchModel')}
+                      </label>
+                      <input
+                        type="text"
+                        value={literatureSearchModel}
+                        onChange={(e) => { setLiteratureSearchModel(e.target.value); setSaved(false) }}
+                        placeholder="openai/o4-mini-deep-research"
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                      <p className="text-xs text-slate-500">
+                        {t('literatureOpenrouterModelOptions')}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* PubMed Search Only */}
+                <div className={`rounded-lg transition-all ${
+                  literatureMode === 'pubmed_llm' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
+                }`}>
+                  <label className="flex items-start gap-3 p-3 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="literatureMode"
+                      value="pubmed_llm"
+                      checked={literatureMode === 'pubmed_llm'}
+                      onChange={() => { setLiteratureMode('pubmed_llm'); setSaved(false) }}
+                      className="mt-0.5 accent-blue-600"
+                    />
+                    <div className="flex-1">
+                      <span className="text-sm font-medium text-slate-800">{t('literaturePubmedLlm')}</span>
+                      <p className="text-xs text-slate-500 mt-0.5">{t('literaturePubmedDesc')}</p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
 
         {/* Model Selection */}
         <div className="mb-4 p-4 bg-slate-50 rounded-xl">
@@ -301,7 +509,7 @@ export function PromptsPanel() {
               selectedAgent === 'pathology' ? '需要具有病理图片识别能力的模型，强烈推荐: google/gemini-3-pro-preview' :
               selectedAgent === 'bioinformatics' ? '需要 coding 能力较强的模型，推荐: anthropic/claude-opus-4.6、openai/gpt-5.2-codex 或 google/gemini-3-pro-preview' :
               selectedAgent === 'biochemistry' ? '推荐: google/gemini-3-pro-preview。若上传了生化结果图片，需要选择支持 Vision 的模型' :
-              selectedAgent === 'literature' ? '推荐: google/gemini-3-pro-preview' :
+              selectedAgent === 'literature' ? '用于文献分析与综合的 LLM 模型，推荐: google/gemini-3-pro-preview' :
               selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3-pro-image-preview' :
               '使用 OpenRouter 模型格式'
             ) : (
@@ -309,7 +517,7 @@ export function PromptsPanel() {
               selectedAgent === 'pathology' ? 'Requires pathology image recognition capability. Strongly recommended: google/gemini-3-pro-preview' :
               selectedAgent === 'bioinformatics' ? 'Requires strong coding capability. Recommended: anthropic/claude-opus-4.6, openai/gpt-5.2-codex, or google/gemini-3-pro-preview' :
               selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3-pro-preview. If biochemistry images are uploaded, a Vision-capable model is required' :
-              selectedAgent === 'literature' ? 'Recommended: google/gemini-3-pro-preview' :
+              selectedAgent === 'literature' ? 'LLM model for literature analysis and synthesis. Recommended: google/gemini-3-pro-preview' :
               selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3-pro-image-preview' :
               'Use OpenRouter model format'
             )}
@@ -344,7 +552,7 @@ export function PromptsPanel() {
             <span>{language === 'zh' ? '创造性 (多样)' : 'Creative'}</span>
           </div>
           <p className="text-xs text-slate-400 mt-1 ml-8">
-            {language === 'zh' 
+            {language === 'zh'
               ? `默认值: ${DEFAULT_TEMPERATURES[selectedAgent]} | 低温度(0.1-0.3)更客观一致，高温度(0.5-0.7)更有创造性`
               : `Default: ${DEFAULT_TEMPERATURES[selectedAgent]} | Low (0.1-0.3): more consistent, High (0.5-0.7): more creative`}
           </p>

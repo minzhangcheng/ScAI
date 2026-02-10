@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.6.0
+**Version**: 0.6.1
 
 ## Core Features
 
@@ -12,14 +12,14 @@
 - **Pathology Agent**: Analyzes histological sections (supports H&E, Sirius Red, Prussian Blue, and other staining types)
 - **Bioinformatics Agent**: Performs autonomous high-throughput sequencing data analysis (scRNA-seq, snRNA-seq, bulk RNA-seq) with checkpoint recovery
 - **Biochemistry Agent**: Interprets biochemical experimental results (3-step analysis: structured indicators → visual image analysis → synthesis & conclusions)
-- **Literature Agent**: Provides literature support (using Google Deep Research)
+- **Literature Agent**: Provides literature support (3 modes: Google Gemini Deep Research, OpenRouter Deep Research, PubMed + LLM synthesis) with multi-round iterative search and automatic fallback chain
 - **Painter Agent**: Generates graphic abstracts using Google Gemini image generation
 
 ### Iterative Analysis Workflow with Human-in-the-Loop
 
 - Multi-round collaboration, progressively deepening analysis
 - **Round Feedback Dialog**: After each round, a modal shows per-agent findings and a 2-minute countdown timer. Users can provide guidance, upload additional data (targeted to specific agents), or skip to auto-continue
-- User input on the last round automatically extends analysis by one additional round
+- User input or file uploads on the last round automatically extends analysis by one additional round
 - Automatic conflict detection and resolution
 - Convergence detection for automatic stopping
 
@@ -42,7 +42,7 @@
 
 ### Detailed Report Generation
 
-The system supports generating comprehensive reports with 9 chapters and 40+ analysis items:
+The system supports generating comprehensive reports with 9 chapters, 40+ analysis items, and cell cluster annotation table:
 
 1. **Quality Control (QC)**: QC violin plots, scatter plots, gene expression distribution, statistics table
 2. **Cell Clustering**: UMAP clustering, grouping, sample distribution, cluster dendrogram
@@ -53,6 +53,13 @@ The system supports generating comprehensive reports with 9 chapters and 40+ ana
 7. **Cell-Cell Communication Analysis**: Communication heatmaps, ligand-receptor analysis (built-in 100+ ligand-receptor pairs database)
 8. **Trajectory Analysis**: PAGA graphs, trajectory analysis
 9. **Targeted Analysis**: Custom analysis based on research objectives
+
+### State Persistence & Session Recovery
+
+- Auto-reload session on page refresh (restores full state from server)
+- Stale session detection: automatically clears sessions that no longer exist on server
+- Base64 image stripping in WebSocket messages and localStorage to prevent overflow
+- Read mode for reviewing existing analyses without starting new ones
 
 ### Real-time Communication
 
@@ -263,12 +270,12 @@ intesc/                         # Code directory
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous)
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent
-│   │   ├── literature_agent.py      # Literature Agent
+│   │   ├── literature_agent.py      # Literature Agent (3 research modes)
 │   │   └── painter_agent.py         # Painter Agent (graphic abstract)
 │   ├── models/
 │   │   └── schemas.py          # Pydantic data models (AgentError, state_version)
 │   ├── utils/
-│   │   ├── llm_client.py       # OpenAI compatible API client
+│   │   ├── llm_client.py       # LLM client (OpenRouter + Google Deep Research)
 │   │   ├── sandbox.py          # Jupyter code execution environment
 │   │   ├── image_utils.py      # Pathology image processing
 │   │   ├── upload.py           # Chunked file upload manager
@@ -338,7 +345,10 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 ### LLM
 
 - **Main Models**: Gemini 3 Pro Preview, Claude Opus 4.6 (via OpenRouter)
-- **Literature Research**: Google Gemini Deep Research
+- **Literature Research**: 3 modes with automatic fallback
+  - Google Gemini Deep Research (via Interactions API, direct Google API)
+  - OpenRouter Deep Research (e.g., `openai/o4-mini-deep-research`)
+  - PubMed + LLM synthesis (NCBI E-utilities search + LLM review)
 - **Image Generation**: Gemini 3 Pro Image Preview for graphic abstracts
 
 ### Bioinformatics
@@ -362,6 +372,21 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.6.1 (2026-02-10)
+
+- **Literature Agent Multi-Mode Research**: 3 literature research modes with automatic fallback chain
+  - Gemini Deep Research (Google Interactions API) - fixed REST payload, status polling, and response extraction
+  - OpenRouter Deep Research (standard chat completions) - fixed 120s timeout to 660s, increased max_tokens to 16384
+  - PubMed + LLM (NCBI E-utilities + LLM synthesis)
+  - Multi-round iterative search with LLM-guided query refinement
+  - Automatic fallback: Gemini/OpenRouter → PubMed → LLM knowledge only
+- **Report Cluster Annotations**: Reports now include a cell cluster annotation table (Cluster → Cell Type → Cell Count) extracted from processed adata
+- **Session Recovery on Page Refresh**: Auto-reload session from server after page refresh; stale session detection clears sessions that no longer exist on server
+- **localStorage Overflow Prevention**: Base64 image data stripped from WebSocket messages, API responses, and Zustand persisted state
+- **Read Mode**: New read-only mode for reviewing existing analyses without starting new ones
+- **File Upload During Pause**: Users can upload pathology images while workflow is paused; uploads on the last round extend max_rounds by 1
+- Bug fixes: null safety in partialize, WebSocket "session not found" detection, report findings dict key safety
 
 ### v0.6.0 (2026-02-09)
 

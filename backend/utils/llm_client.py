@@ -20,14 +20,33 @@ MAX_RETRIES = 3
 RETRY_DELAY_BASE = 2.0  # Base delay in seconds, will be multiplied by attempt number
 # Include JSONDecodeError for when API returns invalid JSON (truncated response, etc.)
 RETRYABLE_EXCEPTIONS = (
-    APITimeoutError, 
-    APIConnectionError, 
+    APITimeoutError,
+    APIConnectionError,
     APIError,  # General API errors
-    httpx.ConnectTimeout, 
-    httpx.ReadTimeout, 
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
     asyncio.TimeoutError,
     json.JSONDecodeError  # Invalid JSON response from API
 )
+
+# Models that do not support the temperature parameter (reasoning models)
+# Match by model name segments after provider prefix (e.g., "openai/o4-mini" -> "o4-mini")
+_NO_TEMPERATURE_PATTERNS = ("o1", "o3", "o4")
+
+
+def _model_supports_temperature(model: str) -> bool:
+    """Check if a model supports the temperature parameter.
+
+    Reasoning models (o1, o3, o4 series) do not support temperature.
+    Model string may have provider prefix like 'openai/o4-mini-deep-research'.
+    """
+    # Extract model name after provider prefix
+    model_name = model.split("/")[-1] if "/" in model else model
+    # Check if model name starts with any no-temperature pattern
+    for pattern in _NO_TEMPERATURE_PATTERNS:
+        if model_name.startswith(pattern):
+            return False
+    return True
 
 
 async def retry_with_backoff(
@@ -159,24 +178,122 @@ class OpenAICompatibleClient:
     async def close(self):
         await self.client.close()
         
+    def _extract_content_from_message(self, message, response=None) -> str:
+        """Extract text content from a chat completion message, handling multiple formats.
+
+        Handles: string content, list content (multimodal), None content with
+        model_dump fallback, and reasoning model responses where content may be
+        in the reasoning/reasoning_content field (e.g. OpenRouter deep research).
+        """
+        if not message:
+            return ""
+
+        raw_content = message.content
+
+        # Case 1: String content (normal case)
+        if isinstance(raw_content, str):
+            return raw_content
+
+        # Case 2: List content (multimodal response format)
+        if isinstance(raw_content, list):
+            text_parts = []
+            for part in raw_content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif "text" in part:
+                        text_parts.append(part["text"])
+                elif isinstance(part, str):
+                    text_parts.append(part)
+            if text_parts:
+                return "\n".join(text_parts)
+
+        # Case 3: None — try model_dump() for Pydantic SDK objects
+        content = ""
+        if raw_content is None:
+            try:
+                if hasattr(message, "model_dump"):
+                    msg_data = message.model_dump()
+                    if "content" in msg_data and msg_data["content"]:
+                        raw = msg_data["content"]
+                        if isinstance(raw, str):
+                            content = raw
+                        elif isinstance(raw, list):
+                            content = "\n".join(
+                                p.get("text", "") if isinstance(p, dict) else str(p)
+                                for p in raw
+                            )
+                    # Reasoning model fallback: content in reasoning/reasoning_content
+                    if not content:
+                        for key in ("reasoning", "reasoning_content"):
+                            val = msg_data.get(key)
+                            if val and isinstance(val, str):
+                                content = val
+                                break
+            except Exception as e:
+                logger.debug(f"[{self.agent_name}] model_dump extraction failed: {e}")
+
+            # Fallback: check text attribute
+            if not content and hasattr(message, "text"):
+                content = message.text or ""
+            # Fallback: check reasoning attribute directly on the object
+            if not content:
+                for attr in ("reasoning", "reasoning_content"):
+                    val = getattr(message, attr, None)
+                    if val and isinstance(val, str):
+                        content = val
+                        break
+
+        # Case 4: Other types — convert to string
+        if not content and raw_content is not None:
+            content = str(raw_content)
+
+        # Check for refusal
+        if not content and hasattr(message, "refusal") and message.refusal:
+            content = f"[Refusal]: {message.refusal}"
+            logger.warning(f"[{self.agent_name}] Request was refused: {message.refusal}")
+
+        # Debug logging: tokens generated but content empty
+        if not content and response and response.usage:
+            completion_tokens = response.usage.completion_tokens or 0
+            if completion_tokens > 0:
+                msg_dict = {}
+                for attr_name in ("content", "refusal", "role", "reasoning", "reasoning_content"):
+                    if hasattr(message, attr_name):
+                        val = getattr(message, attr_name)
+                        msg_dict[attr_name] = str(val)[:200] if val else None
+                try:
+                    if hasattr(message, "model_dump"):
+                        msg_dict["_all_keys"] = list(message.model_dump().keys())
+                except Exception:
+                    pass
+                logger.warning(
+                    f"[{self.agent_name}] Response has {completion_tokens} completion tokens "
+                    f"but empty content. Message fields: {msg_dict}"
+                )
+
+        return content
+
     async def chat(
         self,
         model: str,
         messages: List[Dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        stream: bool = False
+        stream: bool = False,
+        timeout: Optional[float] = None
     ) -> LLMResponse:
         """
         Send chat request to OpenAI-compatible API with automatic retry on timeout
-        
+
         Args:
             model: Model identifier (e.g., "google/gemini-2.5-pro-preview-05-06")
             messages: List of messages
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
             stream: Whether to stream response
-            
+            timeout: Per-request timeout in seconds (overrides client default)
+
         Returns:
             LLMResponse object
         """
@@ -195,14 +312,18 @@ class OpenAICompatibleClient:
         error_msg = None
         
         async def _make_request():
-            return await self.client.chat.completions.create(
+            params: Dict[str, Any] = dict(
                 model=model,
                 messages=messages,
-                temperature=temperature,
                 max_tokens=max_tokens,
-                stream=stream
+                stream=stream,
             )
-        
+            if _model_supports_temperature(model):
+                params["temperature"] = temperature
+            if timeout is not None:
+                params["timeout"] = timeout
+            return await self.client.chat.completions.create(**params)
+
         try:
             logger.info(f"[{self.agent_name}] Sending chat request to {model}")
             
@@ -212,12 +333,11 @@ class OpenAICompatibleClient:
                 agent_name=self.agent_name
             )
             
-            # Safely extract content from response
+            # Extract content — handles reasoning models, list content, etc.
             content = ""
             if response and response.choices and len(response.choices) > 0:
                 message = response.choices[0].message
-                if message and message.content:
-                    content = message.content
+                content = self._extract_content_from_message(message, response)
             
             result = LLMResponse(
                 content=content,
@@ -291,15 +411,17 @@ class OpenAICompatibleClient:
         start_time = time.time()
         
         async def _make_request():
-            return await self.client.chat.completions.create(
+            params: Dict[str, Any] = dict(
                 model=model,
                 messages=messages,
                 tools=tools,
                 tool_choice=tool_choice,
-                temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
             )
-        
+            if _model_supports_temperature(model):
+                params["temperature"] = temperature
+            return await self.client.chat.completions.create(**params)
+
         try:
             logger.info(f"[{self.agent_name}] Sending chat_with_tools request to {model}")
             
@@ -335,8 +457,8 @@ class OpenAICompatibleClient:
                         "arguments": arguments
                     })
             
-            # Safely extract content
-            content = message.content if message else None
+            # Extract content — handles reasoning models, list content, etc.
+            content = self._extract_content_from_message(message, response) if message else None
             
             result = LLMToolResponse(
                 content=content,
@@ -387,13 +509,15 @@ class OpenAICompatibleClient:
         """
         logger.info(f"[{self.agent_name}] Starting stream request to {model}")
         
-        stream = await self.client.chat.completions.create(
+        params: Dict[str, Any] = dict(
             model=model,
             messages=messages,
-            temperature=temperature,
             max_tokens=max_tokens,
-            stream=True
+            stream=True,
         )
+        if _model_supports_temperature(model):
+            params["temperature"] = temperature
+        stream = await self.client.chat.completions.create(**params)
         
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
@@ -457,13 +581,15 @@ class OpenAICompatibleClient:
         start_time = time.time()
         
         async def _make_request():
-            return await self.client.chat.completions.create(
+            params: Dict[str, Any] = dict(
                 model=model,
                 messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
             )
-        
+            if _model_supports_temperature(model):
+                params["temperature"] = temperature
+            return await self.client.chat.completions.create(**params)
+
         try:
             logger.info(f"[{self.agent_name}] Sending vision request to {model} with {len(images)} images")
 
@@ -473,74 +599,11 @@ class OpenAICompatibleClient:
                 agent_name=self.agent_name
             )
 
-            # Extract content - handle various response formats from different providers
+            # Extract content — uses shared helper for reasoning / multimodal formats
             content = ""
             if response and response.choices and len(response.choices) > 0:
                 message = response.choices[0].message
-                if message:
-                    raw_content = message.content
-
-                    # Case 1: String content (normal case)
-                    if isinstance(raw_content, str):
-                        content = raw_content
-
-                    # Case 2: List content (multimodal response format)
-                    elif isinstance(raw_content, list):
-                        text_parts = []
-                        for part in raw_content:
-                            if isinstance(part, dict):
-                                if part.get("type") == "text":
-                                    text_parts.append(part.get("text", ""))
-                                elif "text" in part:
-                                    text_parts.append(part["text"])
-                            elif isinstance(part, str):
-                                text_parts.append(part)
-                        content = "\n".join(text_parts)
-
-                    # Case 3: None - try alternative extraction methods
-                    elif raw_content is None:
-                        # Try model_dump() for Pydantic models (OpenAI SDK uses Pydantic)
-                        try:
-                            if hasattr(message, 'model_dump'):
-                                msg_data = message.model_dump()
-                                if 'content' in msg_data and msg_data['content']:
-                                    raw = msg_data['content']
-                                    if isinstance(raw, str):
-                                        content = raw
-                                    elif isinstance(raw, list):
-                                        content = "\n".join(
-                                            p.get("text", "") if isinstance(p, dict) else str(p)
-                                            for p in raw
-                                        )
-                        except Exception as e:
-                            logger.debug(f"[{self.agent_name}] model_dump extraction failed: {e}")
-
-                        # Fallback: check for text attribute
-                        if not content and hasattr(message, 'text'):
-                            content = message.text or ""
-
-                    # Case 4: Other types - convert to string
-                    else:
-                        content = str(raw_content)
-
-                    # Check for refusal if still empty
-                    if not content and hasattr(message, 'refusal') and message.refusal:
-                        content = f"[Refusal]: {message.refusal}"
-                        logger.warning(f"[{self.agent_name}] Vision request was refused: {message.refusal}")
-
-                    # Debug logging for empty content cases
-                    if not content:
-                        msg_dict = {}
-                        for attr in ['content', 'refusal', 'role', 'function_call', 'tool_calls']:
-                            if hasattr(message, attr):
-                                val = getattr(message, attr)
-                                msg_dict[attr] = str(val)[:200] if val else None
-                        logger.warning(
-                            f"[{self.agent_name}] Vision response has empty content. "
-                            f"Message attributes: {msg_dict}. "
-                            f"Usage: prompt={response.usage.prompt_tokens if response.usage else 0}, "
-                            f"completion={response.usage.completion_tokens if response.usage else 0}"
-                        )
+                content = self._extract_content_from_message(message, response)
             else:
                 logger.warning(f"[{self.agent_name}] Vision response has no choices")
 
@@ -614,25 +677,21 @@ class GoogleDeepResearchClient:
         url = f"{self.BASE_URL}/interactions"
         
         payload = {
-            "userInput": {
-                "text": query
-            },
-            "agentConfig": {
-                "deepResearch": {}
-            },
-            "store": True,
+            "input": query,
+            "agent": "deep-research-pro-preview-12-2025",
             "background": background
         }
-        
+
         response = await self.client.post(
             url,
             params={"key": self.api_key},
             json=payload
         )
         response.raise_for_status()
-        
+
         data = response.json()
-        return data["name"].split("/")[-1]  # Extract interaction ID
+        # Handle both "id" field and "name" resource path format
+        return data.get("id") or data.get("name", "").split("/")[-1]
     
     async def poll_research(
         self,
@@ -663,11 +722,11 @@ class GoogleDeepResearchClient:
             
             data = response.json()
             
-            # Check if completed
-            state = data.get("state", "")
-            if state == "COMPLETED":
+            # Check if completed (handle both "status" and legacy "state", case-insensitive)
+            status = data.get("status", data.get("state", "")).lower()
+            if status == "completed":
                 return self._extract_research_result(data)
-            elif state == "FAILED":
+            elif status == "failed":
                 raise Exception(f"Research failed: {data.get('error', 'Unknown error')}")
             
             await asyncio.sleep(poll_interval)
@@ -675,29 +734,59 @@ class GoogleDeepResearchClient:
         raise TimeoutError("Research timed out")
     
     def _extract_research_result(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract research result from API response"""
+        """Extract research result from Interactions API response"""
         result = {
             "report": "",
             "sources": [],
             "thinking": []
         }
-        
-        # Extract output content
-        output = data.get("output", {})
-        for part in output.get("parts", []):
-            if "text" in part:
-                result["report"] += part["text"]
-        
-        # Extract grounding metadata (sources)
-        grounding = output.get("groundingMetadata", {})
-        for source in grounding.get("groundingChunks", []):
-            if "web" in source:
-                result["sources"].append({
-                    "title": source["web"].get("title", ""),
-                    "uri": source["web"].get("uri", "")
-                })
-        
+
+        # Try new format first: outputs array (Interactions API)
+        outputs = data.get("outputs", [])
+        if outputs:
+            for output_item in outputs:
+                if isinstance(output_item, dict):
+                    # Direct text field
+                    if "text" in output_item:
+                        result["report"] += output_item["text"]
+                    # Nested parts format
+                    elif "parts" in output_item:
+                        for part in output_item["parts"]:
+                            if isinstance(part, dict) and "text" in part:
+                                result["report"] += part["text"]
+                    # Extract grounding metadata from each output
+                    grounding = output_item.get("groundingMetadata", {})
+                    self._extract_sources(grounding, result["sources"])
+        else:
+            # Fallback: legacy output.parts[].text format
+            output = data.get("output", {})
+            if isinstance(output, dict):
+                for part in output.get("parts", []):
+                    if isinstance(part, dict) and "text" in part:
+                        result["report"] += part["text"]
+                grounding = output.get("groundingMetadata", {})
+                self._extract_sources(grounding, result["sources"])
+
+        # Also check top-level groundingMetadata
+        top_grounding = data.get("groundingMetadata", {})
+        if top_grounding:
+            self._extract_sources(top_grounding, result["sources"])
+
         return result
+
+    @staticmethod
+    def _extract_sources(grounding: Dict[str, Any], sources: List[Dict[str, str]]):
+        """Extract source URLs from grounding metadata"""
+        seen_uris = {s.get("uri") for s in sources}
+        for chunk in grounding.get("groundingChunks", []):
+            if "web" in chunk:
+                uri = chunk["web"].get("uri", "")
+                if uri and uri not in seen_uris:
+                    sources.append({
+                        "title": chunk["web"].get("title", ""),
+                        "uri": uri
+                    })
+                    seen_uris.add(uri)
     
     async def research(self, query: str) -> Dict[str, Any]:
         """
@@ -714,39 +803,36 @@ class GoogleDeepResearchClient:
 
 
 class LLMManager:
-    """Manager for all LLM clients"""
-    
+    """Manager for LLM clients (OpenAI-compatible)"""
+
     def __init__(
         self,
         api_key: str,
-        google_api_key: str,
         base_url: Optional[str] = None,
         proxy_url: Optional[str] = None,
         session_id: str = "default",
         agent_name: str = "unknown"
     ):
         self.llm = OpenAICompatibleClient(
-            api_key=api_key, 
+            api_key=api_key,
             base_url=base_url,
             proxy_url=proxy_url,
             session_id=session_id,
             agent_name=agent_name
         )
-        self.deep_research = GoogleDeepResearchClient(google_api_key, proxy_url=proxy_url)
-        
+
         # Alias for backward compatibility
         self.openrouter = self.llm
-    
+
     def set_context(self, session_id: str, agent_name: str):
         """Set session and agent context for logging"""
         self.llm.set_context(session_id, agent_name)
-        
+
     async def close(self):
         await self.llm.close()
-        await self.deep_research.close()
-    
+
     async def __aenter__(self):
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()

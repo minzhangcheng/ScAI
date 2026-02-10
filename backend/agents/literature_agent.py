@@ -1,15 +1,24 @@
 """
-Literature Agent - Uses Google Deep Research for literature support
+Literature Agent - Multi-mode literature research with fallback chain
+
+Supports three research modes:
+1. Gemini Deep Research (Google Interactions API)
+2. OpenRouter Deep Research (models with built-in search)
+3. PubMed + LLM (NCBI E-utilities search + LLM synthesis)
+
+All modes support multi-round iterative search with LLM-guided query refinement.
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 import json
 import re
 import asyncio
 import logging
+import xml.etree.ElementTree as ET
+
+import httpx
 
 from .base import BaseAgent
 
-# Configure logger
 logger = logging.getLogger(__name__)
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, LiteratureReport
@@ -19,24 +28,30 @@ from ..utils.llm_client import OpenAICompatibleClient, GoogleDeepResearchClient
 
 class LiteratureAgent(BaseAgent):
     """
-    Literature Agent
-    
-    Uses Google Gemini Deep Research for comprehensive literature review.
-    
-    Responsibilities:
-    - Search and synthesize biomedical literature
-    - Provide evidence for cell type annotations
-    - Support pathway analysis interpretation
-    - Identify relevant molecular mechanisms
+    Literature Agent - Multi-mode literature research
+
+    Supports:
+    - Gemini Deep Research (Google Interactions API)
+    - OpenRouter Deep Research (models with built-in web search)
+    - PubMed + LLM (NCBI E-utilities + LLM synthesis)
+
+    Fallback chain:
+    - Gemini/OpenRouter → PubMed → quick_search (LLM knowledge only)
     """
-    
+
     def __init__(
         self,
         llm_client: OpenAICompatibleClient,
-        deep_research_client: GoogleDeepResearchClient,
         model: str,
         system_prompt: str,
-        config: Optional['AgentConfig'] = None
+        config: Optional['AgentConfig'] = None,
+        # Literature-specific parameters
+        literature_mode: str = "openrouter_deep_research",
+        google_api_key: str = "",
+        search_model: str = "openai/o4-mini-deep-research",
+        pubmed_email: str = "",
+        max_search_rounds: int = 5,
+        proxy_url: Optional[str] = None,
     ):
         from .base import AgentConfig
         super().__init__(
@@ -46,9 +61,22 @@ class LiteratureAgent(BaseAgent):
             system_prompt=system_prompt,
             config=config or AgentConfig()
         )
-        self.deep_research = deep_research_client
         self.reports: List[LiteratureReport] = []
-        
+
+        # Mode configuration
+        self.literature_mode = literature_mode
+        self.search_model = search_model
+        self.pubmed_email = pubmed_email
+        self.max_search_rounds = max(1, min(20, max_search_rounds))
+        self.proxy_url = proxy_url
+
+        # Create GoogleDeepResearchClient only when needed (Gemini mode)
+        self._deep_research: Optional[GoogleDeepResearchClient] = None
+        if google_api_key:
+            self._deep_research = GoogleDeepResearchClient(
+                google_api_key, proxy_url=proxy_url
+            )
+
     async def process(
         self,
         state: AnalysisState,
@@ -56,67 +84,588 @@ class LiteratureAgent(BaseAgent):
         **kwargs
     ) -> Dict[str, Any]:
         """Process literature research instruction"""
-
         topic = kwargs.get("topic", instruction)
         use_deep_research = kwargs.get("use_deep_research", True)
 
-        logger.info(f"[Literature] Processing topic: {topic[:100]}... (deep_research={use_deep_research})")
+        logger.info(
+            f"[Literature] Processing topic: {topic[:100]}... "
+            f"(mode={self.literature_mode}, deep={use_deep_research})"
+        )
 
         if use_deep_research:
-            return await self._deep_research(topic, state)
+            return await self._do_research(topic, state)
         else:
             return await self._quick_search(topic, state)
-    
-    async def _deep_research(
+
+    # ===================================================================
+    # Core routing with fallback chain
+    # ===================================================================
+
+    async def _do_research(
+        self,
+        topic: str,
+        state: Optional[AnalysisState] = None,
+        pubmed_max_results: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Route to configured research mode with fallback chain.
+
+        Fallback: gemini/openrouter → pubmed → quick_search
+
+        Args:
+            topic: Research topic
+            state: Optional analysis state for context
+            pubmed_max_results: Override max articles per PubMed search round (default 20)
+        """
+        mode = self.literature_mode
+
+        try:
+            if mode == "gemini_deep_research":
+                return await self._multi_round_gemini(topic, state)
+            elif mode == "openrouter_deep_research":
+                return await self._multi_round_openrouter(topic, state)
+            elif mode == "pubmed_llm":
+                return await self._multi_round_pubmed(topic, state, pubmed_max_results=pubmed_max_results)
+            else:
+                logger.warning(f"[Literature] Unknown mode: {mode}, using quick search")
+                return await self._quick_search(topic, state)
+        except Exception as e:
+            logger.warning(f"[Literature] Mode {mode} failed: {e}")
+
+            # Fallback: if primary was gemini or openrouter, try pubmed
+            if mode in ("gemini_deep_research", "openrouter_deep_research"):
+                logger.info("[Literature] Falling back to PubMed + LLM mode")
+                try:
+                    return await self._multi_round_pubmed(topic, state, pubmed_max_results=pubmed_max_results)
+                except Exception as e2:
+                    logger.warning(f"[Literature] PubMed fallback also failed: {e2}")
+
+            # Final fallback: quick search (LLM knowledge only)
+            logger.info("[Literature] Falling back to quick search (LLM knowledge only)")
+            return await self._quick_search(topic, state)
+
+    # ===================================================================
+    # Mode 1: Gemini Deep Research (multi-round)
+    # ===================================================================
+
+    async def _multi_round_gemini(
         self,
         topic: str,
         state: Optional[AnalysisState] = None
     ) -> Dict[str, Any]:
-        """
-        Perform deep research using Google Deep Research Agent
+        """Multi-round Gemini Deep Research via Google Interactions API."""
+        if not self._deep_research:
+            raise ValueError("Google API Key not configured for Gemini Deep Research")
 
-        Args:
-            topic: Research topic
-            state: Optional analysis state for context. If None, no state updates occur.
-        """
-        try:
-            # Build research query
-            query = self._build_research_query(topic, state)
+        query = self._build_research_query(topic, state)
+        all_reports: List[Dict[str, Any]] = []
+        search_history: List[Dict[str, Any]] = []
 
-            # Start research
-            result = await self.deep_research.research(query)
-
-            # Process and store report
-            report = LiteratureReport(
-                topic=topic,
-                report=result.get("report", ""),
-                references=[{
-                    "title": src.get("title", ""),
-                    "url": src.get("uri", "")
-                } for src in result.get("sources", [])]
+        for round_num in range(1, self.max_search_rounds + 1):
+            logger.info(
+                f"[Literature] Gemini DR round {round_num}/{self.max_search_rounds}: "
+                f"{query[:100]}"
             )
 
-            self.reports.append(report)
-            # Only append to state if provided
-            if state is not None:
-                state.literature_reports.append(report)
+            result = await self._deep_research.research(query)
+            report_text = result.get("report", "")
+            sources = result.get("sources", [])
 
-            # Extract key findings
-            findings = await self._extract_findings(report.report)
+            all_reports.append({"text": report_text, "sources": sources})
+            search_history.append({
+                "round": round_num,
+                "query": query,
+                "sources_count": len(sources),
+                "report_preview": report_text[:300],
+            })
 
-            return {
-                "status": "completed",
-                "report": report.report,
-                "references": report.references,
-                "findings": findings,
-                "report_id": report.id
-            }
+            # Evaluate if more research needed
+            if round_num < self.max_search_rounds:
+                evaluation = await self._evaluate_search_results(
+                    topic, search_history
+                )
+                if evaluation.get("sufficient", True):
+                    logger.info(f"[Literature] Gemini DR sufficient after {round_num} rounds")
+                    break
+                query = evaluation.get("refined_query", query)
 
-        except Exception as e:
-            # Fallback to quick search if deep research fails
-            logger.warning(f"[Literature] Deep research failed, falling back to quick search: {e}")
+        # Build final result
+        combined_report = all_reports[-1]["text"]
+        if len(all_reports) > 1:
+            all_texts = [r["text"] for r in all_reports if r["text"]]
+            combined_report = await self._synthesize_multiple_reports(topic, all_texts)
+
+        # Deduplicate sources
+        all_sources: List[Dict[str, str]] = []
+        seen_uris: Set[str] = set()
+        for r in all_reports:
+            for s in r["sources"]:
+                uri = s.get("uri", "")
+                if uri and uri not in seen_uris:
+                    all_sources.append(s)
+                    seen_uris.add(uri)
+
+        references = [
+            {"title": s.get("title", ""), "url": s.get("uri", "")}
+            for s in all_sources
+        ]
+
+        return await self._finalize_result(topic, combined_report, references, state, len(search_history))
+
+    # ===================================================================
+    # Mode 2: OpenRouter Deep Research (multi-round)
+    # ===================================================================
+
+    async def _multi_round_openrouter(
+        self,
+        topic: str,
+        state: Optional[AnalysisState] = None
+    ) -> Dict[str, Any]:
+        """Multi-round deep research via OpenRouter deep research models."""
+        if not self.search_model:
+            raise ValueError("No search model configured for OpenRouter Deep Research")
+
+        query = self._build_research_query(topic, state)
+        all_reports: List[str] = []
+        search_history: List[Dict[str, Any]] = []
+
+        for round_num in range(1, self.max_search_rounds + 1):
+            logger.info(
+                f"[Literature] OpenRouter DR round {round_num}/{self.max_search_rounds}: "
+                f"model={self.search_model}"
+            )
+
+            # Call the deep research model via the shared llm_client
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a biomedical research assistant. "
+                        "Provide a comprehensive literature review with citations and references."
+                    ),
+                },
+                {"role": "user", "content": query},
+            ]
+
+            response = await self.llm_client.chat(
+                model=self.search_model,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=16384,
+                timeout=660.0,  # Deep research models can take up to 600s
+            )
+
+            report_text = response.content if response and response.content else ""
+            if not report_text:
+                logger.warning("[Literature] OpenRouter DR returned empty response")
+                if round_num == 1:
+                    raise ValueError("OpenRouter deep research returned empty response")
+                break
+
+            all_reports.append(report_text)
+            search_history.append({
+                "round": round_num,
+                "query": query,
+                "report_preview": report_text[:300],
+            })
+
+            # Evaluate if more research needed
+            if round_num < self.max_search_rounds:
+                evaluation = await self._evaluate_search_results(
+                    topic, search_history
+                )
+                if evaluation.get("sufficient", True):
+                    logger.info(f"[Literature] OpenRouter DR sufficient after {round_num} rounds")
+                    break
+                query = evaluation.get("refined_query", query)
+
+        # Combine reports
+        combined_report = all_reports[-1] if all_reports else ""
+        if len(all_reports) > 1:
+            combined_report = await self._synthesize_multiple_reports(topic, all_reports)
+
+        return await self._finalize_result(topic, combined_report, [], state, len(search_history))
+
+    # ===================================================================
+    # Mode 3: PubMed + LLM (multi-round)
+    # ===================================================================
+
+    async def _multi_round_pubmed(
+        self,
+        topic: str,
+        state: Optional[AnalysisState] = None,
+        pubmed_max_results: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Multi-round PubMed search with LLM-guided query refinement."""
+        all_articles: List[Dict[str, str]] = []
+        seen_pmids: Set[str] = set()
+        search_history: List[Dict[str, Any]] = []
+
+        # Generate initial PubMed query from the topic
+        query = await self._generate_pubmed_query(topic, state)
+
+        for round_num in range(1, self.max_search_rounds + 1):
+            logger.info(
+                f"[Literature] PubMed round {round_num}/{self.max_search_rounds}: "
+                f"{query[:100]}"
+            )
+
+            # Search PubMed
+            try:
+                articles = await self._pubmed_search(query, max_results=pubmed_max_results or 20)
+            except Exception as e:
+                logger.warning(f"[Literature] PubMed search failed in round {round_num}: {e}")
+                if round_num == 1 and not all_articles:
+                    raise  # Re-raise to trigger fallback
+                break
+
+            # Deduplicate by PMID
+            new_articles = []
+            for a in articles:
+                if a["pmid"] not in seen_pmids:
+                    new_articles.append(a)
+                    seen_pmids.add(a["pmid"])
+            all_articles.extend(new_articles)
+
+            search_history.append({
+                "round": round_num,
+                "query": query,
+                "new_results": len(new_articles),
+                "total_results": len(all_articles),
+            })
+
+            logger.info(
+                f"[Literature] PubMed round {round_num}: "
+                f"{len(new_articles)} new articles, {len(all_articles)} total"
+            )
+
+            # Evaluate if more searching needed
+            if round_num < self.max_search_rounds and all_articles:
+                evaluation = await self._evaluate_pubmed_results(
+                    topic, all_articles, search_history
+                )
+                if evaluation.get("sufficient", True):
+                    logger.info(f"[Literature] PubMed sufficient after {round_num} rounds")
+                    break
+                query = evaluation.get("refined_query", query)
+
+            # Rate limiting for NCBI E-utilities (3 req/s without API key)
+            await asyncio.sleep(0.4)
+
+        if not all_articles:
+            logger.warning("[Literature] No PubMed articles found, falling back to quick search")
             return await self._quick_search(topic, state)
-    
+
+        # Synthesize all collected articles
+        report_text = await self._synthesize_pubmed_results(topic, all_articles)
+
+        references = [
+            {"title": a["title"], "url": f"https://pubmed.ncbi.nlm.nih.gov/{a['pmid']}/"}
+            for a in all_articles
+        ]
+
+        return await self._finalize_result(topic, report_text, references, state, len(search_history))
+
+    # ===================================================================
+    # PubMed E-utilities integration
+    # ===================================================================
+
+    async def _pubmed_search(
+        self,
+        query: str,
+        max_results: int = 20
+    ) -> List[Dict[str, str]]:
+        """Search PubMed using NCBI E-utilities and return article metadata."""
+        # Step 1: esearch to get PMIDs
+        search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        search_params: Dict[str, str] = {
+            "db": "pubmed",
+            "term": query,
+            "retmax": str(max_results),
+            "retmode": "json",
+            "sort": "relevance",
+        }
+        if self.pubmed_email:
+            search_params["email"] = self.pubmed_email
+
+        client_kwargs: Dict[str, Any] = {"timeout": 30.0}
+        if self.proxy_url:
+            client_kwargs["proxy"] = self.proxy_url
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            resp = await client.get(search_url, params=search_params)
+            resp.raise_for_status()
+            search_data = resp.json()
+
+        pmids = search_data.get("esearchresult", {}).get("idlist", [])
+        if not pmids:
+            return []
+
+        # Step 2: efetch to get article details
+        fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+        fetch_params: Dict[str, str] = {
+            "db": "pubmed",
+            "id": ",".join(pmids),
+            "retmode": "xml",
+        }
+        if self.pubmed_email:
+            fetch_params["email"] = self.pubmed_email
+
+        await asyncio.sleep(0.4)  # Rate limiting
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            resp = await client.get(fetch_url, params=fetch_params)
+            resp.raise_for_status()
+            xml_text = resp.text
+
+        # Step 3: Parse XML
+        return self._parse_pubmed_xml(xml_text)
+
+    def _parse_pubmed_xml(self, xml_text: str) -> List[Dict[str, str]]:
+        """Parse PubMed XML response into article metadata."""
+        articles = []
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as e:
+            logger.warning(f"[Literature] PubMed XML parse error: {e}")
+            return []
+
+        for article_elem in root.findall(".//PubmedArticle"):
+            try:
+                pmid = article_elem.findtext(".//PMID", "")
+                title = article_elem.findtext(".//ArticleTitle", "")
+
+                # Concatenate abstract sections
+                abstract_parts = article_elem.findall(".//AbstractText")
+                abstract = " ".join(
+                    p.text for p in abstract_parts if p.text
+                )
+
+                year = article_elem.findtext(".//PubDate/Year", "")
+                if not year:
+                    # Try MedlineDate as fallback
+                    medline_date = article_elem.findtext(".//PubDate/MedlineDate", "")
+                    if medline_date:
+                        year = medline_date[:4]
+
+                # Extract authors
+                authors = []
+                for author_elem in article_elem.findall(".//Author"):
+                    last = author_elem.findtext("LastName", "")
+                    first = author_elem.findtext("ForeName", "")
+                    if last:
+                        authors.append(f"{last} {first}".strip())
+
+                # Extract journal
+                journal = article_elem.findtext(".//Journal/Title", "")
+
+                articles.append({
+                    "pmid": pmid,
+                    "title": title,
+                    "abstract": abstract,
+                    "year": year,
+                    "authors": ", ".join(authors[:5]),
+                    "journal": journal,
+                })
+            except (AttributeError, TypeError):
+                continue
+
+        return articles
+
+    async def _generate_pubmed_query(
+        self,
+        topic: str,
+        state: Optional[AnalysisState] = None
+    ) -> str:
+        """Use LLM to convert a research topic into an optimized PubMed search query."""
+        context = self._build_research_query(topic, state)
+
+        prompt = f"""Convert the following research topic into an optimized PubMed search query.
+
+Research topic: {context}
+
+Rules for PubMed query:
+1. Use MeSH terms where appropriate (e.g., "Mice, Knockout"[MeSH])
+2. Use Boolean operators (AND, OR, NOT)
+3. Keep the query focused but not overly restrictive
+4. Include relevant gene names, species, and techniques
+5. Use field tags like [Title/Abstract], [MeSH] when helpful
+
+Return ONLY the PubMed query string, nothing else."""
+
+        response = await self.chat(prompt, temperature=0.2)
+        # Clean up the response - remove quotes, markdown, etc.
+        query = response.strip().strip('"').strip("'").strip("`")
+        # Remove markdown code block markers
+        query = re.sub(r'^```\w*\n?', '', query)
+        query = re.sub(r'\n?```$', '', query)
+        return query.strip()
+
+    # ===================================================================
+    # LLM evaluation and synthesis helpers
+    # ===================================================================
+
+    async def _evaluate_search_results(
+        self,
+        topic: str,
+        search_history: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """LLM evaluates if search results are sufficient (for Gemini/OpenRouter modes)."""
+        history_summary = json.dumps(search_history, ensure_ascii=False, indent=2)
+
+        prompt = f"""Evaluate whether the search results so far are sufficient for a comprehensive
+literature review on the topic:
+
+Topic: {topic}
+
+Search history:
+{history_summary[:3000]}
+
+Respond in JSON format:
+{{
+    "sufficient": true or false,
+    "reasoning": "why sufficient or not",
+    "refined_query": "suggested refined search query if not sufficient",
+    "missing_aspects": ["aspects not yet covered"]
+}}"""
+
+        response = await self.chat(prompt, temperature=0.3)
+        result = self._safe_parse_json(response)
+        if not result or "sufficient" not in result:
+            return {"sufficient": True}
+        return result
+
+    async def _evaluate_pubmed_results(
+        self,
+        topic: str,
+        articles: List[Dict[str, str]],
+        search_history: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """LLM evaluates PubMed results and suggests refined queries."""
+        articles_summary = "\n".join(
+            f"- [{a.get('year', 'N/A')}] {a['title']}"
+            for a in articles[:20]
+        )
+
+        prompt = f"""Evaluate whether the following PubMed search results are sufficient for a
+comprehensive literature review on the topic:
+
+Topic: {topic}
+
+Search history: {json.dumps(search_history, ensure_ascii=False)}
+
+Articles found ({len(articles)} total, first 20):
+{articles_summary}
+
+Respond in JSON format:
+{{
+    "sufficient": true or false,
+    "reasoning": "why sufficient or not",
+    "refined_query": "a NEW PubMed search query to find missing aspects (not the same as previous)",
+    "missing_aspects": ["aspects not yet covered"]
+}}
+
+IMPORTANT: The refined_query must be a valid PubMed search query using AND/OR operators."""
+
+        response = await self.chat(prompt, temperature=0.3)
+        result = self._safe_parse_json(response)
+        if not result or "sufficient" not in result:
+            return {"sufficient": True}
+        return result
+
+    async def _synthesize_pubmed_results(
+        self,
+        topic: str,
+        articles: List[Dict[str, str]]
+    ) -> str:
+        """Synthesize PubMed articles into a comprehensive literature review."""
+        # Build article text with abstracts (limit to first 20 articles)
+        articles_text = "\n\n".join(
+            f"[PMID: {a['pmid']}] {a['title']} ({a.get('year', 'N/A')})\n"
+            f"Authors: {a.get('authors', 'N/A')}\n"
+            f"Journal: {a.get('journal', 'N/A')}\n"
+            f"Abstract: {a['abstract'][:600]}"
+            for a in articles[:20]
+        )
+
+        prompt = f"""Based on the following PubMed articles, write a comprehensive literature review
+on the topic: {topic}
+
+Articles ({len(articles)} total):
+{articles_text}
+
+Please include:
+1. Overview of the research field and key findings
+2. Molecular mechanisms described in the literature
+3. Areas of consensus and controversy
+4. Current research trends and recent advances
+5. Cite specific PMIDs that support each point (format: PMID: XXXXX)
+6. Gaps in current knowledge and future directions
+
+Write a well-structured review with clear sections."""
+
+        return await self.chat(prompt, temperature=0.4)
+
+    async def _synthesize_multiple_reports(
+        self,
+        topic: str,
+        reports: List[str]
+    ) -> str:
+        """Combine multiple round reports into a single comprehensive review."""
+        reports_text = "\n\n---\n\n".join(
+            f"Report {i + 1}:\n{r[:2000]}" for i, r in enumerate(reports)
+        )
+
+        prompt = f"""Synthesize the following multiple research reports into a single comprehensive
+literature review on the topic: {topic}
+
+{reports_text}
+
+Create a unified, well-structured review that:
+1. Combines insights from all reports without redundancy
+2. Maintains all specific citations and references
+3. Provides a coherent narrative
+4. Highlights the most important findings"""
+
+        return await self.chat(prompt, temperature=0.4)
+
+    # ===================================================================
+    # Result finalization helper
+    # ===================================================================
+
+    async def _finalize_result(
+        self,
+        topic: str,
+        report_text: str,
+        references: List[Dict[str, str]],
+        state: Optional[AnalysisState],
+        search_rounds: int
+    ) -> Dict[str, Any]:
+        """Create and store a LiteratureReport, extract findings, return standardized result."""
+        report = LiteratureReport(
+            topic=topic,
+            report=report_text,
+            references=references,
+        )
+        self.reports.append(report)
+        if state is not None:
+            state.literature_reports.append(report)
+
+        findings = await self._extract_findings(report_text)
+
+        return {
+            "status": "completed",
+            "report": report_text,
+            "references": references,
+            "findings": findings,
+            "report_id": report.id,
+            "search_rounds": search_rounds,
+        }
+
+    # ===================================================================
+    # Quick search fallback (LLM knowledge only)
+    # ===================================================================
+
     async def _quick_search(
         self,
         topic: str,
@@ -124,11 +673,7 @@ class LiteratureAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """
         Quick literature search using LLM knowledge
-        (Fallback when Deep Research is unavailable)
-
-        Args:
-            topic: Research topic
-            state: Optional analysis state for context. If None, no state updates occur.
+        (Final fallback when all search methods fail)
         """
         prompt = f"""
 Based on your knowledge, please provide a literature review on the following topic:
@@ -153,7 +698,6 @@ Note: If you are not certain about specific citation information, please clearly
         )
 
         self.reports.append(report)
-        # Only append to state if provided
         if state is not None:
             state.literature_reports.append(report)
 
@@ -167,22 +711,19 @@ Note: If you are not certain about specific citation information, please clearly
             "note": "Review based on LLM knowledge, not real-time literature search",
             "report_id": report.id
         }
-    
+
+    # ===================================================================
+    # Shared helpers
+    # ===================================================================
+
     def _build_research_query(
         self,
         topic: str,
         state: Optional[AnalysisState] = None
     ) -> str:
-        """Build an optimized research query
-
-        Args:
-            topic: Research topic
-            state: Optional analysis state for context enrichment
-        """
-        # Add context from analysis
+        """Build an optimized research query based on topic and context."""
         context_parts = [topic]
 
-        # Add relevant keywords based on initial instruction (if state provided)
         initial_instruction = state.initial_instruction if state else ""
         if initial_instruction:
             if "knockout" in initial_instruction.lower() or re.search(r'\bKO\b', initial_instruction):
@@ -195,10 +736,9 @@ Note: If you are not certain about specific citation information, please clearly
             context_parts.append("signaling pathway mechanism")
 
         return " ".join(context_parts)
-    
+
     async def _extract_findings(self, report: str) -> List[str]:
-        """Extract key findings from a literature report"""
-        
+        """Extract key findings from a literature report."""
         prompt = f"""
 Extract key findings from the following literature review (in list form):
 
@@ -206,9 +746,9 @@ Extract key findings from the following literature review (in list form):
 
 Please list 3-5 most important findings, one per line.
 """
-        
+
         response = await self.chat(prompt, temperature=0.3)
-        
+
         findings = []
         for line in response.strip().split('\n'):
             line = line.strip()
@@ -216,9 +756,13 @@ Please list 3-5 most important findings, one per line.
                 line = re.sub(r'^[-*•\d.]\s*', '', line)
                 if line:
                     findings.append(line)
-        
+
         return findings[:5]
-    
+
+    # ===================================================================
+    # Specialized utility methods (used by bioinformatics agent)
+    # ===================================================================
+
     async def get_cell_markers(
         self,
         cell_type: str,
@@ -226,21 +770,12 @@ Please list 3-5 most important findings, one per line.
         tissue: str = "",
         state: Optional[AnalysisState] = None
     ) -> Dict[str, Any]:
-        """
-        Get marker genes for a specific cell type
-
-        Used by bioinformatics agent for cell type annotation
-        Args:
-            cell_type: The cell type to look up markers for
-            organism: The organism (default: mouse)
-            tissue: The tissue context (will be inferred from project if not provided)
-            state: Optional analysis state for context enrichment
-        """
+        """Get marker genes for a specific cell type via literature search."""
         tissue_context = f" {tissue}" if tissue else ""
         topic = f"{cell_type} marker genes {organism}{tissue_context} single cell RNA sequencing"
 
-        result = await self._deep_research(topic, state)
-        
+        result = await self._do_research(topic, state)
+
         # Extract marker genes from report
         prompt = f"""
 Extract marker genes for {cell_type} from the following literature review:
@@ -255,15 +790,15 @@ Please return in JSON format:
     "confidence": "high/medium/low"
 }}
 """
-        
+
         response = await self.chat(prompt, temperature=0.2)
 
         try:
-            result = self._safe_parse_json(response)
-            if result:
-                return result
+            parsed = self._safe_parse_json(response)
+            if parsed and "positive_markers" in parsed:
+                return parsed
             else:
-                logger.warning(f"[Literature] No JSON found in get_cell_markers response for {cell_type}")
+                logger.warning(f"[Literature] No JSON found in get_cell_markers for {cell_type}")
         except Exception as e:
             logger.warning(f"[Literature] Failed to parse get_cell_markers for {cell_type}: {e}")
 
@@ -273,7 +808,136 @@ Please return in JSON format:
             "negative_markers": [],
             "confidence": "low"
         }
-    
+
+    async def annotate_clusters(
+        self,
+        cluster_markers: Dict[str, List[str]],
+        organism: str = "mouse",
+        tissue: str = "",
+        state: Optional[AnalysisState] = None
+    ) -> Dict[str, Any]:
+        """
+        Two-phase cluster annotation: one literature search + LLM matching.
+
+        Phase 1: Single _do_research() call with tissue/organism-focused query
+        Phase 2: LLM matches each cluster's markers against retrieved literature
+
+        Args:
+            cluster_markers: Dict mapping cluster_id (str) to list of top marker genes
+                            e.g. {"0": ["Cd79a", "Cd79b", "Ms4a1"], "1": ["Cd3d", "Cd3e"]}
+            organism: Organism name (e.g., "mouse", "human")
+            tissue: Tissue/organ context (e.g., "kidney", "liver")
+            state: Optional analysis state for context
+
+        Returns:
+            Dict with annotations per cluster, literature_report, references, status
+        """
+        n_clusters = len(cluster_markers)
+
+        # ---- Phase 1: One literature search ----
+        # Sample top genes across clusters for the search query
+        all_genes: set = set()
+        for genes in cluster_markers.values():
+            all_genes.update(genes[:5])  # Top 5 per cluster
+        gene_sample = ", ".join(list(all_genes)[:20])  # Cap at 20 genes
+
+        tissue_part = f" {tissue}" if tissue else ""
+        topic = (
+            f"Cell types in {organism}{tissue_part} identified by single-cell RNA sequencing. "
+            f"Key marker genes include: {gene_sample}. "
+            f"Identify known cell type markers and signatures for{tissue_part} tissue."
+        )
+
+        logger.info(
+            f"[Literature] annotate_clusters Phase 1: {n_clusters} clusters, "
+            f"organism={organism}, tissue={tissue}"
+        )
+
+        # Use higher pubmed_max_results (50) for broader tissue coverage
+        research_result = await self._do_research(
+            topic, state, pubmed_max_results=50
+        )
+
+        literature_report = research_result.get("report", "")
+        references = research_result.get("references", [])
+
+        # ---- Phase 2: LLM matching ----
+        markers_text = "\n".join(
+            f"Cluster {cid}: {', '.join(genes[:15])}"
+            for cid, genes in cluster_markers.items()
+        )
+
+        matching_prompt = f"""Based on the following literature review about cell types in {organism}{tissue_part}, \
+annotate each cell cluster by matching its marker genes to known cell type signatures.
+
+=== LITERATURE REVIEW ===
+{literature_report[:6000]}
+
+=== CLUSTER MARKER GENES (from sc.tl.rank_genes_groups) ===
+{markers_text}
+
+For each cluster, provide:
+1. The most likely cell type identity
+2. Possible subtypes if applicable
+3. Key marker genes that support this annotation (from the cluster's markers)
+4. Confidence level (high/medium/low) based on how well markers match literature
+5. Brief evidence/reasoning citing the literature
+
+IMPORTANT:
+- Be specific about cell types (e.g., "CD8+ cytotoxic T cells" not just "T cells")
+- If a cluster has ambiguous markers, list the top 2 candidates
+- Consider the tissue context ({tissue}) when making assignments
+- Use "Unknown" only if markers truly don't match any known cell type
+
+Return a JSON object with this EXACT structure:
+{{
+    "annotations": {{
+        "<cluster_id>": {{
+            "cell_type": "Primary cell type name",
+            "subtypes": ["possible subtype 1", "possible subtype 2"],
+            "key_markers": ["gene1", "gene2", "gene3"],
+            "confidence": "high|medium|low",
+            "evidence": "Brief reasoning with literature support"
+        }}
+    }},
+    "tissue_summary": "Brief summary of expected cell types in this tissue"
+}}
+"""
+
+        logger.info(f"[Literature] annotate_clusters Phase 2: LLM matching {n_clusters} clusters")
+        response = await self.chat(matching_prompt, temperature=0.2)
+
+        # Parse the JSON response
+        parsed = self._safe_parse_json(response)
+
+        annotations = {}
+        tissue_summary = ""
+        if parsed and "annotations" in parsed:
+            annotations = parsed["annotations"]
+            tissue_summary = parsed.get("tissue_summary", "")
+        else:
+            logger.warning("[Literature] Failed to parse annotations JSON, returning raw response")
+            annotations = {
+                "error": "Failed to parse structured annotations",
+                "raw_response": response[:2000]
+            }
+
+        logger.info(
+            f"[Literature] annotate_clusters complete: "
+            f"{len(annotations)} clusters annotated"
+        )
+
+        return {
+            "status": "completed",
+            "annotations": annotations,
+            "tissue_summary": tissue_summary,
+            "literature_report": literature_report,
+            "references": references,
+            "n_clusters": n_clusters,
+            "organism": organism,
+            "tissue": tissue
+        }
+
     async def validate_pathway(
         self,
         pathway_name: str,
@@ -281,19 +945,11 @@ Please return in JSON format:
         context: str = "",
         state: Optional[AnalysisState] = None
     ) -> Dict[str, Any]:
-        """
-        Validate pathway enrichment with literature evidence
-
-        Args:
-            pathway_name: Name of the pathway to validate
-            genes: List of enriched genes
-            context: Research context description
-            state: Optional analysis state for context enrichment
-        """
+        """Validate pathway enrichment with literature evidence."""
         topic = f"{pathway_name} pathway {' '.join(genes[:10])} disease mechanism"
 
-        result = await self._deep_research(topic, state)
-        
+        result = await self._do_research(topic, state)
+
         prompt = f"""
 Based on the literature review, validate the biological significance of the following pathway enrichment:
 
@@ -319,15 +975,15 @@ Reply in JSON format:
     "key_references": ["Key references"]
 }}
 """
-        
+
         response = await self.chat(prompt, temperature=0.3)
 
         try:
-            result = self._safe_parse_json(response)
-            if result:
-                return result
+            parsed = self._safe_parse_json(response)
+            if parsed and "pathway" in parsed:
+                return parsed
             else:
-                logger.warning(f"[Literature] No JSON found in validate_pathway response for {pathway_name}")
+                logger.warning(f"[Literature] No JSON found in validate_pathway for {pathway_name}")
         except Exception as e:
             logger.warning(f"[Literature] Failed to parse validate_pathway for {pathway_name}: {e}")
 
@@ -335,28 +991,21 @@ Reply in JSON format:
             "pathway": pathway_name,
             "confidence": "low"
         }
-    
+
     async def search_mechanism(
         self,
         phenotype: str,
         genes: Optional[List[str]] = None,
         state: Optional[AnalysisState] = None
     ) -> Dict[str, Any]:
-        """
-        Search for molecular mechanisms underlying a phenotype
-
-        Args:
-            phenotype: Phenotype to search mechanisms for
-            genes: Optional list of relevant genes
-            state: Optional analysis state for context enrichment
-        """
+        """Search for molecular mechanisms underlying a phenotype."""
         query_parts = [phenotype, "molecular mechanism"]
         if genes:
             query_parts.extend(genes[:5])
 
         topic = " ".join(query_parts)
-        result = await self._deep_research(topic, state)
-        
+        result = await self._do_research(topic, state)
+
         return {
             "phenotype": phenotype,
             "report": result.get("report", ""),

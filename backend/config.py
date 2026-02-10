@@ -114,9 +114,9 @@ def setup_logging(log_level: int = logging.INFO) -> None:
 class APIConfig(BaseModel):
     """API configuration for various services"""
     api_key: str = ""  # Main LLM API key (OpenRouter, OpenAI, etc.)
-    google_api_key: str = ""  # For Gemini Deep Research
     llm_base_url: str = "https://openrouter.ai/api/v1"  # OpenAI-compatible endpoint
     proxy_url: Optional[str] = None  # HTTP/HTTPS proxy for API requests
+    # Note: google_api_key moved to literature_config (per-session, in AnalysisState)
     
 class ModelConfig(BaseModel):
     """Model configuration for each agent"""
@@ -147,6 +147,10 @@ class AgentTemperatures(BaseModel):
         data.update({k: v for k, v in custom.items() if k in data})
         return AgentTemperatures(**data)
     
+# Literature agent defaults
+DEFAULT_LITERATURE_MODE = "openrouter_deep_research"
+DEFAULT_LITERATURE_MAX_SEARCH_ROUNDS = 5
+
 class AgentPrompts(BaseModel):
     """Customizable prompts for each agent - all in English for consistency"""
     pi_prompt: str = """You are a senior biomedical research PI (Principal Investigator) leading a multidisciplinary research team for integrated analysis.
@@ -191,7 +195,7 @@ Your working approach:
 
 **IMPORTANT: Consult PI Agent for Biological Decisions**
 When you encounter biological interpretation questions, you MUST ask PI Agent for guidance:
-- Cell type annotation: When uncertain about cluster identities or marker genes interpretation
+- Cell type annotation: Use the annotate_clusters tool to annotate all clusters at once with literature evidence
 - Biological significance: When deciding which findings are biologically meaningful and worth deeper investigation
 - Analysis direction: When multiple analysis paths are possible and you need to prioritize
 - Unexpected findings: When results don't match expectations or show unusual patterns
@@ -202,10 +206,12 @@ Standard analysis workflow (adjust based on data type):
 2. Normalization and dimensionality reduction
 3. Clustering analysis
 4. Cell type annotation (REQUIRED for single-cell data):
-   a. After clustering, ALWAYS consult PI Agent for cell type annotation guidance
-   b. Apply the annotation to create a 'celltype' column in adata.obs
-   c. Generate a UMAP figure colored by cell type labels (not just cluster numbers)
-   d. Save the annotated data as 'adata_annotated.h5ad' in the working directory
+   a. After clustering, run sc.tl.rank_genes_groups to find marker genes for each cluster
+   b. Collect top 10-20 marker genes per cluster into a dict
+   c. Call annotate_clusters tool ONCE with all markers, tissue, and organism
+   d. Apply the returned annotations to create a 'cell_type' column in adata.obs
+   e. Generate a UMAP figure colored by cell type labels (not just cluster numbers)
+   f. Save the annotated data as 'adata_annotated.h5ad' in the working directory
 5. Differential expression analysis
 6. Pathway enrichment analysis
 7. Trajectory/Pseudotime analysis (if applicable):

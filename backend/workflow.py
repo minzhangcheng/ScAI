@@ -187,7 +187,6 @@ class SingleCellAnalysisWorkflow:
         # Initialize LLM manager with session context
         self.llm_manager = LLMManager(
             api_key=self.config.api.api_key,
-            google_api_key=self.config.api.google_api_key,
             base_url=self.config.api.llm_base_url,
             proxy_url=self.config.api.proxy_url,
             session_id=self.session_id,
@@ -248,6 +247,7 @@ class SingleCellAnalysisWorkflow:
             sandbox=self.sandbox,
             literature_callback=self._literature_callback,
             pi_callback=self._pi_callback,
+            annotate_clusters_callback=self._annotate_clusters_callback,
             message_callback=self._agent_message_callback,
             config=AgentConfig(temperature=self.temperatures.get('bioinformatics', 0.1))
         )
@@ -259,12 +259,19 @@ class SingleCellAnalysisWorkflow:
             config=AgentConfig(temperature=self.temperatures.get('biochemistry', 0.2))
         )
 
+        # Literature agent with mode-specific configuration
+        literature_config = getattr(self, '_literature_config', {})
         self.literature_agent = LiteratureAgent(
             llm_client=self.llm_manager.openrouter,
-            deep_research_client=self.llm_manager.deep_research,
             model=literature_model,
             system_prompt=literature_prompt,
-            config=AgentConfig(temperature=self.temperatures.get('literature', 0.6))
+            config=AgentConfig(temperature=self.temperatures.get('literature', 0.6)),
+            literature_mode=literature_config.get('mode', 'openrouter_deep_research'),
+            google_api_key=literature_config.get('google_api_key', ''),
+            search_model=literature_config.get('search_model', 'openai/o4-mini-deep-research'),
+            pubmed_email=literature_config.get('pubmed_email', ''),
+            max_search_rounds=literature_config.get('max_search_rounds', 5),
+            proxy_url=self.config.api.proxy_url,
         )
 
         # Initialize Painter Agent for graphic abstract generation (uses OpenRouter like other agents)
@@ -428,7 +435,53 @@ Be specific and actionable in your response."""
             error_msg = f"PI consultation failed: {str(e)}"
             await self._send_message("error", error_msg, AgentType.PI)
             return "Unable to get PI guidance. Please proceed with standard bioinformatics practices."
-    
+
+    async def _annotate_clusters_callback(
+        self,
+        cluster_markers: Dict,
+        tissue: str,
+        organism: str
+    ) -> Dict[str, Any]:
+        """Callback for bioinformatics agent to annotate all clusters via literature."""
+        n_clusters = len(cluster_markers)
+        await self._send_message(
+            "status",
+            f"Literature-based cluster annotation: {n_clusters} clusters in {organism} {tissue}...",
+            AgentType.LITERATURE
+        )
+
+        state = self._current_analysis_state if self._current_analysis_state else AnalysisState()
+
+        try:
+            result = await self.literature_agent.annotate_clusters(
+                cluster_markers=cluster_markers,
+                organism=organism,
+                tissue=tissue,
+                state=state
+            )
+
+            annotations = result.get("annotations", {})
+            n_annotated = sum(
+                1 for v in annotations.values()
+                if isinstance(v, dict) and v.get("cell_type", "Unknown") != "Unknown"
+            )
+            await self._send_message(
+                "status",
+                f"Cluster annotation complete: {n_annotated}/{n_clusters} clusters identified",
+                AgentType.LITERATURE
+            )
+
+            return result
+        except Exception as e:
+            error_msg = f"Cluster annotation failed: {str(e)}"
+            logger.error(f"[{self.session_id}] {error_msg}")
+            await self._send_message("error", error_msg, AgentType.LITERATURE)
+            return {
+                "status": "error",
+                "annotations": {},
+                "error": error_msg
+            }
+
     async def _agent_message_callback(self, msg_type: str, content: str):
         """Callback for agent messages"""
         await self._send_message(msg_type, content, AgentType.BIOINFORMATICS)
@@ -484,6 +537,82 @@ Be specific and actionable in your response."""
         )
 
         return review
+
+    # --- Round context helpers ---
+
+    def _build_previous_findings_context(
+        self,
+        analysis_state: AnalysisState,
+        agent_type: str,
+    ) -> str:
+        """Build a text block of an agent's previous round findings.
+
+        Args:
+            analysis_state: Current analysis state with round_results
+            agent_type: One of "pathology", "bioinformatics", "biochemistry", "literature"
+
+        Returns:
+            Formatted string, or "" if no prior findings exist.
+        """
+        if not analysis_state.round_results:
+            return ""
+
+        findings_key = f"{agent_type}_findings"
+        parts = []
+        for prev_round in analysis_state.round_results:
+            findings = getattr(prev_round, findings_key, [])
+            if findings:
+                parts.append(f"Round {prev_round.round_number}: " + "; ".join(findings[:5]))
+
+        if not parts:
+            return ""
+
+        return (
+            "\n\n## Your Previous Analysis Findings\n"
+            "Below are your findings from prior rounds. Build upon these — do NOT repeat the same analyses.\n"
+            + "\n".join(parts)
+        )
+
+    def _build_code_history_summary(
+        self,
+        analysis_state: AnalysisState,
+        max_entries: int = 20,
+    ) -> str:
+        """Build a truncated summary of previous code executions for bioinformatics agent.
+
+        Args:
+            analysis_state: Current analysis state with code_history
+            max_entries: Max number of code cells to include
+
+        Returns:
+            Formatted string, or "" if no code history exists.
+        """
+        if not analysis_state.code_history:
+            return ""
+
+        recent = analysis_state.code_history[-max_entries:]
+        parts = [
+            "\n\n## Previous Code Execution History",
+            "Below is a summary of previously executed code. Reference these results — do NOT re-run completed steps.\n",
+        ]
+        for i, rec in enumerate(recent):
+            code_lines = rec.code.strip().split("\n")
+            preview = "\n".join(code_lines[:3])
+            if len(code_lines) > 3:
+                preview += f"\n# ... ({len(code_lines)} lines total)"
+
+            output = (rec.output or "")[:200]
+            if len(rec.output or "") > 200:
+                output += "..."
+
+            entry = f"**Cell {i + 1}**:\n```python\n{preview}\n```"
+            if output:
+                entry += f"\nOutput: {output}"
+            if rec.figures:
+                entry += f"\n[Generated {len(rec.figures)} figure(s)]"
+            parts.append(entry)
+
+        return "\n".join(parts)
 
     # Node functions
     async def _initialize_round(self, state: WorkflowState) -> WorkflowState:
@@ -717,10 +846,16 @@ Be specific and actionable in your response."""
             AgentType.PATHOLOGY
         )
         
+        # Enrich instruction with previous findings for round 2+
+        task_instruction = "\n".join(tasks)
+        previous_context = self._build_previous_findings_context(analysis_state, "pathology")
+        if previous_context:
+            task_instruction += previous_context
+
         # Let exceptions propagate to @with_retry decorator for proper retry handling
         result = await self.pathology_agent.process(
             analysis_state,
-            "\n".join(tasks)
+            task_instruction
         )
 
         await self._send_message(
@@ -785,17 +920,25 @@ Be specific and actionable in your response."""
         pi_instructions = state.get("pi_instructions", {})
         bioinf_tasks = pi_instructions.get("bioinformatics_tasks", [])
         
+        # Build previous findings and code history context for round 2+
+        previous_bio_findings = self._build_previous_findings_context(analysis_state, "bioinformatics")
+        code_history_context = ""
+        if analysis_state.current_round > 1:
+            code_history_context = self._build_code_history_summary(analysis_state)
+
         # Build comprehensive instruction for bioinformatics agent
         instruction = f"""Analyze single-cell RNA-seq data for project: {analysis_state.name}
 
 Research context: {analysis_state.initial_instruction}
 
-PI's analysis goals:
+PI's analysis goals for this round:
 {chr(10).join(f"- {task}" for task in bioinf_tasks) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
 {human_guidance}
+{previous_bio_findings}
+{code_history_context}
 
-Execute the analysis autonomously for technical steps (data loading, QC, normalization, clustering).
-For biological decisions (cell annotation, pathway selection, etc.), consult PI for guidance.
+This is Round {analysis_state.current_round}. The Jupyter kernel retains all variables from previous rounds.
+Focus on PI's specific goals above — do NOT re-run completed steps (QC, clustering, cell annotation, etc.).
 Report key findings when you complete each major analysis phase."""
 
         await self._send_message("prompt", instruction, AgentType.PI)
@@ -881,9 +1024,15 @@ Report key findings when you complete each major analysis phase."""
 
         await self._send_message("status", "Biochemistry analysis in progress...", AgentType.BIOCHEMISTRY)
         
+        # Enrich instruction with previous findings for round 2+
+        task_instruction = "\n".join(tasks) if tasks else "Analyze existing biochemistry indicators"
+        previous_context = self._build_previous_findings_context(analysis_state, "biochemistry")
+        if previous_context:
+            task_instruction += previous_context
+
         result = await self.biochemistry_agent.process(
             analysis_state,
-            "\n".join(tasks) if tasks else "Analyze existing biochemistry indicators"
+            task_instruction
         )
         
         await self._send_message(
@@ -923,11 +1072,17 @@ Report key findings when you complete each major analysis phase."""
         
         await self._send_message("status", "Literature research in progress...", AgentType.LITERATURE)
         
+        # Enrich topics with previous findings for round 2+
+        previous_lit_context = self._build_previous_findings_context(analysis_state, "literature")
+
         results = []
         for topic in topics[:3]:  # Limit to 3 topics
+            enriched_topic = topic
+            if previous_lit_context:
+                enriched_topic = f"{topic}\n{previous_lit_context}\nFocus on aspects NOT already covered above."
             result = await self.literature_agent.process(
                 analysis_state,
-                topic,
+                enriched_topic,
                 use_deep_research=True
             )
             results.append(result)
@@ -1380,10 +1535,11 @@ Report key findings when you complete each major analysis phase."""
         Returns:
             Final analysis state
         """
-        # Store custom models, prompts, and temperatures for initialization
+        # Store custom models, prompts, temperatures, and literature config for initialization
         self._custom_models = initial_state.custom_models
         self._custom_prompts = initial_state.custom_prompts
         self._custom_temperatures = initial_state.custom_temperatures
+        self._literature_config = initial_state.literature_config
         
         try:
             await self._send_message("status", "Initializing analysis system...")
@@ -1463,6 +1619,7 @@ Report key findings when you complete each major analysis phase."""
                 self._custom_models = analysis_state.custom_models
                 self._custom_prompts = analysis_state.custom_prompts
                 self._custom_temperatures = analysis_state.custom_temperatures
+                self._literature_config = analysis_state.literature_config
             logger.info(f"[{self.session_id}] Re-initializing workflow components for resume")
             await self.initialize()
 

@@ -482,10 +482,31 @@ Note: Extract biochemistry values from user message if they mention specific num
             RoundResult with synthesis
         """
         logger.info(f"[PI] Synthesizing round {state.current_round} results")
+
+        # Build previous rounds context for redundancy avoidance
+        previous_context = ""
+        if state.round_results:
+            prev_parts = []
+            for prev_round in state.round_results:
+                all_findings = (
+                    prev_round.pathology_findings[:3]
+                    + prev_round.bioinformatics_findings[:3]
+                    + prev_round.biochemistry_findings[:3]
+                    + prev_round.literature_findings[:3]
+                )
+                prev_parts.append(
+                    f"### Round {prev_round.round_number}\n"
+                    f"**Summary**: {prev_round.pi_summary[:500] if prev_round.pi_summary else 'N/A'}\n"
+                    f"**Key findings**: {'; '.join(all_findings) if all_findings else 'None'}\n"
+                    f"**Tasks assigned**: {'; '.join(prev_round.next_steps[:8]) if prev_round.next_steps else 'None'}"
+                )
+            previous_context = "\n\n## Previous Rounds Summary\n" + "\n\n".join(prev_parts)
+
         prompt = f"""
 ## Project Information
 Project Name: {state.name}
 Research Objective: {state.initial_instruction}
+{previous_context}
 
 This is the results summary for Round {state.current_round}. Please synthesize:
 
@@ -519,6 +540,12 @@ Please provide comprehensive analysis in JSON format:
     "should_stop": true/false,
     "stop_reason": "reason for stopping (if applicable)"
 }}
+
+IMPORTANT: When generating next_* tasks:
+- Do NOT repeat tasks already completed in previous rounds
+- Only propose NEW directions, deeper investigations, or follow-up analyses
+- If a previous round already completed standard processing (QC, clustering, cell annotation), do NOT re-assign these
+- Focus next_* on specific hypotheses, pathway analyses, or validation tasks based on current findings
 """
 
         # Try up to 2 times if response is empty

@@ -169,7 +169,6 @@ interface AppState {
   // API Config
   apiConfig: {
     apiKey: string
-    googleApiKey: string
     llmBaseUrl: string
     proxyUrl: string
   }
@@ -205,7 +204,19 @@ interface AppState {
   // Max Rounds
   maxRounds: number
   setMaxRounds: (rounds: number) => void
-  
+
+  // Literature agent config
+  literatureMode: 'gemini_deep_research' | 'openrouter_deep_research' | 'pubmed_llm'
+  setLiteratureMode: (mode: AppState['literatureMode']) => void
+  googleApiKey: string
+  setGoogleApiKey: (key: string) => void
+  literatureSearchModel: string
+  setLiteratureSearchModel: (model: string) => void
+  pubmedEmail: string
+  setPubmedEmail: (email: string) => void
+  literatureMaxSearchRounds: number
+  setLiteratureMaxSearchRounds: (rounds: number) => void
+
   // UI state
   activeTab: 'analysis' | 'data' | 'prompts' | 'results' | 'report'
   setActiveTab: (tab: AppState['activeTab']) => void
@@ -268,7 +279,6 @@ export const useAppStore = create<AppState>()(
       // API Config
       apiConfig: {
         apiKey: '',
-        googleApiKey: '',
         llmBaseUrl: 'https://openrouter.ai/api/v1',
         proxyUrl: ''
       },
@@ -323,7 +333,19 @@ export const useAppStore = create<AppState>()(
       // Max Rounds
       maxRounds: 3,
       setMaxRounds: (rounds) => set({ maxRounds: rounds }),
-      
+
+      // Literature agent config
+      literatureMode: 'openrouter_deep_research' as AppState['literatureMode'],
+      setLiteratureMode: (mode) => set({ literatureMode: mode }),
+      googleApiKey: '',
+      setGoogleApiKey: (key) => set({ googleApiKey: key }),
+      literatureSearchModel: 'openai/o4-mini-deep-research',
+      setLiteratureSearchModel: (model) => set({ literatureSearchModel: model }),
+      pubmedEmail: '',
+      setPubmedEmail: (email) => set({ pubmedEmail: email }),
+      literatureMaxSearchRounds: 5,
+      setLiteratureMaxSearchRounds: (rounds) => set({ literatureMaxSearchRounds: Math.max(1, Math.min(20, rounds)) }),
+
       // UI state - default to 'data' tab as users typically upload data first
       activeTab: 'data',
       setActiveTab: (tab) => set({ activeTab: tab }),
@@ -391,18 +413,43 @@ export const useAppStore = create<AppState>()(
         models: state.models,
         temperatures: state.temperatures,
         maxRounds: state.maxRounds,
+        literatureMode: state.literatureMode,
+        googleApiKey: state.googleApiKey,
+        literatureSearchModel: state.literatureSearchModel,
+        pubmedEmail: state.pubmedEmail,
+        literatureMaxSearchRounds: state.literatureMaxSearchRounds,
         messagePanelWidth: state.messagePanelWidth,
-        // Persist session and messages for page refresh recovery
-        currentSession: state.currentSession,
-        // Limit persisted messages and strip base64 content to prevent localStorage overflow
+        // Persist session with base64 stripped to prevent localStorage overflow
+        currentSession: state.currentSession ? {
+          ...state.currentSession,
+          publicationFigures: state.currentSession.publicationFigures?.map(
+            (f: any) => ({ ...f, pngBase64: undefined, png_base64: undefined })
+          ),
+          graphicAbstract: state.currentSession.graphicAbstract
+            ? { ...state.currentSession.graphicAbstract, imageBase64: undefined, image_base64: undefined }
+            : undefined,
+        } : null,
+        // Limit persisted messages and strip ALL base64 content to prevent localStorage overflow
         messages: state.messages.slice(-200).map(msg => {
-          // Strip base64 figure data from content to prevent localStorage overflow
+          // figure type: content is raw base64 string
+          if (msg.type === 'figure') {
+            return { ...msg, content: '[image]' }
+          }
+          // graphic_abstract type: content has image_base64/imageBase64
+          if (msg.type === 'graphic_abstract' && msg.content != null && typeof msg.content === 'object') {
+            return { ...msg, content: { ...msg.content, image_base64: undefined, imageBase64: undefined } }
+          }
+          // figure_review / figure_approved / figure_revision: content has png_base64
+          if ((msg.type === 'figure_review' || msg.type === 'figure_approved' || msg.type === 'figure_revision') && msg.content != null && typeof msg.content === 'object') {
+            return { ...msg, content: { ...msg.content, png_base64: undefined, pngBase64: undefined } }
+          }
+          // Strip base64 from figures arrays in result/integrated_report messages
           if (msg.content?.figures && Array.isArray(msg.content.figures) && msg.content.figures.length > 0) {
             return {
               ...msg,
               content: {
                 ...msg.content,
-                figures: msg.content.figures.map((f: any) => f ? { ...f, data: undefined, pngBase64: undefined } : f)
+                figures: msg.content.figures.map((f: any) => f ? { ...f, data: undefined, pngBase64: undefined, png_base64: undefined } : f)
               }
             }
           }

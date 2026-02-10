@@ -138,7 +138,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "consult_pi",
-            "description": "Request guidance from PI Agent on biological decisions like: cell type annotation, analysis direction, which genes/pathways to analyze, whether to do trajectory analysis, result interpretation",
+            "description": "Request guidance from PI Agent on biological decisions like: analysis direction, which genes/pathways to analyze, whether to do trajectory analysis, result interpretation. Do NOT use for cell type annotation - use annotate_clusters instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -231,6 +231,35 @@ TOOLS = [
                     }
                 },
                 "required": ["code", "figure_name", "description", "figure_type"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "annotate_clusters",
+            "description": "Annotate all cell clusters at once using literature-based evidence. Call this ONCE after clustering and rank_genes_groups with ALL cluster markers. Returns cell type annotations with confidence levels and literature evidence. Much more efficient than per-cluster consult_pi calls.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cluster_markers": {
+                        "type": "object",
+                        "description": "Dict mapping cluster ID (string) to list of top marker genes. Example: {\"0\": [\"Cd79a\", \"Ms4a1\", \"Cd79b\"], \"1\": [\"Cd3d\", \"Cd3e\", \"Cd8a\"]}. Get these from sc.tl.rank_genes_groups result.",
+                        "additionalProperties": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        }
+                    },
+                    "tissue": {
+                        "type": "string",
+                        "description": "Tissue or organ type (e.g., 'kidney', 'liver', 'brain'). Extract from the research context or data metadata."
+                    },
+                    "organism": {
+                        "type": "string",
+                        "description": "Organism (e.g., 'mouse', 'human'). Extract from the research context or data metadata."
+                    }
+                },
+                "required": ["cluster_markers", "tissue", "organism"]
             }
         }
     }
@@ -327,6 +356,7 @@ class BioinformaticsAgent(BaseAgent):
         sandbox: LocalJupyterSandbox,
         literature_callback: Optional[Callable[[str], Awaitable[str]]] = None,
         pi_callback: Optional[Callable[[str, str], Awaitable[str]]] = None,
+        annotate_clusters_callback: Optional[Callable[[Dict, str, str], Awaitable[Dict[str, Any]]]] = None,
         message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
         config: Optional[AgentConfig] = None
@@ -341,6 +371,7 @@ class BioinformaticsAgent(BaseAgent):
         self.sandbox = sandbox
         self.literature_callback = literature_callback
         self.pi_callback = pi_callback
+        self.annotate_clusters_callback = annotate_clusters_callback
         self.message_callback = message_callback
         self.figure_review_callback = figure_review_callback
 
@@ -533,19 +564,37 @@ class BioinformaticsAgent(BaseAgent):
 
 You are conducting single-cell RNA-seq analysis. You have access to tools:
 1. execute_code - Run Python code (scanpy, anndata, numpy, pandas, matplotlib available)
-2. consult_pi - Ask PI for biological decisions
+2. consult_pi - Ask PI for biological decisions (analysis direction, pathway selection, interpretation)
 3. search_literature - Search for marker genes, pathways, biological knowledge
-4. report_findings - Report conclusions when analysis phase is complete
+4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
+5. report_findings - Report conclusions when analysis phase is complete
+6. generate_publication_figure - Generate publication-quality figures with PI review
 
 WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
-- For BIOLOGICAL DECISIONS, you MUST use consult_pi:
-  * Cell type annotation (what are these clusters?)
+- For CELL TYPE ANNOTATION, use annotate_clusters (NOT consult_pi):
+  * After clustering and sc.tl.rank_genes_groups(), collect ALL cluster top markers into a dict
+  * Call annotate_clusters ONCE with all cluster markers, tissue type, and organism
+  * Apply the returned mapping to adata.obs['cell_type']
+  * This is far more efficient than asking about each cluster separately
+- For OTHER BIOLOGICAL DECISIONS, use consult_pi:
   * Which clusters show interesting changes?
   * What genes or pathways to analyze?
   * Whether to do trajectory/velocity analysis?
   * Interpretation of results
   * Which comparisons matter biologically?
+
+CELL TYPE ANNOTATION WORKFLOW:
+1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')
+2. Extract top 10-20 marker genes per cluster into a dict, e.g.:
+   markers = {{}}
+   for cluster in adata.obs['leiden'].cat.categories:
+       genes = sc.get.rank_genes_groups_df(adata, group=cluster).head(15)['names'].tolist()
+       markers[cluster] = genes
+3. Determine tissue and organism from the research context or data metadata
+4. Call annotate_clusters(cluster_markers=markers, tissue="kidney", organism="mouse")
+5. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].map(cluster_to_celltype)
+6. Generate UMAP colored by cell_type
 
 {self._build_data_context(state)}
 
@@ -841,7 +890,84 @@ plt.close('all')
                         "tool_call_id": tool_call.id,
                         "content": f"Literature findings: {lit_result[:2000]}"
                     })
-                    
+
+                elif tool_name == "annotate_clusters":
+                    cluster_markers = args.get("cluster_markers", {})
+                    tissue = args.get("tissue", "")
+                    organism = args.get("organism", "mouse")
+
+                    n_clusters = len(cluster_markers)
+                    await self._notify("status", f"Annotating {n_clusters} clusters using literature evidence ({organism} {tissue})...")
+
+                    annotation_result: Dict[str, Any] = {}
+                    if self.annotate_clusters_callback:
+                        annotation_result = await self.annotate_clusters_callback(
+                            cluster_markers, tissue, organism
+                        )
+                    else:
+                        annotation_result = {
+                            "status": "unavailable",
+                            "annotations": {},
+                            "error": "Cluster annotation service not available. Use consult_pi instead."
+                        }
+
+                    # Format result for the agent to use in code
+                    annotations = annotation_result.get("annotations", {})
+                    tissue_summary = annotation_result.get("tissue_summary", "")
+
+                    # Build a code-friendly response
+                    result_lines = []
+                    if tissue_summary:
+                        result_lines.append(f"Tissue context: {tissue_summary}\n")
+                    result_lines.append("Cluster annotations:")
+                    for cid, info in annotations.items():
+                        if isinstance(info, dict):
+                            cell_type = info.get("cell_type", "Unknown")
+                            confidence = info.get("confidence", "low")
+                            key_markers = info.get("key_markers", [])
+                            evidence = info.get("evidence", "")
+                            result_lines.append(
+                                f"  Cluster {cid}: {cell_type} (confidence: {confidence})"
+                            )
+                            if key_markers:
+                                result_lines.append(f"    Key markers: {', '.join(key_markers[:5])}")
+                            if evidence:
+                                result_lines.append(f"    Evidence: {evidence[:200]}")
+
+                    result_lines.append(f"\nTotal clusters annotated: {len(annotations)}")
+
+                    # Provide ready-to-use Python code snippet
+                    mapping_items = ", ".join(
+                        f'"{cid}": "{info.get("cell_type", "Unknown") if isinstance(info, dict) else "Unknown"}"'
+                        for cid, info in annotations.items()
+                    )
+                    result_lines.append(
+                        "\nYou can now assign these annotations to adata.obs['cell_type'] using:\n"
+                        f"cluster_to_celltype = {{{mapping_items}}}\n"
+                        "adata.obs['cell_type'] = adata.obs['leiden'].map(cluster_to_celltype)"
+                    )
+
+                    tool_result = "\n".join(result_lines)
+
+                    await self._notify("annotation_result", json.dumps(
+                        annotation_result, ensure_ascii=False, default=str
+                    )[:2000])
+
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {"name": tool_name, "arguments": json.dumps(args)}
+                        }]
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": tool_result[:3000]
+                    })
+
                 elif tool_name == "report_findings":
                     findings = args.get("findings", [])
                     summary = args.get("summary", "")

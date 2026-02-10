@@ -634,6 +634,9 @@ HTML_TEMPLATE = """
                 <p>{abstract}</p>
             </div>
 
+            <!-- Cluster Annotations -->
+            {cluster_annotations_html}
+
             <!-- Sections -->
             {sections_html}
 
@@ -770,6 +773,7 @@ class DetailedReportGenerator:
         self.generated_figures: List[Dict[str, Any]] = []
         self.generated_tables: List[Dict[str, Any]] = []
         self.code_history: List[CodeExecution] = []
+        self.cluster_annotations: Dict[str, Dict[str, Any]] = {}  # cluster_id -> {cell_type, n_cells}
 
     async def _report_progress(self, progress: float, step: str, status: str = "generating"):
         """Report progress to callback"""
@@ -1380,6 +1384,37 @@ print(f"\\nOther available processed files: {{AVAILABLE_PROCESSED_FILES}}")
         else:
             logger.info(f"Processed data loaded successfully")
 
+        # Extract cluster→cell_type mapping from loaded adata
+        await self._extract_cluster_annotations()
+
+    async def _extract_cluster_annotations(self):
+        """Extract cluster→cell_type mapping from loaded adata via sandbox."""
+        extract_code = """
+import json as _json
+_mapping = {}
+if adata is not None and 'cell_type' in adata.obs.columns and 'leiden' in adata.obs.columns:
+    _ct_df = adata.obs[['leiden', 'cell_type']].drop_duplicates().sort_values('leiden')
+    for _, _row in _ct_df.iterrows():
+        _cid = str(_row['leiden'])
+        _ct = str(_row['cell_type'])
+        if _ct and _ct != 'nan':
+            _n = int((adata.obs['leiden'] == _row['leiden']).sum())
+            _mapping[_cid] = {"cell_type": _ct, "n_cells": _n}
+print("CLUSTER_ANNOTATIONS_JSON:" + _json.dumps(_mapping, ensure_ascii=False))
+"""
+        try:
+            result = await self.sandbox.execute(extract_code)
+            if result.output:
+                for line in result.output.split("\n"):
+                    if line.startswith("CLUSTER_ANNOTATIONS_JSON:"):
+                        json_str = line[len("CLUSTER_ANNOTATIONS_JSON:"):].strip()
+                        if json_str:
+                            self.cluster_annotations = json.loads(json_str)
+                            logger.info(f"Extracted {len(self.cluster_annotations)} cluster annotations")
+                        break
+        except Exception as e:
+            logger.warning(f"Failed to extract cluster annotations: {e}")
+
     def _extract_findings(self, state: AnalysisState) -> Dict[str, Any]:
         """Extract key findings from analysis rounds"""
         findings = {
@@ -1396,6 +1431,15 @@ print(f"\\nOther available processed files: {{AVAILABLE_PROCESSED_FILES}}")
             findings["bioinformatics"].extend(round_result.bioinformatics_findings)
             findings["biochemistry"].extend(round_result.biochemistry_findings)
             findings["literature"].extend(round_result.literature_findings)
+
+        # Include cluster annotations so LLM can reference cell types by name
+        if self.cluster_annotations:
+            annotation_lines = []
+            for cid, info in sorted(self.cluster_annotations.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
+                annotation_lines.append(f"Cluster {cid}: {info.get('cell_type', 'Unknown')} ({info.get('n_cells', 0)} cells)")
+            findings["cluster_annotations"] = "\n".join(annotation_lines)
+        else:
+            findings["cluster_annotations"] = "Not available"
 
         return findings
 
@@ -1502,6 +1546,9 @@ Objective: {state.initial_instruction}
 
 ### Pathology Findings:
 {json.dumps(findings['pathology'][:10], ensure_ascii=False, indent=2)}
+
+### Cluster Annotations:
+{findings.get('cluster_annotations', 'Not available')}
 
 ### Final Summary:
 {findings['summary'][:2000] if findings['summary'] else 'Not available'}
@@ -2219,10 +2266,14 @@ Iteration {pi_iteration}/{max_pi_iterations} - {"Last chance to complete!" if pi
 ## Generated Tables (reference if applicable):
 {chr(10).join(table_list) if table_list else "No tables"}
 
+## Cell Cluster Annotations:
+{findings.get('cluster_annotations', 'Not available')}
+
 ## Relevant Findings:
 {json.dumps(findings['bioinformatics'][:10], ensure_ascii=False)}
 
 ## Requirements
+IMPORTANT: When referencing cell clusters, always use their annotated cell type names (e.g., "Hepatocytes (Stressed)" instead of "Cluster 1"). The cluster annotation table above provides the mapping.
 {"用中文撰写，遵循以下格式要求：" if zh else "Write in English, following these format requirements:"}
 
 1. **MUST reference each figure** - Use format like "如图 X 所示" or "As shown in Figure X"
@@ -2339,6 +2390,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
         # Prepare table of contents
         toc_items = []
+        if self.cluster_annotations:
+            ca_toc_label = "细胞群注释" if zh else "Cell Cluster Annotations"
+            toc_items.append(f'<li><a href="#cluster_annotations">{ca_toc_label}</a></li>')
         for section in report.get("sections", []):
             analysis_type = section.get("analysis_type", "general")
             type_class = "general" if analysis_type == "general" else "specific"
@@ -2576,6 +2630,37 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             except Exception as e:
                 logger.error(f"Failed to embed graphic abstract in HTML: {e}")
 
+        # Build cluster annotations table HTML
+        ca_html = ""
+        if self.cluster_annotations:
+            ca_title = "细胞群注释" if zh else "Cell Cluster Annotations"
+            ca_header = (
+                "<th>Cluster</th><th>" + ("细胞类型" if zh else "Cell Type") +
+                "</th><th>" + ("细胞数" if zh else "Cell Count") + "</th>"
+            )
+            ca_rows = ""
+            total_cells = 0
+            for cid, info in sorted(self.cluster_annotations.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
+                ct = html_module.escape(info.get("cell_type", "Unknown"))
+                nc = info.get("n_cells", 0)
+                total_cells += nc
+                ca_rows += f"<tr><td>{html_module.escape(cid)}</td><td>{ct}</td><td>{nc:,}</td></tr>"
+            ca_rows += f"<tr style='font-weight:bold;border-top:2px solid #333'><td colspan='2'>{'总计' if zh else 'Total'}</td><td>{total_cells:,}</td></tr>"
+            ca_html = f'''
+            <div class="section" id="cluster_annotations">
+                <div class="section-header">
+                    <h2>{ca_title}</h2>
+                </div>
+                <div class="section-content">
+                    <div class="table-wrapper">
+                        <table>
+                            <thead><tr>{ca_header}</tr></thead>
+                            <tbody>{ca_rows}</tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>'''
+
         # Escape curly braces in content to prevent str.format() crash on LLM output
         def _safe_format_value(v: str) -> str:
             return v.replace("{", "{{").replace("}", "}}")
@@ -2590,6 +2675,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             graphic_abstract_html=_safe_format_value(ga_html),
             abstract_title="摘要" if zh else "Abstract",
             abstract=_safe_format_value(abstract_html),
+            cluster_annotations_html=_safe_format_value(ca_html),
             sections_html=_safe_format_value("\n".join(sections_html)),
             conclusions_title="结论" if zh else "Conclusions",
             conclusions=_safe_format_value(conclusions_html)

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useSession } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
@@ -36,6 +36,21 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   
   const [instruction, setInstruction] = useState(DEFAULT_PROJECT_DESCRIPTION)
   const [sessionName, setSessionName] = useState(DEFAULT_PROJECT_NAME)
+
+  // Auto-reload session from API on page refresh to restore full data (images etc.)
+  // Uses currentSession?.id as dep so it fires after Zustand hydration restores the session
+  const hasAutoReloaded = useRef(false)
+  useEffect(() => {
+    if (currentSession?.id && !hasAutoReloaded.current) {
+      hasAutoReloaded.current = true
+      loadSession(currentSession.id).catch(e => {
+        // Session no longer exists on server (404) - clear stale session from state
+        console.warn('Sidebar: Auto-reload session failed, clearing stale session:', e)
+        setCurrentSession(null)
+        clearMessages()
+      })
+    }
+  }, [currentSession?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Register session browser callback for external components (e.g., ConfigPanel's Read Mode)
   useEffect(() => {

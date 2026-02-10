@@ -239,6 +239,15 @@ class AnalysisState(BaseModel):
     
     # Agent temperatures (can be customized per session)
     custom_temperatures: Dict[str, float] = Field(default_factory=dict)
+
+    # Literature agent configuration
+    literature_config: Dict[str, Any] = Field(default_factory=lambda: {
+        "mode": "openrouter_deep_research",   # gemini_deep_research | openrouter_deep_research | pubmed_llm
+        "google_api_key": "",                 # For Gemini Deep Research mode
+        "search_model": "openai/o4-mini-deep-research",  # For OpenRouter deep research mode
+        "pubmed_email": "",                   # For PubMed mode (NCBI requirement)
+        "max_search_rounds": 5,              # Max iterative search rounds
+    })
     
     # Sandbox state (for potential restoration)
     sandbox_state: Optional[Dict[str, Any]] = None
@@ -368,7 +377,9 @@ class WebSocketMessage(BaseModel):
         # State synchronization and error tracking
         "state_sync", "parallel_errors",
         # WebSocket reconnection recovery
-        "message_history"
+        "message_history",
+        # Cluster annotation
+        "annotation_result"
     ]
     agent: Optional[AgentType] = None
     content: Any
