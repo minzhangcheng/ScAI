@@ -7,6 +7,8 @@ import asyncio
 import logging
 import traceback
 import zipfile
+import tarfile
+import tempfile
 import io
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Uplo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 
 from .config import (
@@ -332,6 +335,11 @@ class LiteratureConfigRequest(BaseModel):
     google_api_key: str = ""
     pubmed_email: str = ""
     max_search_rounds: int = Field(default=5, ge=1, le=20)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=10000)
+    files: List[Dict[str, str]] = Field(default_factory=list)  # [{filename, type}]
 
 
 class BiochemistryInput(BaseModel):
@@ -1559,136 +1567,272 @@ async def request_human_input(session_id: str):
 
 @app.post("/api/session/{session_id}/export")
 async def export_state(session_id: str):
-    """Export session state including notebook and session dump"""
+    """Export complete session as tar.gz including all uploads, workspace, reports, and state files.
+
+    Uses a temporary file on disk to avoid loading the entire archive into memory.
+    """
+    validate_session_id(session_id)
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Create a zip file in memory
-    zip_buffer = io.BytesIO()
-    
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # Add session state JSON
-        state_json = state.model_dump_json(indent=2)
-        zf.writestr(f"{session_id}/state.json", state_json)
-        
-        # Add notebook file if exists
-        notebook_path = STATE_DIR / f"{session_id}.ipynb"
-        if notebook_path.exists():
-            zf.write(notebook_path, f"{session_id}/notebook.ipynb")
-        
-        # Add session dump (dill) if exists
-        session_dump_path = STATE_DIR / f"{session_id}_session.pkl"
-        if session_dump_path.exists():
-            zf.write(session_dump_path, f"{session_id}/session.pkl")
-        
-        # Add metadata JSON if exists
-        metadata_path = STATE_DIR / f"{session_id}_state.json"
-        if metadata_path.exists():
-            zf.write(metadata_path, f"{session_id}/metadata.json")
-        
-        # Add workspace files if exist
-        workspace_dir = WORKSPACE_DIR / session_id
-        if workspace_dir.exists():
-            for file_path in workspace_dir.rglob("*"):
-                if file_path.is_file():
-                    arcname = f"{session_id}/workspace/{file_path.relative_to(workspace_dir)}"
-                    zf.write(file_path, arcname)
-    
-    zip_buffer.seek(0)
-    
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename={session_id}_export.zip"}
+
+    # Save latest state to disk first
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+
+    # Write tar.gz to a temp file on disk (not in memory)
+    tmp = tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False, dir=str(UPLOAD_TEMP_DIR))
+    tmp_path = tmp.name
+    tmp.close()
+
+    def _build_tar():
+        with tarfile.open(tmp_path, mode='w:gz') as tf:
+            def _add_bytes(arcname: str, data: bytes):
+                info = tarfile.TarInfo(name=arcname)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+
+            # Manifest
+            manifest = json.dumps({
+                "session_id": session_id,
+                "version": "1.0",
+                "data_base_dir": str(DATA_BASE_DIR)
+            }, indent=2).encode("utf-8")
+            _add_bytes(f"{session_id}/manifest.json", manifest)
+
+            # 1. sessions/{session_id}.json
+            session_file = SESSION_DIR / f"{session_id}.json"
+            if session_file.exists():
+                tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
+
+            # 2. states/{session_id}* (skip .pkl)
+            for state_file in STATE_DIR.glob(f"{session_id}*"):
+                if state_file.is_file() and not state_file.suffix == '.pkl':
+                    tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
+
+            # 3. uploads/{session_id}/ (recursive)
+            upload_dir = UPLOAD_DIR / session_id
+            if upload_dir.exists():
+                for file_path in upload_dir.rglob("*"):
+                    if file_path.is_file():
+                        rel = file_path.relative_to(DATA_BASE_DIR)
+                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+
+            # 4. workspace/{session_id}/ (recursive)
+            workspace_dir = WORKSPACE_DIR / session_id
+            if workspace_dir.exists():
+                for file_path in workspace_dir.rglob("*"):
+                    if file_path.is_file():
+                        rel = file_path.relative_to(DATA_BASE_DIR)
+                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+
+            # 5. reports/{session_id}/ (recursive)
+            reports_dir = REPORTS_DIR / session_id
+            if reports_dir.exists():
+                for file_path in reports_dir.rglob("*"):
+                    if file_path.is_file():
+                        rel = file_path.relative_to(DATA_BASE_DIR)
+                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+
+    await asyncio.to_thread(_build_tar)
+
+    # Build safe filename
+    safe_name = "".join(c if c.isalnum() or c in '-_ ' else '' for c in state.name).strip().replace(' ', '_')
+    if not safe_name:
+        safe_name = "session"
+    filename = f"{safe_name}_{session_id[:8]}.tar.gz"
+
+    # FileResponse streams from disk; BackgroundTask deletes the temp file after response is sent
+    return FileResponse(
+        tmp_path,
+        media_type="application/gzip",
+        filename=filename,
+        background=BackgroundTask(os.unlink, tmp_path)
     )
 
 
 @app.post("/api/session/import")
 async def import_state(file: UploadFile = File(...)):
-    """Import session state including notebook and session dump"""
-    import zipfile
-    import io
-    
-    content = await file.read()
-    
-    # Check if it's a zip file or JSON
-    if file.filename.endswith('.zip'):
-        # Handle zip file
-        zip_buffer = io.BytesIO(content)
-        
-        with zipfile.ZipFile(zip_buffer, 'r') as zf:
-            # Find the session ID from the first directory
-            namelist = zf.namelist()
-            if not namelist:
-                raise HTTPException(status_code=400, detail="Empty zip file")
-            
-            session_id = namelist[0].split('/')[0]
+    """Import session from tar.gz/zip/json archive, restoring all files to their directories.
 
-            # Validate session_id from zip to prevent path traversal
-            if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
-                raise HTTPException(status_code=400, detail="Invalid session ID in archive")
+    For tar.gz: streams upload to temp file first to avoid memory issues with large archives.
+    """
+    filename = file.filename or ""
 
-            # Extract state.json
-            state_json_path = f"{session_id}/state.json"
-            if state_json_path not in namelist:
-                raise HTTPException(status_code=400, detail="state.json not found in archive")
-            
-            state_data = json.loads(zf.read(state_json_path).decode('utf-8'))
-            state = AnalysisState(**state_data)
-            
-            # Extract notebook if exists
-            notebook_path = f"{session_id}/notebook.ipynb"
-            if notebook_path in namelist:
-                notebook_content = zf.read(notebook_path)
-                dest_notebook = STATE_DIR / f"{session_id}.ipynb"
-                dest_notebook.write_bytes(notebook_content)
-            
-            # Skip session.pkl - pickle deserialization of untrusted data is unsafe
-            session_pkl_path = f"{session_id}/session.pkl"
-            if session_pkl_path in namelist:
-                logger.warning(f"Skipping session.pkl import for security (pickle deserialization of untrusted data)")
+    if filename.endswith(('.tar.gz', '.tgz')):
+        # ---- tar.gz import: stream to disk first, then extract ----
+        tmp_path = UPLOAD_TEMP_DIR / f"import_{uuid.uuid4().hex}.tar.gz"
+        try:
+            await stream_save_file(file, tmp_path)
+            state = await asyncio.to_thread(_import_tar_gz, str(tmp_path))
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
-            # Extract metadata if exists
-            metadata_path = f"{session_id}/metadata.json"
-            if metadata_path in namelist:
-                metadata_content = zf.read(metadata_path)
-                dest_metadata = STATE_DIR / f"{session_id}_state.json"
-                dest_metadata.write_bytes(metadata_content)
+    elif filename.endswith('.zip'):
+        # ---- Legacy zip import (typically small) ----
+        content = await file.read()
+        state = _import_zip(content)
 
-            # Extract workspace files if exist (with path traversal protection)
-            workspace_parent = (WORKSPACE_DIR / session_id).resolve()
-            workspace_files = [n for n in namelist if n.startswith(f"{session_id}/workspace/")]
-            for wf in workspace_files:
-                if not wf.endswith('/'):  # Skip directories
-                    relative_path = wf.replace(f"{session_id}/workspace/", "")
-                    dest_path = (WORKSPACE_DIR / session_id / relative_path).resolve()
-                    # Validate path stays within workspace directory
-                    if not str(dest_path).startswith(str(workspace_parent) + os.sep):
-                        logger.warning(f"Skipping zip entry with path traversal: {wf}")
-                        continue
-                    dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    dest_path.write_bytes(zf.read(wf))
     else:
-        # Handle plain JSON (backward compatibility)
+        # ---- Plain JSON (backward compatibility) ----
+        content = await file.read()
         state_data = json.loads(content.decode('utf-8'))
         state = AnalysisState(**state_data)
 
-    # Validate imported session ID to prevent path traversal
+    # Validate imported session ID
     if not state.id or '/' in state.id or '\\' in state.id or '..' in state.id:
         raise HTTPException(status_code=400, detail="Invalid session ID in imported data")
 
+    # Save state to disk and load into memory
+    await asyncio.to_thread(save_session_to_disk, state.id, state)
     sessions[state.id] = state
-    
+
     return APIResponse(
         success=True,
-        message="State imported",
+        message="Session imported successfully",
         session_id=state.id,
-        data={
-            "name": state.name,
-            "has_session_dump": (STATE_DIR / f"{state.id}_session.pkl").exists()
-        }
+        data={"name": state.name}
     )
+
+
+def _import_tar_gz(file_path: str) -> AnalysisState:
+    """Import from tar.gz archive file on disk with path remapping"""
+    data_base_str = str(DATA_BASE_DIR)
+
+    with tarfile.open(file_path, mode='r:gz') as tf:
+        # Read manifest first
+        manifest_data = None
+        session_id = None
+        for member in tf.getmembers():
+            if member.name.endswith('/manifest.json'):
+                f = tf.extractfile(member)
+                if f:
+                    manifest_data = json.loads(f.read().decode('utf-8'))
+                    session_id = manifest_data.get("session_id")
+                    break
+
+        if not session_id:
+            # Fallback: infer session_id from first path component
+            members = tf.getmembers()
+            if not members:
+                raise HTTPException(status_code=400, detail="Empty archive")
+            session_id = members[0].name.split('/')[0]
+
+        # Validate session_id
+        if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
+            raise HTTPException(status_code=400, detail="Invalid session ID in archive")
+
+        old_base_dir = manifest_data.get("data_base_dir", "") if manifest_data else ""
+
+        # Extract files with security checks
+        state_json_data = None
+        for member in tf.getmembers():
+            if not member.isfile():
+                continue
+
+            # Security: skip paths with .. or absolute paths
+            if '..' in member.name or member.name.startswith('/'):
+                logger.warning(f"Skipping archive entry with suspicious path: {member.name}")
+                continue
+
+            # Skip .pkl files (security)
+            if member.name.endswith('.pkl'):
+                logger.warning(f"Skipping pickle file: {member.name}")
+                continue
+
+            # Skip manifest (already processed)
+            if member.name.endswith('/manifest.json'):
+                continue
+
+            # Determine destination: strip session_id prefix, rest maps to DATA_BASE_DIR
+            parts = member.name.split('/', 1)
+            if len(parts) < 2:
+                continue
+            relative_to_base = parts[1]  # e.g. "sessions/{id}.json", "uploads/{id}/pathology/img.png"
+
+            # Read state JSON for later processing
+            if relative_to_base == f"sessions/{session_id}.json":
+                f = tf.extractfile(member)
+                if f:
+                    state_json_data = f.read()
+
+            dest_path = (DATA_BASE_DIR / relative_to_base).resolve()
+
+            # Validate path stays within DATA_BASE_DIR
+            if not str(dest_path).startswith(data_base_str + os.sep) and str(dest_path) != data_base_str:
+                logger.warning(f"Skipping entry outside data dir: {member.name}")
+                continue
+
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            f = tf.extractfile(member)
+            if f:
+                dest_path.write_bytes(f.read())
+
+    if state_json_data is None:
+        raise HTTPException(status_code=400, detail="Session state JSON not found in archive")
+
+    # Path remapping: replace old data_base_dir with current one
+    state_json_str = state_json_data.decode('utf-8')
+    if old_base_dir and old_base_dir != data_base_str:
+        state_json_str = state_json_str.replace(old_base_dir, data_base_str)
+
+    state_data = json.loads(state_json_str)
+    state = AnalysisState(**state_data)
+
+    # Overwrite the session file with remapped paths
+    session_file = SESSION_DIR / f"{state.id}.json"
+    session_file.write_text(state.model_dump_json(indent=2), encoding='utf-8')
+
+    return state
+
+
+def _import_zip(content: bytes) -> AnalysisState:
+    """Legacy zip import (backward compatibility)"""
+    zip_buffer = io.BytesIO(content)
+
+    with zipfile.ZipFile(zip_buffer, 'r') as zf:
+        namelist = zf.namelist()
+        if not namelist:
+            raise HTTPException(status_code=400, detail="Empty zip file")
+
+        session_id = namelist[0].split('/')[0]
+        if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
+            raise HTTPException(status_code=400, detail="Invalid session ID in archive")
+
+        # Extract state.json
+        state_json_path = f"{session_id}/state.json"
+        if state_json_path not in namelist:
+            raise HTTPException(status_code=400, detail="state.json not found in archive")
+
+        state_data = json.loads(zf.read(state_json_path).decode('utf-8'))
+        state = AnalysisState(**state_data)
+
+        # Extract notebook if exists
+        notebook_path = f"{session_id}/notebook.ipynb"
+        if notebook_path in namelist:
+            (STATE_DIR / f"{session_id}.ipynb").write_bytes(zf.read(notebook_path))
+
+        # Skip session.pkl for security
+        if f"{session_id}/session.pkl" in namelist:
+            logger.warning("Skipping session.pkl import for security")
+
+        # Extract metadata if exists
+        metadata_path = f"{session_id}/metadata.json"
+        if metadata_path in namelist:
+            (STATE_DIR / f"{session_id}_state.json").write_bytes(zf.read(metadata_path))
+
+        # Extract workspace files with path traversal protection
+        workspace_parent = (WORKSPACE_DIR / session_id).resolve()
+        for wf in namelist:
+            if wf.startswith(f"{session_id}/workspace/") and not wf.endswith('/'):
+                relative_path = wf.replace(f"{session_id}/workspace/", "")
+                dest_path = (WORKSPACE_DIR / session_id / relative_path).resolve()
+                if not str(dest_path).startswith(str(workspace_parent) + os.sep):
+                    logger.warning(f"Skipping zip entry with path traversal: {wf}")
+                    continue
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                dest_path.write_bytes(zf.read(wf))
+
+    return state
 
 
 @app.get("/api/session/{session_id}/code")
@@ -2988,3 +3132,198 @@ async def resume_bioinformatics(session_id: str):
     except Exception as e:
         logger.error(f"Error reading checkpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Error reading checkpoint: {str(e)}")
+
+
+# ============== Chat Endpoints (PI Agent free-form chat) ==============
+
+def _build_chat_context(state: AnalysisState) -> str:
+    """Build analysis context summary for PI Agent chat"""
+    parts = []
+
+    if state.initial_instruction:
+        parts.append(f"Research Goal: {state.initial_instruction}")
+
+    parts.append(f"Current Round: {state.current_round}")
+    parts.append(f"Status: {state.status.value}")
+
+    # Pathology summary
+    if state.pathology_images:
+        parts.append(f"Pathology Images: {len(state.pathology_images)} uploaded")
+
+    # Biochemistry summary
+    if state.biochemistry_results:
+        indicators = [f"{r.indicator}={r.value}{r.unit}" for r in state.biochemistry_results]
+        parts.append(f"Biochemistry: {', '.join(indicators)}")
+
+    # Sequencing data
+    if state.control_seq_path:
+        parts.append(f"Control scRNA-seq: uploaded")
+    if state.treatment_seq_path:
+        parts.append(f"Treatment scRNA-seq: uploaded")
+
+    # Round results (last 3)
+    for rr in state.round_results[-3:]:
+        round_parts = [f"\n--- Round {rr.round_number} Summary ---"]
+        if rr.pathology_findings:
+            round_parts.append(f"Pathology: {'; '.join(rr.pathology_findings[:3])}")
+        if rr.bioinformatics_findings:
+            round_parts.append(f"Bioinformatics: {'; '.join(rr.bioinformatics_findings[:3])}")
+        if rr.biochemistry_findings:
+            round_parts.append(f"Biochemistry: {'; '.join(rr.biochemistry_findings[:3])}")
+        if rr.literature_findings:
+            round_parts.append(f"Literature: {'; '.join(rr.literature_findings[:3])}")
+        if rr.pi_summary:
+            round_parts.append(f"PI Summary: {rr.pi_summary[:500]}")
+        parts.extend(round_parts)
+
+    # Final summary
+    if state.final_summary:
+        parts.append(f"\nFinal Summary: {state.final_summary[:1000]}")
+
+    # Literature reports
+    if state.literature_reports:
+        parts.append(f"\nLiterature Reports: {len(state.literature_reports)} available")
+        for lr in state.literature_reports[-2:]:
+            parts.append(f"- Topic: {lr.topic}")
+
+    return "\n".join(parts)
+
+
+@app.post("/api/session/{session_id}/chat")
+async def chat_with_pi(session_id: str, request: ChatRequest):
+    """Chat with PI Agent using analysis context"""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if config is None:
+        raise HTTPException(status_code=400, detail="API configuration not set")
+
+    # Build context
+    context = _build_chat_context(state)
+    pi_model = state.custom_models.get("pi", "google/gemini-2.5-pro-preview-05-06")
+    pi_temp = state.custom_temperatures.get("pi", 0.5)
+
+    # System prompt
+    system_prompt = (
+        "You are the PI (Principal Investigator) Agent of a biomedical research analysis system. "
+        "You have access to the current analysis state and can help the user understand results, "
+        "answer questions about the data, and provide scientific insights.\n\n"
+        "Current Analysis Context:\n" + context + "\n\n"
+        "Instructions:\n"
+        "- Answer the user's questions based on available analysis results\n"
+        "- If relevant data exists in the analysis, reference it specifically\n"
+        "- Be concise but thorough in scientific explanations\n"
+        "- If you don't have enough information, say so clearly\n"
+        "- You can suggest next steps or additional analyses if appropriate\n"
+        "- Respond in the same language as the user's message"
+    )
+
+    # Build messages array: system + chat history + new user message
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Add chat history (last 20 messages to stay within context limits)
+    for msg in state.chat_messages[-20:]:
+        messages.append({
+            "role": msg.get("role", "user"),
+            "content": msg.get("content", "")
+        })
+
+    # Add new user message
+    user_content = request.message
+    if request.files:
+        file_desc = ", ".join(f["filename"] for f in request.files if "filename" in f)
+        user_content += f"\n\n[Attached files: {file_desc}]"
+
+    messages.append({"role": "user", "content": user_content})
+
+    # Store user message
+    user_msg = {
+        "role": "user",
+        "content": request.message,
+        "timestamp": datetime.now().isoformat(),
+        "files": request.files
+    }
+    state.chat_messages.append(user_msg)
+
+    # Call LLM
+    try:
+        llm_client = OpenAICompatibleClient(
+            api_key=config.api.api_key,
+            base_url=config.api.llm_base_url
+        )
+
+        # Check if there are images to send via vision
+        image_files = [f for f in request.files if f.get("type", "").startswith("image")]
+        if image_files:
+            # Load image data as base64
+            import base64
+            image_b64_list = []
+            for img_file in image_files:
+                img_path = img_file.get("path", "")
+                if img_path and Path(img_path).exists():
+                    with open(img_path, "rb") as f:
+                        image_b64_list.append(base64.b64encode(f.read()).decode("utf-8"))
+
+            if image_b64_list:
+                # Use vision API
+                full_prompt = system_prompt + "\n\nChat History:\n"
+                for msg in state.chat_messages[-20:]:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    full_prompt += f"\n{role}: {content}"
+                full_prompt += f"\n\nuser: {user_content}"
+
+                response = await llm_client.chat_with_vision(
+                    model=pi_model,
+                    text_prompt=full_prompt,
+                    images=image_b64_list,
+                    temperature=pi_temp,
+                    max_tokens=4096
+                )
+            else:
+                response = await llm_client.chat(
+                    model=pi_model,
+                    messages=messages,
+                    temperature=pi_temp,
+                    max_tokens=4096
+                )
+        else:
+            response = await llm_client.chat(
+                model=pi_model,
+                messages=messages,
+                temperature=pi_temp,
+                max_tokens=4096
+            )
+
+        assistant_content = response.content if response.content else "I'm sorry, I couldn't generate a response. Please try again."
+
+    except Exception as e:
+        logger.error(f"Chat LLM error: {e}")
+        logger.error(traceback.format_exc())
+        assistant_content = f"Error communicating with LLM: {str(e)}"
+
+    # Store assistant message
+    assistant_msg = {
+        "role": "assistant",
+        "content": assistant_content,
+        "timestamp": datetime.now().isoformat()
+    }
+    state.chat_messages.append(assistant_msg)
+
+    # Save to disk
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+
+    return {"role": "assistant", "content": assistant_content}
+
+
+@app.get("/api/session/{session_id}/chat")
+async def get_chat_history(session_id: str):
+    """Get chat history for a session"""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {"messages": state.chat_messages}

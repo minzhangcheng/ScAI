@@ -15,11 +15,19 @@ export const translations = {
     tabPrompts: 'Agents',
     tabResults: '结果',
     tabReport: '报告',
+    tabChat: '对话',
     
     // Sidebar
     newAnalysis: '新建分析',
     exportState: '导出状态',
     importState: '导入状态',
+    exportSession: '导出会话',
+    importSession: '导入会话',
+    importing: '导入中...',
+    exporting: '导出中...',
+    importSuccess: '导入成功',
+    importFailed: '导入失败',
+    exportFailed: '导出失败',
     apiSettings: 'API 设置',
     
     // Config Panel
@@ -290,6 +298,14 @@ export const translations = {
     roundInputPlaceholder: '输入补充说明或对下一步分析的指导意见...',
     fileUploadedTo: '发送给',
     removeFile: '移除',
+
+    // Chat Panel
+    chatPlaceholder: '输入消息...',
+    chatSend: '发送',
+    chatEmpty: '开始与 PI Agent 对话',
+    chatEmptyDesc: 'PI Agent 可以根据分析结果回答问题，也可以分析您上传的数据',
+    chatNoSession: '请先创建或选择一个分析会话',
+    chatError: '发送失败，请重试',
   },
 
   en: {
@@ -304,11 +320,19 @@ export const translations = {
     tabPrompts: 'Agents',
     tabResults: 'Results',
     tabReport: 'Report',
-    
+    tabChat: 'Chat',
+
     // Sidebar
     newAnalysis: 'New Analysis',
     exportState: 'Export State',
     importState: 'Import State',
+    exportSession: 'Export Session',
+    importSession: 'Import Session',
+    importing: 'Importing...',
+    exporting: 'Exporting...',
+    importSuccess: 'Import successful',
+    importFailed: 'Import failed',
+    exportFailed: 'Export failed',
     apiSettings: 'API Settings',
     
     // Config Panel
@@ -579,6 +603,14 @@ Please provide a detailed literature review report with specific citations.`,
     roundInputPlaceholder: 'Enter additional guidance or instructions for the next round...',
     fileUploadedTo: 'Send to',
     removeFile: 'Remove',
+
+    // Chat Panel
+    chatPlaceholder: 'Type a message...',
+    chatSend: 'Send',
+    chatEmpty: 'Start a conversation with PI Agent',
+    chatEmptyDesc: 'PI Agent can answer questions based on analysis results or analyze data you upload',
+    chatNoSession: 'Please create or select an analysis session first',
+    chatError: 'Failed to send, please try again',
   }
 } as const
 

@@ -248,6 +248,9 @@ class AnalysisState(BaseModel):
         "max_search_rounds": 5,              # Max iterative search rounds
     })
     
+    # Chat messages (PI Agent free-form chat, separate from workflow)
+    chat_messages: List[Dict[str, Any]] = Field(default_factory=list)
+
     # Sandbox state (for potential restoration)
     sandbox_state: Optional[Dict[str, Any]] = None
     

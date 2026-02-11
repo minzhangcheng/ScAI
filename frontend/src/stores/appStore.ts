@@ -215,8 +215,15 @@ interface AppState {
   literatureMaxSearchRounds: number
   setLiteratureMaxSearchRounds: (rounds: number) => void
 
+  // Chat messages (PI Agent free-form chat)
+  chatMessages: { role: 'user' | 'assistant'; content: string; timestamp: string; files?: { filename: string; type: string }[] }[]
+  addChatMessage: (msg: AppState['chatMessages'][0]) => void
+  setChatMessages: (msgs: AppState['chatMessages']) => void
+  chatLoading: boolean
+  setChatLoading: (loading: boolean) => void
+
   // UI state
-  activeTab: 'analysis' | 'data' | 'prompts' | 'results' | 'report'
+  activeTab: 'analysis' | 'data' | 'prompts' | 'results' | 'report' | 'chat'
   setActiveTab: (tab: AppState['activeTab']) => void
   
   sidebarOpen: boolean
@@ -341,6 +348,13 @@ export const useAppStore = create<AppState>()(
       setPubmedEmail: (email) => set({ pubmedEmail: email }),
       literatureMaxSearchRounds: 5,
       setLiteratureMaxSearchRounds: (rounds) => set({ literatureMaxSearchRounds: Math.max(1, Math.min(20, rounds)) }),
+
+      // Chat messages
+      chatMessages: [],
+      addChatMessage: (msg) => set((state) => ({ chatMessages: [...state.chatMessages, msg] })),
+      setChatMessages: (msgs) => set({ chatMessages: msgs }),
+      chatLoading: false,
+      setChatLoading: (loading) => set({ chatLoading: loading }),
 
       // UI state - default to 'data' tab as users typically upload data first
       activeTab: 'data',

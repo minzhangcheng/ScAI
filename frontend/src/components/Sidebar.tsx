@@ -11,7 +11,10 @@ import {
   FolderOpen,
   Clock,
   X,
-  Repeat
+  Repeat,
+  Download,
+  Upload,
+  Loader2
 } from 'lucide-react'
 
 interface SidebarProps {
@@ -36,6 +39,9 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   
   const [instruction, setInstruction] = useState(DEFAULT_PROJECT_DESCRIPTION)
   const [sessionName, setSessionName] = useState(DEFAULT_PROJECT_NAME)
+  const [exporting, setExporting] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Auto-reload session from API on page refresh to restore full data (images etc.)
   // Uses currentSession?.id as dep so it fires after Zustand hydration restores the session
@@ -129,6 +135,62 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       await loadSession(currentSession.id)
     } catch (e) {
       console.error('Failed to refresh session:', e)
+    }
+  }
+
+  const handleExport = async () => {
+    if (!currentSession || exporting) return
+    setExporting(true)
+    try {
+      const response = await fetch(`/api/session/${currentSession.id}/export`, { method: 'POST' })
+      if (!response.ok) throw new Error('Export failed')
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      // Extract filename from Content-Disposition or use default
+      const disposition = response.headers.get('Content-Disposition')
+      const match = disposition?.match(/filename=(.+)/)
+      a.download = match ? match[1] : `${currentSession.id}.tar.gz`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      console.error('Export failed:', e)
+      alert(t('exportFailed'))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || importing) return
+    setImporting(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const response = await fetch('/api/session/import', {
+        method: 'POST',
+        body: formData,
+      })
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ detail: 'Unknown error' }))
+        throw new Error(err.detail || 'Import failed')
+      }
+      const data = await response.json()
+      if (data.session_id) {
+        clearMessages()
+        await loadSession(data.session_id)
+      }
+    } catch (e: any) {
+      console.error('Import failed:', e)
+      alert(`${t('importFailed')}: ${e.message || ''}`)
+    } finally {
+      setImporting(false)
+      // Reset file input so the same file can be re-imported
+      if (fileInputRef.current) fileInputRef.current.value = ''
     }
   }
 
@@ -404,6 +466,35 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
       {/* Bottom Actions */}
       <div className="p-3 border-t border-slate-200 space-y-1">
+        {/* Export - only when a session is open */}
+        {currentSession && (
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-100 rounded-lg disabled:opacity-50"
+          >
+            {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+            {exporting ? t('exporting') : t('exportSession')}
+          </button>
+        )}
+
+        {/* Import */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".tar.gz,.tgz,.zip,.json"
+          onChange={handleImport}
+          className="hidden"
+        />
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={importing}
+          className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-100 rounded-lg disabled:opacity-50"
+        >
+          {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+          {importing ? t('importing') : t('importSession')}
+        </button>
+
         <button
           onClick={onOpenConfig}
           className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-100 rounded-lg"

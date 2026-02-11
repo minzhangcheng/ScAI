@@ -9,6 +9,7 @@ import { DataPanel } from './components/DataPanel'
 import { PromptsPanel } from './components/PromptsPanel'
 import { ResultsPanel } from './components/ResultsPanel'
 import { ReportPanel } from './components/ReportPanel'
+import { ChatPanel } from './components/ChatPanel'
 import { MessageStream } from './components/MessageStream'
 import { LanguageSelector } from './components/LanguageSelector'
 import {
@@ -17,6 +18,7 @@ import {
   Settings,
   BarChart3,
   FileBarChart,
+  MessageCircle,
   Menu,
   X,
   Wifi,
@@ -133,6 +135,7 @@ function App() {
     { id: 'analysis', label: t('tabAnalysis'), icon: Beaker },
     { id: 'results', label: t('tabResults'), icon: BarChart3 },
     { id: 'report', label: t('tabReport'), icon: FileBarChart },
+    { id: 'chat', label: t('tabChat'), icon: MessageCircle },
   ] as const
 
   return (
@@ -251,6 +254,9 @@ function App() {
               </div>
               <div className="flex-1 flex flex-col min-h-0" style={{ display: activeTab === 'report' ? 'flex' : 'none' }}>
                 <ReportPanel />
+              </div>
+              <div className="flex-1 flex flex-col min-h-0" style={{ display: activeTab === 'chat' ? 'flex' : 'none' }}>
+                <ChatPanel />
               </div>
             </div>
 
