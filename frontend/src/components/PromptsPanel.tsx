@@ -15,8 +15,6 @@ import {
   Cpu,
   Thermometer,
   Search,
-  Eye,
-  EyeOff
 } from 'lucide-react'
 
 export function PromptsPanel() {
@@ -26,9 +24,8 @@ export function PromptsPanel() {
     models, setModel,
     temperatures, setTemperature,
     literatureMode, setLiteratureMode,
-    googleApiKey, setGoogleApiKey,
-    literatureSearchModel, setLiteratureSearchModel,
-    pubmedEmail, setPubmedEmail,
+    googleApiKey,
+    pubmedEmail,
     literatureMaxSearchRounds, setLiteratureMaxSearchRounds,
   } = useAppStore()
   const { savePrompt, saveModel, saveTemperature } = usePrompts()
@@ -40,7 +37,14 @@ export function PromptsPanel() {
   const [editedTemperature, setEditedTemperature] = useState(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
-  const [showGoogleKey, setShowGoogleKey] = useState(false)
+  // Auto-set literature mode based on Google API key presence
+  useEffect(() => {
+    if (googleApiKey) {
+      setLiteratureMode('gemini_deep_research')
+    } else {
+      setLiteratureMode('pubmed_llm')
+    }
+  }, [googleApiKey, setLiteratureMode])
 
   // Update edited prompt, model, and temperature when selected agent changes
   useEffect(() => {
@@ -183,7 +187,6 @@ export function PromptsPanel() {
               body: JSON.stringify({
                 mode: literatureMode,
                 google_api_key: googleApiKey,
-                search_model: literatureSearchModel,
                 pubmed_email: pubmedEmail,
                 max_search_rounds: literatureMaxSearchRounds,
               }),
@@ -220,10 +223,7 @@ export function PromptsPanel() {
 
     // Reset literature config if on literature agent
     if (selectedAgent === 'literature') {
-      setLiteratureMode('openrouter_deep_research')
-      setGoogleApiKey('')
-      setLiteratureSearchModel('openai/o4-mini-deep-research')
-      setPubmedEmail('')
+      setLiteratureMode(googleApiKey ? 'gemini_deep_research' : 'pubmed_llm')
       setLiteratureMaxSearchRounds(5)
     }
 
@@ -331,37 +331,22 @@ export function PromptsPanel() {
                 </label>
                 <span className="text-xs text-slate-400">{t('literaturePubmedSettingsNote')}</span>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <label className="block text-xs font-medium text-slate-600">
-                    {t('literaturePubmedEmailLabel')}
-                  </label>
-                  <input
-                    type="email"
-                    value={pubmedEmail}
-                    onChange={(e) => { setPubmedEmail(e.target.value); setSaved(false) }}
-                    placeholder="your@email.com"
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <p className="text-xs text-slate-400">{t('literaturePubmedEmailNote')}</p>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="block text-xs font-medium text-slate-600">
-                    {t('literatureMaxSearchRounds')}
-                  </label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="20"
-                    value={literatureMaxSearchRounds}
-                    onChange={(e) => {
-                      setLiteratureMaxSearchRounds(parseInt(e.target.value) || 5)
-                      setSaved(false)
-                    }}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <p className="text-xs text-slate-400">{t('literatureMaxSearchRoundsNote')}</p>
-                </div>
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-slate-600">
+                  {t('literatureMaxSearchRounds')}
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={literatureMaxSearchRounds}
+                  onChange={(e) => {
+                    setLiteratureMaxSearchRounds(parseInt(e.target.value) || 5)
+                    setSaved(false)
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <p className="text-xs text-slate-400">{t('literatureMaxSearchRoundsNote')}</p>
               </div>
             </div>
 
@@ -391,74 +376,13 @@ export function PromptsPanel() {
                     <div className="flex-1">
                       <span className="text-sm font-medium text-slate-800">{t('literatureGeminiDeepResearch')}</span>
                       <p className="text-xs text-slate-500 mt-0.5">{t('literatureGeminiDesc')}</p>
+                      {!googleApiKey && (
+                        <p className="text-xs text-amber-600 mt-1">
+                          {t('literatureGeminiNote')}
+                        </p>
+                      )}
                     </div>
                   </label>
-                  {literatureMode === 'gemini_deep_research' && (
-                    <div className="px-3 pb-3 ml-7 space-y-2">
-                      <label className="block text-xs font-medium text-slate-600">
-                        {t('literatureGoogleApiKey')}
-                      </label>
-                      <div className="relative">
-                        <input
-                          type={showGoogleKey ? 'text' : 'password'}
-                          value={googleApiKey}
-                          onChange={(e) => { setGoogleApiKey(e.target.value); setSaved(false) }}
-                          placeholder="AIza..."
-                          className="w-full px-3 py-2 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowGoogleKey(!showGoogleKey)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
-                        >
-                          {showGoogleKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                        </button>
-                      </div>
-                      <p className="text-xs text-blue-600">
-                        {t('literatureGeminiNote')} ·{' '}
-                        <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="underline hover:no-underline">
-                          {language === 'zh' ? '获取 Key' : 'Get Key'}
-                        </a>
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                {/* OpenRouter Deep Research */}
-                <div className={`rounded-lg transition-all ${
-                  literatureMode === 'openrouter_deep_research' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
-                }`}>
-                  <label className="flex items-start gap-3 p-3 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="literatureMode"
-                      value="openrouter_deep_research"
-                      checked={literatureMode === 'openrouter_deep_research'}
-                      onChange={() => { setLiteratureMode('openrouter_deep_research'); setSaved(false) }}
-                      className="mt-0.5 accent-blue-600"
-                    />
-                    <div className="flex-1">
-                      <span className="text-sm font-medium text-slate-800">{t('literatureOpenrouterDeepResearch')}</span>
-                      <p className="text-xs text-slate-500 mt-0.5">{t('literatureOpenrouterDesc')}</p>
-                    </div>
-                  </label>
-                  {literatureMode === 'openrouter_deep_research' && (
-                    <div className="px-3 pb-3 ml-7 space-y-2">
-                      <label className="block text-xs font-medium text-slate-600">
-                        {t('literatureSearchModel')}
-                      </label>
-                      <input
-                        type="text"
-                        value={literatureSearchModel}
-                        onChange={(e) => { setLiteratureSearchModel(e.target.value); setSaved(false) }}
-                        placeholder="openai/o4-mini-deep-research"
-                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                      <p className="text-xs text-slate-500">
-                        {t('literatureOpenrouterModelOptions')}
-                      </p>
-                    </div>
-                  )}
                 </div>
 
                 {/* PubMed Search Only */}

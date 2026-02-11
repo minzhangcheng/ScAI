@@ -73,11 +73,12 @@ export function RoundFeedbackDialog({
   const [files, setFiles] = useState<UploadedFileWithAgent[]>([])
   const [sending, setSending] = useState(false)
 
-  // Timer state
+  // Timer state — uses wall-clock time so background tabs don't freeze the countdown
   const [timeRemaining, setTimeRemaining] = useState(COUNTDOWN_SECONDS)
   const [timerPaused, setTimerPaused] = useState(false)
-  const timerPausedRef = useRef(false)
   const hasTypedRef = useRef(false)
+  const deadlineRef = useRef(Date.now() + COUNTDOWN_SECONDS * 1000) // wall-clock deadline
+  const pausedAtRef = useRef<number | null>(null) // timestamp when paused, null if running
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -86,25 +87,29 @@ export function RoundFeedbackDialog({
 
   const isLastRound = roundNumber >= maxRounds
 
-  // Sync ref with state
+  // Handle pause/resume: shift deadline when pausing/resuming
   useEffect(() => {
-    timerPausedRef.current = timerPaused
+    if (timerPaused) {
+      // Record when we paused
+      pausedAtRef.current = Date.now()
+    } else if (pausedAtRef.current !== null) {
+      // Resuming: shift deadline forward by the time spent paused
+      const pausedDuration = Date.now() - pausedAtRef.current
+      deadlineRef.current += pausedDuration
+      pausedAtRef.current = null
+    }
   }, [timerPaused])
 
-  // Countdown timer
+  // Countdown timer — uses wall-clock diff so background tabs catch up correctly
   useEffect(() => {
     intervalRef.current = setInterval(() => {
-      if (!timerPausedRef.current) {
-        setTimeRemaining(prev => {
-          if (prev <= 1) {
-            // Timer expired — auto-proceed
-            if (intervalRef.current) clearInterval(intervalRef.current)
-            return 0
-          }
-          return prev - 1
-        })
+      if (pausedAtRef.current !== null) return // paused, don't update
+      const remaining = Math.max(0, Math.ceil((deadlineRef.current - Date.now()) / 1000))
+      setTimeRemaining(remaining)
+      if (remaining <= 0) {
+        if (intervalRef.current) clearInterval(intervalRef.current)
       }
-    }, 1000)
+    }, 500) // 500ms for snappier updates when returning from background
 
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)

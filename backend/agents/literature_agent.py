@@ -36,7 +36,7 @@ class LiteratureAgent(BaseAgent):
     - PubMed + LLM (NCBI E-utilities + LLM synthesis)
 
     Fallback chain:
-    - Gemini/OpenRouter → PubMed → quick_search (LLM knowledge only)
+    - Gemini Deep Research → PubMed + LLM → quick_search (LLM knowledge only)
     """
 
     def __init__(
@@ -46,9 +46,8 @@ class LiteratureAgent(BaseAgent):
         system_prompt: str,
         config: Optional['AgentConfig'] = None,
         # Literature-specific parameters
-        literature_mode: str = "openrouter_deep_research",
+        literature_mode: str = "pubmed_llm",
         google_api_key: str = "",
-        search_model: str = "openai/o4-mini-deep-research",
         pubmed_email: str = "",
         max_search_rounds: int = 5,
         proxy_url: Optional[str] = None,
@@ -65,7 +64,6 @@ class LiteratureAgent(BaseAgent):
 
         # Mode configuration
         self.literature_mode = literature_mode
-        self.search_model = search_model
         self.pubmed_email = pubmed_email
         self.max_search_rounds = max(1, min(20, max_search_rounds))
         self.proxy_url = proxy_url
@@ -110,7 +108,7 @@ class LiteratureAgent(BaseAgent):
         """
         Route to configured research mode with fallback chain.
 
-        Fallback: gemini/openrouter → pubmed → quick_search
+        Fallback: gemini → pubmed → quick_search
 
         Args:
             topic: Research topic
@@ -122,8 +120,6 @@ class LiteratureAgent(BaseAgent):
         try:
             if mode == "gemini_deep_research":
                 return await self._multi_round_gemini(topic, state)
-            elif mode == "openrouter_deep_research":
-                return await self._multi_round_openrouter(topic, state)
             elif mode == "pubmed_llm":
                 return await self._multi_round_pubmed(topic, state, pubmed_max_results=pubmed_max_results)
             else:
@@ -132,8 +128,8 @@ class LiteratureAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"[Literature] Mode {mode} failed: {e}")
 
-            # Fallback: if primary was gemini or openrouter, try pubmed
-            if mode in ("gemini_deep_research", "openrouter_deep_research"):
+            # Fallback: if primary was gemini, try pubmed
+            if mode == "gemini_deep_research":
                 logger.info("[Literature] Falling back to PubMed + LLM mode")
                 try:
                     return await self._multi_round_pubmed(topic, state, pubmed_max_results=pubmed_max_results)
@@ -216,78 +212,8 @@ class LiteratureAgent(BaseAgent):
     # Mode 2: OpenRouter Deep Research (multi-round)
     # ===================================================================
 
-    async def _multi_round_openrouter(
-        self,
-        topic: str,
-        state: Optional[AnalysisState] = None
-    ) -> Dict[str, Any]:
-        """Multi-round deep research via OpenRouter deep research models."""
-        if not self.search_model:
-            raise ValueError("No search model configured for OpenRouter Deep Research")
-
-        query = self._build_research_query(topic, state)
-        all_reports: List[str] = []
-        search_history: List[Dict[str, Any]] = []
-
-        for round_num in range(1, self.max_search_rounds + 1):
-            logger.info(
-                f"[Literature] OpenRouter DR round {round_num}/{self.max_search_rounds}: "
-                f"model={self.search_model}"
-            )
-
-            # Call the deep research model via the shared llm_client
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a biomedical research assistant. "
-                        "Provide a comprehensive literature review with citations and references."
-                    ),
-                },
-                {"role": "user", "content": query},
-            ]
-
-            response = await self.llm_client.chat(
-                model=self.search_model,
-                messages=messages,
-                temperature=0.3,
-                max_tokens=16384,
-                timeout=660.0,  # Deep research models can take up to 600s
-            )
-
-            report_text = response.content if response and response.content else ""
-            if not report_text:
-                logger.warning("[Literature] OpenRouter DR returned empty response")
-                if round_num == 1:
-                    raise ValueError("OpenRouter deep research returned empty response")
-                break
-
-            all_reports.append(report_text)
-            search_history.append({
-                "round": round_num,
-                "query": query,
-                "report_preview": report_text[:300],
-            })
-
-            # Evaluate if more research needed
-            if round_num < self.max_search_rounds:
-                evaluation = await self._evaluate_search_results(
-                    topic, search_history
-                )
-                if evaluation.get("sufficient", True):
-                    logger.info(f"[Literature] OpenRouter DR sufficient after {round_num} rounds")
-                    break
-                query = evaluation.get("refined_query", query)
-
-        # Combine reports
-        combined_report = all_reports[-1] if all_reports else ""
-        if len(all_reports) > 1:
-            combined_report = await self._synthesize_multiple_reports(topic, all_reports)
-
-        return await self._finalize_result(topic, combined_report, [], state, len(search_history))
-
     # ===================================================================
-    # Mode 3: PubMed + LLM (multi-round)
+    # Mode 2: PubMed + LLM (multi-round)
     # ===================================================================
 
     async def _multi_round_pubmed(

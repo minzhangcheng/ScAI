@@ -328,9 +328,8 @@ class TemperatureUpdateRequest(BaseModel):
 
 
 class LiteratureConfigRequest(BaseModel):
-    mode: str = Field(default="openrouter_deep_research")
+    mode: str = Field(default="pubmed_llm")
     google_api_key: str = ""
-    search_model: str = "openai/o4-mini-deep-research"
     pubmed_email: str = ""
     max_search_rounds: int = Field(default=5, ge=1, le=20)
 
@@ -1362,7 +1361,6 @@ async def update_literature_config(session_id: str, request: LiteratureConfigReq
     state.literature_config = {
         "mode": request.mode,
         "google_api_key": request.google_api_key,
-        "search_model": request.search_model,
         "pubmed_email": request.pubmed_email,
         "max_search_rounds": request.max_search_rounds,
     }

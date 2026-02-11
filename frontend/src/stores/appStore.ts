@@ -206,12 +206,10 @@ interface AppState {
   setMaxRounds: (rounds: number) => void
 
   // Literature agent config
-  literatureMode: 'gemini_deep_research' | 'openrouter_deep_research' | 'pubmed_llm'
+  literatureMode: 'gemini_deep_research' | 'pubmed_llm'
   setLiteratureMode: (mode: AppState['literatureMode']) => void
   googleApiKey: string
   setGoogleApiKey: (key: string) => void
-  literatureSearchModel: string
-  setLiteratureSearchModel: (model: string) => void
   pubmedEmail: string
   setPubmedEmail: (email: string) => void
   literatureMaxSearchRounds: number
@@ -335,12 +333,10 @@ export const useAppStore = create<AppState>()(
       setMaxRounds: (rounds) => set({ maxRounds: rounds }),
 
       // Literature agent config
-      literatureMode: 'openrouter_deep_research' as AppState['literatureMode'],
+      literatureMode: 'pubmed_llm' as AppState['literatureMode'],
       setLiteratureMode: (mode) => set({ literatureMode: mode }),
       googleApiKey: '',
       setGoogleApiKey: (key) => set({ googleApiKey: key }),
-      literatureSearchModel: 'openai/o4-mini-deep-research',
-      setLiteratureSearchModel: (model) => set({ literatureSearchModel: model }),
       pubmedEmail: '',
       setPubmedEmail: (email) => set({ pubmedEmail: email }),
       literatureMaxSearchRounds: 5,
@@ -415,7 +411,6 @@ export const useAppStore = create<AppState>()(
         maxRounds: state.maxRounds,
         literatureMode: state.literatureMode,
         googleApiKey: state.googleApiKey,
-        literatureSearchModel: state.literatureSearchModel,
         pubmedEmail: state.pubmedEmail,
         literatureMaxSearchRounds: state.literatureMaxSearchRounds,
         messagePanelWidth: state.messagePanelWidth,

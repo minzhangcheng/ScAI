@@ -12,10 +12,11 @@ interface ConfigPanelProps {
 
 export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
   const { apiConfig, setApiConfig, saveConfig, loading, error, clearError } = useConfig()
-  const { language } = useAppStore()
+  const { language, pubmedEmail, setPubmedEmail, googleApiKey, setGoogleApiKey, setLiteratureMode } = useAppStore()
   const { t } = useTranslation(language)
   const [localError, setLocalError] = useState<string | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
+  const [showGoogleKey, setShowGoogleKey] = useState(false)
 
   // Clear errors when user modifies config
   const handleConfigChange = (updates: Partial<typeof apiConfig>) => {
@@ -67,11 +68,13 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
 
         {/* Content */}
         <div className="p-6 space-y-5">
+          {/* === Required Fields === */}
+
           {/* LLM Server URL */}
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-2">
               <Server className="w-4 h-4 inline mr-1" />
-              {language === 'zh' ? 'LLM 服务器' : 'LLM Server'}
+              {language === 'zh' ? 'LLM 服务器' : 'LLM Server'} <span className="text-red-500">*</span>
             </label>
             <input
               type="text"
@@ -81,13 +84,13 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
               className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all font-mono text-sm"
             />
             <p className="text-xs text-slate-500 mt-1.5">
-              {language === 'zh' 
-                ? '支持任何 OpenAI 兼容的 API 端点' 
+              {language === 'zh'
+                ? '支持任何 OpenAI 兼容的 API 端点'
                 : 'Supports any OpenAI-compatible API endpoint'}
             </p>
             <p className="text-xs text-blue-600 mt-1">
-              💡 {language === 'zh' 
-                ? '建议使用 OpenRouter 以支持更多模型' 
+              💡 {language === 'zh'
+                ? '建议使用 OpenRouter 以支持更多模型'
                 : 'Recommend using OpenRouter for more model options'}
             </p>
           </div>
@@ -115,9 +118,67 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
               </button>
             </div>
             <p className="text-xs text-slate-500 mt-1.5">
-              {language === 'zh' ? '用于 LLM 服务的 API 密钥' : 'API key for LLM service'} · 
+              {language === 'zh' ? '用于 LLM 服务的 API 密钥' : 'API key for LLM service'} ·
               <a href="https://openrouter.ai/keys" target="_blank" className="text-violet-600 hover:underline">
                 {t('getKey')}
+              </a>
+            </p>
+          </div>
+
+          {/* PubMed Email */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">
+              {t('literaturePubmedEmailLabel')} <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="email"
+              value={pubmedEmail}
+              onChange={(e) => setPubmedEmail(e.target.value)}
+              placeholder="your@email.com"
+              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all text-sm"
+            />
+            <p className="text-xs text-slate-500 mt-1.5">
+              {t('literaturePubmedEmailNote')}
+            </p>
+          </div>
+
+          {/* === Optional Fields === */}
+
+          {/* Google AI API Key (optional, for Gemini Deep Research) */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">
+              {t('literatureGoogleApiKey')}
+              <span className="text-slate-400 font-normal ml-2">
+                ({language === 'zh' ? '可选' : 'Optional'})
+              </span>
+            </label>
+            <div className="relative">
+              <input
+                type={showGoogleKey ? 'text' : 'password'}
+                value={googleApiKey}
+                onChange={(e) => {
+                  setGoogleApiKey(e.target.value)
+                  // Auto-switch literature mode based on key presence
+                  setLiteratureMode(e.target.value ? 'gemini_deep_research' : 'pubmed_llm')
+                }}
+                placeholder="AIza..."
+                className="w-full px-4 py-3 pr-12 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all font-mono text-sm"
+              />
+              <button
+                type="button"
+                onClick={() => setShowGoogleKey(!showGoogleKey)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition-colors"
+                title={showGoogleKey ? (language === 'zh' ? '隐藏' : 'Hide') : (language === 'zh' ? '显示' : 'Show')}
+              >
+                {showGoogleKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+            <p className="text-xs text-slate-500 mt-1.5">
+              {language === 'zh'
+                ? '用于 Gemini Deep Research 文献检索（设置后自动启用）'
+                : 'For Gemini Deep Research literature search (auto-enabled when set)'} ·{' '}
+              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-violet-600 hover:underline">
+                {language === 'zh' ? '获取 Key' : 'Get Key'}
               </a>
             </p>
           </div>
@@ -138,8 +199,8 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
               className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
             />
             <p className="text-xs text-slate-500 mt-1.5">
-              {language === 'zh' 
-                ? '设置HTTP/HTTPS代理，用于API请求' 
+              {language === 'zh'
+                ? '设置HTTP/HTTPS代理，用于API请求'
                 : 'Set HTTP/HTTPS proxy for API requests'}
             </p>
           </div>

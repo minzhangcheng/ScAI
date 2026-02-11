@@ -190,8 +190,8 @@ class OpenAICompatibleClient:
 
         raw_content = message.content
 
-        # Case 1: String content (normal case)
-        if isinstance(raw_content, str):
+        # Case 1: String content (normal case) — only return if non-empty
+        if isinstance(raw_content, str) and raw_content:
             return raw_content
 
         # Case 2: List content (multimodal response format)
@@ -208,9 +208,9 @@ class OpenAICompatibleClient:
             if text_parts:
                 return "\n".join(text_parts)
 
-        # Case 3: None — try model_dump() for Pydantic SDK objects
+        # Case 3: None or empty — try model_dump() for Pydantic SDK objects
         content = ""
-        if raw_content is None:
+        if not raw_content:
             try:
                 if hasattr(message, "model_dump"):
                     msg_data = message.model_dump()
@@ -257,6 +257,17 @@ class OpenAICompatibleClient:
         if not content and response and response.usage:
             completion_tokens = response.usage.completion_tokens or 0
             if completion_tokens > 0:
+                # Dump raw message object for debugging
+                try:
+                    if hasattr(message, "model_dump"):
+                        raw_dump = message.model_dump()
+                        logger.info(
+                            f"[{self.agent_name}] Empty content with {completion_tokens} tokens. "
+                            f"Raw message keys: {list(raw_dump.keys())}, "
+                            f"values preview: {str(raw_dump)[:2000]}"
+                        )
+                except Exception:
+                    pass
                 msg_dict = {}
                 for attr_name in ("content", "refusal", "role", "reasoning", "reasoning_content"):
                     if hasattr(message, attr_name):
@@ -315,11 +326,14 @@ class OpenAICompatibleClient:
             params: Dict[str, Any] = dict(
                 model=model,
                 messages=messages,
-                max_tokens=max_tokens,
                 stream=stream,
             )
+            # o-series reasoning models use max_completion_tokens, not max_tokens
             if _model_supports_temperature(model):
                 params["temperature"] = temperature
+                params["max_tokens"] = max_tokens
+            else:
+                params["max_completion_tokens"] = max_tokens
             if timeout is not None:
                 params["timeout"] = timeout
             return await self.client.chat.completions.create(**params)
@@ -416,10 +430,13 @@ class OpenAICompatibleClient:
                 messages=messages,
                 tools=tools,
                 tool_choice=tool_choice,
-                max_tokens=max_tokens,
             )
+            # o-series reasoning models use max_completion_tokens, not max_tokens
             if _model_supports_temperature(model):
                 params["temperature"] = temperature
+                params["max_tokens"] = max_tokens
+            else:
+                params["max_completion_tokens"] = max_tokens
             return await self.client.chat.completions.create(**params)
 
         try:
@@ -512,11 +529,14 @@ class OpenAICompatibleClient:
         params: Dict[str, Any] = dict(
             model=model,
             messages=messages,
-            max_tokens=max_tokens,
             stream=True,
         )
+        # o-series reasoning models use max_completion_tokens, not max_tokens
         if _model_supports_temperature(model):
             params["temperature"] = temperature
+            params["max_tokens"] = max_tokens
+        else:
+            params["max_completion_tokens"] = max_tokens
         stream = await self.client.chat.completions.create(**params)
         
         async for chunk in stream:
@@ -584,10 +604,13 @@ class OpenAICompatibleClient:
             params: Dict[str, Any] = dict(
                 model=model,
                 messages=messages,
-                max_tokens=max_tokens,
             )
+            # o-series reasoning models use max_completion_tokens, not max_tokens
             if _model_supports_temperature(model):
                 params["temperature"] = temperature
+                params["max_tokens"] = max_tokens
+            else:
+                params["max_completion_tokens"] = max_tokens
             return await self.client.chat.completions.create(**params)
 
         try:

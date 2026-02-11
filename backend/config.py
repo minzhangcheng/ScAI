@@ -148,7 +148,7 @@ class AgentTemperatures(BaseModel):
         return AgentTemperatures(**data)
     
 # Literature agent defaults
-DEFAULT_LITERATURE_MODE = "openrouter_deep_research"
+DEFAULT_LITERATURE_MODE = "pubmed_llm"
 DEFAULT_LITERATURE_MAX_SEARCH_ROUNDS = 5
 
 class AgentPrompts(BaseModel):
