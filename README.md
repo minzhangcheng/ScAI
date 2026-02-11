@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.6.1
+**Version**: 0.6.3
 
 ## Core Features
 
@@ -12,7 +12,7 @@
 - **Pathology Agent**: Analyzes histological sections (supports H&E, Sirius Red, Prussian Blue, and other staining types)
 - **Bioinformatics Agent**: Performs autonomous high-throughput sequencing data analysis (scRNA-seq, snRNA-seq, bulk RNA-seq) with checkpoint recovery
 - **Biochemistry Agent**: Interprets biochemical experimental results (3-step analysis: structured indicators → visual image analysis → synthesis & conclusions)
-- **Literature Agent**: Provides literature support (3 modes: Google Gemini Deep Research, OpenRouter Deep Research, PubMed + LLM synthesis) with multi-round iterative search and automatic fallback chain
+- **Literature Agent**: Provides literature support (2 modes: Google Gemini Deep Research, PubMed + LLM synthesis) with multi-round iterative search, automatic fallback chain, and literature-based cluster annotation
 - **Painter Agent**: Generates graphic abstracts using Google Gemini image generation
 
 ### Iterative Analysis Workflow with Human-in-the-Loop
@@ -153,12 +153,14 @@ npm install
 
 ### 4. Configure API Keys
 
-Configure the following API keys in the web interface:
+Configure the following in the web interface:
 
-- **OpenRouter API Key**: For calling Gemini and Claude models
+- **OpenRouter API Key** (required): For calling Gemini and Claude models
   - Get it at: https://openrouter.ai/keys
 
-- **Google AI API Key**: For Gemini Deep Research (optional)
+- **PubMed Email** (required): Email for NCBI E-utilities PubMed access (NCBI requirement)
+
+- **Google AI API Key** (optional): For Gemini Deep Research mode — auto-enables when set
   - Get it at: https://aistudio.google.com/app/apikey
 
 - **Proxy URL** (optional): HTTP/HTTPS proxy for API requests
@@ -270,7 +272,7 @@ intesc/                         # Code directory
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous)
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent
-│   │   ├── literature_agent.py      # Literature Agent (3 research modes)
+│   │   ├── literature_agent.py      # Literature Agent (2 research modes + cluster annotation)
 │   │   └── painter_agent.py         # Painter Agent (graphic abstract)
 │   ├── models/
 │   │   └── schemas.py          # Pydantic data models (AgentError, state_version)
@@ -345,9 +347,8 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 ### LLM
 
 - **Main Models**: Gemini 3 Pro Preview, Claude Opus 4.6 (via OpenRouter)
-- **Literature Research**: 3 modes with automatic fallback
+- **Literature Research**: 2 modes with automatic fallback
   - Google Gemini Deep Research (via Interactions API, direct Google API)
-  - OpenRouter Deep Research (e.g., `openai/o4-mini-deep-research`)
   - PubMed + LLM synthesis (NCBI E-utilities search + LLM review)
 - **Image Generation**: Gemini 3 Pro Image Preview for graphic abstracts
 
@@ -373,19 +374,33 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 
 ## Changelog
 
-### v0.6.1 (2026-02-10)
+### v0.6.3 (2026-02-11)
 
-- **Literature Agent Multi-Mode Research**: 3 literature research modes with automatic fallback chain
+- **Literature-based Cluster Annotation**: New `annotate_clusters` tool for bioinformatics agent — single literature search + LLM matching annotates all clusters at once, replacing per-cluster PI consultation
+- **Round Context Enrichment**: Each agent now receives previous round findings and code history, preventing redundant analyses in multi-round workflows
+- **Literature Config per Session**: Literature mode (Gemini/PubMed), Google API key, PubMed email, and search rounds are now stored per-session in `literature_config` (moved from global `APIConfig`)
+- **ConfigPanel Redesign**: PubMed email (required) and Google API key (optional, auto-enables Gemini mode) moved to main config panel
+- **LLM Client Improvements**: Robust content extraction from various response formats (string, list, None, reasoning models); reasoning model support (`o1`/`o3`/`o4` series use `max_completion_tokens` instead of `max_tokens`)
+- **RoundFeedbackDialog Timer Fix**: Countdown timer now uses wall-clock time so background browser tabs don't freeze the countdown
+- Bug fixes: literature agent cleanup, PromptsPanel literature config save, base64 stripping improvements
+
+### v0.6.2 (2026-02-10)
+
+- **Literature Agent Rewrite**: Rebuilt with 2 research modes (removed OpenRouter deep research)
   - Gemini Deep Research (Google Interactions API) - fixed REST payload, status polling, and response extraction
-  - OpenRouter Deep Research (standard chat completions) - fixed 120s timeout to 660s, increased max_tokens to 16384
   - PubMed + LLM (NCBI E-utilities + LLM synthesis)
   - Multi-round iterative search with LLM-guided query refinement
-  - Automatic fallback: Gemini/OpenRouter → PubMed → LLM knowledge only
+  - Automatic fallback: Gemini → PubMed → LLM knowledge only
+- **Literature-based Cluster Annotation**: `annotate_clusters()` method for two-phase cluster annotation (literature search + LLM matching)
+- **Bioinformatics Agent `annotate_clusters` Tool**: New function-calling tool to annotate all clusters via literature evidence in a single call
 - **Report Cluster Annotations**: Reports now include a cell cluster annotation table (Cluster → Cell Type → Cell Count) extracted from processed adata
 - **Session Recovery on Page Refresh**: Auto-reload session from server after page refresh; stale session detection clears sessions that no longer exist on server
 - **localStorage Overflow Prevention**: Base64 image data stripped from WebSocket messages, API responses, and Zustand persisted state
 - **Read Mode**: New read-only mode for reviewing existing analyses without starting new ones
 - **File Upload During Pause**: Users can upload pathology images while workflow is paused; uploads on the last round extend max_rounds by 1
+
+### v0.6.1 (2026-02-10)
+
 - Bug fixes: null safety in partialize, WebSocket "session not found" detection, report findings dict key safety
 
 ### v0.6.0 (2026-02-09)
