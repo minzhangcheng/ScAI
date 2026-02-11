@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.6.3
+**Version**: 0.7.2
 
 ## Core Features
 
@@ -14,6 +14,14 @@
 - **Biochemistry Agent**: Interprets biochemical experimental results (3-step analysis: structured indicators → visual image analysis → synthesis & conclusions)
 - **Literature Agent**: Provides literature support (2 modes: Google Gemini Deep Research, PubMed + LLM synthesis) with multi-round iterative search, automatic fallback chain, and literature-based cluster annotation
 - **Painter Agent**: Generates graphic abstracts using Google Gemini image generation
+
+### Interactive Chat with PI Agent
+
+- **Chat Tab**: Free-form conversational interface with the PI Agent after analysis
+- Ask questions about results, request explanations, or discuss next steps
+- **File Attachments**: Upload images and data files directly in chat, with per-file agent targeting (PI, Pathology, Bioinformatics, Biochemistry)
+- **Figure Display & Generation**: PI can reference existing analysis figures or generate new custom figures on-the-fly via Jupyter sandbox
+- Markdown-rendered responses with inline figure display and PNG/PDF download
 
 ### Iterative Analysis Workflow with Human-in-the-Loop
 
@@ -54,6 +62,12 @@ The system supports generating comprehensive reports with 9 chapters, 40+ analys
 8. **Trajectory Analysis**: PAGA graphs, trajectory analysis
 9. **Targeted Analysis**: Custom analysis based on research objectives
 
+### Session Import/Export
+
+- **Export**: Download complete session as tar.gz archive (state, uploads, workspace, reports)
+- **Import**: Restore sessions from tar.gz, zip, or JSON archives with automatic path remapping
+- Session browser with metadata display (status, round count, data types)
+
 ### State Persistence & Session Recovery
 
 - Auto-reload session on page refresh (restores full state from server)
@@ -88,10 +102,10 @@ The system supports generating comprehensive reports with 9 chapters, 40+ analys
 ┌─────────────────────────────────────────────────────────────┐
 │            React Web Frontend (localhost:3000)              │
 │           (Zustand + Tailwind CSS + Recharts)               │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────┐ │
-│  │  Data   │ │ Prompts │ │Analysis │ │ Results │ │Report │ │
-│  │  Panel  │ │  Panel  │ │  Panel  │ │  Panel  │ │ Panel │ │
-│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └───────┘ │
+│  ┌──────┐ ┌───────┐ ┌────────┐ ┌───────┐ ┌──────┐ ┌──────┐ │
+│  │ Data │ │Prompts│ │Analysis│ │Results│ │Report│ │ Chat │ │
+│  │Panel │ │ Panel │ │ Panel  │ │ Panel │ │Panel │ │Panel │ │
+│  └──────┘ └───────┘ └────────┘ └───────┘ └──────┘ └──────┘ │
 └─────────────────────────┬───────────────────────────────────┘
                           │ WebSocket / REST API
 ┌─────────────────────────▼───────────────────────────────────┐
@@ -292,6 +306,7 @@ intesc/                         # Code directory
 │   │   ├── App.tsx             # Main application
 │   │   ├── components/         # React components
 │   │   │   ├── AnalysisPanel.tsx         # Analysis control + error display
+│   │   │   ├── ChatPanel.tsx            # PI Agent free-form chat
 │   │   │   ├── RoundFeedbackDialog.tsx  # Round-end feedback modal
 │   │   │   ├── DataPanel.tsx            # Data upload
 │   │   │   ├── PromptsPanel.tsx         # Agent configuration
@@ -373,6 +388,19 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.7.2 (2026-02-11)
+
+- **Chat Panel**: New Chat tab for free-form conversation with PI Agent — ask questions about analysis results, request scientific insights, and discuss next steps
+  - File attachment support with per-file agent targeting (PI, Pathology, Bioinformatics, Biochemistry)
+  - Inline figure display: PI can reference existing figures (`[[FIGURE:name]]`) or generate new ones on-the-fly (`[[GENERATE_FIGURE:description]]`) via Jupyter sandbox
+  - Markdown-rendered responses with PNG/PDF download buttons for figures
+  - Resizable input textarea with drag handle
+- **Session Export/Import**: Download complete sessions as tar.gz archives and restore them on any instance
+  - Export includes: session state, uploads, workspace files, reports (excludes large .pkl files)
+  - Import supports tar.gz, zip, and plain JSON formats with automatic path remapping
+  - Session browser modal with status badges and data type indicators
+- Bug fixes: chat file deduplication, sandbox message filtering, import path validation
 
 ### v0.6.3 (2026-02-11)
 

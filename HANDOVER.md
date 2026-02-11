@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.6.3
+**Version**: 0.7.2
 **Last Updated**: 2026-02-11
 
 ## Project Overview
@@ -17,10 +17,10 @@ This document is intended for developers and operations personnel, providing tec
 ┌─────────────────────────────────────────────────────────────┐
 │                 React Frontend (Port 3000)                  │
 │         Zustand State + Tailwind CSS + Recharts             │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────┐ │
-│  │  Data   │ │ Prompts │ │Analysis │ │ Results │ │Report │ │
-│  │  Panel  │ │  Panel  │ │+ Errors │ │  Panel  │ │ Panel │ │
-│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └───────┘ │
+│  ┌──────┐ ┌───────┐ ┌────────┐ ┌───────┐ ┌──────┐ ┌──────┐ │
+│  │ Data │ │Prompts│ │Analysis│ │Results│ │Report│ │ Chat │ │
+│  │Panel │ │ Panel │ │+Errors │ │ Panel │ │Panel │ │Panel │ │
+│  └──────┘ └───────┘ └────────┘ └───────┘ └──────┘ └──────┘ │
 └──────────────────────────┬──────────────────────────────────┘
                            │ REST API + WebSocket (state_sync, parallel_errors)
 ┌──────────────────────────▼──────────────────────────────────┐
@@ -61,13 +61,15 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~2990 lines)
+│   ├── main.py                 # FastAPI entry point (~3617 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
 │   │                           # - Chunked file upload (10GB support)
 │   │                           # - Report generation task scheduling
 │   │                           # - Base64 stripping for message optimization
+│   │                           # - PI Agent chat (figure display + generation)
+│   │                           # - Session export/import (tar.gz/zip/JSON)
 │   │
 │   ├── workflow.py             # LangGraph workflow (~1685 lines)
 │   │                           # - Multi-Agent coordination
@@ -107,8 +109,8 @@ intesc/                         # Code directory
 │   │   └── painter_agent.py    # Painter Agent (graphic abstract)
 │   │
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models
-│   │                           # - AnalysisState: Core state with version control + literature_config
+│   │   └── schemas.py          # Pydantic data models (~388 lines)
+│   │                           # - AnalysisState: Core state with version control + literature_config + chat_messages
 │   │                           # - AgentError: Structured error tracking
 │   │                           # - BiochemistryResult/File: Biochemistry data models
 │   │                           # - PublicationFigure/Table: Publication outputs
@@ -118,7 +120,7 @@ intesc/                         # Code directory
 │   │
 │   ├── utils/
 │   │   ├── llm_client.py       # LLM client (~861 lines, OpenRouter + Google DR)
-│   │   ├── sandbox.py          # Jupyter execution environment (~763 lines)
+│   │   ├── sandbox.py          # Jupyter execution environment (~768 lines)
 │   │   ├── image_utils.py      # Image processing
 │   │   ├── upload.py           # Chunked upload manager (~398 lines)
 │   │   └── llm_logger.py       # LLM logging
@@ -127,9 +129,11 @@ intesc/                         # Code directory
 │
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx             # Main application component
+│   │   ├── App.tsx             # Main application component (+ Chat tab)
 │   │   ├── components/         # React components
-│   │   ├── stores/             # Zustand state
+│   │   │   ├── ChatPanel.tsx   # PI Agent free-form chat (~466 lines)
+│   │   │   └── ...             # Other panels (Analysis, Data, Prompts, Results, Report)
+│   │   ├── stores/             # Zustand state (+ chatMessages, chatLoading)
 │   │   ├── hooks/              # API Hooks
 │   │   ├── i18n/               # Internationalization
 │   │   └── styles/             # CSS styles
@@ -289,6 +293,45 @@ The Literature Agent supports 2 research modes with automatic fallback:
 - `_multi_round_pubmed()`: E-Search → E-Fetch → XML parsing → LLM synthesis
 - `_evaluate_search_results()` / `_evaluate_pubmed_results()`: LLM judges sufficiency
 - `annotate_clusters()`: Two-phase cluster annotation — single literature search + LLM matching for all clusters at once. Called by bioinformatics agent via `annotate_clusters_callback`
+
+### 1.3 PI Agent Chat (main.py, Chat Endpoints)
+
+Free-form conversational interface with the PI Agent, separate from the workflow analysis:
+
+**Endpoint**: `POST /api/session/{session_id}/chat`
+
+**Features:**
+- Accepts text message + file uploads with per-file agent targeting (PI, Pathology, Bioinformatics, Biochemistry)
+- Builds analysis context from session state (round results, figures, literature reports) for informed responses
+- **Figure Display**: PI references existing figures via `[[FIGURE:name]]` markers — matched against on-disk figure inventory (workspace + reports directories)
+- **Figure Generation**: PI requests new figures via `[[GENERATE_FIGURE:description]]` — system spins up Jupyter sandbox, generates code via LLM, executes it, captures PNG/PDF output
+- File routing: Uploaded images → `pathology_images` or `biochemistry_files` based on target agent
+- Chat history stored in `AnalysisState.chat_messages` (last 20 messages used as LLM context)
+- Vision API used when images are attached
+
+**Key functions:**
+- `_build_chat_context()`: Builds analysis summary + scans disk for available PNG figures
+- `_generate_figures_in_chat()`: LLM writes code → sandbox executes → captures figures (neutralizes `plt.show/close`)
+- `chat_with_pi()`: Main endpoint handler — file saving, context building, LLM call, figure post-processing
+
+### 1.4 Session Export/Import (main.py)
+
+**Export** (`POST /api/session/{session_id}/export`):
+- Creates tar.gz archive on disk (temp file, not in memory) containing:
+  - `manifest.json` with session_id, version, data_base_dir
+  - `sessions/{id}.json` — complete state
+  - `states/{id}*` — Jupyter notebooks (excludes .pkl for size)
+  - `uploads/{id}/` — all uploaded files
+  - `workspace/{id}/` — Jupyter working directory
+  - `reports/{id}/` — generated reports
+- Returns `FileResponse` with background cleanup of temp file
+- Safe filename generation from session name
+
+**Import** (`POST /api/session/import`):
+- Supports tar.gz (streamed to disk first), zip, and plain JSON formats
+- Path remapping: replaces archived `data_base_dir` with current installation's `DATA_BASE_DIR`
+- Session ID validation (no path traversal)
+- Extracts files to correct directories, loads state into memory
 
 ### 2. Session Persistence
 
@@ -456,6 +499,10 @@ class LLMManager:
 | `/api/session/{id}/report/download-full` | POST | Download complete report |
 | `/api/session/{id}/literature-config` | POST | Save literature agent configuration (mode, keys, rounds) |
 | `/api/session/{id}/resume` | POST | Resume analysis (paused/completed/waiting_input) |
+| `/api/session/{id}/chat` | POST | Chat with PI Agent (supports file uploads with per-file agent targeting) |
+| `/api/session/{id}/chat` | GET | Get chat history for a session |
+| `/api/session/{id}/export` | POST | Export complete session as tar.gz archive |
+| `/api/session/import` | POST | Import session from tar.gz/zip/JSON archive |
 | `/api/config` | GET/POST | Get/save configuration |
 | `/api/file` | GET | Get file content |
 
@@ -587,6 +634,9 @@ class AnalysisState(BaseModel):
 
     # Literature config (per-session, replaces global google_api_key)
     literature_config: Dict[str, Any]   # mode (gemini_deep_research|pubmed_llm), google_api_key, pubmed_email, max_search_rounds
+
+    # Chat messages (PI Agent free-form chat, separate from workflow)
+    chat_messages: List[Dict[str, Any]] = []  # role, content, timestamp, files, figures
 
     # Configuration
     custom_prompts: Dict[str, str]
@@ -907,14 +957,14 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| FastAPI server & session mgmt | `main.py` | ~2990 lines |
+| FastAPI server, session mgmt, chat & export/import | `main.py` | ~3617 lines |
 | Report generator (9 chapters) | `report_generator.py` | ~2691 lines |
 | Workflow graph & orchestration | `workflow.py` | ~1685 lines |
 | Bioinformatics Agent (autonomous) | `bioinformatics_agent.py` | ~1496 lines |
 | PI Agent (coordinator + reviewer) | `pi_agent.py` | ~1330 lines |
 | Literature Agent (2 modes + annotation) | `literature_agent.py` | ~940 lines |
 | LLM client (OpenRouter + Google DR) | `llm_client.py` | ~861 lines |
-| Jupyter sandbox | `sandbox.py` | ~763 lines |
+| Jupyter sandbox | `sandbox.py` | ~768 lines |
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
 | Pathology Agent | `pathology_agent.py` | ~450 lines |
 | Chunked upload manager | `upload.py` | ~398 lines |
@@ -931,11 +981,12 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 | Analysis control + error display | `AnalysisPanel.tsx` | ~797 lines |
 | Report generation & download | `ReportPanel.tsx` | ~789 lines |
 | Real-time message streaming | `MessageStream.tsx` | ~778 lines |
+| Session mgmt + export/import | `Sidebar.tsx` | ~598 lines |
 | Agent prompt + literature config | `PromptsPanel.tsx` | ~509 lines |
 | Round feedback dialog | `RoundFeedbackDialog.tsx` | ~479 lines |
-| Zustand global state | `appStore.ts` | ~456 lines |
-| Session management sidebar | `Sidebar.tsx` | ~417 lines |
-| Main application | `App.tsx` | ~303 lines |
+| Zustand global state | `appStore.ts` | ~470 lines |
+| PI Agent chat | `ChatPanel.tsx` | ~466 lines |
+| Main application | `App.tsx` | ~309 lines |
 | Round results display | `ResultsPanel.tsx` | ~265 lines |
 | API + literature configuration | `ConfigPanel.tsx` | ~250 lines |
 
@@ -975,6 +1026,9 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.7.2 | 2026-02-11 | Bug fixes for chat file handling, sandbox message filtering, import path validation |
+| 0.7.1 | 2026-02-11 | ChatPanel UX improvements (per-file agent selector, resizable textarea), Sidebar export/import UX polish |
+| 0.7.0 | 2026-02-11 | Chat tab (PI Agent free-form chat with figure display/generation), session export/import (tar.gz), session browser |
 | 0.6.3 | 2026-02-11 | Literature-based cluster annotation tool, round context enrichment, per-session literature config, ConfigPanel redesign, LLM reasoning model support, timer wall-clock fix |
 | 0.6.2 | 2026-02-10 | Literature Agent rewrite (2 modes), annotate_clusters method, cluster annotations in report, session recovery, localStorage overflow fix, read mode |
 | 0.6.1 | 2026-02-10 | Bug fixes (partialize null safety, session not found, report dict keys) |
@@ -997,4 +1051,4 @@ For issues, please contact the project maintainers.
 ---
 
 *Document updated: 2026-02-11*
-*Version: 0.6.3*
+*Version: 0.7.2*
