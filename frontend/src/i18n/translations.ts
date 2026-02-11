@@ -306,6 +306,12 @@ export const translations = {
     chatEmptyDesc: 'PI Agent 可以根据分析结果回答问题，也可以分析您上传的数据',
     chatNoSession: '请先创建或选择一个分析会话',
     chatError: '发送失败，请重试',
+    chatAttach: '附件',
+    chatTargetAgent: '目标 Agent',
+    chatTargetPi: 'PI（自动分发）',
+    chatTargetPathology: '病理',
+    chatTargetBioinformatics: '生信',
+    chatTargetBiochemistry: '生化',
   },
 
   en: {
@@ -611,6 +617,12 @@ Please provide a detailed literature review report with specific citations.`,
     chatEmptyDesc: 'PI Agent can answer questions based on analysis results or analyze data you upload',
     chatNoSession: 'Please create or select an analysis session first',
     chatError: 'Failed to send, please try again',
+    chatAttach: 'Attach',
+    chatTargetAgent: 'Target Agent',
+    chatTargetPi: 'PI (auto-dispatch)',
+    chatTargetPathology: 'Pathology',
+    chatTargetBioinformatics: 'Bioinformatics',
+    chatTargetBiochemistry: 'Biochemistry',
   }
 } as const
 

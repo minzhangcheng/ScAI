@@ -323,33 +323,6 @@ export function PromptsPanel() {
         {/* Literature Agent: Research Mode Selector */}
         {selectedAgent === 'literature' && (
           <>
-            {/* PubMed Settings - always visible (all modes fallback to PubMed) */}
-            <div className="mb-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
-              <div className="flex items-center justify-between mb-3">
-                <label className="text-sm font-medium text-slate-700">
-                  {t('literaturePubmedSettings')}
-                </label>
-                <span className="text-xs text-slate-400">{t('literaturePubmedSettingsNote')}</span>
-              </div>
-              <div className="space-y-1.5">
-                <label className="block text-xs font-medium text-slate-600">
-                  {t('literatureMaxSearchRounds')}
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="20"
-                  value={literatureMaxSearchRounds}
-                  onChange={(e) => {
-                    setLiteratureMaxSearchRounds(parseInt(e.target.value) || 5)
-                    setSaved(false)
-                  }}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <p className="text-xs text-slate-400">{t('literatureMaxSearchRoundsNote')}</p>
-              </div>
-            </div>
-
             {/* Research Mode Selector */}
             <div className="mb-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100">
               <div className="flex items-center gap-2 mb-3">
@@ -404,6 +377,33 @@ export function PromptsPanel() {
                     </div>
                   </label>
                 </div>
+              </div>
+            </div>
+
+            {/* PubMed Settings - search rounds */}
+            <div className="mb-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-sm font-medium text-slate-700">
+                  {t('literaturePubmedSettings')}
+                </label>
+                <span className="text-xs text-slate-400">{t('literaturePubmedSettingsNote')}</span>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-slate-600">
+                  {t('literatureMaxSearchRounds')}
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={literatureMaxSearchRounds}
+                  onChange={(e) => {
+                    setLiteratureMaxSearchRounds(parseInt(e.target.value) || 5)
+                    setSaved(false)
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <p className="text-xs text-slate-400">{t('literatureMaxSearchRoundsNote')}</p>
               </div>
             </div>
           </>

@@ -1,9 +1,28 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import { apiFetch } from '../hooks/useApi'
 import ReactMarkdown from 'react-markdown'
-import { Send, Loader2, User, Bot, AlertCircle } from 'lucide-react'
+import { Send, Loader2, User, Bot, AlertCircle, Paperclip, X, FileText, Image as ImageIcon } from 'lucide-react'
+
+const AGENT_OPTIONS = [
+  { value: 'pi', labelKey: 'chatTargetPi' as const },
+  { value: 'pathology', labelKey: 'chatTargetPathology' as const },
+  { value: 'bioinformatics', labelKey: 'chatTargetBioinformatics' as const },
+  { value: 'biochemistry', labelKey: 'chatTargetBiochemistry' as const },
+]
+
+interface SelectedFileWithAgent {
+  file: File
+  targetAgent: string
+}
+
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg'])
+
+function isImageFile(filename: string): boolean {
+  const ext = filename.toLowerCase().slice(filename.lastIndexOf('.'))
+  return IMAGE_EXTS.has(ext)
+}
 
 export function ChatPanel() {
   const {
@@ -14,9 +33,16 @@ export function ChatPanel() {
   const { t } = useTranslation(language)
   const [input, setInput] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [selectedFiles, setSelectedFiles] = useState<SelectedFileWithAgent[]>([])
+  const [defaultAgent, setDefaultAgent] = useState('pi')
+  const [filePreviews, setFilePreviews] = useState<Record<string, string>>({})
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const loadedSessionRef = useRef<string | null>(null)
+  const [textareaHeight, setTextareaHeight] = useState(72)
+  const resizingRef = useRef(false)
+  const resizeStartRef = useRef({ y: 0, height: 0 })
 
   // Load chat history when session changes
   useEffect(() => {
@@ -33,7 +59,6 @@ export function ChatPanel() {
         setChatMessages(data.messages || [])
       })
       .catch(() => {
-        // Session may not have chat history yet
         setChatMessages([])
       })
   }, [currentSession?.id, setChatMessages])
@@ -43,44 +68,120 @@ export function ChatPanel() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [chatMessages])
 
-  // Auto-resize textarea
-  const adjustTextareaHeight = () => {
-    const textarea = textareaRef.current
-    if (textarea) {
-      textarea.style.height = 'auto'
-      textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px'
+  // Generate image previews for selected files
+  useEffect(() => {
+    const previews: Record<string, string> = {}
+    const urls: string[] = []
+    selectedFiles.forEach(({ file }) => {
+      if (file.type.startsWith('image/')) {
+        const url = URL.createObjectURL(file)
+        previews[file.name + file.size] = url
+        urls.push(url)
+      }
+    })
+    setFilePreviews(previews)
+    return () => urls.forEach(URL.revokeObjectURL)
+  }, [selectedFiles])
+
+  // Custom top-edge resize: drag upward to grow
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    resizingRef.current = true
+    resizeStartRef.current = { y: e.clientY, height: textareaHeight }
+    document.body.style.cursor = 'ns-resize'
+    document.body.style.userSelect = 'none'
+  }, [textareaHeight])
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!resizingRef.current) return
+      const delta = resizeStartRef.current.y - e.clientY // upward = positive
+      setTextareaHeight(Math.max(72, resizeStartRef.current.height + delta))
     }
+    const onMouseUp = () => {
+      if (resizingRef.current) {
+        resizingRef.current = false
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+    }
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [])
+
+  const handleAddFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newFiles = Array.from(e.target.files || [])
+    if (newFiles.length > 0) {
+      setSelectedFiles((prev) => [
+        ...prev,
+        ...newFiles.map((file) => ({ file, targetAgent: defaultAgent })),
+      ])
+    }
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  const handleRemoveFile = (index: number) => {
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const handleFileAgentChange = (index: number, agent: string) => {
+    setSelectedFiles((prev) =>
+      prev.map((item, i) => (i === index ? { ...item, targetAgent: agent } : item))
+    )
   }
 
   const handleSend = async () => {
-    if (!input.trim() || !currentSession?.id || chatLoading) return
+    if ((!input.trim() && selectedFiles.length === 0) || !currentSession?.id || chatLoading) return
 
-    const message = input.trim()
+    const message = input.trim() || (selectedFiles.length > 0 ? `[${selectedFiles.map(sf => sf.file.name).join(', ')}]` : '')
     setInput('')
     setError(null)
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    setTextareaHeight(72)
+
+    const filesToSend = [...selectedFiles]
+    setSelectedFiles([])
 
     // Optimistic: add user message immediately
     const userMsg = {
       role: 'user' as const,
-      content: message,
+      content: input.trim(),
       timestamp: new Date().toISOString(),
+      files: filesToSend.map((sf) => ({
+        filename: sf.file.name,
+        type: sf.file.type.startsWith('image/') ? 'image' : 'file',
+        target_agent: sf.targetAgent,
+      })),
     }
     addChatMessage(userMsg)
     setChatLoading(true)
 
     try {
-      const response = await apiFetch<{ role: string; content: string }>(
-        `/session/${currentSession.id}/chat`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ message, files: [] }),
-        }
-      )
+      const formData = new FormData()
+      formData.append('message', message)
+      // Send per-file target agents as JSON array
+      formData.append('target_agents', JSON.stringify(filesToSend.map((sf) => sf.targetAgent)))
+      filesToSend.forEach((sf) => formData.append('files', sf.file))
+
+      // Use raw fetch (not apiFetch) because FormData needs no Content-Type header
+      const response = await fetch(`/api/session/${currentSession.id}/chat`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ detail: 'Unknown error' }))
+        throw new Error(err.detail || 'Chat request failed')
+      }
+
+      const data = await response.json()
 
       addChatMessage({
         role: 'assistant',
-        content: response.content,
+        content: data.content,
         timestamp: new Date().toISOString(),
       })
     } catch (e: any) {
@@ -139,21 +240,42 @@ export function ChatPanel() {
                     : 'bg-slate-100 text-slate-800'
                 }`}
               >
-                {msg.role === 'assistant' ? (
-                  <div className="prose prose-sm prose-slate max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                    <ReactMarkdown>{msg.content}</ReactMarkdown>
-                  </div>
-                ) : (
-                  <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-                )}
+                {/* File attachments */}
                 {msg.files && msg.files.length > 0 && (
-                  <div className="mt-2 text-xs opacity-70">
-                    {msg.files.map((f, j) => (
-                      <span key={j} className="inline-block mr-2">
-                        {f.filename}
-                      </span>
+                  <div className="mb-2 space-y-1">
+                    {msg.files.map((f: any, j: number) => (
+                      <div
+                        key={j}
+                        className={`flex items-center gap-1.5 text-xs rounded-lg px-2 py-1 ${
+                          msg.role === 'user' ? 'bg-violet-500/30' : 'bg-slate-200'
+                        }`}
+                      >
+                        {isImageFile(f.filename) ? (
+                          <ImageIcon className="w-3 h-3 shrink-0" />
+                        ) : (
+                          <FileText className="w-3 h-3 shrink-0" />
+                        )}
+                        <span className="truncate">{f.filename}</span>
+                        {f.target_agent && f.target_agent !== 'pi' && (
+                          <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                            msg.role === 'user' ? 'bg-violet-400/40' : 'bg-violet-100 text-violet-700'
+                          }`}>
+                            {f.target_agent}
+                          </span>
+                        )}
+                      </div>
                     ))}
                   </div>
+                )}
+                {/* Message content */}
+                {msg.content && (
+                  msg.role === 'assistant' ? (
+                    <div className="prose prose-sm prose-slate max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                  )
                 )}
               </div>
               {msg.role === 'user' && (
@@ -185,25 +307,106 @@ export function ChatPanel() {
         </div>
       )}
 
+      {/* Selected files preview with per-file agent selector */}
+      {selectedFiles.length > 0 && (
+        <div className="mx-4 mb-2 space-y-1.5">
+          {selectedFiles.map(({ file, targetAgent }, i) => {
+            const preview = filePreviews[file.name + file.size]
+            return (
+              <div
+                key={i}
+                className="flex items-center gap-2 bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700"
+              >
+                {preview ? (
+                  <img src={preview} alt="" className="w-6 h-6 rounded object-cover shrink-0" />
+                ) : (
+                  <FileText className="w-4 h-4 text-slate-400 shrink-0" />
+                )}
+                <span className="truncate max-w-[160px]">{file.name}</span>
+                <select
+                  value={targetAgent}
+                  onChange={(e) => handleFileAgentChange(i, e.target.value)}
+                  className="ml-auto shrink-0 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-600 bg-white focus:ring-1 focus:ring-violet-500"
+                >
+                  {AGENT_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {t(opt.labelKey)}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => handleRemoveFile(i)}
+                  className="p-0.5 hover:bg-slate-200 rounded shrink-0"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
       {/* Input area */}
       <div className="border-t border-slate-200 p-4">
         <div className="flex items-end gap-2">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value)
-              adjustTextareaHeight()
-            }}
-            onKeyDown={handleKeyDown}
-            placeholder={t('chatPlaceholder')}
-            rows={1}
-            className="flex-1 resize-none px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all text-sm"
-            disabled={chatLoading}
+          {/* Attach button */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,.csv,.xlsx,.xls,.txt,.json,.tsv"
+            onChange={handleAddFiles}
+            className="hidden"
           />
           <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={chatLoading}
+            className="shrink-0 p-3 text-slate-500 hover:text-violet-600 hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-50"
+            title={t('chatAttach')}
+          >
+            <Paperclip className="w-5 h-5" />
+          </button>
+
+          {/* Default agent selector for new files */}
+          <select
+            value={defaultAgent}
+            onChange={(e) => setDefaultAgent(e.target.value)}
+            disabled={chatLoading}
+            className="shrink-0 px-2 py-3 border border-slate-300 rounded-xl text-xs text-slate-600 bg-white focus:ring-2 focus:ring-violet-500 focus:border-violet-500 disabled:opacity-50"
+            title={language === 'zh' ? '新文件默认Agent' : 'Default agent for new files'}
+          >
+            {AGENT_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {t(opt.labelKey)}
+              </option>
+            ))}
+          </select>
+
+          {/* Textarea with top-edge resize handle */}
+          <div className="flex-1 flex flex-col">
+            {/* Drag handle at top */}
+            <div
+              onMouseDown={handleResizeMouseDown}
+              className="flex justify-center py-1 cursor-ns-resize group"
+            >
+              <div className="w-8 h-1 rounded-full bg-slate-300 group-hover:bg-violet-400 transition-colors" />
+            </div>
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={t('chatPlaceholder')}
+              className="w-full resize-none px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 text-sm"
+              style={{ height: textareaHeight + 'px' }}
+              disabled={chatLoading}
+            />
+          </div>
+
+          {/* Send button */}
+          <button
             onClick={handleSend}
-            disabled={!input.trim() || chatLoading}
+            disabled={(!input.trim() && selectedFiles.length === 0) || chatLoading}
             className="shrink-0 p-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {chatLoading ? (

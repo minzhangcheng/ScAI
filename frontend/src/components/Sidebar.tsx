@@ -358,8 +358,8 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
               value={instruction}
               onChange={(e) => setInstruction(e.target.value)}
               placeholder={t('researchGoalPlaceholder')}
-              rows={8}
-              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-violet-500 resize-none"
+              rows={12}
+              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-violet-500 resize-y min-h-[200px]"
             />
             
             {/* Max Rounds Setting */}
@@ -369,9 +369,17 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                 <label className="text-sm font-medium text-indigo-700">
                   {language === 'zh' ? '分析轮次' : 'Analysis Rounds'}
                 </label>
-                <span className="ml-auto text-sm font-mono text-indigo-600 bg-white px-2 py-0.5 rounded border border-indigo-200">
-                  {maxRounds}
-                </span>
+                <input
+                  type="number"
+                  min="1"
+                  max="30"
+                  value={maxRounds}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value)
+                    if (!isNaN(val) && val >= 1 && val <= 30) setMaxRounds(val)
+                  }}
+                  className="ml-auto w-16 text-sm font-mono text-indigo-600 bg-white px-2 py-0.5 rounded border border-indigo-200 text-center focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                />
               </div>
               <input
                 type="range"

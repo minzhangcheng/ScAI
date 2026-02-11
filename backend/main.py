@@ -337,11 +337,6 @@ class LiteratureConfigRequest(BaseModel):
     max_search_rounds: int = Field(default=5, ge=1, le=20)
 
 
-class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=10000)
-    files: List[Dict[str, str]] = Field(default_factory=list)  # [{filename, type}]
-
-
 class BiochemistryInput(BaseModel):
     indicator: str = Field(..., min_length=1, max_length=200, description="Biochemistry indicator name")
     value: float = Field(..., description="Indicator value")
@@ -3190,8 +3185,13 @@ def _build_chat_context(state: AnalysisState) -> str:
 
 
 @app.post("/api/session/{session_id}/chat")
-async def chat_with_pi(session_id: str, request: ChatRequest):
-    """Chat with PI Agent using analysis context"""
+async def chat_with_pi(
+    session_id: str,
+    message: str = Form(...),
+    target_agents: str = Form(default="[]"),
+    files: List[UploadFile] = File(default=[]),
+):
+    """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
     validate_session_id(session_id)
     state = await ensure_session_loaded(session_id)
     if state is None:
@@ -3200,12 +3200,86 @@ async def chat_with_pi(session_id: str, request: ChatRequest):
     if config is None:
         raise HTTPException(status_code=400, detail="API configuration not set")
 
-    # Build context
+    # Parse per-file target agents
+    try:
+        per_file_agents = json.loads(target_agents)
+        if not isinstance(per_file_agents, list):
+            per_file_agents = []
+    except (json.JSONDecodeError, TypeError):
+        per_file_agents = []
+
+    # --- Save uploaded files ---
+    import base64
+    saved_files: List[Dict[str, str]] = []
+    image_b64_list: List[str] = []
+    data_file_contents: List[str] = []
+    IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg'}
+
+    chat_upload_dir = UPLOAD_DIR / session_id / "chat"
+    chat_upload_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, upload_file in enumerate(files):
+        fname = safe_filename(upload_file.filename or "file")
+        if not fname:
+            continue
+        dest = chat_upload_dir / fname
+        # Deduplicate filenames
+        counter = 1
+        while dest.exists():
+            stem = Path(fname).stem
+            suffix = Path(fname).suffix
+            dest = chat_upload_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+
+        await stream_save_file(upload_file, dest)
+        ext = dest.suffix.lower()
+        is_image = ext in IMAGE_EXTS
+        file_type = "image" if is_image else "file"
+        file_agent = per_file_agents[idx] if idx < len(per_file_agents) else "pi"
+
+        saved_files.append({
+            "filename": dest.name,
+            "type": file_type,
+            "path": str(dest),
+            "target_agent": file_agent,
+        })
+
+        # Load image as base64 for vision API
+        if is_image:
+            with open(dest, "rb") as f:
+                image_b64_list.append(base64.b64encode(f.read()).decode("utf-8"))
+
+        # Read data file content (first 5000 chars) for text inclusion
+        if not is_image and ext in {'.csv', '.tsv', '.txt', '.json'}:
+            try:
+                with open(dest, "r", encoding="utf-8", errors="replace") as f:
+                    content_preview = f.read(5000)
+                data_file_contents.append(f"--- {dest.name} ---\n{content_preview}")
+            except Exception:
+                pass
+
+    # --- Register files to target agent state (per-file) ---
+    for sf in saved_files:
+        agent = sf["target_agent"]
+        if agent == "pathology" and sf["type"] == "image":
+            state.pathology_images.append(PathologyImage(
+                filename=sf["filename"],
+                image_type="uploaded_via_chat",
+                original_path=sf["path"],
+            ))
+        elif agent == "biochemistry":
+            state.biochemistry_files.append(BiochemistryFile(
+                filename=sf["filename"],
+                file_type=sf["type"],
+                file_path=sf["path"],
+                description="Uploaded via chat",
+            ))
+
+    # --- Build context & prompt ---
     context = _build_chat_context(state)
     pi_model = state.custom_models.get("pi", "google/gemini-2.5-pro-preview-05-06")
     pi_temp = state.custom_temperatures.get("pi", 0.5)
 
-    # System prompt
     system_prompt = (
         "You are the PI (Principal Investigator) Agent of a biomedical research analysis system. "
         "You have access to the current analysis state and can help the user understand results, "
@@ -3220,79 +3294,64 @@ async def chat_with_pi(session_id: str, request: ChatRequest):
         "- Respond in the same language as the user's message"
     )
 
-    # Build messages array: system + chat history + new user message
-    messages = [{"role": "system", "content": system_prompt}]
-
-    # Add chat history (last 20 messages to stay within context limits)
+    # Build messages: system + history + new message
+    chat_messages_list = [{"role": "system", "content": system_prompt}]
     for msg in state.chat_messages[-20:]:
-        messages.append({
+        chat_messages_list.append({
             "role": msg.get("role", "user"),
             "content": msg.get("content", "")
         })
 
-    # Add new user message
-    user_content = request.message
-    if request.files:
-        file_desc = ", ".join(f["filename"] for f in request.files if "filename" in f)
-        user_content += f"\n\n[Attached files: {file_desc}]"
+    # Build user content with file info
+    user_content = message
+    if saved_files:
+        # Group files by target agent for readable description
+        agent_files: Dict[str, List[str]] = {}
+        for sf in saved_files:
+            agent_files.setdefault(sf["target_agent"], []).append(sf["filename"])
+        file_parts = []
+        for agent, fnames in agent_files.items():
+            label = agent.upper() if agent != "pi" else "PI"
+            file_parts.append(f"{label} Agent: {', '.join(fnames)}")
+        user_content += f"\n\n[Attached {len(saved_files)} file(s) — {'; '.join(file_parts)}]"
+    if data_file_contents:
+        user_content += "\n\n" + "\n\n".join(data_file_contents)
 
-    messages.append({"role": "user", "content": user_content})
+    chat_messages_list.append({"role": "user", "content": user_content})
 
     # Store user message
-    user_msg = {
+    state.chat_messages.append({
         "role": "user",
-        "content": request.message,
+        "content": message,
         "timestamp": datetime.now().isoformat(),
-        "files": request.files
-    }
-    state.chat_messages.append(user_msg)
+        "files": saved_files,
+    })
 
-    # Call LLM
+    # --- Call LLM ---
     try:
         llm_client = OpenAICompatibleClient(
             api_key=config.api.api_key,
             base_url=config.api.llm_base_url
         )
 
-        # Check if there are images to send via vision
-        image_files = [f for f in request.files if f.get("type", "").startswith("image")]
-        if image_files:
-            # Load image data as base64
-            import base64
-            image_b64_list = []
-            for img_file in image_files:
-                img_path = img_file.get("path", "")
-                if img_path and Path(img_path).exists():
-                    with open(img_path, "rb") as f:
-                        image_b64_list.append(base64.b64encode(f.read()).decode("utf-8"))
+        if image_b64_list:
+            # Vision API for images
+            full_prompt = system_prompt + "\n\nChat History:\n"
+            for msg in state.chat_messages[-21:-1]:  # exclude the just-added user msg
+                full_prompt += f"\n{msg.get('role', 'user')}: {msg.get('content', '')}"
+            full_prompt += f"\n\nuser: {user_content}"
 
-            if image_b64_list:
-                # Use vision API
-                full_prompt = system_prompt + "\n\nChat History:\n"
-                for msg in state.chat_messages[-20:]:
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    full_prompt += f"\n{role}: {content}"
-                full_prompt += f"\n\nuser: {user_content}"
-
-                response = await llm_client.chat_with_vision(
-                    model=pi_model,
-                    text_prompt=full_prompt,
-                    images=image_b64_list,
-                    temperature=pi_temp,
-                    max_tokens=4096
-                )
-            else:
-                response = await llm_client.chat(
-                    model=pi_model,
-                    messages=messages,
-                    temperature=pi_temp,
-                    max_tokens=4096
-                )
+            response = await llm_client.chat_with_vision(
+                model=pi_model,
+                text_prompt=full_prompt,
+                images=image_b64_list,
+                temperature=pi_temp,
+                max_tokens=4096
+            )
         else:
             response = await llm_client.chat(
                 model=pi_model,
-                messages=messages,
+                messages=chat_messages_list,
                 temperature=pi_temp,
                 max_tokens=4096
             )
@@ -3305,14 +3364,12 @@ async def chat_with_pi(session_id: str, request: ChatRequest):
         assistant_content = f"Error communicating with LLM: {str(e)}"
 
     # Store assistant message
-    assistant_msg = {
+    state.chat_messages.append({
         "role": "assistant",
         "content": assistant_content,
         "timestamp": datetime.now().isoformat()
-    }
-    state.chat_messages.append(assistant_msg)
+    })
 
-    # Save to disk
     await asyncio.to_thread(save_session_to_disk, session_id, state)
 
     return {"role": "assistant", "content": assistant_content}
