@@ -41,6 +41,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   const [sessionName, setSessionName] = useState(DEFAULT_PROJECT_NAME)
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Auto-reload session from API on page refresh to restore full data (images etc.)
@@ -141,26 +142,61 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   const handleExport = async () => {
     if (!currentSession || exporting) return
     setExporting(true)
+    setProgressInfo({ action: language === 'zh' ? '导出' : 'Export', detail: language === 'zh' ? '正在打包文件...' : 'Packing files...' })
     try {
       const response = await fetch(`/api/session/${currentSession.id}/export`, { method: 'POST' })
       if (!response.ok) throw new Error('Export failed')
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      // Extract filename from Content-Disposition or use default
-      const disposition = response.headers.get('Content-Disposition')
-      const match = disposition?.match(/filename=(.+)/)
-      a.download = match ? match[1] : `${currentSession.id}.tar.gz`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+
+      // Stream download with progress
+      const contentLength = response.headers.get('Content-Length')
+      const total = contentLength ? parseInt(contentLength) : 0
+
+      if (total && response.body) {
+        setProgressInfo({ action: language === 'zh' ? '导出' : 'Export', detail: language === 'zh' ? '正在下载...' : 'Downloading...', percent: 0 })
+        const reader = response.body.getReader()
+        const chunks: BlobPart[] = []
+        let received = 0
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          chunks.push(value)
+          received += value.length
+          setProgressInfo({ action: language === 'zh' ? '导出' : 'Export', detail: `${(received / 1024 / 1024).toFixed(1)} MB`, percent: Math.round((received / total) * 100) })
+        }
+
+        const blob = new Blob(chunks)
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        const disposition = response.headers.get('Content-Disposition')
+        const match = disposition?.match(/filename=(.+)/)
+        a.download = match ? match[1] : `${currentSession.id}.tar.gz`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      } else {
+        // Fallback: no Content-Length
+        setProgressInfo({ action: language === 'zh' ? '导出' : 'Export', detail: language === 'zh' ? '正在下载...' : 'Downloading...' })
+        const blob = await response.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        const disposition = response.headers.get('Content-Disposition')
+        const match = disposition?.match(/filename=(.+)/)
+        a.download = match ? match[1] : `${currentSession.id}.tar.gz`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      }
     } catch (e) {
       console.error('Export failed:', e)
       alert(t('exportFailed'))
     } finally {
       setExporting(false)
+      setProgressInfo(null)
     }
   }
 
@@ -168,18 +204,43 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
     const file = e.target.files?.[0]
     if (!file || importing) return
     setImporting(true)
+    const sizeMB = (file.size / 1024 / 1024).toFixed(1)
+    setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? `正在上传 (${sizeMB} MB)...` : `Uploading (${sizeMB} MB)...`, percent: 0 })
+
     try {
-      const formData = new FormData()
-      formData.append('file', file)
-      const response = await fetch('/api/session/import', {
-        method: 'POST',
-        body: formData,
+      // Use XMLHttpRequest for upload progress tracking
+      const data: any = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', '/api/session/import')
+
+        xhr.upload.onprogress = (ev) => {
+          if (ev.lengthComputable) {
+            const pct = Math.round((ev.loaded / ev.total) * 100)
+            setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? `正在上传... ${pct}%` : `Uploading... ${pct}%`, percent: pct })
+          }
+        }
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在解压和加载...' : 'Extracting and loading...' })
+            try { resolve(JSON.parse(xhr.responseText)) } catch { resolve({}) }
+          } else {
+            try {
+              const err = JSON.parse(xhr.responseText)
+              reject(new Error(err.detail || 'Import failed'))
+            } catch {
+              reject(new Error('Import failed'))
+            }
+          }
+        }
+
+        xhr.onerror = () => reject(new Error('Network error'))
+
+        const formData = new FormData()
+        formData.append('file', file)
+        xhr.send(formData)
       })
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ detail: 'Unknown error' }))
-        throw new Error(err.detail || 'Import failed')
-      }
-      const data = await response.json()
+
       if (data.session_id) {
         clearMessages()
         await loadSession(data.session_id)
@@ -189,7 +250,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       alert(`${t('importFailed')}: ${e.message || ''}`)
     } finally {
       setImporting(false)
-      // Reset file input so the same file can be re-imported
+      setProgressInfo(null)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
   }
@@ -198,6 +259,27 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
   return (
     <div className="w-72 border-r border-slate-200 bg-white flex flex-col h-full shrink-0">
+      {/* Export/Import Progress Modal */}
+      {progressInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-72 text-center space-y-4">
+            <Loader2 className="w-8 h-8 animate-spin text-violet-600 mx-auto" />
+            <div>
+              <p className="text-sm font-semibold text-slate-800">{progressInfo.action}</p>
+              <p className="text-xs text-slate-500 mt-1">{progressInfo.detail}</p>
+            </div>
+            {progressInfo.percent != null && (
+              <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-violet-600 h-full rounded-full transition-all duration-300"
+                  style={{ width: `${progressInfo.percent}%` }}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Logo */}
       <div className="p-4 border-b border-slate-200">
         <div className="flex items-center gap-3">

@@ -10,6 +10,7 @@ import zipfile
 import tarfile
 import tempfile
 import io
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -1285,7 +1286,7 @@ async def get_models(session_id: str):
         "pathology": state.custom_models.get("pathology", config.models.pathology_model if config else ""),
         "bioinformatics": state.custom_models.get("bioinformatics", config.models.bioinformatics_model if config else ""),
         "biochemistry": state.custom_models.get("biochemistry", config.models.biochemistry_model if config else ""),
-        "literature": state.custom_models.get("literature", config.models.pi_model if config else "google/gemini-3-pro-preview"),
+        "literature": state.custom_models.get("literature", config.models.pi_model if config else "google/gemini-3-flash-preview"),
         "painter": state.custom_models.get("painter", config.models.painter_model if config else "gemini-2.0-flash-exp-image-generation")
     }
 
@@ -2403,6 +2404,7 @@ async def get_file(path: str):
         Path(REPORTS_DIR).resolve(),
         Path(UPLOAD_DIR).resolve(),
         Path(STATE_DIR).resolve(),
+        Path(WORKSPACE_DIR).resolve(),
     ]
 
     # Resolve the real path to prevent traversal attacks like /../../../etc/passwd
@@ -2443,6 +2445,7 @@ async def download_file(path: str):
         Path(REPORTS_DIR).resolve(),
         Path(UPLOAD_DIR).resolve(),
         Path(STATE_DIR).resolve(),
+        Path(WORKSPACE_DIR).resolve(),
     ]
 
     # Resolve the real path to prevent traversal attacks
@@ -3131,8 +3134,13 @@ async def resume_bioinformatics(session_id: str):
 
 # ============== Chat Endpoints (PI Agent free-form chat) ==============
 
-def _build_chat_context(state: AnalysisState) -> str:
-    """Build analysis context summary for PI Agent chat"""
+def _build_chat_context(state: AnalysisState) -> tuple:
+    """Build analysis context summary for PI Agent chat.
+
+    Returns:
+        (context_str, figure_inventory) where figure_inventory is a list of
+        {"name": str, "path": str} dicts for PNG files found on disk.
+    """
     parts = []
 
     if state.initial_instruction:
@@ -3181,7 +3189,167 @@ def _build_chat_context(state: AnalysisState) -> str:
         for lr in state.literature_reports[-2:]:
             parts.append(f"- Topic: {lr.topic}")
 
-    return "\n".join(parts)
+    # Scan disk for actual figure files
+    figure_inventory: List[Dict[str, str]] = []
+    seen_names: set = set()
+
+    def _add_pngs(directory: Path):
+        if not directory.exists():
+            return
+        for png in sorted(directory.glob("*.png")):
+            if png.stem not in seen_names:
+                seen_names.add(png.stem)
+                figure_inventory.append({"name": png.stem, "path": str(png)})
+
+    _add_pngs(WORKSPACE_DIR / state.id)
+    _add_pngs(WORKSPACE_DIR / state.id / "figures")
+    _add_pngs(REPORTS_DIR / state.id / "figures")
+
+    if figure_inventory:
+        parts.append(f"\nAvailable Figures ({len(figure_inventory)} on disk):")
+        for fig in figure_inventory:
+            parts.append(f"  - {fig['name']}")
+
+    return "\n".join(parts), figure_inventory
+
+
+async def _generate_figures_in_chat(
+    session_id: str, state: AnalysisState, descriptions: List[str]
+) -> List[Dict[str, str]]:
+    """Generate figures via bioinformatics sandbox for chat responses."""
+    from backend.utils.sandbox import LocalJupyterSandbox
+    import time as _time
+
+    generated_figures: List[Dict[str, str]] = []
+
+    sandbox = LocalJupyterSandbox(
+        session_id=session_id,
+        state_dir=str(STATE_DIR),
+        working_dir=str(WORKSPACE_DIR),
+    )
+    try:
+        start_info = await sandbox.start()
+        if not start_info.get("session_restored"):
+            logger.warning("Chat sandbox: session not restored, figure generation may fail")
+
+        for desc_idx, desc in enumerate(descriptions):
+            # Ask LLM to write figure code
+            code_prompt = (
+                "You are a bioinformatics expert. Write Python code using scanpy and matplotlib "
+                "to generate the following figure. The variable `adata` is already loaded in the "
+                "environment with all prior analysis results.\n"
+                "IMPORTANT: End your code with plt.show() to display the figure. "
+                "Do NOT call plt.close(). Do NOT use plt.savefig().\n"
+                "Output ONLY a single ```python code block, no explanations.\n\n"
+                f"Figure request: {desc}"
+            )
+
+            llm_client = OpenAICompatibleClient(
+                api_key=config.api.api_key,
+                base_url=config.api.llm_base_url,
+            )
+            bio_model = state.custom_models.get("bioinformatics", "google/gemini-3-pro-preview")
+            code_resp = await llm_client.chat(
+                model=bio_model,
+                messages=[{"role": "user", "content": code_prompt}],
+                temperature=0.1,
+                max_tokens=4096,
+            )
+
+            code_text = code_resp.content or ""
+            code_match = re.search(r'```python\s*\n(.*?)```', code_text, re.DOTALL)
+            code = code_match.group(1) if code_match else code_text
+            if not code.strip():
+                logger.warning(f"Chat sandbox: empty code for description '{desc[:80]}'")
+                continue
+
+            ts = _time.strftime("%Y%m%d_%H%M%S")
+            fig_dir = WORKSPACE_DIR / session_id / "figures"
+            fig_dir.mkdir(parents=True, exist_ok=True)
+
+            # Wrap code: neutralize plt.show/plt.close, capture figures as PNG via IPython.display
+            # Also save high-res PDF for download
+            escaped_dir = str(fig_dir).replace("\\", "\\\\")
+            wrapped = (
+                "import matplotlib\n"
+                "import matplotlib.pyplot as plt\n"
+                "import io as _io\n"
+                "from IPython.display import display as _display, Image as _Image\n"
+                "# Neutralize plt.show() and plt.close() to keep figures alive\n"
+                "_orig_show = plt.show\n"
+                "_orig_close_func = plt.close\n"
+                "plt.show = lambda *a, **kw: None\n"
+                "plt.close = lambda *a, **kw: None\n"
+                "_code_error = None\n"
+                "try:\n"
+                f"    {code.replace(chr(10), chr(10) + '    ')}\n"
+                "except Exception as _e:\n"
+                "    _code_error = str(_e)\n"
+                "    print(f'CODE_ERROR: {_e}')\n"
+                "    import traceback; traceback.print_exc()\n"
+                "finally:\n"
+                "    plt.show = _orig_show\n"
+                "    plt.close = _orig_close_func\n"
+                "# Capture all open figures as PNG + save PDF for download\n"
+                "_fignums = plt.get_fignums()\n"
+                "for _fn in _fignums:\n"
+                "    _f = plt.figure(_fn)\n"
+                "    # Save high-res PDF\n"
+                f"    _f.savefig(r\"{escaped_dir}/chat_{ts}_\" + str(_fn) + \".pdf\", "
+                "format='pdf', dpi=300, bbox_inches='tight', facecolor='white')\n"
+                "    # Capture PNG for display\n"
+                "    _buf = _io.BytesIO()\n"
+                "    _f.savefig(_buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')\n"
+                "    _buf.seek(0)\n"
+                "    _display(_Image(data=_buf.getvalue()))\n"
+                "plt.close('all')\n"
+            )
+
+            result = await sandbox.execute(wrapped, save_to_history=False)
+            logger.info(f"Chat sandbox execute: success={result.success}, "
+                        f"kernel_figures={len(result.figures)}, error={result.error}")
+            if result.output:
+                logger.info(f"Chat sandbox output: {result.output[:2000]}")
+
+            # Primary: use kernel-captured base64 figures (most reliable)
+            if result.figures:
+                import base64 as _b64
+                for i, b64_data in enumerate(result.figures):
+                    fig_name = f"chat_{ts}_{i + 1}"
+                    fig_path = fig_dir / f"{fig_name}.png"
+                    pdf_path = fig_dir / f"{fig_name}.pdf"
+                    try:
+                        fig_path.write_bytes(_b64.b64decode(b64_data))
+                        logger.info(f"Chat sandbox: saved figure to {fig_path}")
+                        entry: Dict[str, str] = {
+                            "name": fig_name,
+                            "path": str(fig_path),
+                            "base64": b64_data,
+                        }
+                        # PDF was saved by the kernel code directly
+                        if pdf_path.exists():
+                            entry["pdfPath"] = str(pdf_path)
+                        generated_figures.append(entry)
+                    except Exception as save_err:
+                        logger.warning(f"Chat sandbox: disk save failed ({save_err}), using base64 only")
+                        generated_figures.append({
+                            "name": fig_name,
+                            "base64": b64_data,
+                        })
+            else:
+                logger.warning(f"Chat sandbox: no figures captured from kernel output "
+                               f"(success={result.success})")
+
+    except Exception as e:
+        logger.error(f"Chat figure generation error: {e}")
+        logger.error(traceback.format_exc())
+    finally:
+        try:
+            await sandbox.stop()
+        except Exception:
+            pass
+
+    return generated_figures
 
 
 @app.post("/api/session/{session_id}/chat")
@@ -3276,7 +3444,7 @@ async def chat_with_pi(
             ))
 
     # --- Build context & prompt ---
-    context = _build_chat_context(state)
+    context, figure_inventory = _build_chat_context(state)
     pi_model = state.custom_models.get("pi", "google/gemini-2.5-pro-preview-05-06")
     pi_temp = state.custom_temperatures.get("pi", 0.5)
 
@@ -3291,6 +3459,24 @@ async def chat_with_pi(
         "- Be concise but thorough in scientific explanations\n"
         "- If you don't have enough information, say so clearly\n"
         "- You can suggest next steps or additional analyses if appropriate\n"
+        "\n"
+        "FIGURE DISPLAY RULES (CRITICAL — you MUST follow these):\n"
+        "You have a built-in figure rendering system. You MUST use it. "
+        "NEVER provide Python/R code for the user to run. NEVER tell the user to 'run this code'. "
+        "The user CANNOT execute code — only you can display figures through these commands:\n\n"
+        "1. To show an EXISTING figure from the analysis, write on its own line:\n"
+        "   [[FIGURE:figure_name]]\n"
+        "   Use exact names from the 'Available Figures' list in the context above.\n"
+        "   Example: [[FIGURE:umap_cell_types]]\n\n"
+        "2. To CREATE a NEW figure that doesn't exist, write on its own line:\n"
+        "   [[GENERATE_FIGURE:detailed description]]\n"
+        "   The system will automatically generate and display the figure.\n"
+        "   Include specific details: what plot type, which genes/clusters, colors, labels, etc.\n"
+        "   Example: [[GENERATE_FIGURE:UMAP plot colored by cell_type annotation with legend on the right margin, "
+        "using tab20 palette, title 'Cell Type Clusters', frameon=False]]\n\n"
+        "When the user asks to see, show, display, generate, or create any figure/plot/chart/image, "
+        "you MUST use [[FIGURE:...]] or [[GENERATE_FIGURE:...]] — NEVER give code.\n"
+        "\n"
         "- Respond in the same language as the user's message"
     )
 
@@ -3363,16 +3549,61 @@ async def chat_with_pi(
         logger.error(traceback.format_exc())
         assistant_content = f"Error communicating with LLM: {str(e)}"
 
+    # --- Post-process: extract figure references ---
+    figure_pattern = re.compile(r'\[\[FIGURE:([\w.-]+)\]\]')
+    referenced_names = figure_pattern.findall(assistant_content)
+    logger.info(f"Chat post-process: found {len(referenced_names)} FIGURE refs, {len(figure_inventory)} in inventory")
+
+    response_figures: List[Dict[str, str]] = []
+    if referenced_names and figure_inventory:
+        fig_lookup = {f["name"]: f for f in figure_inventory}
+        for name in dict.fromkeys(referenced_names):  # deduplicate, preserve order
+            fig = fig_lookup.get(name)
+            if fig:
+                entry = {"name": fig["name"], "path": fig["path"]}
+                # Check for corresponding PDF
+                pdf_path = Path(fig["path"]).with_suffix(".pdf")
+                if pdf_path.exists():
+                    entry["pdfPath"] = str(pdf_path)
+                response_figures.append(entry)
+        logger.info(f"Chat post-process: matched {len(response_figures)} existing figures")
+
+    # --- Post-process: extract GENERATE_FIGURE requests ---
+    generate_pattern = re.compile(r'\[\[GENERATE_FIGURE:(.*?)\]\]', re.DOTALL)
+    generate_requests = generate_pattern.findall(assistant_content)
+    logger.info(f"Chat post-process: found {len(generate_requests)} GENERATE_FIGURE requests")
+
+    if generate_requests:
+        try:
+            generated = await _generate_figures_in_chat(session_id, state, generate_requests)
+            logger.info(f"Chat post-process: generated {len(generated)} figures: {generated}")
+            response_figures.extend(generated)
+        except Exception as e:
+            logger.error(f"Chat figure generation failed: {e}")
+            logger.error(traceback.format_exc())
+
+    # Clean markers from text
+    cleaned_content = figure_pattern.sub('', assistant_content)
+    cleaned_content = generate_pattern.sub('', cleaned_content).strip()
+    cleaned_content = re.sub(r'\n{3,}', '\n\n', cleaned_content)
+
     # Store assistant message
-    state.chat_messages.append({
+    assistant_msg: Dict[str, Any] = {
         "role": "assistant",
-        "content": assistant_content,
-        "timestamp": datetime.now().isoformat()
-    })
+        "content": cleaned_content,
+        "timestamp": datetime.now().isoformat(),
+    }
+    if response_figures:
+        assistant_msg["figures"] = response_figures
+    state.chat_messages.append(assistant_msg)
+    logger.info(f"Chat response: {len(response_figures)} figures attached to response")
 
     await asyncio.to_thread(save_session_to_disk, session_id, state)
 
-    return {"role": "assistant", "content": assistant_content}
+    result: Dict[str, Any] = {"role": "assistant", "content": cleaned_content}
+    if response_figures:
+        result["figures"] = response_figures
+    return result
 
 
 @app.get("/api/session/{session_id}/chat")

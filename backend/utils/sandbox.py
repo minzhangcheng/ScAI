@@ -542,8 +542,8 @@ print(f"Session saved: {{len(_session_data)}} variables")
         try:
             # Send execute request
             msg_id = self.kc.execute(code)
-            
-            # Collect outputs
+
+            # Collect outputs — only process messages belonging to THIS execution (matched by msg_id)
             while True:
                 try:
                     msg = await asyncio.wait_for(
@@ -574,17 +574,22 @@ print(f"Session saved: {{len(_session_data)}} variables")
                         except Exception as interrupt_error:
                             logger.error(f"Failed to interrupt kernel: {interrupt_error}")
                     break
-                
+
+                # Skip messages from other execution requests (e.g. leftover from session restore)
+                parent_msg_id = msg.get('parent_header', {}).get('msg_id', '')
+                if parent_msg_id and parent_msg_id != msg_id:
+                    continue
+
                 msg_type = msg['msg_type']
                 content = msg['content']
-                
+
                 if msg_type == 'status':
                     if content['execution_state'] == 'idle':
                         break
-                
+
                 elif msg_type == 'execute_input':
                     execution_count = content.get('execution_count', 0)
-                
+
                 elif msg_type == 'stream':
                     text = content.get('text', '')
                     output_text.append(text)
@@ -593,7 +598,7 @@ print(f"Session saved: {{len(_session_data)}} variables")
                         "name": content.get('name', 'stdout'),
                         "text": text
                     })
-                
+
                 elif msg_type == 'execute_result':
                     data = content.get('data', {})
                     if 'text/plain' in data:
@@ -602,7 +607,7 @@ print(f"Session saved: {{len(_session_data)}} variables")
                         "type": "execute_result",
                         "data": data
                     })
-                
+
                 elif msg_type == 'display_data':
                     data = content.get('data', {})
                     # Extract images
@@ -612,7 +617,7 @@ print(f"Session saved: {{len(_session_data)}} variables")
                         "type": "display_data",
                         "data": data
                     })
-                
+
                 elif msg_type == 'error':
                     error_msg = '\n'.join(content.get('traceback', []))
                     outputs.append({

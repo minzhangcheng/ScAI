@@ -145,7 +145,7 @@ export const DEFAULT_MODELS: AgentModels = {
   pathology: 'google/gemini-3-pro-preview',
   bioinformatics: 'anthropic/claude-opus-4.6',
   biochemistry: 'google/gemini-3-pro-preview',
-  literature: 'google/gemini-3-pro-preview',
+  literature: 'google/gemini-3-flash-preview',
   painter: 'google/gemini-3-pro-image-preview'  // Image generation model via OpenRouter
 }
 
@@ -216,7 +216,7 @@ interface AppState {
   setLiteratureMaxSearchRounds: (rounds: number) => void
 
   // Chat messages (PI Agent free-form chat)
-  chatMessages: { role: 'user' | 'assistant'; content: string; timestamp: string; files?: { filename: string; type: string }[] }[]
+  chatMessages: { role: 'user' | 'assistant'; content: string; timestamp: string; files?: { filename: string; type: string }[]; figures?: { name: string; path?: string; base64?: string; pdfPath?: string }[] }[]
   addChatMessage: (msg: AppState['chatMessages'][0]) => void
   setChatMessages: (msgs: AppState['chatMessages']) => void
   chatLoading: boolean

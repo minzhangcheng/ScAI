@@ -3,7 +3,7 @@ import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import { apiFetch } from '../hooks/useApi'
 import ReactMarkdown from 'react-markdown'
-import { Send, Loader2, User, Bot, AlertCircle, Paperclip, X, FileText, Image as ImageIcon } from 'lucide-react'
+import { Send, Loader2, User, Bot, AlertCircle, Paperclip, X, FileText, Image as ImageIcon, Download } from 'lucide-react'
 
 const AGENT_OPTIONS = [
   { value: 'pi', labelKey: 'chatTargetPi' as const },
@@ -183,6 +183,7 @@ export function ChatPanel() {
         role: 'assistant',
         content: data.content,
         timestamp: new Date().toISOString(),
+        figures: data.figures,
       })
     } catch (e: any) {
       setError(t('chatError'))
@@ -276,6 +277,49 @@ export function ChatPanel() {
                   ) : (
                     <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                   )
+                )}
+                {/* Referenced / generated figures */}
+                {msg.figures && msg.figures.length > 0 && (
+                  <div className="mt-3 space-y-3">
+                    {msg.figures.map((fig, idx) => (
+                      <div key={idx} className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+                        <img
+                          src={fig.base64
+                            ? `data:image/png;base64,${fig.base64}`
+                            : `/api/file?path=${encodeURIComponent(fig.path || '')}`}
+                          alt={fig.name}
+                          className="w-full h-auto"
+                          loading="lazy"
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                        />
+                        <div className="px-3 py-2 border-t border-slate-100 flex items-center justify-between">
+                          <p className="text-xs font-medium text-slate-700">{fig.name}</p>
+                          <div className="flex gap-1.5">
+                            {fig.pdfPath && (
+                              <a
+                                href={`/api/file?path=${encodeURIComponent(fig.pdfPath)}`}
+                                download={`${fig.name}.pdf`}
+                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-violet-700 bg-violet-50 hover:bg-violet-100 rounded-md transition-colors"
+                              >
+                                <Download className="w-3 h-3" />
+                                PDF
+                              </a>
+                            )}
+                            {fig.path && (
+                              <a
+                                href={`/api/file?path=${encodeURIComponent(fig.path)}`}
+                                download={`${fig.name}.png`}
+                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-600 bg-slate-50 hover:bg-slate-100 rounded-md transition-colors"
+                              >
+                                <Download className="w-3 h-3" />
+                                PNG
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
               {msg.role === 'user' && (
