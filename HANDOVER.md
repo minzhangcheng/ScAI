@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.7.2
-**Last Updated**: 2026-02-11
+**Version**: 0.7.3
+**Last Updated**: 2026-02-13
 
 ## Project Overview
 
@@ -61,7 +61,7 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~3617 lines)
+│   ├── main.py                 # FastAPI entry point (~4273 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
@@ -69,9 +69,10 @@ intesc/                         # Code directory
 │   │                           # - Report generation task scheduling
 │   │                           # - Base64 stripping for message optimization
 │   │                           # - PI Agent chat (figure display + generation)
-│   │                           # - Session export/import (tar.gz/zip/JSON)
+│   │                           # - Chat delegation (PI delegates to agents)
+│   │                           # - Session export/import (tar.gz/zip/JSON, incl. .pkl)
 │   │
-│   ├── workflow.py             # LangGraph workflow (~1685 lines)
+│   ├── workflow.py             # LangGraph workflow (~1826 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
@@ -81,20 +82,23 @@ intesc/                         # Code directory
 │   │                           # - File upload handling during pause
 │   │                           # - Round context enrichment (previous findings + code history)
 │   │                           # - annotate_clusters_callback for literature-based annotation
+│   │                           # - Deep Research topic merging + gap coverage fallback
+│   │                           # - Report-only resume via generate_report()
 │   │
-│   ├── report_generator.py     # Report generator (~2691 lines)
-│   │                           # - 9 chapters, 40+ analysis items
-│   │                           # - Jupyter code execution
-│   │                           # - Chart/table generation (PNG/PDF/CSV)
+│   ├── report_generator.py     # Report generator (~3196 lines)
+│   │                           # - No-sandbox report compilation (v0.7.3 rewrite)
+│   │                           # - Builds analysis record from code_history
+│   │                           # - Scans workspace for existing figures/tables
+│   │                           # - PI plans narrative around existing assets
 │   │                           # - Cluster annotation table extraction
 │   │
 │   ├── regenerate_report_html.py # Report HTML regeneration utility
 │   │
-│   ├── config.py               # Configuration management (~288 lines)
+│   ├── config.py               # Configuration management (~292 lines)
 │   │                           # - APIConfig: LLM keys + proxy (google_api_key moved to literature_config)
-│   │                           # - ModelConfig: Model selection per agent
+│   │                           # - ModelConfig: Model selection per agent (incl. literature_model)
 │   │                           # - AgentTemperatures: Per-agent temperatures
-│   │                           # - AgentPrompts: System prompts (English)
+│   │                           # - AgentPrompts: System prompts (English, batch effect + PDF guidelines)
 │   │                           # - SystemConfig: System parameters
 │   │                           # - Data directory path definitions
 │   │                           # - Literature agent defaults (mode, max_search_rounds)
@@ -105,22 +109,23 @@ intesc/                         # Code directory
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2)
-│   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~940 lines)
+│   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~907 lines)
 │   │   └── painter_agent.py    # Painter Agent (graphic abstract)
 │   │
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models (~388 lines)
-│   │                           # - AnalysisState: Core state with version control + literature_config + chat_messages
+│   │   └── schemas.py          # Pydantic data models (~392 lines)
+│   │                           # - AnalysisState: Core state with version control + literature_config + chat_messages + round_wait_seconds
+│   │                           # - TaskStatus: GENERATING_REPORT status added
 │   │                           # - AgentError: Structured error tracking
 │   │                           # - BiochemistryResult/File: Biochemistry data models
 │   │                           # - PublicationFigure/Table: Publication outputs
 │   │                           # - GraphicAbstract: Painter agent output
 │   │                           # - BioinformaticsCheckpoint: Step-level recovery
-│   │                           # - WebSocketMessage: annotation_result type added
+│   │                           # - WebSocketMessage: chat_delegation, chat_result, chat_error types added
 │   │
 │   ├── utils/
-│   │   ├── llm_client.py       # LLM client (~861 lines, OpenRouter + Google DR)
-│   │   ├── sandbox.py          # Jupyter execution environment (~768 lines)
+│   │   ├── llm_client.py       # LLM client (~872 lines, OpenRouter + Google DR)
+│   │   ├── sandbox.py          # Jupyter execution environment (~793 lines, auto PDF monkey-patch)
 │   │   ├── image_utils.py      # Image processing
 │   │   ├── upload.py           # Chunked upload manager (~398 lines)
 │   │   └── llm_logger.py       # LLM logging
@@ -131,9 +136,9 @@ intesc/                         # Code directory
 │   ├── src/
 │   │   ├── App.tsx             # Main application component (+ Chat tab)
 │   │   ├── components/         # React components
-│   │   │   ├── ChatPanel.tsx   # PI Agent free-form chat (~466 lines)
+│   │   │   ├── ChatPanel.tsx   # PI Agent free-form chat + delegation (~561 lines)
 │   │   │   └── ...             # Other panels (Analysis, Data, Prompts, Results, Report)
-│   │   ├── stores/             # Zustand state (+ chatMessages, chatLoading)
+│   │   ├── stores/             # Zustand state (+ chatMessages, chatLoading, chatDelegation)
 │   │   ├── hooks/              # API Hooks
 │   │   ├── i18n/               # Internationalization
 │   │   └── styles/             # CSS styles
@@ -233,10 +238,13 @@ initialize_round ◄────────────────────
 4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
 5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval
 6. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
-7. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with 2-minute wall-clock countdown (works correctly in background tabs). Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend has 10-minute safety timeout. User input or file uploads on the last round extends `max_rounds` by 1.
+7. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with configurable countdown (default 300s; -1=manual-only, 0=no-wait auto-continue, stored in `round_wait_seconds`). Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend has 10-minute safety timeout. User input or file uploads on the last round extends `max_rounds` by 1.
 8. **File Upload During Pause**: Users can upload pathology images while workflow is in `waiting_input` or `completed` state. Files are tracked in `pending_uploaded_files` and processed in the next round.
 9. **Round Context Enrichment**: `_build_previous_findings_context()` and `_build_code_history_summary()` methods provide each agent with previous round findings and code execution history, preventing redundant analyses in multi-round workflows.
 10. **Literature-based Cluster Annotation**: `_annotate_clusters_callback()` routes bioinformatics agent's `annotate_clusters` tool calls to the literature agent for efficient batch cluster annotation.
+11. **Deep Research Topic Merging**: When using Gemini Deep Research mode, multiple topics are merged into a single comprehensive query (one DR call instead of N). After the DR call, `_evaluate_dr_coverage()` checks which topics were insufficiently covered and falls back to PubMed+LLM for gaps.
+12. **Report-Only Resume**: `generate_report()` method runs only the report generation phase (final report → graphic abstract → detailed report), bypassing analysis rounds. Used when a session completed all analysis but was interrupted during report generation. WebSocket handler detects this condition automatically.
+13. **GENERATING_REPORT Status**: New `TaskStatus.GENERATING_REPORT` marks sessions in report generation phase, enabling detection of interrupted report generation on resume.
 
 **WebSocket Message Types:**
 
@@ -262,6 +270,9 @@ initialize_round ◄────────────────────
 | `human_input_received` | User input received, continuing workflow |
 | `annotation_result` | Literature-based cluster annotation result |
 | `data_request` | Agent requesting additional data |
+| `chat_delegation` | Chat delegation progress (started/agent_complete/agent_error/synthesizing) |
+| `chat_result` | Final chat delegation result |
+| `chat_error` | Chat delegation error |
 
 ### 1.1 Biochemistry Agent (v2 - 3-Step Workflow)
 
@@ -273,7 +284,7 @@ Since v0.5.1, the biochemistry agent uses a 3-step analysis pipeline:
 
 This approach is more robust against vision API inconsistencies (see Known Issues).
 
-### 1.2 Literature Agent (2 Research Modes + Cluster Annotation, ~940 lines)
+### 1.2 Literature Agent (2 Research Modes + Cluster Annotation, ~907 lines)
 
 The Literature Agent supports 2 research modes with automatic fallback:
 
@@ -284,12 +295,14 @@ The Literature Agent supports 2 research modes with automatic fallback:
 
 **Fallback chain**: Configured mode → PubMed + LLM → Quick search (LLM knowledge only)
 
-**Multi-round search**: Both modes support iterative refinement (configurable 1-20 rounds). After each round, LLM evaluates whether results are sufficient and generates refined queries if needed.
+**Search behavior**:
+- **Gemini Deep Research**: Single call per topic — DR handles multi-round search/synthesis internally on Google's servers. Gap coverage for multi-topic queries is handled at the workflow level (`_evaluate_dr_coverage()` in `workflow.py`), falling back to PubMed+LLM for insufficiently covered topics.
+- **PubMed + LLM**: Multi-round iterative search (configurable 1-20 rounds). After each round, LLM evaluates whether results are sufficient and generates refined queries if needed.
 
 **Per-session configuration**: Literature mode, Google API key, PubMed email, and max search rounds are stored in `AnalysisState.literature_config` (not global `APIConfig`). The `GoogleDeepResearchClient` is created lazily inside the agent only when a Google API key is provided.
 
 **Key methods:**
-- `_multi_round_gemini()`: Google Interactions API (start + poll, 5s interval)
+- `_multi_round_gemini()`: Single Google Interactions API call (start + poll, 5s interval)
 - `_multi_round_pubmed()`: E-Search → E-Fetch → XML parsing → LLM synthesis
 - `_evaluate_search_results()` / `_evaluate_pubmed_results()`: LLM judges sufficiency
 - `annotate_clusters()`: Two-phase cluster annotation — single literature search + LLM matching for all clusters at once. Called by bioinformatics agent via `annotate_clusters_callback`
@@ -314,13 +327,41 @@ Free-form conversational interface with the PI Agent, separate from the workflow
 - `_generate_figures_in_chat()`: LLM writes code → sandbox executes → captures figures (neutralizes `plt.show/close`)
 - `chat_with_pi()`: Main endpoint handler — file saving, context building, LLM call, figure post-processing
 
-### 1.4 Session Export/Import (main.py)
+### 1.4 Chat Delegation (main.py)
+
+When a user's chat request requires specialized analysis beyond PI's direct knowledge, PI can delegate to other agents:
+
+**Flow:**
+1. User sends message via `POST /api/session/{id}/chat`
+2. PI Agent receives the message with a delegation-aware system prompt
+3. If PI returns a delegation plan (`{"delegation": true, "delegates": [...], "plan": "..."}`), the backend:
+   - Returns `{"status": "processing"}` immediately to the frontend
+   - Spawns a background task `_run_chat_delegation()` to orchestrate agents
+4. Each delegated agent is executed via `_execute_chat_agent()`:
+   - **Bioinformatics**: Creates full sandbox with session restore, literature/PI callbacks, runs `run_autonomous_analysis()`
+   - **Pathology**: Creates `PathologyAgent.process()` call
+   - **Biochemistry**: Creates `BiochemistryAgent.process()` call
+   - **Literature**: Creates `LiteratureAgent.process()` call
+5. WebSocket messages track progress (`chat_delegation` type with status: started/agent_complete/agent_error/synthesizing)
+6. After all agents complete, PI synthesizes results via `_build_synthesis_prompt()`
+7. Final response saved to `chat_messages` and sent via `chat_result` WebSocket message
+
+**Cancellation**: `POST /api/session/{id}/chat/cancel` cancels the background delegation task and stops any active sandbox.
+
+**Key functions:**
+- `_try_parse_delegation()`: Parses PI response as delegation plan (JSON or markdown code block)
+- `_execute_chat_agent()`: Executes a single agent with full callback wiring
+- `_run_chat_delegation()`: Background task orchestrating delegation flow
+- `_build_synthesis_prompt()`: Builds PI synthesis prompt from agent results
+- `_collect_session_figures()`: Collects figures from workspace (optionally filtered by creation time)
+
+### 1.5 Session Export/Import (main.py)
 
 **Export** (`POST /api/session/{session_id}/export`):
 - Creates tar.gz archive on disk (temp file, not in memory) containing:
   - `manifest.json` with session_id, version, data_base_dir
   - `sessions/{id}.json` — complete state
-  - `states/{id}*` — Jupyter notebooks (excludes .pkl for size)
+  - `states/{id}*` — Jupyter notebooks and .pkl files (sandbox state for full restore)
   - `uploads/{id}/` — all uploaded files
   - `workspace/{id}/` — Jupyter working directory
   - `reports/{id}/` — generated reports
@@ -331,7 +372,7 @@ Free-form conversational interface with the PI Agent, separate from the workflow
 - Supports tar.gz (streamed to disk first), zip, and plain JSON formats
 - Path remapping: replaces archived `data_base_dir` with current installation's `DATA_BASE_DIR`
 - Session ID validation (no path traversal)
-- Extracts files to correct directories, loads state into memory
+- Extracts files (including .pkl for sandbox restore) to correct directories, loads state into memory
 
 ### 2. Session Persistence
 
@@ -391,8 +432,10 @@ class LocalJupyterSandbox:
 - Auto-saves as .ipynb format
 - dill serialization supports pause/resume
 - Fixed random seed (42) ensures reproducibility
+- **Auto PDF generation**: Monkey-patches `Figure.savefig` to automatically generate companion high-res PDFs (300 DPI) alongside every PNG saved. Uses vectorized Type 42 fonts for editable PDFs
+- **Code history extraction**: `get_code_history()` returns executed cells from the notebook, used by bioinformatics agent to populate code_history on session restore
 
-### 4. Report Generator (report_generator.py, ~2691 lines)
+### 4. Report Generator (report_generator.py, ~3196 lines)
 
 **9 Chapters + Cluster Annotation Table:**
 
@@ -408,32 +451,44 @@ class LocalJupyterSandbox:
 | Trajectory | PAGA graph, trajectory analysis |
 | Targeted | Research objective-related analysis |
 
-**Generation Flow:**
+**Generation Flow (v0.7.3 — No Sandbox):**
+
+Since v0.7.3, the report generator no longer uses Jupyter sandbox for code re-execution. Instead, it compiles the report entirely from existing analysis artifacts:
 
 ```python
 class DetailedReportGenerator:
     async def generate_report(self, state: AnalysisState):
-        # 1. Initialize Jupyter Sandbox
-        await self.sandbox.start()
+        # 1. Build structured analysis record from state.code_history
+        analysis_record = self._build_analysis_record(state)
 
-        # 2. Load data
-        await self._setup_environment(state)
+        # 2. Scan workspace for existing figures and tables
+        existing_figures = self._scan_existing_figures()
+        existing_tables = self._scan_existing_tables()
 
-        # 3. PI plans report structure
-        report_plan = await self._plan_report(state, conclusions, language)
+        # 3. Extract findings from round results
+        findings = self._extract_findings(state)
 
-        # 4. Generate each section
+        # 4. PI plans report structure from analysis record
+        report_plan = await self._plan_report_from_analysis(...)
+
+        # 5. Generate each section using existing figures + PI narrative
         for section_plan in report_plan["sections"]:
-            section = await self._generate_section(...)
+            section = await self._generate_section_from_existing_figures(...)
 
-        # 5. Generate abstract and conclusions
+        # 6. Generate abstract and conclusions
         abstract = await self._generate_abstract(...)
-        final_conclusions = await self._generate_final_conclusions(...)
+        conclusions = await self._generate_conclusions(...)
 ```
 
-**Cluster Annotation Extraction**: After loading adata in `_auto_load_processed_data()`, runs sandbox code to extract `leiden → cell_type` mapping from `obs` columns. Stored in `self.cluster_annotations` dict, rendered as HTML table in report, and included in LLM prompts so narrative uses cell type names instead of cluster numbers.
+**Key methods (v0.7.3):**
+- `_build_analysis_record()`: Parses `code_history` to find cells that saved figures, connects code → figures → round findings
+- `_plan_report_from_analysis()`: PI plans report structure based on analysis record and available figures
+- `_generate_section_from_existing_figures()`: Writes narrative around existing figures (no code execution)
+- `_scan_existing_figures()` / `_scan_existing_tables()`: Scans workspace + reports directories for PNG/PDF/CSV files
 
-### 5. LLM Client (llm_client.py, ~861 lines)
+**Cluster Annotation Extraction**: `_extract_cluster_annotations_from_state()` extracts cluster annotations from state data (no sandbox needed). Stored in `self.cluster_annotations` dict, rendered as HTML table in report, and included in LLM prompts so narrative uses cell type names instead of cluster numbers.
+
+### 5. LLM Client (llm_client.py, ~872 lines)
 
 **Three client classes:**
 
@@ -498,9 +553,12 @@ class LLMManager:
 | `/api/session/{id}/report/download-all-tables` | POST | Download all tables |
 | `/api/session/{id}/report/download-full` | POST | Download complete report |
 | `/api/session/{id}/literature-config` | POST | Save literature agent configuration (mode, keys, rounds) |
-| `/api/session/{id}/resume` | POST | Resume analysis (paused/completed/waiting_input) |
+| `/api/session/{id}/round-wait` | POST | Update round wait countdown seconds (-1=manual, 0=no wait, positive=countdown) |
+| `/api/session/{id}/round-wait` | GET | Get current round wait setting |
+| `/api/session/{id}/resume` | POST | Resume analysis (paused/completed/waiting_input/failed/generating_report) |
 | `/api/session/{id}/chat` | POST | Chat with PI Agent (supports file uploads with per-file agent targeting) |
 | `/api/session/{id}/chat` | GET | Get chat history for a session |
+| `/api/session/{id}/chat/cancel` | POST | Cancel active chat delegation task |
 | `/api/session/{id}/export` | POST | Export complete session as tar.gz archive |
 | `/api/session/import` | POST | Import session from tar.gz/zip/JSON archive |
 | `/api/config` | GET/POST | Get/save configuration |
@@ -548,6 +606,10 @@ type MessageType =
   | 'figure_revision'   // Revision requested
   // Cluster annotation
   | 'annotation_result' // Literature-based cluster annotation result
+  // Chat delegation
+  | 'chat_delegation'   // Delegation progress (started/agent_complete/agent_error/synthesizing)
+  | 'chat_result'       // Final delegation result
+  | 'chat_error'        // Delegation error
 ```
 
 **State Sync Message:**
@@ -596,7 +658,7 @@ type MessageType =
 class AnalysisState(BaseModel):
     id: str
     name: str
-    status: TaskStatus  # pending, running, completed, failed, paused, waiting_input (new in v0.6.0)
+    status: TaskStatus  # pending, running, completed, failed, paused, waiting_input, generating_report
     initial_instruction: str
 
     # Version control
@@ -631,6 +693,7 @@ class AnalysisState(BaseModel):
     pending_human_input: Optional[str]  # User message waiting to be processed
     pending_uploaded_files: List[Dict]  # Files uploaded during pause
     max_rounds: int = 0                 # Dynamic max rounds (0 = use config default)
+    round_wait_seconds: int = 300       # Countdown between rounds (-1=manual, 0=no wait, positive=countdown)
 
     # Literature config (per-session, replaces global google_api_key)
     literature_config: Dict[str, Any]   # mode (gemini_deep_research|pubmed_llm), google_api_key, pubmed_email, max_search_rounds
@@ -823,6 +886,7 @@ uvicorn stdout      # API logs
 | `image_tile_size` | 1024 | Pathology image tile size |
 | `image_overlap` | 64 | Tile overlap pixels |
 | `blank_threshold` | 0.95 | Threshold for detecting blank tiles |
+| `round_wait_seconds` | 300 | Countdown between rounds (-1=manual, 0=no wait, positive=seconds) |
 
 **Literature Agent Defaults:**
 
@@ -837,10 +901,10 @@ uvicorn stdout      # API logs
 |-------|--------------|
 | PI | `google/gemini-3-pro-preview` |
 | Pathology | `google/gemini-3-pro-preview` |
-| Bioinformatics | `anthropic/claude-opus-4.6` |
+| Bioinformatics | `anthropic/claude-sonnet-4.5` |
 | Biochemistry | `google/gemini-3-pro-preview` |
 | Painter | `google/gemini-3-pro-image-preview` |
-| Literature | `google/gemini-3-pro-preview` (chat); Deep Research via mode config |
+| Literature | `google/gemini-3-flash-preview` (chat); Deep Research via mode config |
 
 **Agent Temperatures:**
 
@@ -904,9 +968,10 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 **9. Deep Research Timeout**
 
-- OpenRouter deep research models can take up to 10 minutes per request
+- Gemini Deep Research via Google Interactions API can take up to 30 minutes per request
 - v0.6.1+ uses per-request `timeout=660s` for deep research calls (vs default 120s)
-- If timeout errors persist, check network/proxy connection and OpenRouter service status
+- Since v0.7.3, Deep Research is single-call per topic (DR handles multi-round internally). Gap coverage is handled at the workflow level by falling back to PubMed+LLM
+- If timeout errors persist, check network/proxy connection and Google API service status
 
 ## Dependencies
 
@@ -957,37 +1022,38 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| FastAPI server, session mgmt, chat & export/import | `main.py` | ~3617 lines |
-| Report generator (9 chapters) | `report_generator.py` | ~2691 lines |
-| Workflow graph & orchestration | `workflow.py` | ~1685 lines |
-| Bioinformatics Agent (autonomous) | `bioinformatics_agent.py` | ~1496 lines |
+| FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4273 lines |
+| Report generator (no-sandbox compilation) | `report_generator.py` | ~3196 lines |
+| Workflow graph, orchestration & DR optimization | `workflow.py` | ~1826 lines |
+| Bioinformatics Agent (autonomous + session restore) | `bioinformatics_agent.py` | ~1543 lines |
 | PI Agent (coordinator + reviewer) | `pi_agent.py` | ~1330 lines |
-| Literature Agent (2 modes + annotation) | `literature_agent.py` | ~940 lines |
-| LLM client (OpenRouter + Google DR) | `llm_client.py` | ~861 lines |
-| Jupyter sandbox | `sandbox.py` | ~768 lines |
+| Literature Agent (2 modes + annotation) | `literature_agent.py` | ~907 lines |
+| LLM client (OpenRouter + Google DR) | `llm_client.py` | ~872 lines |
+| Jupyter sandbox (+ auto PDF) | `sandbox.py` | ~793 lines |
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
-| Pathology Agent | `pathology_agent.py` | ~450 lines |
+| Pathology Agent (batch size 5 + dynamic timeout) | `pathology_agent.py` | ~453 lines |
 | Chunked upload manager | `upload.py` | ~398 lines |
+| Data models & schemas | `schemas.py` | ~392 lines |
 | Painter Agent (graphic abstract) | `painter_agent.py` | ~326 lines |
-| Configuration & prompts | `config.py` | ~288 lines |
+| Configuration & prompts | `config.py` | ~292 lines |
 | Agent base class | `base.py` | ~246 lines |
 
 ### Frontend
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| API hooks + WebSocket | `useApi.ts` | ~1172 lines |
+| API hooks + WebSocket | `useApi.ts` | ~1249 lines |
 | Data upload interface | `DataPanel.tsx` | ~965 lines |
-| Analysis control + error display | `AnalysisPanel.tsx` | ~797 lines |
+| Real-time message streaming + delegation | `MessageStream.tsx` | ~846 lines |
 | Report generation & download | `ReportPanel.tsx` | ~789 lines |
-| Real-time message streaming | `MessageStream.tsx` | ~778 lines |
-| Session mgmt + export/import | `Sidebar.tsx` | ~598 lines |
+| Analysis control + error display | `AnalysisPanel.tsx` | ~725 lines |
+| Session mgmt + export/import | `Sidebar.tsx` | ~624 lines |
+| PI Agent chat + delegation | `ChatPanel.tsx` | ~561 lines |
 | Agent prompt + literature config | `PromptsPanel.tsx` | ~509 lines |
-| Round feedback dialog | `RoundFeedbackDialog.tsx` | ~479 lines |
-| Zustand global state | `appStore.ts` | ~470 lines |
-| PI Agent chat | `ChatPanel.tsx` | ~466 lines |
+| Round feedback dialog (configurable timer) | `RoundFeedbackDialog.tsx` | ~503 lines |
+| Zustand global state (+ delegation) | `appStore.ts` | ~503 lines |
+| Round results + publication outputs | `ResultsPanel.tsx` | ~348 lines |
 | Main application | `App.tsx` | ~309 lines |
-| Round results display | `ResultsPanel.tsx` | ~265 lines |
 | API + literature configuration | `ConfigPanel.tsx` | ~250 lines |
 
 ## Known Issues
@@ -1026,6 +1092,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.7.3 | 2026-02-13 | Chat delegation, no-sandbox report generation, report-only resume, auto PDF, Deep Research optimization, bioinformatics session restore, batch effect check, configurable round timer, pathology reliability, .pkl in export/import |
 | 0.7.2 | 2026-02-11 | Bug fixes for chat file handling, sandbox message filtering, import path validation |
 | 0.7.1 | 2026-02-11 | ChatPanel UX improvements (per-file agent selector, resizable textarea), Sidebar export/import UX polish |
 | 0.7.0 | 2026-02-11 | Chat tab (PI Agent free-form chat with figure display/generation), session export/import (tar.gz), session browser |
@@ -1050,5 +1117,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-02-11*
-*Version: 0.7.2*
+*Document updated: 2026-02-13*
+*Version: 0.7.3*

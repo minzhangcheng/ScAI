@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.7.2
+**Version**: 0.7.3
 
 ## Core Features
 
@@ -19,14 +19,16 @@
 
 - **Chat Tab**: Free-form conversational interface with the PI Agent after analysis
 - Ask questions about results, request explanations, or discuss next steps
+- **Chat Delegation**: PI can delegate complex requests to specialized agents (Bioinformatics, Pathology, Biochemistry, Literature) — agents execute analysis in the background, then PI synthesizes results into a comprehensive response
 - **File Attachments**: Upload images and data files directly in chat, with per-file agent targeting (PI, Pathology, Bioinformatics, Biochemistry)
 - **Figure Display & Generation**: PI can reference existing analysis figures or generate new custom figures on-the-fly via Jupyter sandbox
+- **Stop/Cancel**: Cancel ongoing chat requests or delegation tasks with a stop button
 - Markdown-rendered responses with inline figure display and PNG/PDF download
 
 ### Iterative Analysis Workflow with Human-in-the-Loop
 
 - Multi-round collaboration, progressively deepening analysis
-- **Round Feedback Dialog**: After each round, a modal shows per-agent findings and a 2-minute countdown timer. Users can provide guidance, upload additional data (targeted to specific agents), or skip to auto-continue
+- **Round Feedback Dialog**: After each round, a modal shows per-agent findings with a configurable countdown timer (default 5 minutes; supports manual-only mode and no-wait auto-continue). Users can provide guidance, upload additional data (targeted to specific agents), or skip to auto-continue
 - User input or file uploads on the last round automatically extends analysis by one additional round
 - Automatic conflict detection and resolution
 - Convergence detection for automatic stopping
@@ -35,8 +37,10 @@
 
 - Uses local Jupyter kernel for code execution (supports large memory analysis)
 - Each execution is automatically saved as Jupyter Notebook (.ipynb format)
+- **Auto PDF Generation**: Every PNG figure saved automatically gets a companion high-resolution PDF with vectorized fonts (Type 42) for publication-quality editing
 - Supports scanpy and other bioinformatics tools
 - Reproducible code (fixed random seed 42)
+- **Batch Effect Assessment**: Automatic batch effect detection step when multiple samples/batches are present — visualizes cells by batch before clustering
 
 ### State Persistence & Synchronization
 
@@ -64,8 +68,8 @@ The system supports generating comprehensive reports with 9 chapters, 40+ analys
 
 ### Session Import/Export
 
-- **Export**: Download complete session as tar.gz archive (state, uploads, workspace, reports)
-- **Import**: Restore sessions from tar.gz, zip, or JSON archives with automatic path remapping
+- **Export**: Download complete session as tar.gz archive (state, uploads, workspace, reports, sandbox state)
+- **Import**: Restore sessions from tar.gz, zip, or JSON archives with automatic path remapping and full sandbox restore
 - Session browser with metadata display (status, round count, data types)
 
 ### State Persistence & Session Recovery
@@ -361,10 +365,11 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 
 ### LLM
 
-- **Main Models**: Gemini 3 Pro Preview, Claude Opus 4.6 (via OpenRouter)
+- **Main Models**: Gemini 3 Pro Preview, Claude Sonnet 4.5 (via OpenRouter)
 - **Literature Research**: 2 modes with automatic fallback
-  - Google Gemini Deep Research (via Interactions API, direct Google API)
+  - Google Gemini Deep Research (via Interactions API, single call with workflow-level gap coverage)
   - PubMed + LLM synthesis (NCBI E-utilities search + LLM review)
+- **Literature Chat**: Gemini 3 Flash Preview (fast model for literature agent)
 - **Image Generation**: Gemini 3 Pro Image Preview for graphic abstracts
 
 ### Bioinformatics
@@ -388,6 +393,22 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.7.3 (2026-02-13)
+
+- **Chat Delegation**: PI Agent can now delegate complex chat requests to specialized agents (Bioinformatics, Pathology, Biochemistry, Literature). Agents execute analysis in background, PI synthesizes results — with WebSocket progress updates and stop/cancel support
+- **Report Generation Rewrite**: Detailed report no longer uses Jupyter sandbox for code re-execution. Instead builds structured analysis record from existing code history, scans workspace for figures/tables, and PI writes narrative around existing assets — faster and more reliable
+- **Report-Only Resume**: Sessions interrupted during report generation (after all analysis rounds completed) are automatically detected and resume with report generation only, skipping redundant analysis
+- **Auto PDF Generation**: Monkey-patches `Figure.savefig` to automatically generate companion high-resolution PDFs (300 DPI, vectorized Type 42 fonts) alongside every PNG saved during analysis
+- **Deep Research Optimization**: Gemini Deep Research now merges multiple topics into a single comprehensive query. After DR completes, evaluates topic coverage and falls back to PubMed+LLM for insufficiently covered gaps
+- **Bioinformatics Session Restore**: When resuming analysis, code history is populated from restored notebook cells — prevents agent from re-running completed analysis steps. New "REUSE EXISTING RESULTS" guidelines check for existing PCA, UMAP, clustering, annotations before re-executing
+- **Batch Effect Assessment**: Bioinformatics agent now checks for batch effects after PCA/UMAP when multiple samples are present, and consults PI about correction strategy (Harmony, BBKNN, scVI, etc.)
+- **Configurable Round Wait Timer**: Round feedback countdown is now user-configurable (default 5 minutes; -1 for manual-only mode; 0 for no-wait auto-continue). Stored per-session in `round_wait_seconds`
+- **Pathology Agent Reliability**: Reduced tile batch size (20 → 5) and added dynamic timeouts (120s base + 30s per image) for more reliable vision API calls
+- **Export/Import with Sandbox State**: Session export/import now includes .pkl files for full sandbox environment restore
+- **Publication Outputs in Results Tab**: Publication figures, integrated report, graphic abstract, and download buttons moved from Analysis tab to Results tab for cleaner organization
+- **Model Defaults Updated**: Bioinformatics agent now defaults to Claude Sonnet 4.5; Literature agent gets dedicated `literature_model` field defaulting to Gemini 3 Flash Preview
+- Bug fixes: chat stop/cancel, progress message rendering, snake_case→camelCase transform for publication outputs, sandbox kernel cleanup
 
 ### v0.7.2 (2026-02-11)
 
