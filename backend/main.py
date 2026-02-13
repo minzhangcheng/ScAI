@@ -5,6 +5,7 @@ import os
 import json
 import asyncio
 import logging
+import time
 import traceback
 import zipfile
 import tarfile
@@ -35,7 +36,7 @@ from .models.schemas import (
     WebSocketMessage, AgentType, PathologyImage, BiochemistryResult, BiochemistryFile
 )
 from .workflow import SingleCellAnalysisWorkflow
-from .utils.llm_client import OpenAICompatibleClient
+from .utils.llm_client import OpenAICompatibleClient, LLMManager
 from .utils.upload import ChunkedUploadManager, stream_save_file
 
 # Initialize upload manager for chunked uploads (supports up to 10GB files)
@@ -96,6 +97,11 @@ _initializing_sessions: set = set()
 
 # Lock for protecting concurrent access to global dicts
 _state_lock = asyncio.Lock()
+
+# Chat delegation tracking
+_chat_tasks: Dict[str, asyncio.Task] = {}  # session_id → background delegation task
+_chat_task_lock = asyncio.Lock()
+_chat_sandboxes: Dict[str, Any] = {}  # session_id → sandbox for active chat (delegation/figure gen)
 
 # Memory management settings
 MAX_CACHED_SESSIONS = 50  # Maximum number of sessions to keep in memory
@@ -558,6 +564,7 @@ async def load_session(session_id: str):
         "status": state.status.value if hasattr(state.status, 'value') else str(state.status),
         "current_round": state.current_round,
         "max_rounds": state.max_rounds,
+        "round_wait_seconds": state.round_wait_seconds,
         "created_at": state.created_at.isoformat() if state.created_at else "",
         "updated_at": state.updated_at.isoformat() if state.updated_at else "",
         "initial_instruction": state.initial_instruction,
@@ -1355,6 +1362,26 @@ async def get_max_rounds(session_id: str):
     return {"max_rounds": state.max_rounds}
 
 
+class RoundWaitRequest(BaseModel):
+    round_wait_seconds: int = Field(ge=-1, le=3600, default=300)
+
+
+@app.post("/api/session/{session_id}/round-wait")
+async def update_round_wait(session_id: str, request: RoundWaitRequest):
+    """Update round wait countdown seconds (-1=manual, 0=no wait, positive=countdown)"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    state.round_wait_seconds = request.round_wait_seconds
+
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+
+    return APIResponse(
+        success=True,
+        message=f"Round wait updated to {request.round_wait_seconds}s"
+    )
+
+
 @app.post("/api/session/{session_id}/literature-config")
 async def update_literature_config(session_id: str, request: LiteratureConfigRequest):
     """Update literature agent configuration"""
@@ -1458,6 +1485,13 @@ async def resume_analysis(session_id: str):
         return APIResponse(
             success=True,
             message="Analysis resumed"
+        )
+    elif state.status in (TaskStatus.GENERATING_REPORT, TaskStatus.FAILED):
+        # Interrupted during report generation or failed — allow re-run
+        state.status = TaskStatus.RUNNING
+        return APIResponse(
+            success=True,
+            message="Resuming analysis"
         )
     else:
         raise HTTPException(status_code=400, detail="Analysis not paused, waiting, or completed")
@@ -1600,9 +1634,9 @@ async def export_state(session_id: str):
             if session_file.exists():
                 tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
 
-            # 2. states/{session_id}* (skip .pkl)
+            # 2. states/{session_id}* (including .pkl for sandbox restore)
             for state_file in STATE_DIR.glob(f"{session_id}*"):
-                if state_file.is_file() and not state_file.suffix == '.pkl':
+                if state_file.is_file():
                     tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
 
             # 3. uploads/{session_id}/ (recursive)
@@ -1730,11 +1764,6 @@ def _import_tar_gz(file_path: str) -> AnalysisState:
                 logger.warning(f"Skipping archive entry with suspicious path: {member.name}")
                 continue
 
-            # Skip .pkl files (security)
-            if member.name.endswith('.pkl'):
-                logger.warning(f"Skipping pickle file: {member.name}")
-                continue
-
             # Skip manifest (already processed)
             if member.name.endswith('/manifest.json'):
                 continue
@@ -1807,9 +1836,10 @@ def _import_zip(content: bytes) -> AnalysisState:
         if notebook_path in namelist:
             (STATE_DIR / f"{session_id}.ipynb").write_bytes(zf.read(notebook_path))
 
-        # Skip session.pkl for security
-        if f"{session_id}/session.pkl" in namelist:
-            logger.warning("Skipping session.pkl import for security")
+        # Extract session.pkl if exists (for sandbox restore)
+        pkl_path = f"{session_id}/session.pkl"
+        if pkl_path in namelist:
+            (STATE_DIR / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
 
         # Extract metadata if exists
         metadata_path = f"{session_id}/metadata.json"
@@ -2149,10 +2179,25 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     monitor_task = asyncio.create_task(monitor_websocket())
 
+    # Detect sessions that completed analysis but were interrupted during report generation
+    effective_max_rounds = state.max_rounds if state.max_rounds > 0 else config.max_rounds
+    needs_report_only = (
+        state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
+                         TaskStatus.FAILED, TaskStatus.GENERATING_REPORT)
+        and state.current_round >= effective_max_rounds
+        and len(state.round_results) >= effective_max_rounds
+    )
+
     try:
-        # Run workflow
-        logger.info(f"Starting workflow for session {session_id}")
-        final_state = await workflow.run(state, session_id)
+        # Run workflow (or report-only if analysis was already complete)
+        if needs_report_only:
+            logger.info(f"Session {session_id} needs report generation only "
+                        f"(round {state.current_round}/{effective_max_rounds}, "
+                        f"{len(state.round_results)} round results)")
+            final_state = await workflow.generate_report(state, session_id)
+        else:
+            logger.info(f"Starting workflow for session {session_id}")
+            final_state = await workflow.run(state, session_id)
         sessions[session_id] = final_state
         logger.info(f"Workflow completed for session {session_id}")
 
@@ -3227,6 +3272,7 @@ async def _generate_figures_in_chat(
         state_dir=str(STATE_DIR),
         working_dir=str(WORKSPACE_DIR),
     )
+    _chat_sandboxes[session_id] = sandbox
     try:
         start_info = await sandbox.start()
         if not start_info.get("session_restored"):
@@ -3344,12 +3390,537 @@ async def _generate_figures_in_chat(
         logger.error(f"Chat figure generation error: {e}")
         logger.error(traceback.format_exc())
     finally:
+        _chat_sandboxes.pop(session_id, None)
         try:
             await sandbox.stop()
         except Exception:
             pass
 
     return generated_figures
+
+
+# ============== Chat Delegation Helpers ==============
+
+async def _send_chat_ws(session_id: str, msg_type: str, content: Any):
+    """Send a WebSocket message for chat delegation events."""
+    ws = websockets.get(session_id)
+    if ws:
+        try:
+            await ws.send_json({
+                "type": msg_type,
+                "agent": None,
+                "content": content,
+                "timestamp": datetime.now().isoformat(),
+                "id": str(uuid.uuid4()),
+            })
+        except Exception as e:
+            logger.warning(f"Chat WS send failed for {session_id} ({msg_type}): {e}")
+    else:
+        logger.warning(f"Chat WS: no connection for {session_id}, message {msg_type} not delivered")
+
+
+def _try_parse_delegation(content: str) -> Optional[Dict[str, Any]]:
+    """Try to parse PI response as a delegation plan. Returns None if not delegation."""
+    content = content.strip()
+    # Direct JSON
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict) and parsed.get("delegation") is True:
+            delegates = parsed.get("delegates", [])
+            if isinstance(delegates, list) and len(delegates) > 0:
+                return parsed
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # JSON inside markdown code block
+    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(1))
+            if isinstance(parsed, dict) and parsed.get("delegation") is True:
+                delegates = parsed.get("delegates", [])
+                if isinstance(delegates, list) and len(delegates) > 0:
+                    return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return None
+
+
+def _build_synthesis_prompt(
+    user_message: str,
+    delegation: Dict[str, Any],
+    agent_results: Dict[str, Dict[str, Any]],
+) -> str:
+    """Build PI synthesis prompt from delegation results."""
+    parts = [
+        "You are the PI Agent. Synthesize the following agent results into a clear, "
+        "helpful response to the user's original request.",
+        f"\n## User's Request\n{user_message}",
+        f"\n## Delegation Plan\n{delegation.get('plan', '')}",
+        "\n## Agent Results",
+    ]
+    for agent_name, result in agent_results.items():
+        if "error" in result and not result.get("findings"):
+            parts.append(f"\n### {agent_name.upper()} Agent: ERROR\n{result['error']}")
+        else:
+            # Extract the most useful content from agent result
+            summary = result.get("synthesis", result.get("report", result.get("summary", "")))
+            if isinstance(summary, dict):
+                summary = json.dumps(summary, ensure_ascii=False, indent=2)
+            findings = result.get("findings", [])
+            if isinstance(findings, list) and findings:
+                findings_text = "\n".join(f"- {f}" for f in findings[:20])
+            else:
+                findings_text = str(findings) if findings else ""
+            agent_text = ""
+            if summary:
+                agent_text += f"Summary:\n{str(summary)[:6000]}\n"
+            if findings_text:
+                agent_text += f"Key Findings:\n{findings_text}\n"
+            if not agent_text:
+                agent_text = json.dumps(result, ensure_ascii=False, indent=2)[:4000]
+            parts.append(f"\n### {agent_name.upper()} Agent\n{agent_text}")
+
+    parts.append(
+        "\n## Instructions\n"
+        "- Synthesize these results into a comprehensive response\n"
+        "- Reference specific findings from each agent\n"
+        "- If figures were generated during the analysis, you can reference them with [[FIGURE:figure_name]]\n"
+        "- Respond in the same language as the user's message\n"
+    )
+    if delegation.get("synthesis_instruction"):
+        parts.append(f"Additional guidance: {delegation['synthesis_instruction']}")
+
+    return "\n".join(parts)
+
+
+def _collect_session_figures(
+    session_id: str,
+    since_time: Optional[float] = None
+) -> List[Dict[str, str]]:
+    """Collect figures from workspace, optionally filtering by creation time."""
+    figures: List[Dict[str, str]] = []
+    fig_dir = WORKSPACE_DIR / session_id / "figures"
+    if not fig_dir.exists():
+        return figures
+    for png in sorted(fig_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if since_time and png.stat().st_mtime < since_time:
+            continue
+        entry: Dict[str, str] = {"name": png.stem, "path": str(png)}
+        pdf_path = png.with_suffix(".pdf")
+        if pdf_path.exists():
+            entry["pdfPath"] = str(pdf_path)
+        figures.append(entry)
+    return figures[:30]
+
+
+async def _execute_chat_agent(
+    session_id: str,
+    state: AnalysisState,
+    agent_name: str,
+    instruction: str,
+    llm_client: OpenAICompatibleClient,
+    message_callback,
+    saved_files: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """Execute a single agent in chat delegation context."""
+    from .agents.base import AgentConfig
+    from .utils.sandbox import LocalJupyterSandbox
+
+    async def _send_agent_msg(msg_type: str, content: Any, agent_type: AgentType):
+        msg = WebSocketMessage(type=msg_type, agent=agent_type, content=content)
+        await message_callback(msg)
+
+    agent_type = AgentType(agent_name)
+    await _send_agent_msg("status", f"Starting {agent_name} analysis...", agent_type)
+
+    if agent_name == "bioinformatics":
+        from .agents.bioinformatics_agent import BioinformaticsAgent
+
+        # Create sandbox with session restore
+        sandbox = LocalJupyterSandbox(
+            session_id=session_id,
+            state_dir=str(STATE_DIR),
+            working_dir=str(WORKSPACE_DIR),
+            timeout=config.sandbox_timeout if hasattr(config, 'sandbox_timeout') else 120
+        )
+        _chat_sandboxes[session_id] = sandbox
+
+        # Create literature agent for callbacks
+        lit_model = state.custom_models.get("literature", config.models.literature_model)
+        lit_prompt = state.custom_prompts.get("literature", config.prompts.literature_prompt)
+        lit_config = state.literature_config or {}
+
+        from .agents.literature_agent import LiteratureAgent
+        literature_agent = LiteratureAgent(
+            llm_client=llm_client,
+            model=lit_model,
+            system_prompt=lit_prompt,
+            config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
+            literature_mode=lit_config.get("mode", "pubmed_llm"),
+            google_api_key=lit_config.get("google_api_key", ""),
+            pubmed_email=lit_config.get("pubmed_email", ""),
+            max_search_rounds=lit_config.get("max_search_rounds", 5),
+            proxy_url=config.api.proxy_url if config.api else None,
+        )
+
+        async def lit_callback(topic: str) -> str:
+            result = await literature_agent.process(state, topic, use_deep_research=True)
+            return result.get("report", "")
+
+        async def pi_callback(question: str, context: str) -> str:
+            await _send_agent_msg("pi_question", f"Question: {question}\nContext: {context}", AgentType.BIOINFORMATICS)
+            pi_model = state.custom_models.get("pi", config.models.pi_model)
+            prompt = (
+                f"The bioinformatics analyst is asking for your guidance:\n\n"
+                f"QUESTION: {question}\n\nCONTEXT: {context}\n\n"
+                f"Please provide clear, actionable guidance."
+            )
+            resp = await llm_client.chat(
+                model=pi_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=state.custom_temperatures.get("pi", 0.5),
+                max_tokens=2048
+            )
+            answer = resp.content or "Proceed with standard bioinformatics practices."
+            await _send_agent_msg("pi_response", answer, AgentType.PI)
+            return answer
+
+        async def annotate_callback(cluster_markers, tissue, organism):
+            await _send_agent_msg("status", f"Annotating {len(cluster_markers)} clusters via literature...", AgentType.LITERATURE)
+            return await literature_agent.annotate_clusters(cluster_markers, tissue, organism, state)
+
+        async def agent_msg_callback(msg_type: str, content: str):
+            await _send_agent_msg(msg_type, content, AgentType.BIOINFORMATICS)
+
+        bio_agent = BioinformaticsAgent(
+            llm_client=llm_client,
+            model=state.custom_models.get("bioinformatics", config.models.bioinformatics_model),
+            system_prompt=state.custom_prompts.get("bioinformatics", config.prompts.bioinformatics_prompt),
+            sandbox=sandbox,
+            literature_callback=lit_callback,
+            pi_callback=pi_callback,
+            annotate_clusters_callback=annotate_callback,
+            message_callback=agent_msg_callback,
+            config=AgentConfig(temperature=state.custom_temperatures.get("bioinformatics", 0.1)),
+        )
+
+        try:
+            analysis_start_time = time.time()
+            await sandbox.start()
+            result = await bio_agent.run_autonomous_analysis(
+                state, instruction, max_steps=30
+            )
+            # Collect only figures generated during THIS analysis (not historical ones)
+            result["figures"] = _collect_session_figures(session_id, since_time=analysis_start_time)
+            return result
+        finally:
+            _chat_sandboxes.pop(session_id, None)
+            try:
+                await sandbox.stop()
+            except Exception:
+                pass
+
+    elif agent_name == "pathology":
+        from .agents.pathology_agent import PathologyAgent
+
+        pathology_agent = PathologyAgent(
+            llm_client=llm_client,
+            model=state.custom_models.get("pathology", config.models.pathology_model),
+            system_prompt=state.custom_prompts.get("pathology", config.prompts.pathology_prompt),
+            tile_size=config.image_tile_size if hasattr(config, 'image_tile_size') else 1024,
+            max_tiles=50,
+            config=AgentConfig(temperature=state.custom_temperatures.get("pathology", 0.2)),
+        )
+        result = await pathology_agent.process(state, instruction)
+        return result
+
+    elif agent_name == "biochemistry":
+        from .agents.biochemistry_agent import BiochemistryAgent
+
+        biochem_agent = BiochemistryAgent(
+            llm_client=llm_client,
+            model=state.custom_models.get("biochemistry", config.models.biochemistry_model),
+            system_prompt=state.custom_prompts.get("biochemistry", config.prompts.biochemistry_prompt),
+            config=AgentConfig(temperature=state.custom_temperatures.get("biochemistry", 0.2)),
+        )
+        result = await biochem_agent.process(state, instruction)
+        return result
+
+    elif agent_name == "literature":
+        from .agents.literature_agent import LiteratureAgent
+        lit_config = state.literature_config or {}
+
+        lit_agent = LiteratureAgent(
+            llm_client=llm_client,
+            model=state.custom_models.get("literature", config.models.literature_model),
+            system_prompt=state.custom_prompts.get("literature", config.prompts.literature_prompt),
+            config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
+            literature_mode=lit_config.get("mode", "pubmed_llm"),
+            google_api_key=lit_config.get("google_api_key", ""),
+            pubmed_email=lit_config.get("pubmed_email", ""),
+            max_search_rounds=lit_config.get("max_search_rounds", 5),
+            proxy_url=config.api.proxy_url if config.api else None,
+        )
+        result = await lit_agent.process(state, instruction)
+        return result
+
+    else:
+        raise ValueError(f"Unknown agent for chat delegation: {agent_name}")
+
+
+async def _run_chat_delegation(
+    session_id: str,
+    state: AnalysisState,
+    delegation: Dict[str, Any],
+    user_message: str,
+    image_b64_list: List[str],
+    saved_files: List[Dict[str, str]],
+):
+    """Background task: orchestrate delegated agent work, then PI synthesizes results."""
+    llm_manager = None
+    start_time = time.time()
+    try:
+        # 1. Send started notification
+        delegates = delegation.get("delegates", [])
+        agent_names = [d.get("agent", "unknown") for d in delegates]
+        await _send_chat_ws(session_id, "chat_delegation", {
+            "status": "started",
+            "plan": delegation.get("plan", ""),
+            "agents": agent_names,
+        })
+
+        # 2. Create shared LLM client
+        llm_manager = LLMManager(
+            api_key=config.api.api_key,
+            base_url=config.api.llm_base_url,
+            proxy_url=config.api.proxy_url,
+            session_id=session_id,
+            agent_name="chat_delegation"
+        )
+
+        # 3. Create message callback that sends to WebSocket + persists
+        async def chat_msg_callback(msg: WebSocketMessage):
+            ws = websockets.get(session_id)
+            if ws:
+                try:
+                    await ws.send_json({
+                        "type": msg.type,
+                        "agent": msg.agent.value if msg.agent else None,
+                        "content": msg.content,
+                        "timestamp": msg.timestamp.isoformat(),
+                        "id": msg.id,
+                    })
+                except Exception:
+                    pass
+            # Persist to realtime_messages
+            if hasattr(state, 'realtime_messages'):
+                state.realtime_messages.append(msg)
+
+        # 4. Check for sandbox conflicts with running workflow
+        workflow_running = session_id in workflows
+        if workflow_running:
+            # Filter out bioinformatics to avoid sandbox conflict
+            delegates = [d for d in delegates if d.get("agent") != "bioinformatics"]
+            if not delegates:
+                await _send_chat_ws(session_id, "chat_error", {
+                    "error": "Cannot run bioinformatics analysis while main workflow is active. "
+                             "Please wait for the workflow to complete."
+                })
+                return
+
+        # 5. Group by priority and execute
+        priority_groups: Dict[int, List[Dict]] = {}
+        for d in delegates:
+            p = d.get("priority", 1)
+            priority_groups.setdefault(p, []).append(d)
+
+        agent_results: Dict[str, Dict[str, Any]] = {}
+        all_figures: List[Dict[str, str]] = []
+        figure_timestamp = time.time()  # Track when delegation started for figure collection
+
+        for priority in sorted(priority_groups.keys()):
+            group = priority_groups[priority]
+
+            if len(group) == 1:
+                # Single agent — execute directly
+                d = group[0]
+                agent_name = d.get("agent", "unknown")
+                try:
+                    result = await _execute_chat_agent(
+                        session_id, state, agent_name, d.get("instruction", ""),
+                        llm_manager.openrouter, chat_msg_callback, saved_files
+                    )
+                    agent_results[agent_name] = result
+                    if "figures" in result:
+                        all_figures.extend(result["figures"])
+                    await _send_chat_ws(session_id, "chat_delegation", {
+                        "status": "agent_complete", "agent": agent_name,
+                    })
+                except Exception as e:
+                    logger.error(f"Chat delegation agent {agent_name} failed: {traceback.format_exc()}")
+                    agent_results[agent_name] = {"error": str(e), "findings": []}
+                    await _send_chat_ws(session_id, "chat_delegation", {
+                        "status": "agent_error", "agent": agent_name, "error": str(e),
+                    })
+            else:
+                # Multiple agents at same priority — execute in parallel
+                tasks = []
+                for d in group:
+                    tasks.append(_execute_chat_agent(
+                        session_id, state, d.get("agent", "unknown"), d.get("instruction", ""),
+                        llm_manager.openrouter, chat_msg_callback, saved_files
+                    ))
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for d, result in zip(group, results):
+                    agent_name = d.get("agent", "unknown")
+                    if isinstance(result, Exception):
+                        logger.error(f"Chat delegation agent {agent_name} failed: {result}")
+                        agent_results[agent_name] = {"error": str(result), "findings": []}
+                        await _send_chat_ws(session_id, "chat_delegation", {
+                            "status": "agent_error", "agent": agent_name, "error": str(result),
+                        })
+                    else:
+                        agent_results[agent_name] = result
+                        if "figures" in result:
+                            all_figures.extend(result["figures"])
+                        await _send_chat_ws(session_id, "chat_delegation", {
+                            "status": "agent_complete", "agent": agent_name,
+                        })
+
+        # 6. PI Synthesis
+        await _send_chat_ws(session_id, "chat_delegation", {
+            "status": "synthesizing", "message": "PI synthesizing results...",
+        })
+
+        synthesis_prompt = _build_synthesis_prompt(user_message, delegation, agent_results)
+        pi_model = state.custom_models.get("pi", config.models.pi_model)
+        pi_temp = state.custom_temperatures.get("pi", 0.5)
+
+        pi_response = await llm_manager.openrouter.chat(
+            model=pi_model,
+            messages=[{"role": "user", "content": synthesis_prompt}],
+            temperature=pi_temp,
+            max_tokens=4096,
+        )
+        final_content = pi_response.content or "Analysis completed but synthesis failed."
+
+        # 7. Post-process: FIGURE and GENERATE_FIGURE markers (reuse existing patterns)
+        context, figure_inventory = _build_chat_context(state)
+        figure_pattern = re.compile(r'\[\[FIGURE:([\w.-]+)\]\]')
+        referenced_names = figure_pattern.findall(final_content)
+        synthesis_figures: List[Dict[str, str]] = []
+
+        if referenced_names and figure_inventory:
+            fig_lookup = {f["name"]: f for f in figure_inventory}
+            for name in dict.fromkeys(referenced_names):
+                fig = fig_lookup.get(name)
+                if fig:
+                    entry = {"name": fig["name"], "path": fig["path"]}
+                    pdf_path = Path(fig["path"]).with_suffix(".pdf")
+                    if pdf_path.exists():
+                        entry["pdfPath"] = str(pdf_path)
+                    synthesis_figures.append(entry)
+
+        generate_pattern = re.compile(r'\[\[GENERATE_FIGURE:(.*?)\]\]', re.DOTALL)
+        generate_requests = generate_pattern.findall(final_content)
+        if generate_requests:
+            try:
+                generated = await _generate_figures_in_chat(session_id, state, generate_requests)
+                synthesis_figures.extend(generated)
+            except Exception as e:
+                logger.error(f"Chat delegation figure generation failed: {e}")
+
+        # Merge: all_figures from agents + synthesis_figures
+        # Deduplicate by name
+        seen_names = set()
+        merged_figures = []
+        for fig in all_figures + synthesis_figures:
+            if fig["name"] not in seen_names:
+                seen_names.add(fig["name"])
+                merged_figures.append(fig)
+
+        # Clean markers from text
+        cleaned_content = figure_pattern.sub('', final_content)
+        cleaned_content = generate_pattern.sub('', cleaned_content).strip()
+        cleaned_content = re.sub(r'\n{3,}', '\n\n', cleaned_content)
+
+        # 8. Build final chat message
+        assistant_msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": cleaned_content,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if merged_figures:
+            assistant_msg["figures"] = merged_figures
+
+        # Replace placeholder message in chat_messages
+        replaced = False
+        for i in range(len(state.chat_messages) - 1, -1, -1):
+            if state.chat_messages[i].get("delegation_active"):
+                state.chat_messages[i] = assistant_msg
+                replaced = True
+                break
+        if not replaced:
+            state.chat_messages.append(assistant_msg)
+
+        # 9. Send chat_result via WebSocket
+        await _send_chat_ws(session_id, "chat_result", {
+            "content": cleaned_content,
+            "figures": merged_figures,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        # 10. Persist state
+        sessions[session_id] = state
+        await asyncio.to_thread(save_session_to_disk, session_id, state)
+
+        duration = time.time() - start_time
+        logger.info(f"Chat delegation completed for {session_id} in {duration:.1f}s, "
+                     f"{len(agent_results)} agents, {len(merged_figures)} figures")
+
+    except asyncio.CancelledError:
+        logger.info(f"Chat delegation cancelled by user for {session_id}")
+        for i in range(len(state.chat_messages) - 1, -1, -1):
+            if state.chat_messages[i].get("delegation_active"):
+                state.chat_messages[i] = {
+                    "role": "assistant",
+                    "content": "已取消",
+                    "timestamp": datetime.now().isoformat(),
+                }
+                break
+        try:
+            await _send_chat_ws(session_id, "chat_cancelled", {"message": "Cancelled by user"})
+            sessions[session_id] = state
+            await asyncio.to_thread(save_session_to_disk, session_id, state)
+        except Exception:
+            pass
+        raise
+
+    except Exception as e:
+        logger.error(f"Chat delegation error for {session_id}: {traceback.format_exc()}")
+        error_msg = f"Analysis failed: {str(e)}"
+        # Update placeholder message
+        for i in range(len(state.chat_messages) - 1, -1, -1):
+            if state.chat_messages[i].get("delegation_active"):
+                state.chat_messages[i] = {
+                    "role": "assistant",
+                    "content": error_msg,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                break
+        await _send_chat_ws(session_id, "chat_error", {"error": error_msg})
+        sessions[session_id] = state
+        await asyncio.to_thread(save_session_to_disk, session_id, state)
+
+    finally:
+        async with _chat_task_lock:
+            _chat_tasks.pop(session_id, None)
+        _chat_sandboxes.pop(session_id, None)
+        if llm_manager:
+            try:
+                await llm_manager.close()
+            except Exception:
+                pass
 
 
 @app.post("/api/session/{session_id}/chat")
@@ -3477,7 +4048,30 @@ async def chat_with_pi(
         "When the user asks to see, show, display, generate, or create any figure/plot/chart/image, "
         "you MUST use [[FIGURE:...]] or [[GENERATE_FIGURE:...]] — NEVER give code.\n"
         "\n"
-        "- Respond in the same language as the user's message"
+        "- Respond in the same language as the user's message\n"
+        "\n"
+        "DELEGATION CAPABILITY:\n"
+        "When the user's request requires running new computational analysis, processing new data, "
+        "or using specialized agent capabilities beyond your own knowledge, you can delegate tasks "
+        "to other agents. Available agents:\n"
+        "- bioinformatics: Code execution, new plots, scRNA-seq analysis, clustering, DE analysis, trajectory\n"
+        "- pathology: Pathology/histology image analysis or re-examination\n"
+        "- biochemistry: Biochemistry data interpretation (Western blot, ELISA, etc.)\n"
+        "- literature: Literature search, evidence gathering, Deep Research\n\n"
+        "When delegation is needed, respond with ONLY a JSON block (no other text):\n"
+        '{"delegation": true, "plan": "Brief description of what you will coordinate", "delegates": [\n'
+        '  {"agent": "bioinformatics", "instruction": "Detailed task instruction with data paths and specifics", "priority": 1}\n'
+        '], "synthesis_instruction": "How to summarize results for user"}\n\n'
+        "Delegation rules:\n"
+        "- Same priority number = parallel execution; lower number executes first\n"
+        "- For simple questions answerable from existing results, respond normally (NO delegation)\n"
+        "- For showing existing figures, use [[FIGURE:...]] (NO delegation)\n"
+        "- Only delegate when NEW analysis, computation, or specialized processing is genuinely needed\n"
+        "- Include specific data file paths and analysis requirements in the instruction field\n"
+        "- The bioinformatics agent's notebook ALREADY has all previous analysis results loaded (adata with "
+        "cell_type, clustering, PCA, UMAP, DE results, etc.). Do NOT include prerequisite steps like "
+        "'first ensure cell annotations are available' or 'run clustering first' in the instruction. "
+        "Focus ONLY on the NEW analysis the user is asking for. The agent will check existing results automatically.\n"
     )
 
     # Build messages: system + history + new message
@@ -3549,6 +4143,37 @@ async def chat_with_pi(
         logger.error(traceback.format_exc())
         assistant_content = f"Error communicating with LLM: {str(e)}"
 
+    # --- Check for delegation ---
+    delegation = _try_parse_delegation(assistant_content)
+    if delegation:
+        logger.info(f"Chat delegation detected for {session_id}: {delegation.get('plan', '')}")
+
+        # Concurrency guard
+        async with _chat_task_lock:
+            if session_id in _chat_tasks and not _chat_tasks[session_id].done():
+                raise HTTPException(status_code=409, detail="Chat analysis already in progress for this session")
+
+        # Add placeholder assistant message
+        state.chat_messages.append({
+            "role": "assistant",
+            "content": f"Working on it: {delegation.get('plan', 'Coordinating agents...')}",
+            "timestamp": datetime.now().isoformat(),
+            "delegation_active": True,
+        })
+        await asyncio.to_thread(save_session_to_disk, session_id, state)
+
+        # Launch background task
+        task = asyncio.create_task(
+            _run_chat_delegation(
+                session_id, state, delegation, user_content,
+                image_b64_list, saved_files
+            )
+        )
+        async with _chat_task_lock:
+            _chat_tasks[session_id] = task
+
+        return {"status": "processing", "plan": delegation.get("plan", "")}
+
     # --- Post-process: extract figure references ---
     figure_pattern = re.compile(r'\[\[FIGURE:([\w.-]+)\]\]')
     referenced_names = figure_pattern.findall(assistant_content)
@@ -3573,37 +4198,68 @@ async def chat_with_pi(
     generate_requests = generate_pattern.findall(assistant_content)
     logger.info(f"Chat post-process: found {len(generate_requests)} GENERATE_FIGURE requests")
 
-    if generate_requests:
-        try:
-            generated = await _generate_figures_in_chat(session_id, state, generate_requests)
-            logger.info(f"Chat post-process: generated {len(generated)} figures: {generated}")
-            response_figures.extend(generated)
-        except Exception as e:
-            logger.error(f"Chat figure generation failed: {e}")
-            logger.error(traceback.format_exc())
-
     # Clean markers from text
     cleaned_content = figure_pattern.sub('', assistant_content)
     cleaned_content = generate_pattern.sub('', cleaned_content).strip()
     cleaned_content = re.sub(r'\n{3,}', '\n\n', cleaned_content)
 
-    # Store assistant message
+    # Save text response IMMEDIATELY (before figure generation which can take minutes)
     assistant_msg: Dict[str, Any] = {
         "role": "assistant",
         "content": cleaned_content,
         "timestamp": datetime.now().isoformat(),
     }
     if response_figures:
-        assistant_msg["figures"] = response_figures
+        assistant_msg["figures"] = list(response_figures)
     state.chat_messages.append(assistant_msg)
-    logger.info(f"Chat response: {len(response_figures)} figures attached to response")
-
     await asyncio.to_thread(save_session_to_disk, session_id, state)
+    logger.info(f"Chat response: text saved ({len(cleaned_content)} chars, {len(response_figures)} existing figures)")
+
+    # Now try to generate new figures (may take long, but text is already saved)
+    if generate_requests:
+        try:
+            generated = await _generate_figures_in_chat(session_id, state, generate_requests)
+            logger.info(f"Chat post-process: generated {len(generated)} figures")
+            if generated:
+                existing = assistant_msg.get("figures", [])
+                assistant_msg["figures"] = existing + generated
+                response_figures.extend(generated)
+                await asyncio.to_thread(save_session_to_disk, session_id, state)
+        except Exception as e:
+            logger.error(f"Chat figure generation failed: {e}")
+            logger.error(traceback.format_exc())
 
     result: Dict[str, Any] = {"role": "assistant", "content": cleaned_content}
-    if response_figures:
-        result["figures"] = response_figures
+    if assistant_msg.get("figures"):
+        result["figures"] = assistant_msg["figures"]
     return result
+
+
+@app.post("/api/session/{session_id}/chat/cancel")
+async def cancel_chat(session_id: str):
+    """Cancel an in-progress chat request (delegation or simple)."""
+    validate_session_id(session_id)
+
+    cancelled = False
+
+    # 1. Cancel delegation task if running
+    async with _chat_task_lock:
+        task = _chat_tasks.get(session_id)
+        if task and not task.done():
+            task.cancel()
+            cancelled = True
+
+    # 2. Interrupt sandbox kernel if running
+    sandbox = _chat_sandboxes.get(session_id)
+    if sandbox:
+        try:
+            if sandbox.km:
+                sandbox.km.interrupt_kernel()
+                logger.info(f"Chat cancel: interrupted sandbox kernel for {session_id}")
+        except Exception as e:
+            logger.warning(f"Chat cancel: sandbox interrupt failed for {session_id}: {e}")
+
+    return {"status": "cancelled", "had_delegation": cancelled}
 
 
 @app.get("/api/session/{session_id}/chat")

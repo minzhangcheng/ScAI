@@ -31,6 +31,7 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     WAITING_INPUT = "waiting_input"
     PAUSED = "paused"
+    GENERATING_REPORT = "generating_report"
 
 class FigureReviewStatus(str, Enum):
     """Status of figure review by PI Agent"""
@@ -194,6 +195,7 @@ class AnalysisState(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     current_round: int = 0
     max_rounds: int = 3  # User-configurable maximum rounds
+    round_wait_seconds: int = 300  # Countdown seconds between rounds (-1=manual, 0=no wait)
     
     # Initial inputs
     initial_instruction: str = ""
@@ -381,7 +383,9 @@ class WebSocketMessage(BaseModel):
         # WebSocket reconnection recovery
         "message_history",
         # Cluster annotation
-        "annotation_result"
+        "annotation_result",
+        # Chat delegation
+        "chat_delegation", "chat_result", "chat_error"
     ]
     agent: Optional[AgentType] = None
     content: Any

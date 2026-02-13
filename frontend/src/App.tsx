@@ -27,7 +27,7 @@ import {
 } from 'lucide-react'
 
 function App() {
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks } = useAppStore()
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, chatDelegationActive } = useAppStore()
   const { checkStatus } = useConfig()
   const { connect, disconnect, connected } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
@@ -104,7 +104,7 @@ function App() {
   const maxReconnectDelay = 30000 // Max 30 seconds between attempts
 
   useEffect(() => {
-    if (currentSession && currentSession.status === 'running' && !connected && !wsConnected) {
+    if (currentSession && (currentSession.status === 'running' || chatDelegationActive) && !connected && !wsConnected) {
       // Calculate delay with exponential backoff: 1s, 2s, 4s, 8s... up to maxReconnectDelay
       const baseDelay = 1000
       const delay = Math.min(baseDelay * Math.pow(2, reconnectAttemptRef.current), maxReconnectDelay)
@@ -119,7 +119,7 @@ function App() {
       // Reset reconnect attempts on successful connection
       reconnectAttemptRef.current = 0
     }
-  }, [currentSession?.id, currentSession?.status, connected, wsConnected, connect])
+  }, [currentSession?.id, currentSession?.status, connected, wsConnected, connect, chatDelegationActive])
 
   if (configured === null) {
     return (

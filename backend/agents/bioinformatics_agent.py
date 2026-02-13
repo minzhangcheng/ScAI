@@ -558,7 +558,32 @@ class BioinformaticsAgent(BaseAgent):
             if start_result.get("restore_failed"):
                 logger.warning("[Bioinformatics] Previous session restore failed, starting with fresh environment")
                 await self._notify("status", "Note: Previous session could not be restored, starting fresh...")
-        
+            elif start_result.get("session_restored") and not self.code_history:
+                # Populate code_history from restored notebook cells so _build_notebook_context()
+                # shows previous analysis, preventing the agent from restarting from scratch
+                restored_cells = self.sandbox.get_code_history()
+                for cell in restored_cells:
+                    outputs = cell.get('outputs', [])
+                    output_text = '\n'.join(
+                        o.get('text', '') for o in outputs if o.get('type') == 'stream'
+                    )
+                    error_text = '\n'.join(
+                        o.get('evalue', '') for o in outputs if o.get('type') == 'error'
+                    )
+                    figures = [
+                        o.get('data', {}).get('image/png', '')
+                        for o in outputs
+                        if o.get('type') == 'display_data' and 'image/png' in o.get('data', {})
+                    ]
+                    self.code_history.append(CodeExecution(
+                        code=cell.get('code', ''),
+                        output=output_text if output_text else None,
+                        error=error_text if error_text else None,
+                        figures=figures,
+                        execution_time=0.0,
+                    ))
+                logger.info(f"[Bioinformatics] Restored {len(self.code_history)} cells into code_history from notebook state")
+
         # Build initial prompt
         system_prompt = f"""{self.system_prompt}
 
@@ -572,12 +597,34 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
 
 WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
+- **REUSE EXISTING RESULTS (CRITICAL for chat follow-up analyses)**:
+  Before running any analysis step, CHECK if the result already exists in the current session.
+  The notebook environment may already contain results from previous analyses.
+  * Cell type annotation: `'cell_type' in adata.obs.columns` — if True, SKIP rank_genes_groups + annotate_clusters
+  * Differential expression: `'rank_genes_groups' in adata.uns` — if True, SKIP unless a DIFFERENT groupby is needed
+  * Clustering: `'leiden' in adata.obs.columns` — if True, SKIP re-clustering
+  * PCA: `'X_pca' in adata.obsm` — if True, SKIP sc.tl.pca
+  * UMAP: `'X_umap' in adata.obsm` — if True, SKIP sc.tl.umap
+  * Neighbors graph: `'neighbors' in adata.uns` — if True, SKIP sc.pp.neighbors
+  * Batch correction: `'X_pca_harmony' in adata.obsm` (or similar) — if True, SKIP
+  * Trajectory/Velocity: `'velocity' in adata.layers` — if True, SKIP scvelo steps
+  * At the START of any analysis, run a quick diagnostic:
+    print(f"obs columns: {{list(adata.obs.columns)}}")
+    print(f"obsm keys: {{list(adata.obsm.keys())}}")
+    print(f"uns keys: {{list(adata.uns.keys())}}")
+    to see what's already available, then SKIP to the new analysis directly.
+  * Only REDO a step if the user EXPLICITLY requests it or if a prerequisite has changed
+- **BATCH EFFECT CHECK**: When loading multiple samples/batches/conditions, assess batch effects BEFORE clustering:
+  * After initial PCA/UMAP, visualize cells colored by batch/sample/condition to check for batch effects
+  * If batch effects are apparent (samples cluster by batch rather than cell type), consult PI about correction strategy (Harmony, BBKNN, scVI, Combat, etc.)
+  * Do NOT skip this step when multiple samples exist — batch effects can dominate clustering results
 - For CELL TYPE ANNOTATION, use annotate_clusters (NOT consult_pi):
   * After clustering and sc.tl.rank_genes_groups(), collect ALL cluster top markers into a dict
   * Call annotate_clusters ONCE with all cluster markers, tissue type, and organism
   * Apply the returned mapping to adata.obs['cell_type']
   * This is far more efficient than asking about each cluster separately
 - For OTHER BIOLOGICAL DECISIONS, use consult_pi:
+  * Whether batch correction is needed and which method to use
   * Which clusters show interesting changes?
   * What genes or pathways to analyze?
   * Whether to do trajectory/velocity analysis?

@@ -122,9 +122,9 @@ class ModelConfig(BaseModel):
     """Model configuration for each agent"""
     pi_model: str = "google/gemini-3-pro-preview"
     pathology_model: str = "google/gemini-3-pro-preview"
-    bioinformatics_model: str = "anthropic/claude-opus-4.6"
+    bioinformatics_model: str = "anthropic/claude-sonnet-4.5"
     biochemistry_model: str = "google/gemini-3-pro-preview"
-    # Literature agent uses Google Deep Research API directly
+    literature_model: str = "google/gemini-3-flash-preview"
     # Painter agent uses image generation model via OpenRouter
     painter_model: str = "google/gemini-3-pro-image-preview"
 
@@ -203,7 +203,9 @@ Do NOT make arbitrary biological decisions on your own - PI Agent has the domain
 
 Standard analysis workflow (adjust based on data type):
 1. Quality Control (QC)
-2. Normalization and dimensionality reduction
+2. Normalization, dimensionality reduction, and batch effect assessment
+   - After PCA/UMAP, visualize cells colored by sample/batch to check for batch effects
+   - If multiple samples/batches exist and batch effects are evident, consult PI about correction strategy
 3. Clustering analysis
 4. Cell type annotation (REQUIRED for single-cell data):
    a. After clustering, run sc.tl.rank_genes_groups to find marker genes for each cluster
@@ -231,6 +233,8 @@ Code requirements:
 - Generate visualization results for each step
 - Save key intermediate results
 - After cell type annotation, always generate a UMAP showing cell type labels as the primary clustering visualization
+- When saving figures, use PNG format (e.g., plt.savefig('figure.png')). The system automatically generates a companion high-quality PDF for every PNG saved. Do NOT manually save separate PDF files.
+- When using scanpy plotting with save= parameter, use .png extension (e.g., sc.pl.umap(adata, save='_clusters.png'))
 
 Please reply analysis conclusions in the same language as the user's input. Code comments should be in English."""
 

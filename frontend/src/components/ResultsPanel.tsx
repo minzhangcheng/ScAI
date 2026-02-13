@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useAppStore } from '../stores/appStore'
+import { useAppStore, PublicationFigure, PublicationTable, GraphicAbstract as GraphicAbstractType } from '../stores/appStore'
 import { useSession } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
-import ReactMarkdown from 'react-markdown'
+import { FigureGallery, IntegratedReport, GraphicAbstract, DownloadButtons } from './analysis'
 import {
   FileText,
   Download,
@@ -11,17 +11,22 @@ import {
   Microscope,
   Code2,
   FlaskConical,
-  BookOpen,
-  CheckCircle2
+  BookOpen
 } from 'lucide-react'
 
 export function ResultsPanel() {
-  const { currentSession, language } = useAppStore()
+  const { currentSession, messages, language } = useAppStore()
   const { getReport } = useSession()
   const { t } = useTranslation(language)
   const [report, setReport] = useState<any>(null)
   const [expandedRounds, setExpandedRounds] = useState<Set<number>>(new Set())
   const [_loading, setLoading] = useState(false)
+
+  // Publication outputs state
+  const [publicationFigures, setPublicationFigures] = useState<PublicationFigure[]>([])
+  const [publicationTables, setPublicationTables] = useState<PublicationTable[]>([])
+  const [integratedReport, setIntegratedReport] = useState<string | null>(null)
+  const [graphicAbstract, setGraphicAbstract] = useState<GraphicAbstractType | null>(null)
 
   const loadReport = useCallback(async () => {
     setLoading(true)
@@ -40,6 +45,77 @@ export function ResultsPanel() {
       loadReport()
     }
   }, [currentSession?.status, loadReport])
+
+  // Extract publication outputs from session and messages
+  useEffect(() => {
+    if (currentSession?.publicationFigures) {
+      setPublicationFigures(currentSession.publicationFigures)
+    }
+    if (currentSession?.publicationTables) {
+      setPublicationTables(currentSession.publicationTables)
+    }
+    if (currentSession?.integratedReport) {
+      setIntegratedReport(currentSession.integratedReport)
+    }
+    if (currentSession?.graphicAbstract) {
+      setGraphicAbstract(currentSession.graphicAbstract)
+    }
+
+    // Helper: transform figure from snake_case to camelCase
+    const transformFigure = (f: any): PublicationFigure => ({
+      id: f.id,
+      name: f.name,
+      description: f.description,
+      figureType: f.figure_type || f.figureType || '',
+      pngPath: f.png_path || f.pngPath || '',
+      pdfPath: f.pdf_path || f.pdfPath || '',
+      pngBase64: f.png_base64 || f.pngBase64,
+      reviewStatus: f.review_status || f.reviewStatus || 'pending',
+      piFeedback: f.pi_feedback || f.piFeedback,
+      revisionCount: f.revision_count ?? f.revisionCount ?? 0,
+      createdAt: f.created_at || f.createdAt || '',
+    })
+
+    // Process messages for real-time updates
+    for (const msg of messages) {
+      if (msg.type === 'figure_review' || msg.type === 'figure_approved') {
+        const content = msg.content as any
+        if (content?.figure) {
+          const fig = transformFigure(content.figure)
+          setPublicationFigures(prev => {
+            const existing = prev.find((f: PublicationFigure) => f.id === fig.id)
+            if (existing) {
+              return prev.map((f: PublicationFigure) => f.id === fig.id ? fig : f)
+            }
+            return [...prev, fig]
+          })
+        }
+      }
+      if (msg.type === 'integrated_report') {
+        const content = msg.content as any
+        if (content?.report) {
+          setIntegratedReport(content.report)
+        }
+        if (content?.figures) {
+          setPublicationFigures(content.figures.map(transformFigure))
+        }
+        if (content?.tables) {
+          setPublicationTables(content.tables)
+        }
+      }
+      if (msg.type === 'graphic_abstract') {
+        const content = msg.content as any
+        if (content?.image_base64 || content?.imageBase64) {
+          setGraphicAbstract({
+            id: content.id || 'ga-1',
+            prompt: content.prompt || '',
+            imageBase64: content.image_base64 || content.imageBase64,
+            createdAt: content.created_at || content.createdAt || new Date().toISOString()
+          })
+        }
+      }
+    }
+  }, [currentSession, messages])
 
   const toggleRound = (round: number) => {
     const newExpanded = new Set(expandedRounds)
@@ -120,18 +196,25 @@ export function ResultsPanel() {
         )}
       </div>
 
-      {/* Final Summary */}
-      {currentSession.finalSummary && (
-        <div className="bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-200 rounded-2xl p-6">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="p-2 bg-violet-100 rounded-lg">
-              <CheckCircle2 className="w-5 h-5 text-violet-600" />
-            </div>
-            <h3 className="font-semibold text-violet-900">{t('finalReport')}</h3>
-          </div>
-          <div className="prose prose-slate prose-sm max-w-none">
-            <ReactMarkdown>{currentSession.finalSummary}</ReactMarkdown>
-          </div>
+      {/* Publication Outputs */}
+      {(currentSession.status === 'completed' || publicationFigures.length > 0) && (
+        <div className="space-y-4">
+          <FigureGallery figures={publicationFigures} />
+
+          {integratedReport && (
+            <IntegratedReport report={integratedReport} />
+          )}
+
+          {graphicAbstract && (
+            <GraphicAbstract graphicAbstract={graphicAbstract} />
+          )}
+
+          {publicationFigures.length > 0 && (
+            <DownloadButtons
+              figures={publicationFigures}
+              tables={publicationTables}
+            />
+          )}
         </div>
       )}
 

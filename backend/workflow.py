@@ -33,7 +33,7 @@ from .agents.painter_agent import PainterAgent
 from .agents.base import AgentConfig
 from .utils.llm_client import LLMManager, OpenAICompatibleClient
 from .utils.sandbox import LocalJupyterSandbox
-from .config import SystemConfig, REPORTS_DIR
+from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR
 from .report_generator import DetailedReportGenerator
 
 
@@ -214,7 +214,7 @@ class SingleCellAnalysisWorkflow:
         pathology_model = custom_models.get('pathology', self.config.models.pathology_model)
         bioinformatics_model = custom_models.get('bioinformatics', self.config.models.bioinformatics_model)
         biochemistry_model = custom_models.get('biochemistry', self.config.models.biochemistry_model)
-        literature_model = custom_models.get('literature', self.config.models.pi_model)
+        literature_model = custom_models.get('literature', self.config.models.literature_model)
         
         # Determine prompts to use (custom takes precedence)
         pi_prompt = custom_prompts.get('pi', self.config.prompts.pi_prompt)
@@ -1054,7 +1054,14 @@ Report key findings when you complete each major analysis phase."""
 
     @with_retry("literature_research")
     async def _literature_research(self, state: WorkflowState) -> WorkflowState:
-        """Literature agent researches relevant topics"""
+        """Literature agent researches relevant topics.
+
+        Deep Research mode: merges all topics into one comprehensive query and
+        makes a single DR call. If some topics are insufficiently covered,
+        falls back to PubMed+LLM for the gaps.
+
+        PubMed mode: searches each topic individually (up to 3).
+        """
         analysis_state = state["analysis_state"]
         instructions = state["pi_instructions"]
 
@@ -1068,31 +1075,69 @@ Report key findings when you complete each major analysis phase."""
             if path_findings or bio_findings:
                 # Use findings as search topics (context from actual analysis)
                 topics = [f"single cell sequencing {' '.join((path_findings + bio_findings)[:3])}"]
-        
+
         await self._send_message("status", "Literature research in progress...", AgentType.LITERATURE)
-        
+
         # Enrich topics with previous findings for round 2+
         previous_lit_context = self._build_previous_findings_context(analysis_state, "literature")
 
-        results = []
-        for topic in topics[:3]:  # Limit to 3 topics
-            enriched_topic = topic
+        # Check if Deep Research mode is available
+        is_deep_research = (
+            self.literature_agent.literature_mode == "gemini_deep_research"
+            and self.literature_agent._deep_research is not None
+        )
+
+        limited_topics = topics[:3]
+
+        if is_deep_research and limited_topics:
+            # === Deep Research: merge topics, one call ===
+            merged_topic = "Please conduct a comprehensive literature review covering the following aspects:\n"
+            for i, t in enumerate(limited_topics, 1):
+                merged_topic += f"{i}. {t}\n"
             if previous_lit_context:
-                enriched_topic = f"{topic}\n{previous_lit_context}\nFocus on aspects NOT already covered above."
-            result = await self.literature_agent.process(
-                analysis_state,
-                enriched_topic,
-                use_deep_research=True
+                merged_topic += f"\n{previous_lit_context}\nFocus on aspects NOT already covered above."
+
+            logger.info(f"[{self.session_id}] Deep Research mode: merging {len(limited_topics)} topics into one query")
+            dr_result = await self.literature_agent.process(
+                analysis_state, merged_topic, use_deep_research=True
             )
-            results.append(result)
-        
+            results = [dr_result]
+
+            # Evaluate coverage — fallback to PubMed for gaps
+            if len(limited_topics) > 1:
+                gaps = await self._evaluate_dr_coverage(limited_topics, dr_result)
+                if gaps:
+                    logger.info(f"[{self.session_id}] Deep Research gaps detected, PubMed fallback for: {gaps}")
+                    await self._send_message("status", f"Supplementing {len(gaps)} topic(s) via PubMed...", AgentType.LITERATURE)
+                    for gap_topic in gaps:
+                        enriched = gap_topic
+                        if previous_lit_context:
+                            enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
+                        gap_result = await self.literature_agent.process(
+                            analysis_state, enriched, use_deep_research=False
+                        )
+                        results.append(gap_result)
+        else:
+            # === PubMed mode: per-topic search ===
+            results = []
+            for topic in limited_topics:
+                enriched_topic = topic
+                if previous_lit_context:
+                    enriched_topic = f"{topic}\n{previous_lit_context}\nFocus on aspects NOT already covered above."
+                result = await self.literature_agent.process(
+                    analysis_state,
+                    enriched_topic,
+                    use_deep_research=True
+                )
+                results.append(result)
+
         # Combine results
         combined_result = {
             "topics": topics,
             "findings": [],
             "reports": []
         }
-        
+
         for r in results:
             combined_result["findings"].extend(r.get("findings", []))
             if r.get("report"):
@@ -1105,18 +1150,52 @@ Report key findings when you complete each major analysis phase."""
             combined_result,
             AgentType.LITERATURE
         )
-        
+
         analysis_state.add_message(
             AgentType.LITERATURE,
             MessageRole.ASSISTANT,
             json.dumps({"findings": combined_result["findings"]}, ensure_ascii=False)
         )
-        
+
         return {
             **state,
             "analysis_state": analysis_state,
             "literature_result": combined_result
         }
+
+    async def _evaluate_dr_coverage(self, topics: List[str], dr_result: Dict) -> List[str]:
+        """Evaluate which topics were NOT sufficiently covered by Deep Research.
+
+        Returns a list of gap topic strings for PubMed+LLM fallback.
+        """
+        report = dr_result.get("report", "")
+        if not report:
+            return topics  # No report at all — fall back on everything
+
+        topics_list = "\n".join(f"{i+1}. {t}" for i, t in enumerate(topics))
+        prompt = f"""The following Deep Research report was generated:
+
+{report[:3000]}
+
+The original research topics were:
+{topics_list}
+
+Which topics are NOT sufficiently covered in the report? Return a JSON array of topic strings that need additional research. If all topics are well covered, return an empty array [].
+
+Return ONLY the JSON array, nothing else."""
+
+        try:
+            response = await self.literature_agent.chat(prompt, temperature=0.2)
+            # Strip markdown code fences if present
+            cleaned = response.strip().strip('`')
+            if cleaned.startswith('json'):
+                cleaned = cleaned[4:].strip()
+            gaps = json.loads(cleaned)
+            if isinstance(gaps, list):
+                return [g for g in gaps if isinstance(g, str)]
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"[{self.session_id}] DR coverage evaluation failed: {e}")
+        return []
     
     async def _pi_synthesis(self, state: WorkflowState) -> WorkflowState:
         """PI synthesizes all results and prepares round summary for user"""
@@ -1313,6 +1392,10 @@ Report key findings when you complete each major analysis phase."""
         """Generate final analysis report including integrated report with figures"""
         analysis_state = state["analysis_state"]
 
+        # Mark status so interrupted report generation can be detected on resume
+        analysis_state.status = TaskStatus.GENERATING_REPORT
+        await self._send_state_sync(analysis_state, "report_generation_start")
+
         logger.info(f"[{self.session_id}] Generating final report after {analysis_state.current_round} rounds")
 
         # Step 1: Generate final summary
@@ -1468,11 +1551,14 @@ Report key findings when you complete each major analysis phase."""
             pi_model = analysis_state.custom_models.get("pi", self.config.models.pi_model)
             bio_model = analysis_state.custom_models.get("bioinformatics", self.config.models.bioinformatics_model)
 
+            workspace_dir = str(WORKSPACE_DIR / self.session_id)
+
             generator = DetailedReportGenerator(
                 llm_client=llm_client,
                 pi_model=pi_model,
                 bio_model=bio_model,
                 output_dir=output_dir,
+                workspace_dir=workspace_dir,
                 progress_callback=progress_callback
             )
 
@@ -1598,6 +1684,61 @@ Report key findings when you complete each major analysis phase."""
             )
             return initial_state
     
+    async def generate_report(
+        self,
+        initial_state: AnalysisState,
+        thread_id: str
+    ) -> AnalysisState:
+        """
+        Run only the report generation phase, bypassing analysis rounds.
+        Used when a session completed all analysis rounds but was interrupted
+        before report generation finished.
+        """
+        self._custom_models = initial_state.custom_models
+        self._custom_prompts = initial_state.custom_prompts
+        self._custom_temperatures = initial_state.custom_temperatures
+        self._literature_config = initial_state.literature_config
+
+        try:
+            await self._send_message("status", "Resuming report generation (analysis already complete)...")
+            await self.initialize()
+            logger.info(f"[{self.session_id}] Workflow initialized for report-only generation")
+        except Exception as e:
+            logger.error(f"[{self.session_id}] Failed to initialize for report generation: {e}")
+            await self._send_message("error", f"Initialization failed: {str(e)}")
+            initial_state.status = TaskStatus.FAILED
+            return initial_state
+
+        # Create workflow state with existing analysis data
+        workflow_state: WorkflowState = {
+            "analysis_state": initial_state,
+            "current_round": initial_state.current_round,
+            "pi_instructions": {},
+            "pathology_result": None,
+            "bioinformatics_result": None,
+            "biochemistry_result": None,
+            "literature_result": None,
+            "round_result": None,
+            "should_continue": False,
+            "error": None,
+            "messages": []
+        }
+
+        try:
+            logger.info(f"[{self.session_id}] Running report generation only (skipping analysis)")
+            state = await self._generate_final_report(workflow_state)
+            state = await self._generate_graphic_abstract(state)
+            state = await self._generate_detailed_report(state)
+            logger.info(f"[{self.session_id}] Report generation completed")
+            return state["analysis_state"]
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            logger.error(f"[{self.session_id}] Report generation failed: {error_detail}")
+            await self._send_message("error", f"Report generation failed: {str(e)}")
+            initial_state.status = TaskStatus.FAILED
+            return initial_state
+
     async def resume(
         self,
         thread_id: str,

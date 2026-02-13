@@ -751,6 +751,7 @@ class DetailedReportGenerator:
         pi_model: str,
         bio_model: str,
         output_dir: str,
+        workspace_dir: str = None,
         progress_callback: Optional[Callable] = None
     ):
         self.llm_client = llm_client
@@ -758,6 +759,7 @@ class DetailedReportGenerator:
         self.bio_model = bio_model
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.workspace_dir = Path(workspace_dir) if workspace_dir else None
         self.progress_callback = progress_callback
 
         # Create subdirectories
@@ -965,7 +967,13 @@ Be specific and actionable. Include:
         state: AnalysisState,
     ) -> Dict[str, Any]:
         """
-        Generate a detailed research report using Agent-driven approach
+        Generate a detailed research report by compiling existing analysis results.
+
+        NO code execution or Jupyter sandbox — the report is built entirely from:
+        - state.code_history (what analyses were done)
+        - state.round_results (what was found)
+        - state.publication_figures (PI-reviewed figures)
+        - Workspace files (figures and tables generated during analysis)
 
         Args:
             state: Analysis state with results
@@ -975,128 +983,119 @@ Be specific and actionable. Include:
         """
         report_id = str(uuid.uuid4())
         language = "zh" if any('\u4e00' <= c <= '\u9fff' for c in state.initial_instruction) else "en"
+        zh = language == "zh"
 
-        await self._report_progress(2, "初始化..." if language == "zh" else "Initializing...")
+        await self._report_progress(2, "初始化报告编排..." if zh else "Initializing report compilation...")
 
-        # Initialize Jupyter sandbox with correct data directories
-        self.sandbox = LocalJupyterSandbox(
-            session_id=f"report_{report_id}",
-            state_dir=str(STATE_DIR),
-            working_dir=str(WORKSPACE_DIR)
+        # Step 1: Build structured analysis record from state data
+        await self._report_progress(5, "读取分析记录..." if zh else "Reading analysis records...")
+        analysis_record = self._build_analysis_record(state)
+        logger.info(
+            f"Analysis record: {analysis_record['total_code_cells']} code cells, "
+            f"{len(analysis_record['analysis_steps'])} steps with figures, "
+            f"{analysis_record['total_rounds']} rounds"
         )
-        await self.sandbox.start()
 
-        try:
-            # Setup the analysis environment
-            await self._report_progress(5, "设置分析环境..." if language == "zh" else "Setting up environment...")
-            env_ready = await self._setup_environment(state)
+        # Step 2: Scan workspace for existing figures and tables, copy to report dir
+        await self._report_progress(10, "收集分析图表..." if zh else "Collecting analysis figures and tables...")
+        existing_figures = self._scan_existing_figures()
+        existing_tables = self._scan_existing_tables()
+        logger.info(f"Collected {len(existing_figures)} figures and {len(existing_tables)} tables for report")
 
-            if not env_ready:
-                return {
-                    "id": report_id,
-                    "status": "failed",
-                    "error": "Failed to setup environment or load data"
-                }
+        # Step 3: Extract findings from round results
+        await self._report_progress(15, "提取分析结论..." if zh else "Extracting analysis findings...")
+        findings = self._extract_findings(state)
 
-            # Extract key findings from analysis
-            await self._report_progress(10, "提取分析结论..." if language == "zh" else "Extracting conclusions...")
-            findings = self._extract_findings(state)
+        # Extract cluster annotations from state data (no sandbox needed)
+        self._extract_cluster_annotations_from_state(state)
 
-            # Scan for existing figures from analysis phase
-            await self._report_progress(12, "扫描已有图片..." if language == "zh" else "Scanning existing figures...")
-            existing_figures = self._scan_existing_figures()
-            logger.info(f"Found {len(existing_figures)} existing figures for report")
+        # Step 4: PI plans report structure based on analysis record
+        await self._report_progress(20, "PI Agent规划报告结构..." if zh else "PI Agent planning report structure...")
+        report_plan = await self._plan_report_from_analysis(
+            state, analysis_record, findings, existing_figures, existing_tables, language
+        )
 
-            # PI Agent dynamically plans the report structure based on existing figures
-            await self._report_progress(15, "PI Agent分析图片并规划报告..." if language == "zh" else "PI Agent analyzing figures and planning report...")
-            report_plan = await self._plan_report_dynamic(state, findings, language, existing_figures)
+        # Step 5: Generate each section using existing figures + PI narrative (no code execution)
+        sections = []
+        total_sections = len(report_plan.get("sections", []))
 
-            # Generate each section using Agent-driven code generation
-            sections = []
-            total_sections = len(report_plan.get("sections", []))
+        for i, section_plan in enumerate(report_plan.get("sections", [])):
+            progress = 25 + (i / max(total_sections, 1)) * 55
+            section_title = section_plan.get("title", f"Section {i+1}")
+            await self._report_progress(
+                progress,
+                f"撰写: {section_title}" if zh else f"Writing: {section_title}"
+            )
 
-            for i, section_plan in enumerate(report_plan.get("sections", [])):
-                progress = 20 + (i / max(total_sections, 1)) * 60
-                section_title = section_plan.get("title", f"Section {i+1}")
-                await self._report_progress(
-                    progress,
-                    f"生成: {section_title}" if language == "zh" else f"Generating: {section_title}"
-                )
+            section = await self._generate_section_from_existing_figures(
+                state,
+                section_plan,
+                findings,
+                language
+            )
+            sections.append(section)
 
-                section = await self._generate_section_autonomous(
-                    state,
-                    section_plan,
-                    findings,
-                    language
-                )
-                sections.append(section)
+        # Step 6: PI writes abstract and conclusions
+        await self._report_progress(85, "撰写摘要..." if zh else "Writing abstract...")
+        abstract = await self._generate_abstract(state, sections, findings, language)
 
-            # PI Agent writes the abstract and conclusions
-            await self._report_progress(85, "撰写摘要..." if language == "zh" else "Writing abstract...")
-            abstract = await self._generate_abstract(state, sections, findings, language)
+        await self._report_progress(92, "撰写结论..." if zh else "Writing conclusions...")
+        conclusions = await self._generate_conclusions(state, sections, findings, language)
 
-            await self._report_progress(92, "撰写结论..." if language == "zh" else "Writing conclusions...")
-            conclusions = await self._generate_conclusions(state, sections, findings, language)
+        # Save graphic abstract image to figures dir if available
+        graphic_abstract_path = None
+        if state.graphic_abstract and state.graphic_abstract.image_base64:
+            try:
+                import base64 as b64mod
+                ga_png = self.figures_dir / "graphic_abstract.png"
+                with open(ga_png, "wb") as ga_f:
+                    ga_f.write(b64mod.b64decode(state.graphic_abstract.image_base64))
+                graphic_abstract_path = str(ga_png)
+                logger.info(f"Saved graphic abstract to {ga_png}")
+            except Exception as e:
+                logger.error(f"Failed to save graphic abstract: {e}")
 
-            # Save graphic abstract image to figures dir if available
-            graphic_abstract_path = None
-            if state.graphic_abstract and state.graphic_abstract.image_base64:
-                try:
-                    import base64 as b64mod
-                    ga_png = self.figures_dir / "graphic_abstract.png"
-                    with open(ga_png, "wb") as ga_f:
-                        ga_f.write(b64mod.b64decode(state.graphic_abstract.image_base64))
-                    graphic_abstract_path = str(ga_png)
-                    logger.info(f"Saved graphic abstract to {ga_png}")
-                except Exception as e:
-                    logger.error(f"Failed to save graphic abstract: {e}")
+        report = {
+            "id": report_id,
+            "session_id": state.id,
+            "title": report_plan.get("title", state.name),
+            "abstract": abstract,
+            "sections": sections,
+            "conclusions": conclusions,
+            "figures": self.generated_figures,
+            "tables": self.generated_tables,
+            "graphic_abstract_path": graphic_abstract_path,
+            "generated_at": datetime.now().isoformat(),
+            "status": "completed",
+            "progress": 100,
+            "current_step": "完成" if zh else "Complete"
+        }
 
-            report = {
-                "id": report_id,
-                "session_id": state.id,
-                "title": report_plan.get("title", state.name),
-                "abstract": abstract,
-                "sections": sections,
-                "conclusions": conclusions,
-                "figures": self.generated_figures,
-                "tables": self.generated_tables,
-                "graphic_abstract_path": graphic_abstract_path,
-                "generated_at": datetime.now().isoformat(),
-                "status": "completed",
-                "progress": 100,
-                "current_step": "完成" if language == "zh" else "Complete"
-            }
+        # Sanitize NaN/Infinity values before saving (pandas data can contain these)
+        def _sanitize(obj):
+            import math
+            if isinstance(obj, float):
+                return None if (math.isnan(obj) or math.isinf(obj)) else obj
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_sanitize(v) for v in obj]
+            return obj
+        report = _sanitize(report)
 
-            # Sanitize NaN/Infinity values before saving (pandas data can contain these)
-            def _sanitize(obj):
-                import math
-                if isinstance(obj, float):
-                    return None if (math.isnan(obj) or math.isinf(obj)) else obj
-                if isinstance(obj, dict):
-                    return {k: _sanitize(v) for k, v in obj.items()}
-                if isinstance(obj, list):
-                    return [_sanitize(v) for v in obj]
-                return obj
-            report = _sanitize(report)
+        # Save report metadata
+        report_path = self.output_dir / "report.json"
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
 
-            # Save report metadata
-            report_path = self.output_dir / "report.json"
-            with open(report_path, "w", encoding="utf-8") as f:
-                json.dump(report, f, ensure_ascii=False, indent=2)
+        # Generate HTML report
+        await self._report_progress(95, "生成HTML报告..." if zh else "Generating HTML report...")
+        html_path = await self._generate_html_report(report, language)
+        report["html_path"] = str(html_path)
 
-            # Generate HTML report
-            await self._report_progress(95, "生成HTML报告..." if language == "zh" else "Generating HTML report...")
-            html_path = await self._generate_html_report(report, language)
-            report["html_path"] = str(html_path)
+        await self._report_progress(100, "完成" if zh else "Complete", "completed")
 
-            await self._report_progress(100, "完成" if language == "zh" else "Complete", "completed")
-
-            return report
-
-        finally:
-            # Cleanup sandbox
-            if self.sandbox:
-                await self.sandbox.stop()
+        return report
 
     async def _setup_environment(self, state: AnalysisState) -> bool:
         """Setup the Jupyter environment with basic packages - Agent will import additional libraries as needed"""
@@ -1443,58 +1442,267 @@ print("CLUSTER_ANNOTATIONS_JSON:" + _json.dumps(_mapping, ensure_ascii=False))
 
         return findings
 
+    def _build_analysis_record(self, state: AnalysisState) -> Dict[str, Any]:
+        """
+        Build a structured analysis record from state data.
+        Connects code_history → saved figures → round findings to create
+        a comprehensive timeline of the analysis.
+
+        Returns dict with:
+        - analysis_steps: list of notable code cells with their saved figures
+        - round_summaries: list of round results with per-agent findings
+        - publication_figures: list of PI-reviewed figure metadata
+        - tables: list of CSV tables found in workspace
+        """
+        import re as _re
+
+        # 1. Parse code_history to find cells that saved figures
+        analysis_steps = []
+        for i, cell in enumerate(state.code_history):
+            code = cell.code or ""
+            output = cell.output or ""
+            timestamp = cell.timestamp.isoformat() if hasattr(cell.timestamp, 'isoformat') else str(cell.timestamp)
+
+            # Extract saved figure filenames from code
+            saved_figures = []
+            # Match patterns like: savefig("name.png"), save_figure(fig, path / "name")
+            for match in _re.findall(r'["\']([^"\']*\.png)["\']', code):
+                # Get just the filename, not full path
+                fname = os.path.basename(match)
+                if fname:
+                    saved_figures.append(fname)
+
+            # Extract a description from the first meaningful comment or code line
+            description = ""
+            for line in code.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("#") and not line.startswith("# ==="):
+                    description = line.lstrip("# ").strip()
+                    break
+
+            # Only include cells that produced figures or had significant output
+            has_display_figures = len(cell.figures) > 0
+            has_saved_figures = len(saved_figures) > 0
+            has_error = bool(cell.error)
+
+            if has_display_figures or has_saved_figures:
+                analysis_steps.append({
+                    "cell_index": i,
+                    "timestamp": timestamp,
+                    "description": description or f"Code cell {i}",
+                    "saved_figures": saved_figures,
+                    "has_display_figures": has_display_figures,
+                    "output_summary": output[:300] if output else "",
+                    "had_error": has_error,
+                })
+
+        # 2. Build round summaries from round_results
+        round_summaries = []
+        for r in state.round_results:
+            round_summaries.append({
+                "round_number": r.round_number,
+                "pi_summary": r.pi_summary or "",
+                "pathology_findings": r.pathology_findings or [],
+                "bioinformatics_findings": r.bioinformatics_findings or [],
+                "biochemistry_findings": r.biochemistry_findings or [],
+                "literature_findings": r.literature_findings or [],
+            })
+
+        # 3. Collect publication figure metadata
+        pub_figures = []
+        for fig in state.publication_figures:
+            pub_figures.append({
+                "name": fig.name,
+                "description": fig.description,
+                "figure_type": fig.figure_type,
+                "filename": os.path.basename(fig.png_path) if fig.png_path else "",
+                "review_status": fig.review_status.value if hasattr(fig.review_status, 'value') else str(fig.review_status),
+            })
+
+        # 4. Scan workspace for CSV tables
+        tables = []
+        if self.workspace_dir and self.workspace_dir.exists():
+            for csv_file in sorted(self.workspace_dir.glob("*.csv")):
+                tables.append({
+                    "filename": csv_file.name,
+                    "name": csv_file.stem.replace("_", " ").title(),
+                })
+
+        return {
+            "analysis_steps": analysis_steps,
+            "round_summaries": round_summaries,
+            "publication_figures": pub_figures,
+            "tables": tables,
+            "total_code_cells": len(state.code_history),
+            "total_rounds": len(state.round_results),
+        }
+
+    def _extract_cluster_annotations_from_state(self, state: AnalysisState):
+        """
+        Extract cluster annotations from state data (round_results and publication_figures)
+        without requiring a Jupyter sandbox.
+        """
+        import re as _re
+
+        # Try to extract from bioinformatics findings
+        for r in state.round_results:
+            for finding in (r.bioinformatics_findings or []):
+                # Look for patterns like "cluster X: CellType" or "X cells of type Y"
+                # This is best-effort; cluster annotations may also come from publication_figures
+                pass
+
+        # Try to extract from publication figure descriptions
+        for fig in state.publication_figures:
+            desc = fig.description or ""
+            # Look for patterns like "11 cell types" or cluster mentions
+            matches = _re.findall(r'(\d+)\s+cell\s+types?', desc, _re.IGNORECASE)
+            if matches:
+                logger.info(f"Found cell type count reference in figure: {fig.name}")
+
+        logger.info(f"Cluster annotations extracted from state: {len(self.cluster_annotations)} clusters")
+
+    @staticmethod
+    def _infer_figure_type(filename: str) -> str:
+        """Infer figure type from filename."""
+        name = filename.lower()
+        if "celltype" in name or "cell_type" in name or "annotation" in name:
+            return "annotation"
+        elif "umap" in name:
+            return "umap"
+        elif "violin" in name:
+            return "violin"
+        elif "heatmap" in name:
+            return "heatmap"
+        elif "dotplot" in name or "dot_plot" in name:
+            return "dotplot"
+        elif "volcano" in name:
+            return "volcano"
+        elif "bar" in name or "composition" in name:
+            return "bar_chart"
+        elif "feature" in name or "expression" in name:
+            return "feature_plot"
+        elif "cluster" in name or "leiden" in name:
+            return "clustering"
+        elif "fold_change" in name:
+            return "fold_change"
+        elif "marker" in name:
+            return "marker_genes"
+        elif "qc" in name or "quality" in name:
+            return "qc"
+        elif "trajectory" in name or "dpt" in name or "pseudotime" in name:
+            return "trajectory"
+        elif "velocity" in name:
+            return "velocity"
+        elif "pathway" in name or "enrichment" in name:
+            return "pathway"
+        elif "scatter" in name:
+            return "scatter"
+        elif "overview" in name:
+            return "overview"
+        elif "zonation" in name:
+            return "zonation"
+        elif "stress" in name:
+            return "stress_markers"
+        return "unknown"
+
     def _scan_existing_figures(self) -> List[Dict[str, Any]]:
         """
-        Scan the figures directory for existing images from analysis phase.
+        Scan the WORKSPACE directory for existing images from analysis phase.
+        Copies figures to the report output directory for HTML embedding.
         Returns a list of figure info dicts with path, name, and inferred type.
         """
+        import shutil
         existing_figures = []
+        seen_filenames = set()
 
-        if not self.figures_dir.exists():
+        if not self.workspace_dir or not self.workspace_dir.exists():
+            logger.warning(f"Workspace directory not available: {self.workspace_dir}")
             return existing_figures
 
-        for png_file in sorted(self.figures_dir.glob("*.png")):
-            filename = png_file.stem.lower()
-            pdf_file = png_file.with_suffix('.pdf')
+        # Scan both workspace root and figures/ subdirectory
+        scan_dirs = [self.workspace_dir]
+        figures_subdir = self.workspace_dir / "figures"
+        if figures_subdir.exists():
+            scan_dirs.append(figures_subdir)
 
-            # Infer figure type from filename
-            fig_type = "unknown"
-            if "celltype" in filename or "cell_type" in filename or "annotation" in filename:
-                fig_type = "annotation"
-            elif "umap" in filename:
-                fig_type = "umap"
-            elif "violin" in filename:
-                fig_type = "violin"
-            elif "heatmap" in filename:
-                fig_type = "heatmap"
-            elif "dotplot" in filename:
-                fig_type = "dotplot"
-            elif "volcano" in filename:
-                fig_type = "volcano"
-            elif "bar" in filename or "composition" in filename:
-                fig_type = "bar_chart"
-            elif "feature" in filename or "expression" in filename:
-                fig_type = "feature_plot"
-            elif "cluster" in filename or "leiden" in filename:
-                fig_type = "clustering"
-            elif "fold_change" in filename:
-                fig_type = "fold_change"
-            elif "marker" in filename:
-                fig_type = "marker_genes"
-            elif "qc" in filename or "quality" in filename:
-                fig_type = "qc"
+        for scan_dir in scan_dirs:
+            for png_file in sorted(scan_dir.glob("*.png")):
+                if png_file.name in seen_filenames:
+                    continue
+                seen_filenames.add(png_file.name)
 
-            fig_info = {
-                "filename": png_file.name,
-                "name": png_file.stem.replace("_", " ").title(),
-                "png_path": str(png_file),
-                "pdf_path": str(pdf_file) if pdf_file.exists() else None,
-                "inferred_type": fig_type
-            }
-            existing_figures.append(fig_info)
+                # Copy to report figures directory for HTML embedding
+                dest_png = self.figures_dir / png_file.name
+                try:
+                    shutil.copy2(str(png_file), str(dest_png))
+                except Exception as e:
+                    logger.warning(f"Failed to copy figure {png_file.name}: {e}")
+                    continue
 
-        logger.info(f"Found {len(existing_figures)} existing figures in {self.figures_dir}")
+                # Also copy PDF if it exists
+                pdf_file = png_file.with_suffix('.pdf')
+                dest_pdf = self.figures_dir / pdf_file.name
+                if pdf_file.exists():
+                    try:
+                        shutil.copy2(str(pdf_file), str(dest_pdf))
+                    except Exception:
+                        pass
+
+                fig_info = {
+                    "filename": png_file.name,
+                    "name": png_file.stem.replace("_", " ").title(),
+                    "png_path": str(dest_png),
+                    "pdf_path": str(dest_pdf) if pdf_file.exists() else None,
+                    "inferred_type": self._infer_figure_type(png_file.stem)
+                }
+                existing_figures.append(fig_info)
+
+        logger.info(f"Found {len(existing_figures)} existing figures from workspace {self.workspace_dir}")
         return existing_figures
+
+    def _scan_existing_tables(self) -> List[Dict[str, Any]]:
+        """
+        Scan the workspace directory for existing CSV tables from analysis phase.
+        Copies tables to the report output directory.
+        Returns a list of table info dicts.
+        """
+        import shutil
+        existing_tables = []
+
+        if not self.workspace_dir or not self.workspace_dir.exists():
+            return existing_tables
+
+        for csv_file in sorted(self.workspace_dir.glob("*.csv")):
+            # Copy to report tables directory
+            dest_csv = self.tables_dir / csv_file.name
+            try:
+                shutil.copy2(str(csv_file), str(dest_csv))
+            except Exception as e:
+                logger.warning(f"Failed to copy table {csv_file.name}: {e}")
+                continue
+
+            # Read preview data
+            columns = []
+            preview_data = []
+            try:
+                df_preview = pd.read_csv(csv_file, nrows=10)
+                columns = list(df_preview.columns)
+                preview_data = df_preview.to_dict('records')
+            except Exception:
+                pass
+
+            tbl_info = {
+                "filename": csv_file.name,
+                "name": csv_file.stem.replace("_", " ").title(),
+                "csv_path": str(dest_csv),
+                "columns": columns,
+                "preview_data": preview_data,
+                "inferred_type": "differential_expression" if csv_file.stem.startswith("de_") else "data"
+            }
+            existing_tables.append(tbl_info)
+
+        logger.info(f"Found {len(existing_tables)} existing tables from workspace {self.workspace_dir}")
+        return existing_tables
 
     async def _plan_report_dynamic(
         self,
@@ -1711,6 +1919,180 @@ Return JSON with this EXACT structure:
             ]
         }
 
+    async def _plan_report_from_analysis(
+        self,
+        state: AnalysisState,
+        analysis_record: Dict[str, Any],
+        findings: Dict[str, Any],
+        existing_figures: List[Dict[str, Any]],
+        existing_tables: List[Dict[str, Any]],
+        language: str
+    ) -> Dict[str, Any]:
+        """
+        PI Agent plans the report structure based on the complete analysis record.
+        Uses analysis flow, existing figures, tables, and round findings to create
+        a comprehensive report that walks through the analysis chronologically.
+        """
+        zh = language == "zh"
+
+        # Format figures list
+        figures_list = "\n".join([
+            f"  {i+1}. {fig['filename']} (type: {fig['inferred_type']})"
+            for i, fig in enumerate(existing_figures)
+        ]) if existing_figures else "No existing figures found."
+
+        # Format tables list
+        tables_list = "\n".join([
+            f"  {i+1}. {tbl['filename']} (type: {tbl.get('inferred_type', 'data')})"
+            + (f" — columns: {', '.join(tbl['columns'][:5])}" if tbl.get('columns') else "")
+            for i, tbl in enumerate(existing_tables)
+        ]) if existing_tables else "No tables found."
+
+        # Format publication figures with descriptions
+        pub_figs_text = ""
+        if analysis_record.get("publication_figures"):
+            pub_figs_lines = []
+            for pf in analysis_record["publication_figures"]:
+                pub_figs_lines.append(
+                    f"  - {pf['filename']} [{pf['figure_type']}]: {pf['description'][:200]}"
+                )
+            pub_figs_text = "\n".join(pub_figs_lines)
+
+        # Format round summaries
+        rounds_text = ""
+        for rs in analysis_record.get("round_summaries", []):
+            rounds_text += f"\n### Round {rs['round_number']}\n"
+            rounds_text += f"**PI Summary**: {rs['pi_summary'][:500]}\n"
+            if rs['bioinformatics_findings']:
+                rounds_text += f"**Bioinformatics findings**:\n"
+                for f in rs['bioinformatics_findings'][:5]:
+                    rounds_text += f"  - {f[:200]}\n"
+            if rs['pathology_findings']:
+                rounds_text += f"**Pathology findings**:\n"
+                for f in rs['pathology_findings'][:3]:
+                    rounds_text += f"  - {f[:200]}\n"
+            if rs['biochemistry_findings']:
+                rounds_text += f"**Biochemistry findings**:\n"
+                for f in rs['biochemistry_findings'][:3]:
+                    rounds_text += f"  - {f[:200]}\n"
+            if rs['literature_findings']:
+                rounds_text += f"**Literature findings**:\n"
+                for f in rs['literature_findings'][:3]:
+                    rounds_text += f"  - {f[:200]}\n"
+
+        # Format analysis steps (code cells that produced figures)
+        steps_text = ""
+        for step in analysis_record.get("analysis_steps", [])[:30]:
+            figs_str = ", ".join(step['saved_figures']) if step['saved_figures'] else "(display only)"
+            steps_text += f"  - [{step['timestamp'][:16]}] {step['description']} → figures: {figs_str}\n"
+
+        prompt = f"""You are a Principal Investigator writing a comprehensive scientific research report.
+
+## CRITICAL INSTRUCTION
+You must organize the report to walk through the COMPLETE ANALYSIS FLOW chronologically.
+- Present the analysis process step by step
+- Show ALL figures and tables that were generated during analysis
+- Provide scientific interpretation for EACH figure and table
+- Do NOT request any new analysis or figure generation — use only existing results
+
+## Research Project
+Title: {state.name}
+Objective: {state.initial_instruction}
+
+## Analysis Flow ({analysis_record['total_rounds']} rounds, {analysis_record['total_code_cells']} code cells)
+{rounds_text}
+
+## Key Analysis Steps (code cells that generated figures)
+{steps_text}
+
+## Publication-Quality Figures (PI-reviewed)
+{pub_figs_text or "None"}
+
+## ALL Available Figures ({len(existing_figures)} total)
+{figures_list}
+
+## Available Tables ({len(existing_tables)} total)
+{tables_list}
+
+## Final Summary
+{findings.get('summary', '')[:2000]}
+
+## Task
+{"用中文撰写所有内容（标题、描述、解读、叙述）" if zh else "Write all content in English"}
+
+Create a report plan that walks through the complete analysis process. Return JSON:
+{{
+    "title": "Report title",
+    "sections": [
+        {{
+            "id": "unique_id",
+            "title": "Section Title",
+            "description": "What this section covers",
+            "analysis_type": "general" or "specific",
+            "existing_figures": [
+                {{
+                    "filename": "exact_filename.png",
+                    "caption": "Detailed caption (50-100 words)",
+                    "interpretation": "Scientific interpretation (100-200 words)",
+                    "importance": "high/medium/low"
+                }}
+            ],
+            "existing_tables": [
+                {{
+                    "filename": "exact_filename.csv",
+                    "caption": "What this table contains",
+                    "interpretation": "How to interpret the data"
+                }}
+            ],
+            "narrative": "Section narrative (200-400 words)"
+        }}
+    ]
+}}
+
+## Section Organization Requirements
+
+1. **Data Quality Control**: QC violin plots, scatter plots, filtering metrics
+2. **Cell Clustering & Visualization**: UMAP embeddings, leiden clustering, cell type annotations
+3. **Cell Composition Analysis**: Cell type proportions, composition bar charts
+4. **Marker Gene Analysis**: Dotplots, heatmaps of cluster markers
+5. **Differential Expression Analysis**: Volcano plots, DE gene lists/tables
+6. **Pathway & Functional Analysis**: Pathway enrichment, heatmaps
+7. **Trajectory / Velocity Analysis** (if applicable): Pseudotime, RNA velocity plots
+8. **Key Biological Findings**: Disease-specific findings, stress markers, specific gene patterns
+
+### IMPORTANT:
+- Include ALL {len(existing_figures)} figures — assign every figure to a section
+- Include ALL {len(existing_tables)} tables — assign every table to a section
+- Use EXACT filenames from the lists above
+- If a figure doesn't fit standard sections, create an appropriate section for it
+- Write detailed captions and interpretations using the analysis findings as context
+- The narrative should reference figures and tables by filename
+"""
+
+        response = await self._pi_chat(prompt, temperature=0.4)
+
+        try:
+            plan = _safe_parse_json(response)
+            if plan and plan.get("sections"):
+                logger.info(f"Analysis-based report plan: {len(plan['sections'])} sections")
+
+                for section in plan.get("sections", []):
+                    if "analysis_type" not in section:
+                        section["analysis_type"] = "general"
+                    if "existing_figures" not in section:
+                        section["existing_figures"] = []
+                    if "existing_tables" not in section:
+                        section["existing_tables"] = []
+
+                plan["_existing_figures"] = existing_figures
+                plan["_existing_tables"] = existing_tables
+                return plan
+        except Exception as e:
+            logger.error(f"Failed to parse analysis-based report plan: {e}")
+
+        # Fallback to auto-assignment based on figure types
+        return self._create_fallback_plan_with_existing_figures(state, existing_figures, zh)
+
     async def _generate_section_from_existing_figures(
         self,
         state: AnalysisState,
@@ -1719,7 +2101,7 @@ Return JSON with this EXACT structure:
         language: str
     ) -> Dict[str, Any]:
         """
-        Generate a report section using EXISTING figures from the analysis phase.
+        Generate a report section using EXISTING figures and tables from the analysis phase.
         PI Agent writes the narrative, captions, and scientific interpretations.
         """
         zh = language == "zh"
@@ -1728,17 +2110,47 @@ Return JSON with this EXACT structure:
         section_description = section_plan.get("description", "")
         analysis_type = section_plan.get("analysis_type", "general")
         existing_figures = section_plan.get("existing_figures", [])
+        existing_tables = section_plan.get("existing_tables", [])
         provided_narrative = section_plan.get("narrative", "")
 
-        logger.info(f"Generating section '{section_title}' with {len(existing_figures)} existing figures")
+        logger.info(f"Generating section '{section_title}' with {len(existing_figures)} figures, {len(existing_tables)} tables")
 
         # Build figure info for PI Agent
         figures_info = "\n".join([
-            f"  - {fig.get('filename', 'unknown')}: {fig.get('caption', 'No caption provided')}"
+            f"  - {fig.get('filename', 'unknown')}: {fig.get('caption', fig.get('interpretation', 'No caption provided'))}"
             for fig in existing_figures
-        ])
+        ]) if existing_figures else "No figures in this section."
+
+        # Build table info for PI Agent
+        tables_info = "\n".join([
+            f"  - {tbl.get('filename', 'unknown')}: {tbl.get('caption', tbl.get('interpretation', 'No description'))}"
+            for tbl in existing_tables
+        ]) if existing_tables else ""
 
         # Ask PI Agent to write comprehensive content for this section
+        tables_section = ""
+        if tables_info:
+            tables_section = f"""
+## Tables in This Section
+{tables_info}
+"""
+
+        tables_json_template = ""
+        if existing_tables:
+            tables_json_template = """,
+
+    "tables": [
+        {{
+            "filename": "exact_filename.csv",
+            "caption": "Detailed table caption describing what data it contains",
+            "interpretation": "How to interpret this data and its significance"
+        }}
+    ]"""
+
+        tables_requirement = ""
+        if existing_tables:
+            tables_requirement = f"\n6. Each table must have a caption and interpretation"
+
         prompt = f"""You are a Principal Investigator writing a section for a scientific research report.
 
 ## Section Information
@@ -1748,7 +2160,7 @@ Analysis Type: {analysis_type}
 
 ## Figures in This Section
 {figures_info}
-
+{tables_section}
 ## Research Context
 Project: {state.name}
 Objective: {state.initial_instruction}
@@ -1759,6 +2171,9 @@ Objective: {state.initial_instruction}
 ## Summary
 {findings.get('summary', '')[:1500]}
 
+## Cluster Annotations
+{findings.get('cluster_annotations', 'Not available')}
+
 ## Your Task
 {"用中文撰写" if zh else "Write in English"}
 
@@ -1766,20 +2181,20 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 
 {{
     "narrative": "A detailed scientific narrative (300-500 words) that:
-        - Introduces the purpose of this analysis
-        - References each figure by filename (e.g., 'As shown in umap_leiden_clusters.png...')
+        - Introduces the purpose of this analysis step
+        - References each figure by filename (e.g., 'As shown in umap_cell_types.png...')
         - Explains the methodology used
-        - Presents the key observations
+        - Presents the key observations with quantitative details
         - Discusses the biological significance
         - Connects findings to the research hypothesis",
 
     "figures": [
         {{
             "filename": "exact_filename.png",
-            "caption": "Detailed figure caption (50-100 words) describing what the figure shows, including sample sizes, methods, and key observations",
-            "interpretation": "Scientific interpretation (100-200 words) explaining the biological significance of the observations shown in this figure"
+            "caption": "Detailed figure caption (50-100 words)",
+            "interpretation": "Scientific interpretation (100-200 words)"
         }}
-    ]
+    ]{tables_json_template}
 }}
 
 ## Important Requirements:
@@ -1787,7 +2202,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 2. Include quantitative details where available (cell counts, percentages, p-values)
 3. Reference specific clusters, genes, or conditions discussed in the findings
 4. Each figure must have BOTH a detailed caption AND an interpretation
-5. The narrative should flow logically and reference all figures in the section
+5. The narrative should flow logically and reference all figures in the section{tables_requirement}
 """
 
         response = await self._pi_chat(prompt, temperature=0.3)
@@ -1798,6 +2213,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
             if content:
                 narrative = content.get("narrative", "")
                 figure_details = content.get("figures", [])
+                table_details = content.get("tables", [])
 
                 # Merge PI Agent's interpretations with existing figure info
                 section_figures = []
@@ -1809,20 +2225,63 @@ Generate a comprehensive scientific narrative for this section. Your response mu
                         {}
                     )
 
+                    # Resolve png_path: check if we have it in figures_dir
+                    png_path = fig.get("png_path", "")
+                    if not png_path and filename:
+                        candidate = self.figures_dir / filename
+                        if candidate.exists():
+                            png_path = str(candidate)
+
+                    pdf_path = fig.get("pdf_path")
+                    if not pdf_path and filename:
+                        candidate = self.figures_dir / filename.replace(".png", ".pdf")
+                        if candidate.exists():
+                            pdf_path = str(candidate)
+
                     fig_id = str(uuid.uuid4())[:8]
                     section_figures.append({
                         "id": fig_id,
                         "name": fig.get("caption", fig.get("filename", "Figure")).replace("_", " ").title(),
                         "caption": matching_detail.get("caption", fig.get("caption", "")),
-                        "interpretation": matching_detail.get("interpretation", ""),
-                        "png_path": fig.get("png_path", ""),
-                        "pdf_path": fig.get("pdf_path"),
+                        "interpretation": matching_detail.get("interpretation", fig.get("interpretation", "")),
+                        "png_path": png_path,
+                        "pdf_path": pdf_path,
                         "section": section_id,
                         "analysis_type": analysis_type
                     })
 
                     # Add to global generated figures list
                     self.generated_figures.append(section_figures[-1])
+
+                # Process tables
+                section_tables = []
+                for tbl in existing_tables:
+                    tbl_filename = tbl.get("filename", "")
+                    matching_tbl = next(
+                        (d for d in table_details if d.get("filename", "").lower() == tbl_filename.lower()),
+                        {}
+                    )
+
+                    csv_path = tbl.get("csv_path", "")
+                    if not csv_path and tbl_filename:
+                        candidate = self.tables_dir / tbl_filename
+                        if candidate.exists():
+                            csv_path = str(candidate)
+
+                    tbl_id = str(uuid.uuid4())[:8]
+                    tbl_info = {
+                        "id": tbl_id,
+                        "name": matching_tbl.get("caption", tbl.get("name", tbl_filename)),
+                        "caption": matching_tbl.get("caption", tbl.get("caption", "")),
+                        "interpretation": matching_tbl.get("interpretation", tbl.get("interpretation", "")),
+                        "csv_path": csv_path,
+                        "columns": tbl.get("columns", []),
+                        "preview_data": tbl.get("preview_data", []),
+                        "section": section_id,
+                        "analysis_type": analysis_type
+                    }
+                    section_tables.append(tbl_info)
+                    self.generated_tables.append(tbl_info)
 
                 return {
                     "id": section_id,
@@ -1831,7 +2290,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
                     "analysis_type": analysis_type,
                     "content": narrative,
                     "figures": section_figures,
-                    "tables": section_plan.get("tables", []),
+                    "tables": section_tables,
                     "pi_iterations": 1,
                     "steps_executed": 1
                 }
@@ -1842,18 +2301,47 @@ Generate a comprehensive scientific narrative for this section. Your response mu
         # Fallback: use provided narrative and basic figure info
         section_figures = []
         for fig in existing_figures:
+            png_path = fig.get("png_path", "")
+            if not png_path and fig.get("filename"):
+                candidate = self.figures_dir / fig["filename"]
+                if candidate.exists():
+                    png_path = str(candidate)
+
             fig_id = str(uuid.uuid4())[:8]
             section_figures.append({
                 "id": fig_id,
                 "name": fig.get("filename", "Figure").replace("_", " ").title(),
                 "caption": fig.get("caption", ""),
                 "interpretation": fig.get("interpretation", ""),
-                "png_path": fig.get("png_path", ""),
+                "png_path": png_path,
                 "pdf_path": fig.get("pdf_path"),
                 "section": section_id,
                 "analysis_type": analysis_type
             })
             self.generated_figures.append(section_figures[-1])
+
+        section_tables = []
+        for tbl in existing_tables:
+            csv_path = tbl.get("csv_path", "")
+            if not csv_path and tbl.get("filename"):
+                candidate = self.tables_dir / tbl["filename"]
+                if candidate.exists():
+                    csv_path = str(candidate)
+
+            tbl_id = str(uuid.uuid4())[:8]
+            tbl_info = {
+                "id": tbl_id,
+                "name": tbl.get("name", tbl.get("filename", "Table")),
+                "caption": tbl.get("caption", ""),
+                "interpretation": tbl.get("interpretation", ""),
+                "csv_path": csv_path,
+                "columns": tbl.get("columns", []),
+                "preview_data": tbl.get("preview_data", []),
+                "section": section_id,
+                "analysis_type": analysis_type
+            }
+            section_tables.append(tbl_info)
+            self.generated_tables.append(tbl_info)
 
         return {
             "id": section_id,
@@ -1862,7 +2350,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
             "analysis_type": analysis_type,
             "content": provided_narrative or section_description,
             "figures": section_figures,
-            "tables": section_plan.get("tables", []),
+            "tables": section_tables,
             "pi_iterations": 1,
             "steps_executed": 1
         }
@@ -1877,8 +2365,25 @@ Generate a comprehensive scientific narrative for this section. Your response mu
         """
         Generate a report section.
 
-        If section_plan contains 'existing_figures', use those figures and have PI Agent
-        write the narrative. Otherwise, use PI-guided Bioinformatics Agent to generate new figures.
+        Always delegates to _generate_section_from_existing_figures() —
+        no code execution during report generation.
+        """
+        # Always use existing-figures path — no code execution during report
+        return await self._generate_section_from_existing_figures(
+            state, section_plan, findings, language
+        )
+
+    async def _generate_section_autonomous_legacy(
+        self,
+        state: AnalysisState,
+        section_plan: Dict[str, Any],
+        findings: Dict[str, Any],
+        language: str
+    ) -> Dict[str, Any]:
+        """
+        [LEGACY - Not called during report generation]
+        Previously spawned a Bioinformatics Agent to generate figures via code execution.
+        Kept for reference only.
         """
         zh = language == "zh"
         section_id = section_plan.get("id", str(uuid.uuid4())[:8])

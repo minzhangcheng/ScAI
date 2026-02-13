@@ -9,7 +9,7 @@ export type FigureReviewStatus = 'pending' | 'approved' | 'revision_requested'
 
 export interface Message {
   id: string
-  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors'
+  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error'
   agent?: AgentType
   content: any
   timestamp: string
@@ -143,7 +143,7 @@ export interface AgentTemperatures {
 export const DEFAULT_MODELS: AgentModels = {
   pi: 'google/gemini-3-pro-preview',
   pathology: 'google/gemini-3-pro-preview',
-  bioinformatics: 'anthropic/claude-opus-4.6',
+  bioinformatics: 'anthropic/claude-sonnet-4.5',
   biochemistry: 'google/gemini-3-pro-preview',
   literature: 'google/gemini-3-flash-preview',
   painter: 'google/gemini-3-pro-image-preview'  // Image generation model via OpenRouter
@@ -205,6 +205,10 @@ interface AppState {
   maxRounds: number
   setMaxRounds: (rounds: number) => void
 
+  // Round Wait Time (-1=manual, 0=no wait, positive=countdown seconds)
+  roundWaitSeconds: number
+  setRoundWaitSeconds: (seconds: number) => void
+
   // Literature agent config
   literatureMode: 'gemini_deep_research' | 'pubmed_llm'
   setLiteratureMode: (mode: AppState['literatureMode']) => void
@@ -221,6 +225,12 @@ interface AppState {
   setChatMessages: (msgs: AppState['chatMessages']) => void
   chatLoading: boolean
   setChatLoading: (loading: boolean) => void
+  chatDelegationActive: boolean
+  setChatDelegationActive: (active: boolean) => void
+  chatDelegationPlan: string | null
+  setChatDelegationPlan: (plan: string | null) => void
+  chatAbortController: AbortController | null
+  setChatAbortController: (controller: AbortController | null) => void
 
   // UI state
   activeTab: 'analysis' | 'data' | 'prompts' | 'results' | 'report' | 'chat'
@@ -302,9 +312,21 @@ export const useAppStore = create<AppState>()(
       
       // Messages
       messages: [],
-      addMessage: (message) => set((state) => ({
-        messages: [...state.messages, message]
-      })),
+      addMessage: (message) => set((state) => {
+        if (message.type === 'progress') {
+          // Replace the last progress message instead of appending (avoids stacked spinners)
+          let lastProgressIdx = -1;
+          for (let i = state.messages.length - 1; i >= 0; i--) {
+            if (state.messages[i].type === 'progress') { lastProgressIdx = i; break; }
+          }
+          if (lastProgressIdx !== -1) {
+            const updated = [...state.messages];
+            updated[lastProgressIdx] = message;
+            return { messages: updated };
+          }
+        }
+        return { messages: [...state.messages, message] };
+      }),
       setMessages: (messages) => set({ messages }),
       clearMessages: () => set({ messages: [] }),
       
@@ -339,6 +361,10 @@ export const useAppStore = create<AppState>()(
       maxRounds: 3,
       setMaxRounds: (rounds) => set({ maxRounds: rounds }),
 
+      // Round Wait Time
+      roundWaitSeconds: 300,
+      setRoundWaitSeconds: (seconds) => set({ roundWaitSeconds: seconds }),
+
       // Literature agent config
       literatureMode: 'pubmed_llm' as AppState['literatureMode'],
       setLiteratureMode: (mode) => set({ literatureMode: mode }),
@@ -355,6 +381,12 @@ export const useAppStore = create<AppState>()(
       setChatMessages: (msgs) => set({ chatMessages: msgs }),
       chatLoading: false,
       setChatLoading: (loading) => set({ chatLoading: loading }),
+      chatDelegationActive: false,
+      setChatDelegationActive: (active) => set({ chatDelegationActive: active }),
+      chatDelegationPlan: null,
+      setChatDelegationPlan: (plan) => set({ chatDelegationPlan: plan }),
+      chatAbortController: null,
+      setChatAbortController: (controller) => set({ chatAbortController: controller }),
 
       // UI state - default to 'data' tab as users typically upload data first
       activeTab: 'data',
@@ -423,6 +455,7 @@ export const useAppStore = create<AppState>()(
         models: state.models,
         temperatures: state.temperatures,
         maxRounds: state.maxRounds,
+        roundWaitSeconds: state.roundWaitSeconds,
         literatureMode: state.literatureMode,
         googleApiKey: state.googleApiKey,
         pubmedEmail: state.pubmedEmail,

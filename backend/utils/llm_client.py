@@ -53,28 +53,31 @@ async def retry_with_backoff(
     func,
     max_retries: int = MAX_RETRIES,
     retry_delay_base: float = RETRY_DELAY_BASE,
-    agent_name: str = "unknown"
+    agent_name: str = "unknown",
+    request_timeout: float = 300.0,
 ):
     """
     Execute an async function with exponential backoff retry on timeout/connection errors
-    
+
     Args:
         func: Async function to execute
         max_retries: Maximum number of retry attempts
         retry_delay_base: Base delay between retries (multiplied by attempt number)
         agent_name: Agent name for logging
-        
+        request_timeout: Hard per-attempt timeout in seconds (asyncio-level deadline).
+            Fires even if the HTTP client hangs during response body reading.
+
     Returns:
         Result from the function
-        
+
     Raises:
         The last exception if all retries fail
     """
     last_exception = None
-    
+
     for attempt in range(max_retries + 1):
         try:
-            return await func()
+            return await asyncio.wait_for(func(), timeout=request_timeout)
         except RETRYABLE_EXCEPTIONS as e:
             last_exception = e
             if attempt < max_retries:
@@ -157,13 +160,17 @@ class OpenAICompatibleClient:
         # Configure HTTP client with proxy if provided
         http_client = None
         if proxy_url:
-            http_client = httpx.AsyncClient(proxy=proxy_url)
+            http_client = httpx.AsyncClient(
+                proxy=proxy_url,
+                timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
+            )
         
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=self.base_url,
             http_client=http_client,
             timeout=120.0,
+            max_retries=0,  # Disable SDK internal retries; retry_with_backoff handles all retries
             default_headers={
                 "HTTP-Referer": "https://intesc.local",
                 "X-Title": "InteSc - Integrated Single Cell Analysis"
@@ -549,7 +556,8 @@ class OpenAICompatibleClient:
         text_prompt: str,
         images: List[str],  # Base64 encoded images
         temperature: float = 0.7,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
+        request_timeout: Optional[float] = None
     ) -> LLMResponse:
         """
         Send chat request with images to OpenAI-compatible API with automatic retry on timeout
@@ -617,9 +625,12 @@ class OpenAICompatibleClient:
             logger.info(f"[{self.agent_name}] Sending vision request to {model} with {len(images)} images")
 
             # Use retry mechanism for the API call
+            retry_kwargs: Dict[str, Any] = {"agent_name": self.agent_name}
+            if request_timeout is not None:
+                retry_kwargs["request_timeout"] = request_timeout
             response = await retry_with_backoff(
                 _make_request,
-                agent_name=self.agent_name
+                **retry_kwargs
             )
 
             # Extract content — uses shared helper for reasoning / multimodal formats

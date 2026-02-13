@@ -3,7 +3,7 @@ import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import { apiFetch } from '../hooks/useApi'
 import ReactMarkdown from 'react-markdown'
-import { Send, Loader2, User, Bot, AlertCircle, Paperclip, X, FileText, Image as ImageIcon, Download } from 'lucide-react'
+import { Send, Loader2, User, Bot, AlertCircle, Paperclip, X, FileText, Image as ImageIcon, Download, Square } from 'lucide-react'
 
 const AGENT_OPTIONS = [
   { value: 'pi', labelKey: 'chatTargetPi' as const },
@@ -29,6 +29,9 @@ export function ChatPanel() {
     language, currentSession,
     chatMessages, addChatMessage, setChatMessages,
     chatLoading, setChatLoading,
+    chatDelegationActive, chatDelegationPlan,
+    setChatDelegationActive, setChatDelegationPlan,
+    setChatAbortController,
   } = useAppStore()
   const { t } = useTranslation(language)
   const [input, setInput] = useState('')
@@ -62,6 +65,30 @@ export function ChatPanel() {
         setChatMessages([])
       })
   }, [currentSession?.id, setChatMessages])
+
+  // Poll backend during loading as fallback (covers both delegation and slow figure generation)
+  useEffect(() => {
+    if (!chatLoading || !currentSession?.id) return
+    const interval = setInterval(async () => {
+      try {
+        const data = await apiFetch<{ messages: typeof chatMessages }>(
+          `/session/${currentSession.id}/chat`
+        )
+        const msgs = data.messages || []
+        // Check if backend has more messages than frontend (new response arrived)
+        if (msgs.length > chatMessages.length) {
+          const lastMsg = msgs[msgs.length - 1] as any
+          if (lastMsg && !lastMsg?.delegation_active && lastMsg.role === 'assistant') {
+            setChatMessages(msgs)
+            setChatLoading(false)
+            setChatDelegationActive(false)
+            setChatDelegationPlan(null)
+          }
+        }
+      } catch {}
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [chatLoading, currentSession?.id, chatMessages.length, setChatMessages, setChatLoading, setChatDelegationActive, setChatDelegationPlan])
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -145,6 +172,10 @@ export function ChatPanel() {
     const filesToSend = [...selectedFiles]
     setSelectedFiles([])
 
+    // Create AbortController for this request
+    const abortController = new AbortController()
+    setChatAbortController(abortController)
+
     // Optimistic: add user message immediately
     const userMsg = {
       role: 'user' as const,
@@ -170,6 +201,7 @@ export function ChatPanel() {
       const response = await fetch(`/api/session/${currentSession.id}/chat`, {
         method: 'POST',
         body: formData,
+        signal: abortController.signal,
       })
 
       if (!response.ok) {
@@ -179,6 +211,18 @@ export function ChatPanel() {
 
       const data = await response.json()
 
+      if (data.status === 'processing') {
+        // Delegation mode: response will arrive via WebSocket (chat_result)
+        // Ensure WebSocket is connected to receive progress messages
+        const { wsConnect: connectWs, wsConnected: isWsConnected } = useAppStore.getState()
+        if (!isWsConnected && connectWs) {
+          connectWs()
+        }
+        // Mark delegation active BEFORE return so finally block won't reset chatLoading
+        setChatDelegationActive(true)
+        return
+      }
+
       addChatMessage({
         role: 'assistant',
         content: data.content,
@@ -186,10 +230,45 @@ export function ChatPanel() {
         figures: data.figures,
       })
     } catch (e: any) {
-      setError(t('chatError'))
+      if (e.name === 'AbortError') {
+        addChatMessage({
+          role: 'assistant',
+          content: t('chatCancelled'),
+          timestamp: new Date().toISOString(),
+        })
+      } else {
+        setError(t('chatError'))
+      }
     } finally {
-      setChatLoading(false)
+      setChatAbortController(null)
+      if (!useAppStore.getState().chatDelegationActive) {
+        setChatLoading(false)
+      }
     }
+  }
+
+  const handleStop = async () => {
+    if (!currentSession?.id) return
+
+    const { chatAbortController: controller, chatDelegationActive: isDelegation } = useAppStore.getState()
+
+    if (isDelegation) {
+      // Cancel delegation via backend endpoint
+      try {
+        await fetch(`/api/session/${currentSession.id}/chat/cancel`, { method: 'POST' })
+      } catch (e) {
+        console.error('Failed to cancel chat delegation:', e)
+      }
+    } else if (controller) {
+      // Cancel simple fetch request
+      controller.abort()
+    }
+
+    // Immediate UI feedback
+    setChatAbortController(null)
+    setChatLoading(false)
+    setChatDelegationActive(false)
+    setChatDelegationPlan(null)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -330,13 +409,23 @@ export function ChatPanel() {
             </div>
           ))
         )}
-        {chatLoading && (
+        {(chatLoading || chatDelegationActive) && (
           <div className="flex gap-3 justify-start">
             <div className="shrink-0 w-8 h-8 rounded-full bg-violet-100 flex items-center justify-center">
               <Bot className="w-4 h-4 text-violet-600" />
             </div>
             <div className="bg-slate-100 rounded-2xl px-4 py-3">
-              <Loader2 className="w-4 h-4 animate-spin text-violet-500" />
+              {chatDelegationActive ? (
+                <div className="flex items-center gap-2 text-sm text-slate-600">
+                  <Loader2 className="w-4 h-4 animate-spin text-violet-500 shrink-0" />
+                  <div>
+                    <div className="font-medium text-violet-700">{chatDelegationPlan || 'Coordinating agents...'}</div>
+                    <div className="text-xs text-slate-400 mt-0.5">{language === 'zh' ? '分析进度请查看 Analysis 标签页' : 'Progress in Analysis tab'}</div>
+                  </div>
+                </div>
+              ) : (
+                <Loader2 className="w-4 h-4 animate-spin text-violet-500" />
+              )}
             </div>
           </div>
         )}
@@ -447,18 +536,24 @@ export function ChatPanel() {
             />
           </div>
 
-          {/* Send button */}
-          <button
-            onClick={handleSend}
-            disabled={(!input.trim() && selectedFiles.length === 0) || chatLoading}
-            className="shrink-0 p-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {chatLoading ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
+          {/* Send / Stop button */}
+          {chatLoading ? (
+            <button
+              onClick={handleStop}
+              className="shrink-0 p-3 bg-red-500 hover:bg-red-600 text-white rounded-xl transition-colors"
+              title={t('chatStop')}
+            >
+              <Square className="w-5 h-5 fill-current" />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() && selectedFiles.length === 0}
+              className="shrink-0 p-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
               <Send className="w-5 h-5" />
-            )}
-          </button>
+            </button>
+          )}
         </div>
       </div>
     </div>

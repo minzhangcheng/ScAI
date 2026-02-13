@@ -1,12 +1,15 @@
 """
 Literature Agent - Multi-mode literature research with fallback chain
 
-Supports three research modes:
-1. Gemini Deep Research (Google Interactions API)
-2. OpenRouter Deep Research (models with built-in search)
-3. PubMed + LLM (NCBI E-utilities search + LLM synthesis)
+Supports two research modes:
+1. Gemini Deep Research (Google Interactions API) — single call per topic;
+   Deep Research handles multi-round search internally on Google's servers.
+2. PubMed + LLM (NCBI E-utilities search + LLM synthesis) — multi-round
+   iterative search with LLM-guided query refinement.
 
-All modes support multi-round iterative search with LLM-guided query refinement.
+Fallback chain: Gemini DR → PubMed + LLM → quick search (LLM knowledge only).
+When in DR mode, gap coverage is handled at the workflow level by falling back
+to PubMed+LLM for insufficiently covered topics.
 """
 from typing import Dict, Any, List, Optional, Set
 import json
@@ -141,7 +144,7 @@ class LiteratureAgent(BaseAgent):
             return await self._quick_search(topic, state)
 
     # ===================================================================
-    # Mode 1: Gemini Deep Research (multi-round)
+    # Mode 1: Gemini Deep Research (single call — DR handles rounds internally)
     # ===================================================================
 
     async def _multi_round_gemini(
@@ -149,64 +152,28 @@ class LiteratureAgent(BaseAgent):
         topic: str,
         state: Optional[AnalysisState] = None
     ) -> Dict[str, Any]:
-        """Multi-round Gemini Deep Research via Google Interactions API."""
+        """Single Gemini Deep Research call via Google Interactions API.
+
+        Deep Research handles multi-round search/synthesis internally on Google's
+        servers, so we only need one call per topic. Gap coverage (if any) is
+        handled at the workflow level by falling back to PubMed+LLM.
+        """
         if not self._deep_research:
             raise ValueError("Google API Key not configured for Gemini Deep Research")
 
         query = self._build_research_query(topic, state)
-        all_reports: List[Dict[str, Any]] = []
-        search_history: List[Dict[str, Any]] = []
+        logger.info(f"[Literature] Gemini Deep Research: {query[:200]}")
 
-        for round_num in range(1, self.max_search_rounds + 1):
-            logger.info(
-                f"[Literature] Gemini DR round {round_num}/{self.max_search_rounds}: "
-                f"{query[:100]}"
-            )
-
-            result = await self._deep_research.research(query)
-            report_text = result.get("report", "")
-            sources = result.get("sources", [])
-
-            all_reports.append({"text": report_text, "sources": sources})
-            search_history.append({
-                "round": round_num,
-                "query": query,
-                "sources_count": len(sources),
-                "report_preview": report_text[:300],
-            })
-
-            # Evaluate if more research needed
-            if round_num < self.max_search_rounds:
-                evaluation = await self._evaluate_search_results(
-                    topic, search_history
-                )
-                if evaluation.get("sufficient", True):
-                    logger.info(f"[Literature] Gemini DR sufficient after {round_num} rounds")
-                    break
-                query = evaluation.get("refined_query", query)
-
-        # Build final result
-        combined_report = all_reports[-1]["text"]
-        if len(all_reports) > 1:
-            all_texts = [r["text"] for r in all_reports if r["text"]]
-            combined_report = await self._synthesize_multiple_reports(topic, all_texts)
-
-        # Deduplicate sources
-        all_sources: List[Dict[str, str]] = []
-        seen_uris: Set[str] = set()
-        for r in all_reports:
-            for s in r["sources"]:
-                uri = s.get("uri", "")
-                if uri and uri not in seen_uris:
-                    all_sources.append(s)
-                    seen_uris.add(uri)
+        result = await self._deep_research.research(query)
+        report_text = result.get("report", "")
+        sources = result.get("sources", [])
 
         references = [
             {"title": s.get("title", ""), "url": s.get("uri", "")}
-            for s in all_sources
+            for s in sources
         ]
 
-        return await self._finalize_result(topic, combined_report, references, state, len(search_history))
+        return await self._finalize_result(topic, report_text, references, state, 1)
 
     # ===================================================================
     # Mode 2: OpenRouter Deep Research (multi-round)
@@ -445,7 +412,7 @@ literature review on the topic:
 Topic: {topic}
 
 Search history:
-{history_summary[:3000]}
+{history_summary[:8000]}
 
 Respond in JSON format:
 {{
@@ -539,7 +506,7 @@ Write a well-structured review with clear sections."""
     ) -> str:
         """Combine multiple round reports into a single comprehensive review."""
         reports_text = "\n\n---\n\n".join(
-            f"Report {i + 1}:\n{r[:2000]}" for i, r in enumerate(reports)
+            f"Report {i + 1}:\n{r[:6000]}" for i, r in enumerate(reports)
         )
 
         prompt = f"""Synthesize the following multiple research reports into a single comprehensive
@@ -668,7 +635,7 @@ Note: If you are not certain about specific citation information, please clearly
         prompt = f"""
 Extract key findings from the following literature review (in list form):
 
-{report[:3000]}
+{report[:10000]}
 
 Please list 3-5 most important findings, one per line.
 """
@@ -706,7 +673,7 @@ Please list 3-5 most important findings, one per line.
         prompt = f"""
 Extract marker genes for {cell_type} from the following literature review:
 
-{result['report'][:2000]}
+{result['report'][:8000]}
 
 Please return in JSON format:
 {{
@@ -797,7 +764,7 @@ Please return in JSON format:
 annotate each cell cluster by matching its marker genes to known cell type signatures.
 
 === LITERATURE REVIEW ===
-{literature_report[:6000]}
+{literature_report[:12000]}
 
 === CLUSTER MARKER GENES (from sc.tl.rank_genes_groups) ===
 {markers_text}
@@ -884,7 +851,7 @@ Enriched genes: {', '.join(genes[:20])}
 Research context: {context}
 
 Literature information:
-{result['report'][:2000]}
+{result['report'][:8000]}
 
 Please evaluate:
 1. Known role of this pathway in disease/physiology

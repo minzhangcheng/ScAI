@@ -1,8 +1,8 @@
 import { useEffect, useState, useMemo, useCallback } from 'react'
-import { useAppStore, PublicationFigure, PublicationTable, GraphicAbstract as GraphicAbstractType } from '../stores/appStore'
+import { useAppStore } from '../stores/appStore'
 import { useSession, useConfig } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
-import { FigureGallery, IntegratedReport, GraphicAbstract, DownloadButtons } from './analysis'
+import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
 import {
   Play,
@@ -55,12 +55,6 @@ export function AnalysisPanel() {
   const [showValidationDialog, setShowValidationDialog] = useState(false)
   const [validationMessage, setValidationMessage] = useState('')
   const [validationUncertain, setValidationUncertain] = useState(false)
-
-  // Publication outputs state
-  const [publicationFigures, setPublicationFigures] = useState<PublicationFigure[]>([])
-  const [publicationTables, setPublicationTables] = useState<PublicationTable[]>([])
-  const [integratedReport, setIntegratedReport] = useState<string | null>(null)
-  const [graphicAbstract, setGraphicAbstract] = useState<GraphicAbstractType | null>(null)
 
   const agents = [
     { id: 'pi', name: t('piAgent'), icon: Users, color: 'violet' },
@@ -324,62 +318,6 @@ export function AnalysisPanel() {
       setShowFeedbackDialog(false)
     }
   }, [currentSession?.status, showFeedbackDialog])
-
-  // Extract publication outputs from messages and session
-  useEffect(() => {
-    // Sync from session state first
-    if (currentSession?.publicationFigures) {
-      setPublicationFigures(currentSession.publicationFigures)
-    }
-    if (currentSession?.publicationTables) {
-      setPublicationTables(currentSession.publicationTables)
-    }
-    if (currentSession?.integratedReport) {
-      setIntegratedReport(currentSession.integratedReport)
-    }
-    if (currentSession?.graphicAbstract) {
-      setGraphicAbstract(currentSession.graphicAbstract)
-    }
-
-    // Process messages for real-time updates
-    for (const msg of messages) {
-      if (msg.type === 'figure_review' || msg.type === 'figure_approved') {
-        const content = msg.content as any
-        if (content?.figure) {
-          setPublicationFigures(prev => {
-            const existing = prev.find(f => f.id === content.figure.id)
-            if (existing) {
-              return prev.map(f => f.id === content.figure.id ? content.figure : f)
-            }
-            return [...prev, content.figure]
-          })
-        }
-      }
-      if (msg.type === 'integrated_report') {
-        const content = msg.content as any
-        if (content?.report) {
-          setIntegratedReport(content.report)
-        }
-        if (content?.figures) {
-          setPublicationFigures(content.figures)
-        }
-        if (content?.tables) {
-          setPublicationTables(content.tables)
-        }
-      }
-      if (msg.type === 'graphic_abstract') {
-        const content = msg.content as any
-        if (content?.image_base64 || content?.imageBase64) {
-          setGraphicAbstract({
-            id: content.id || 'ga-1',
-            prompt: content.prompt || '',
-            imageBase64: content.image_base64 || content.imageBase64,
-            createdAt: content.created_at || content.createdAt || new Date().toISOString()
-          })
-        }
-      }
-    }
-  }, [currentSession, messages])
 
   if (!currentSession) {
     return (
@@ -754,29 +692,18 @@ export function AnalysisPanel() {
           </div>
         </div>
 
-        {/* Publication Outputs Section - Only show when analysis is completed or has figures */}
-        {(isCompleted || publicationFigures.length > 0) && (
-          <div className="border-t border-slate-200 pt-4">
-            {/* Figure Gallery */}
-            <FigureGallery figures={publicationFigures} />
-
-            {/* Integrated Report */}
-            {integratedReport && (
-              <IntegratedReport report={integratedReport} />
-            )}
-
-            {/* Graphic Abstract */}
-            {graphicAbstract && (
-              <GraphicAbstract graphicAbstract={graphicAbstract} />
-            )}
-
-            {/* Download Buttons */}
-            {publicationFigures.length > 0 && (
-              <DownloadButtons
-                figures={publicationFigures}
-                tables={publicationTables}
-              />
-            )}
+        {/* Brief Analysis Result */}
+        {currentSession.finalSummary && (
+          <div className="bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-200 rounded-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-violet-100 rounded-lg">
+                <CheckCircle2 className="w-5 h-5 text-violet-600" />
+              </div>
+              <h3 className="font-semibold text-violet-900">{t('finalReport')}</h3>
+            </div>
+            <div className="prose prose-slate prose-sm max-w-none">
+              <ReactMarkdown>{currentSession.finalSummary}</ReactMarkdown>
+            </div>
           </div>
         )}
       </div>
@@ -788,6 +715,7 @@ export function AnalysisPanel() {
           maxRounds={useAppStore.getState().maxRounds}
           roundSummary={feedbackRoundData}
           language={language}
+          countdownSeconds={useAppStore.getState().roundWaitSeconds}
           onSend={handleDialogSend}
           onSkip={handleDialogSkip}
         />

@@ -181,10 +181,27 @@ export function useSession() {
         treatmentLoomPath: data.treatment_loom_path,
         roundResults: transformedRoundResults,
         finalSummary: data.final_summary,
-        // Publication outputs
-        publicationFigures: data.publication_figures || [],
+        // Publication outputs (snake_case → camelCase)
+        publicationFigures: (data.publication_figures || []).map((f: any) => ({
+          id: f.id,
+          name: f.name,
+          description: f.description,
+          figureType: f.figure_type || f.figureType || '',
+          pngPath: f.png_path || f.pngPath || '',
+          pdfPath: f.pdf_path || f.pdfPath || '',
+          pngBase64: f.png_base64 || f.pngBase64,
+          reviewStatus: f.review_status || f.reviewStatus || 'pending',
+          piFeedback: f.pi_feedback || f.piFeedback,
+          revisionCount: f.revision_count ?? f.revisionCount ?? 0,
+          createdAt: f.created_at || f.createdAt || '',
+        })),
         publicationTables: data.publication_tables || [],
-        graphicAbstract: data.graphic_abstract || undefined,
+        graphicAbstract: data.graphic_abstract ? {
+          id: data.graphic_abstract.id,
+          prompt: data.graphic_abstract.prompt || '',
+          imageBase64: data.graphic_abstract.image_base64 || data.graphic_abstract.imageBase64 || '',
+          createdAt: data.graphic_abstract.created_at || data.graphic_abstract.createdAt || '',
+        } : undefined,
         integratedReport: data.integrated_report || undefined,
       }
 
@@ -551,6 +568,17 @@ export function useSession() {
       })
     } catch (e) {
       console.error('Failed to sync max rounds:', e)
+    }
+
+    // Sync round wait seconds to backend before starting
+    const roundWaitSeconds = useAppStore.getState().roundWaitSeconds
+    try {
+      await apiFetch(`/session/${currentSession.id}/round-wait`, {
+        method: 'POST',
+        body: JSON.stringify({ round_wait_seconds: roundWaitSeconds }),
+      })
+    } catch (e) {
+      console.error('Failed to sync round wait seconds:', e)
     }
 
     // Sync literature config to backend before starting
@@ -948,6 +976,55 @@ export function useWebSocket() {
             }
           }
           // Also add to message stream for visibility
+        }
+
+        // Handle chat_result - final response from chat delegation
+        if (data.type === 'chat_result') {
+          // Refresh full chat history from backend to ensure consistency
+          const sessionId = useAppStore.getState().currentSession?.id
+          if (sessionId) {
+            apiFetch<{ messages: any[] }>(`/session/${sessionId}/chat`)
+              .then((res) => {
+                useAppStore.getState().setChatMessages(res.messages || [])
+              })
+              .catch(() => {})
+          }
+          useAppStore.getState().setChatLoading(false)
+          useAppStore.getState().setChatDelegationActive(false)
+          useAppStore.getState().setChatDelegationPlan(null)
+          return  // Don't add to MessageStream
+        }
+
+        // Handle chat_cancelled - delegation was stopped by user
+        if (data.type === 'chat_cancelled') {
+          useAppStore.getState().setChatLoading(false)
+          useAppStore.getState().setChatDelegationActive(false)
+          useAppStore.getState().setChatDelegationPlan(null)
+          useAppStore.getState().setChatAbortController(null)
+          return  // Don't add to MessageStream
+        }
+
+        // Handle chat_error - delegation failed
+        if (data.type === 'chat_error') {
+          useAppStore.getState().addChatMessage({
+            role: 'assistant',
+            content: `Error: ${data.content?.error || 'Unknown error during analysis'}`,
+            timestamp: new Date().toISOString(),
+          })
+          useAppStore.getState().setChatLoading(false)
+          useAppStore.getState().setChatDelegationActive(false)
+          useAppStore.getState().setChatDelegationPlan(null)
+          return  // Don't add to MessageStream
+        }
+
+        // Handle chat_delegation progress - update delegation status AND show in MessageStream
+        if (data.type === 'chat_delegation') {
+          const delegContent = data.content
+          if (delegContent?.status === 'started') {
+            useAppStore.getState().setChatDelegationActive(true)
+            useAppStore.getState().setChatDelegationPlan(delegContent.plan || null)
+          }
+          // Fall through to addMessage() so it shows in MessageStream
         }
 
         const message: Message = {

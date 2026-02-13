@@ -23,7 +23,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
-  const { currentSession, setCurrentSession, clearMessages, language, maxRounds, setMaxRounds, reportGenerated, setOpenSessionBrowserCallback } = useAppStore()
+  const { currentSession, setCurrentSession, clearMessages, language, maxRounds, setMaxRounds, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback } = useAppStore()
   const { createSession, loadSession, listSessions, deleteSession } = useSession()
   const { t } = useTranslation(language)
   const [showNewSession, setShowNewSession] = useState(false)
@@ -483,7 +483,33 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                   : '💡 Start small - you can request more rounds via chat later'}
               </p>
             </div>
-            
+
+            {/* Round Wait Time Setting */}
+            <div className="p-3 bg-indigo-50 rounded-lg border border-indigo-100">
+              <div className="flex items-center gap-2 mb-2">
+                <Clock className="w-4 h-4 text-indigo-500" />
+                <label className="text-sm font-medium text-indigo-700">
+                  {language === 'zh' ? '轮次等待时间' : 'Round Wait Time'}
+                </label>
+              </div>
+              <select
+                value={roundWaitSeconds}
+                onChange={(e) => setRoundWaitSeconds(parseInt(e.target.value))}
+                className="w-full text-sm font-mono text-indigo-600 bg-white px-3 py-1.5 rounded border border-indigo-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              >
+                <option value={0}>{language === 'zh' ? '不等待' : 'No wait'}</option>
+                <option value={300}>{language === 'zh' ? '5 分钟' : '5 minutes'}</option>
+                <option value={900}>{language === 'zh' ? '15 分钟' : '15 minutes'}</option>
+                <option value={3600}>{language === 'zh' ? '60 分钟' : '60 minutes'}</option>
+                <option value={-1}>{language === 'zh' ? '手动跳过' : 'Manual skip'}</option>
+              </select>
+              <p className="text-xs text-indigo-500 mt-2 leading-relaxed">
+                {language === 'zh'
+                  ? '💡 每轮分析后等待用户输入的时间，超时后自动继续'
+                  : '💡 Wait time for user input between rounds, auto-continues on timeout'}
+              </p>
+            </div>
+
             <div className="flex gap-2">
               <button
                 onClick={() => setShowNewSession(false)}

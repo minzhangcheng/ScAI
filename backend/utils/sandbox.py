@@ -361,6 +361,30 @@ plt.rcParams['figure.figsize'] = (10, 6)
 plt.rcParams['figure.dpi'] = 100
 plt.rcParams['savefig.dpi'] = 100
 plt.rcParams['font.size'] = 10
+plt.rcParams['pdf.fonttype'] = 42   # Vectorized fonts for editable PDFs
+plt.rcParams['ps.fonttype'] = 42
+
+# === Monkey-patch Figure.savefig to auto-generate PDF alongside PNG ===
+import matplotlib.figure as _mpl_figure
+_original_savefig = _mpl_figure.Figure.savefig
+
+def _savefig_with_pdf(self, fname, *args, **kwargs):
+    # Wrapper: after saving PNG, auto-generate a companion high-res PDF.
+    _original_savefig(self, fname, *args, **kwargs)
+    try:
+        _fname_str = str(fname)
+        if _fname_str.lower().endswith('.png'):
+            _pdf_path = _fname_str[:-4] + '.pdf'
+            _pdf_kwargs = dict(kwargs)
+            _pdf_kwargs['format'] = 'pdf'
+            _pdf_kwargs['dpi'] = 300
+            if 'bbox_inches' not in _pdf_kwargs:
+                _pdf_kwargs['bbox_inches'] = 'tight'
+            _original_savefig(self, _pdf_path, *args, **_pdf_kwargs)
+    except Exception as _pdf_err:
+        print(f"[Auto-PDF] Warning: {_pdf_err}")
+
+_mpl_figure.Figure.savefig = _savefig_with_pdf
 
 # Try importing common bioinformatics packages
 try:
@@ -712,6 +736,7 @@ print(f"Session saved: {{len(_session_data)}} variables")
                 except Exception as e:
                     logger.error(f"Error shutting down kernel for {self.session_id}: {e}")
                 self.km = None
+                self._initialized = False
 
             logger.info(f"Kernel stopped for session {self.session_id}")
     

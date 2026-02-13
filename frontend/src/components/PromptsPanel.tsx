@@ -431,7 +431,7 @@ export function PromptsPanel() {
             {language === 'zh' ? (
               selectedAgent === 'pi' ? '推荐: google/gemini-3-pro-preview' :
               selectedAgent === 'pathology' ? '需要具有病理图片识别能力的模型，强烈推荐: google/gemini-3-pro-preview' :
-              selectedAgent === 'bioinformatics' ? '需要 coding 能力较强的模型，推荐: anthropic/claude-opus-4.6、openai/gpt-5.2-codex 或 google/gemini-3-pro-preview' :
+              selectedAgent === 'bioinformatics' ? '需要 coding 能力较强的模型，推荐: anthropic/claude-sonnet-4.5、anthropic/claude-opus-4.6、openai/gpt-5.2-codex 或 google/gemini-3-pro-preview' :
               selectedAgent === 'biochemistry' ? '推荐: google/gemini-3-pro-preview。若上传了生化结果图片，需要选择支持 Vision 的模型' :
               selectedAgent === 'literature' ? '用于文献分析与综合的 LLM 模型，推荐: google/gemini-3-flash-preview' :
               selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3-pro-image-preview' :
@@ -439,7 +439,7 @@ export function PromptsPanel() {
             ) : (
               selectedAgent === 'pi' ? 'Recommended: google/gemini-3-pro-preview' :
               selectedAgent === 'pathology' ? 'Requires pathology image recognition capability. Strongly recommended: google/gemini-3-pro-preview' :
-              selectedAgent === 'bioinformatics' ? 'Requires strong coding capability. Recommended: anthropic/claude-opus-4.6, openai/gpt-5.2-codex, or google/gemini-3-pro-preview' :
+              selectedAgent === 'bioinformatics' ? 'Requires strong coding capability. Recommended: anthropic/claude-sonnet-4.5, anthropic/claude-opus-4.6, openai/gpt-5.2-codex, or google/gemini-3-pro-preview' :
               selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3-pro-preview. If biochemistry images are uploaded, a Vision-capable model is required' :
               selectedAgent === 'literature' ? 'LLM model for literature analysis and synthesis. Recommended: google/gemini-3-flash-preview' :
               selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3-pro-image-preview' :

@@ -45,11 +45,10 @@ interface RoundFeedbackDialogProps {
   maxRounds: number
   roundSummary: RoundSummary
   language: Language
+  countdownSeconds: number  // -1=manual skip only, 0=no wait (auto-skip), positive=countdown
   onSend: (message: string, files: UploadedFileWithAgent[]) => Promise<void>
   onSkip: () => Promise<void>
 }
-
-const COUNTDOWN_SECONDS = 120
 
 const AGENT_OPTIONS = [
   { value: 'pi', label: 'PI Agent', labelZh: 'PI Agent' },
@@ -63,10 +62,16 @@ export function RoundFeedbackDialog({
   maxRounds,
   roundSummary,
   language,
+  countdownSeconds,
   onSend,
   onSkip,
 }: RoundFeedbackDialogProps) {
   const { t } = useTranslation(language)
+
+  // Derived mode flags
+  const isManualMode = countdownSeconds === -1
+  const isNoWait = countdownSeconds === 0
+  const hasCountdown = countdownSeconds > 0
 
   // Input state
   const [userInput, setUserInput] = useState('')
@@ -74,10 +79,10 @@ export function RoundFeedbackDialog({
   const [sending, setSending] = useState(false)
 
   // Timer state — uses wall-clock time so background tabs don't freeze the countdown
-  const [timeRemaining, setTimeRemaining] = useState(COUNTDOWN_SECONDS)
+  const [timeRemaining, setTimeRemaining] = useState(hasCountdown ? countdownSeconds : 0)
   const [timerPaused, setTimerPaused] = useState(false)
   const hasTypedRef = useRef(false)
-  const deadlineRef = useRef(Date.now() + COUNTDOWN_SECONDS * 1000) // wall-clock deadline
+  const deadlineRef = useRef(hasCountdown ? Date.now() + countdownSeconds * 1000 : 0)
   const pausedAtRef = useRef<number | null>(null) // timestamp when paused, null if running
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -87,8 +92,16 @@ export function RoundFeedbackDialog({
 
   const isLastRound = roundNumber >= maxRounds
 
+  // No-wait mode: auto-skip immediately on mount
+  useEffect(() => {
+    if (isNoWait && !sending) {
+      onSkip()
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Handle pause/resume: shift deadline when pausing/resuming
   useEffect(() => {
+    if (!hasCountdown) return
     if (timerPaused) {
       // Record when we paused
       pausedAtRef.current = Date.now()
@@ -98,10 +111,11 @@ export function RoundFeedbackDialog({
       deadlineRef.current += pausedDuration
       pausedAtRef.current = null
     }
-  }, [timerPaused])
+  }, [timerPaused, hasCountdown])
 
   // Countdown timer — uses wall-clock diff so background tabs catch up correctly
   useEffect(() => {
+    if (!hasCountdown) return
     intervalRef.current = setInterval(() => {
       if (pausedAtRef.current !== null) return // paused, don't update
       const remaining = Math.max(0, Math.ceil((deadlineRef.current - Date.now()) / 1000))
@@ -114,14 +128,14 @@ export function RoundFeedbackDialog({
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [])
+  }, [hasCountdown])
 
-  // Auto-proceed when timer reaches 0
+  // Auto-proceed when timer reaches 0 (only in countdown mode)
   useEffect(() => {
-    if (timeRemaining === 0 && !sending) {
+    if (hasCountdown && timeRemaining === 0 && !sending) {
       onSkip()
     }
-  }, [timeRemaining, sending, onSkip])
+  }, [timeRemaining, sending, onSkip, hasCountdown])
 
   // Auto-pause when user starts typing
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -223,27 +237,37 @@ export function RoundFeedbackDialog({
             {t('roundComplete').replace('{round}', String(roundNumber))}
           </h2>
           <div className="flex items-center gap-3">
-            {/* Timer */}
-            <div className="flex items-center gap-2">
-              <Clock className={`w-4 h-4 ${timerUrgent ? 'text-red-500' : 'text-slate-500'}`} />
-              <span className={`font-mono text-lg tabular-nums ${
-                timerUrgent ? 'text-red-600 animate-pulse' :
-                timerPaused ? 'text-amber-600' : 'text-slate-700'
-              }`}>
-                {timerDisplay}
+            {/* Timer — only shown in countdown mode */}
+            {hasCountdown && (
+              <>
+                <div className="flex items-center gap-2">
+                  <Clock className={`w-4 h-4 ${timerUrgent ? 'text-red-500' : 'text-slate-500'}`} />
+                  <span className={`font-mono text-lg tabular-nums ${
+                    timerUrgent ? 'text-red-600 animate-pulse' :
+                    timerPaused ? 'text-amber-600' : 'text-slate-700'
+                  }`}>
+                    {timerDisplay}
+                  </span>
+                  {timerPaused && (
+                    <span className="text-xs text-amber-600 font-medium">{t('timerPaused')}</span>
+                  )}
+                </div>
+                {/* Pause/Resume timer */}
+                <button
+                  onClick={toggleTimerPause}
+                  className="p-1.5 rounded-lg hover:bg-white/60 text-slate-600 hover:text-slate-800 transition-colors"
+                  title={timerPaused ? t('resumeTimer') : t('pauseTimer')}
+                >
+                  {timerPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+                </button>
+              </>
+            )}
+            {/* Manual mode indicator */}
+            {isManualMode && (
+              <span className="text-xs text-slate-500 font-medium">
+                {language === 'zh' ? '手动跳过模式' : 'Manual skip mode'}
               </span>
-              {timerPaused && (
-                <span className="text-xs text-amber-600 font-medium">{t('timerPaused')}</span>
-              )}
-            </div>
-            {/* Pause/Resume timer */}
-            <button
-              onClick={toggleTimerPause}
-              className="p-1.5 rounded-lg hover:bg-white/60 text-slate-600 hover:text-slate-800 transition-colors"
-              title={timerPaused ? t('resumeTimer') : t('pauseTimer')}
-            >
-              {timerPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
-            </button>
+            )}
             {/* Skip button */}
             <button
               onClick={handleSkip}

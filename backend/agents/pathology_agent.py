@@ -132,10 +132,9 @@ class PathologyAgent(BaseAgent):
         # Set LLM context before vision calls (client is shared between agents)
         self._set_llm_context()
         
-        # Batch size for tile analysis (to stay under 100K token limit)
-        # Each image ~1000-2000 tokens, leave 20K for text, so ~40 images per batch
-        # Use 20 to be safe
-        BATCH_SIZE = 20
+        # Batch size for tile analysis — smaller batches are more reliable
+        # and avoid vision API timeouts on large multimodal requests
+        BATCH_SIZE = 5
         
         # Check if file exists
         if not os.path.exists(image_info.original_path):
@@ -195,7 +194,8 @@ Please reply in JSON format:
                 model=self.model,
                 text_prompt=overview_prompt,
                 images=[overview],
-                temperature=0.3
+                temperature=0.3,
+                request_timeout=180.0  # 3 min for single overview image
             )
             
             # Parse overview result (handle None)
@@ -241,11 +241,14 @@ Reply in JSON format with an array of findings for each tile:
 Be concise but thorough for each tile.
 """
                 
+                # Dynamic timeout: 120s base + 30s per image
+                batch_timeout = 120.0 + 30.0 * len(batch_tiles)
                 batch_result = await self.llm_client.chat_with_vision(
                     model=self.model,
                     text_prompt=batch_prompt,
                     images=batch_tiles,
-                    temperature=0.3
+                    temperature=0.3,
+                    request_timeout=batch_timeout
                 )
                 
                 # Parse batch results (handle None)

@@ -23,7 +23,8 @@ import {
   HelpCircle,
   Palette,
   FileText,
-  Clock
+  Clock,
+  Loader2
 } from 'lucide-react'
 
 // Type interfaces for message content
@@ -303,14 +304,35 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           </div>
         )
       
-      case 'progress':
-        // 进度更新
+      case 'progress': {
+        // 进度更新 - content can be: string, number, or {step, progress, status}
+        const progressContent = message.content
+        let progressText = ''
+        let progressPercent: number | null = null
+
+        if (typeof progressContent === 'string') {
+          progressText = progressContent
+        } else if (typeof progressContent === 'number') {
+          progressPercent = progressContent
+        } else if (progressContent && typeof progressContent === 'object') {
+          progressText = (progressContent as any).step || ''
+          progressPercent = (progressContent as any).progress ?? null
+        }
+
+        const isComplete = progressPercent !== null && progressPercent >= 100
+
         return (
           <div className="flex items-center gap-2 text-sm text-blue-600">
-            <CheckCircle2 className="w-4 h-4" />
-            <span>{typeof message.content === 'string' ? message.content : `${message.content}%`}</span>
+            {isComplete
+              ? <CheckCircle2 className="w-4 h-4 text-green-500" />
+              : <Loader2 className="w-4 h-4 animate-spin" />}
+            <span>
+              {progressText}
+              {progressPercent !== null && ` (${Math.round(progressPercent)}%)`}
+            </span>
           </div>
         )
+      }
       
       case 'figure_review':
       case 'figure_approved':
@@ -516,6 +538,52 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           )
         }
         
+        // Chat delegation progress
+        if (message.type === 'chat_delegation') {
+          const delegContent = message.content as { status: string; plan?: string; agent?: string; agents?: string[]; error?: string; message?: string }
+          if (delegContent.status === 'started') {
+            return (
+              <div className="flex items-center gap-2 text-sm text-violet-600 bg-violet-50 rounded-lg p-3">
+                <Sparkles className="w-4 h-4 shrink-0" />
+                <div>
+                  <div className="font-medium">{language === 'zh' ? 'Chat分析委派开始' : 'Chat delegation started'}</div>
+                  {delegContent.plan && <div className="text-xs mt-0.5">{delegContent.plan}</div>}
+                  {delegContent.agents && <div className="text-xs text-violet-400 mt-0.5">Agents: {delegContent.agents.join(', ')}</div>}
+                </div>
+              </div>
+            )
+          }
+          if (delegContent.status === 'agent_complete') {
+            return (
+              <div className="flex items-center gap-2 text-sm text-green-600 bg-green-50 rounded-lg p-3">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{delegContent.agent} {language === 'zh' ? '分析完成' : 'agent completed'}</span>
+              </div>
+            )
+          }
+          if (delegContent.status === 'agent_error') {
+            return (
+              <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 rounded-lg p-3">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{delegContent.agent} {language === 'zh' ? '分析失败' : 'agent error'}: {delegContent.error}</span>
+              </div>
+            )
+          }
+          if (delegContent.status === 'synthesizing') {
+            return (
+              <div className="flex items-center gap-2 text-sm text-violet-600 bg-violet-50 rounded-lg p-3">
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                <span>{language === 'zh' ? 'PI正在汇总结果...' : 'PI synthesizing results...'}</span>
+              </div>
+            )
+          }
+          return (
+            <div className="text-sm text-slate-500 bg-slate-50 rounded-lg p-3">
+              {delegContent.message || JSON.stringify(delegContent)}
+            </div>
+          )
+        }
+
         // Default message rendering
         if (typeof message.content === 'string') {
           return (
