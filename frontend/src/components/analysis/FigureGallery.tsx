@@ -26,7 +26,13 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
     return null
   }
 
+  const isSessionCompleted = currentSession?.status === 'completed'
+
   const getStatusIcon = (status: FigureReviewStatus) => {
+    // When session is completed, revision_requested figures are the final accepted version
+    if (isSessionCompleted && status === 'revision_requested') {
+      return <CheckCircle2 className="w-4 h-4 text-green-500" />
+    }
     switch (status) {
       case 'approved':
         return <CheckCircle2 className="w-4 h-4 text-green-500" />
@@ -38,6 +44,9 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
   }
 
   const getStatusLabel = (status: FigureReviewStatus) => {
+    if (isSessionCompleted && status === 'revision_requested') {
+      return language === 'zh' ? '最终版' : 'Final'
+    }
     switch (status) {
       case 'approved':
         return t('figureApproved')
@@ -49,6 +58,9 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
   }
 
   const getStatusColor = (status: FigureReviewStatus) => {
+    if (isSessionCompleted && status === 'revision_requested') {
+      return 'bg-green-100 text-green-700 border-green-200'
+    }
     switch (status) {
       case 'approved':
         return 'bg-green-100 text-green-700 border-green-200'
@@ -126,7 +138,7 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
             >
               {figure.pngBase64 ? (
                 <img
-                  src={`data:image/png;base64,${figure.pngBase64}`}
+                  src={`data:image/jpeg;base64,${figure.pngBase64}`}
                   alt={figure.name}
                   className="w-full h-full object-contain"
                 />
@@ -227,7 +239,7 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
             <div className="p-4 max-h-[60vh] overflow-auto bg-slate-50">
               {selectedFigure.pngBase64 ? (
                 <img
-                  src={`data:image/png;base64,${selectedFigure.pngBase64}`}
+                  src={`data:image/jpeg;base64,${selectedFigure.pngBase64}`}
                   alt={selectedFigure.name}
                   className="max-w-full h-auto mx-auto"
                 />

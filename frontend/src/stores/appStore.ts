@@ -4,7 +4,7 @@ import { Language, getDefaultPrompts } from '../i18n/translations'
 
 // Types
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter'
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input'
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'generating_report'
 export type FigureReviewStatus = 'pending' | 'approved' | 'revision_requested'
 
 export interface Message {
@@ -64,6 +64,7 @@ export interface PathologyImage {
   filename: string
   imageType: string
   preview?: string
+  filePath?: string
 }
 
 export interface BiochemistryResult {
@@ -78,6 +79,7 @@ export interface BiochemistryFile {
   filename: string
   fileType: 'image' | 'file'
   description?: string
+  filePath?: string
 }
 
 export interface RoundResult {

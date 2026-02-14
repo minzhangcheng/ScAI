@@ -343,6 +343,7 @@ export function useSession() {
           filename: file.name,
           imageType: imageType,
           preview: URL.createObjectURL(file),
+          filePath: data.data.file_path,
         },
       ],
     })
@@ -492,6 +493,7 @@ export function useSession() {
       id: data.data.file_id,
       filename: file.name,
       fileType: data.data.file_type as 'image' | 'file',
+      filePath: data.data.file_path,
     }
 
     // Update session with new file using store's method directly

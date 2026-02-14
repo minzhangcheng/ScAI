@@ -569,9 +569,9 @@ async def load_session(session_id: str):
         "updated_at": state.updated_at.isoformat() if state.updated_at else "",
         "initial_instruction": state.initial_instruction,
         # Data uploads
-        "pathology_images": [{"id": img.id, "filename": img.filename, "imageType": img.image_type} for img in state.pathology_images],
+        "pathology_images": [{"id": img.id, "filename": img.filename, "imageType": img.image_type, "filePath": img.original_path} for img in state.pathology_images],
         "biochemistry_results": [{"id": r.id, "indicator": r.indicator, "value": r.value, "unit": r.unit} for r in state.biochemistry_results],
-        "biochemistry_files": [{"id": f.id, "filename": f.filename, "fileType": f.file_type} for f in state.biochemistry_files],
+        "biochemistry_files": [{"id": f.id, "filename": f.filename, "fileType": f.file_type, "filePath": f.file_path} for f in state.biochemistry_files],
         "control_seq_path": state.control_seq_path,
         "treatment_seq_path": state.treatment_seq_path,
         "control_loom_path": state.control_loom_path,
@@ -821,7 +821,7 @@ async def upload_pathology(
     return APIResponse(
         success=True,
         message=f"Pathology image uploaded: {sanitized_name}",
-        data={"image_id": img.id, "image_type": image_type}
+        data={"image_id": img.id, "image_type": image_type, "file_path": str(file_path)}
     )
 
 
@@ -1051,7 +1051,8 @@ async def upload_biochemistry_file(
         message=f"Biochemistry {file_type} uploaded: {sanitized_name}",
         data={
             "file_id": bio_file.id,
-            "file_type": file_type
+            "file_type": file_type,
+            "file_path": str(file_path)
         }
     )
 

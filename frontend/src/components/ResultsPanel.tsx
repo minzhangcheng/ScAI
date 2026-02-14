@@ -97,7 +97,18 @@ export function ResultsPanel() {
           setIntegratedReport(content.report)
         }
         if (content?.figures) {
-          setPublicationFigures(content.figures.map(transformFigure))
+          setPublicationFigures(prev => {
+            const newFigs = content.figures.map(transformFigure)
+            // Preserve pngBase64 from existing figures (integrated_report message may have
+            // been stripped of base64 by localStorage persistence)
+            return newFigs.map((fig: PublicationFigure) => {
+              const existing = prev.find((f: PublicationFigure) => f.id === fig.id)
+              if (existing?.pngBase64 && !fig.pngBase64) {
+                return { ...fig, pngBase64: existing.pngBase64 }
+              }
+              return fig
+            })
+          })
         }
         if (content?.tables) {
           setPublicationTables(content.tables)

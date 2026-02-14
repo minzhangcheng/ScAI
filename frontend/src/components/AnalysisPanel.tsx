@@ -91,7 +91,23 @@ export function AnalysisPanel() {
       return agentErrors.length > 0 ? 'error' : 'idle'
     }
 
-    if (lastMessage.type === 'result') {
+    // Session completed → all agents with messages show as done
+    if (currentSession.status === 'completed') {
+      return 'done'
+    }
+
+    // Report generation phase → analysis agents stay done, only PI/Painter may be working
+    if (currentSession.status === 'generating_report') {
+      const analysisAgents = ['pathology', 'bioinformatics', 'biochemistry', 'literature']
+      if (analysisAgents.includes(agentId)) {
+        return 'done'
+      }
+    }
+
+    // These message types indicate the agent has completed its work
+    const doneTypes = ['result', 'completed', 'integrated_report', 'detailed_report',
+                       'graphic_abstract', 'round_summary', 'findings']
+    if (doneTypes.includes(lastMessage.type)) {
       return 'done'
     }
 

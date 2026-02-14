@@ -12,7 +12,8 @@ import {
   Check,
   File,
   Zap,
-  Trash2
+  Trash2,
+  Download
 } from 'lucide-react'
 
 export function DataPanel() {
@@ -30,7 +31,17 @@ export function DataPanel() {
     deleteLoom
   } = useSession()
   const { t } = useTranslation(language)
-  
+
+  const handleDownload = useCallback((filePath: string, filename: string) => {
+    const url = `/api/download?path=${encodeURIComponent(filePath)}`
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  }, [])
+
   // Pathology states
   const [stainType, setStainType] = useState<'H&E' | 'Other'>('H&E')
   const [customStainType, setCustomStainType] = useState('')
@@ -479,13 +490,24 @@ export function DataPanel() {
                         <span className="px-2 py-1 bg-violet-100 text-violet-700 rounded text-xs font-medium">
                           {img.imageType}
                         </span>
-                        <button
-                          onClick={() => deletePathologyImage(img.id)}
-                          className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                          title={language === 'zh' ? '删除' : 'Delete'}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          {img.filePath && (
+                            <button
+                              onClick={() => handleDownload(img.filePath!, img.filename)}
+                              className="p-1 text-slate-400 hover:text-blue-500 hover:bg-blue-50 rounded transition-colors"
+                              title={language === 'zh' ? '下载' : 'Download'}
+                            >
+                              <Download className="w-4 h-4" />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => deletePathologyImage(img.id)}
+                            className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                            title={language === 'zh' ? '删除' : 'Delete'}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                     </td>
                   </tr>
@@ -520,6 +542,13 @@ export function DataPanel() {
                     {currentSession.controlSeqPath.split('/').pop()}
                   </p>
                 </div>
+                <button
+                  onClick={() => handleDownload(currentSession.controlSeqPath!, currentSession.controlSeqPath!.split('/').pop()!)}
+                  className="p-1.5 text-blue-400 hover:text-blue-600 hover:bg-blue-100 rounded transition-colors"
+                  title={language === 'zh' ? '下载' : 'Download'}
+                >
+                  <Download className="w-4 h-4" />
+                </button>
                 <button
                   onClick={() => deleteSequencing('control')}
                   className="p-1.5 text-blue-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
@@ -582,6 +611,13 @@ export function DataPanel() {
                     {currentSession.treatmentSeqPath.split('/').pop()}
                   </p>
                 </div>
+                <button
+                  onClick={() => handleDownload(currentSession.treatmentSeqPath!, currentSession.treatmentSeqPath!.split('/').pop()!)}
+                  className="p-1.5 text-orange-400 hover:text-orange-600 hover:bg-orange-100 rounded transition-colors"
+                  title={language === 'zh' ? '下载' : 'Download'}
+                >
+                  <Download className="w-4 h-4" />
+                </button>
                 <button
                   onClick={() => deleteSequencing('treatment')}
                   className="p-1.5 text-orange-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
@@ -666,6 +702,13 @@ export function DataPanel() {
                   </p>
                 </div>
                 <button
+                  onClick={() => handleDownload(currentSession.controlLoomPath!, currentSession.controlLoomPath!.split('/').pop()!)}
+                  className="p-1.5 text-purple-400 hover:text-purple-600 hover:bg-purple-100 rounded transition-colors"
+                  title={language === 'zh' ? '下载' : 'Download'}
+                >
+                  <Download className="w-4 h-4" />
+                </button>
+                <button
                   onClick={() => deleteLoom('control')}
                   className="p-1.5 text-purple-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
                   title={language === 'zh' ? '删除' : 'Delete'}
@@ -727,6 +770,13 @@ export function DataPanel() {
                     {currentSession.treatmentLoomPath.split('/').pop()}
                   </p>
                 </div>
+                <button
+                  onClick={() => handleDownload(currentSession.treatmentLoomPath!, currentSession.treatmentLoomPath!.split('/').pop()!)}
+                  className="p-1.5 text-pink-400 hover:text-pink-600 hover:bg-pink-100 rounded transition-colors"
+                  title={language === 'zh' ? '下载' : 'Download'}
+                >
+                  <Download className="w-4 h-4" />
+                </button>
                 <button
                   onClick={() => deleteLoom('treatment')}
                   className="p-1.5 text-pink-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
@@ -858,6 +908,15 @@ export function DataPanel() {
                   )}
                   <span className="flex-1">{file.filename}</span>
                   <Check className="w-4 h-4 text-green-500" />
+                  {file.filePath && (
+                    <button
+                      onClick={() => handleDownload(file.filePath!, file.filename)}
+                      className="p-1 text-amber-400 hover:text-blue-500 hover:bg-blue-50 rounded transition-colors"
+                      title={language === 'zh' ? '下载' : 'Download'}
+                    >
+                      <Download className="w-4 h-4" />
+                    </button>
+                  )}
                   <button
                     onClick={() => deleteBiochemistryFile(file.id)}
                     className="p-1 text-amber-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"

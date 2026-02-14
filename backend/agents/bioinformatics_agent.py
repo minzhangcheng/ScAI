@@ -698,6 +698,8 @@ Before running sc.tl.pca() or any dimensionality reduction:
         completed = False
         text_response_count = 0
         MAX_TEXT_RESPONSES = 2
+        figure_iteration_count = 0
+        MAX_FIGURE_ITERATIONS = 5  # Max figure-only iterations excluded from step count
 
         while step_count < max_steps and not completed:
             step_count += 1
@@ -753,11 +755,15 @@ Before running sc.tl.pca() or any dimensionality reduction:
                 })
                 continue
             
+            # Track whether this iteration only contains figure generation (excluded from step count)
+            figure_only_iteration = True
+
             for tool_call in response.tool_calls:
                 tool_name = tool_call.name
                 args = tool_call.arguments
-                
+
                 if tool_name == "execute_code":
+                    figure_only_iteration = False
                     code = args.get("code", "")
                     description = args.get("description", "")
                     step_type = args.get("step_type", "technical")
@@ -878,6 +884,7 @@ plt.close('all')
                     })
                     
                 elif tool_name == "consult_pi":
+                    figure_only_iteration = False
                     question = args.get("question", "")
                     context = args.get("context", "")
                     options = args.get("options", [])
@@ -912,6 +919,7 @@ plt.close('all')
                     })
                     
                 elif tool_name == "search_literature":
+                    figure_only_iteration = False
                     topic = args.get("topic", "")
                     
                     await self._notify("status", f"Searching literature: {topic[:50]}...")
@@ -939,6 +947,7 @@ plt.close('all')
                     })
 
                 elif tool_name == "annotate_clusters":
+                    figure_only_iteration = False
                     cluster_markers = args.get("cluster_markers", {})
                     tissue = args.get("tissue", "")
                     organism = args.get("organism", "mouse")
@@ -1016,6 +1025,7 @@ plt.close('all')
                     })
 
                 elif tool_name == "report_findings":
+                    figure_only_iteration = False
                     findings = args.get("findings", [])
                     summary = args.get("summary", "")
                     suggestions = args.get("suggestions", [])
@@ -1064,6 +1074,14 @@ plt.close('all')
                             f"Figure {figure_name} has been skipped after {fig_attempts[figure_name]-1} failed attempts. "
                             "Please move on to the next analysis step or generate a different figure."
                         )
+                    elif figure_iteration_count >= MAX_FIGURE_ITERATIONS:
+                        # Budget exhausted: refuse figure generation, redirect to analysis
+                        logger.warning(f"[Bioinformatics] Figure budget exhausted, rejecting {figure_name}")
+                        tool_result = (
+                            f"Figure generation budget exhausted ({MAX_FIGURE_ITERATIONS} figures already generated). "
+                            "Do NOT generate any more figures. Focus on completing the remaining analysis steps "
+                            "(differential expression, pathway enrichment, etc.) and then call report_findings."
+                        )
                     else:
                         await self._notify("status", f"Generating publication figure: {figure_name} (attempt {fig_attempts[figure_name]})")
 
@@ -1091,6 +1109,15 @@ plt.close('all')
                         "tool_call_id": tool_call.id,
                         "content": tool_result
                     })
+
+            # Figure-only iterations don't count toward analysis step budget (with safety cap)
+            if figure_only_iteration and response.has_tool_calls:
+                figure_iteration_count += 1
+                if figure_iteration_count <= MAX_FIGURE_ITERATIONS:
+                    step_count -= 1
+                    logger.debug(f"[Bioinformatics] Figure-only step excluded ({figure_iteration_count}/{MAX_FIGURE_ITERATIONS}), step_count={step_count}")
+                else:
+                    logger.warning(f"[Bioinformatics] Figure iteration budget ({MAX_FIGURE_ITERATIONS}) exhausted, accepting last version and moving on")
 
         status = "completed" if completed else "max_steps_reached"
 
@@ -1516,7 +1543,7 @@ Return only the Python code:"""
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=revision_temp,
-            max_tokens=2048
+            max_tokens=32000
         )
 
         response_text = response.content if response and response.content else None
