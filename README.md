@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.7.3
+**Version**: 0.7.4
 
 ## Core Features
 
@@ -237,6 +237,8 @@ Upload in the interface:
 - **Sequencing Data**: h5ad format AnnData files, .loom files
 - **Biochemical Indicators**: Manual data entry or upload data tables/images
 
+All uploaded data can be downloaded back to local via the download buttons in the Data panel.
+
 ### 4. Start Analysis
 
 Click "Start Analysis", the system will:
@@ -393,6 +395,15 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.7.4 (2026-02-14)
+
+- **Figure Step Budget**: Figure generation (`generate_publication_figure`) no longer counts toward bioinformatics agent's step budget. A safety cap of 5 figure-only iterations prevents infinite loops — after exhaustion, agent refuses new figure generation and redirects to remaining analysis steps
+- **Figure Revision Fix**: Increased `max_tokens` for figure revision code generation from 2048 to 32000, preventing code truncation (SyntaxError) when revising complex publication figures
+- **Data Download**: All uploaded data (pathology images, sequencing files, loom files, biochemistry files) can now be downloaded from the Data panel via individual download buttons
+- **Agent Status Display Fix**: Fixed bug where completed analysis agents showed spinning icons during report generation. `getAgentStatus()` now correctly handles `generating_report` session status (analysis agents stay "done") and recognizes additional completion message types (`completed`, `integrated_report`, `graphic_abstract`, etc.)
+- **Figure Gallery Fix**: Fixed figure previews not displaying after page reload (localStorage persistence stripped base64 data, which then overwrote fresh API data). Fixed MIME type mismatch (JPEG data displayed as PNG). Session-completed figures with `revision_requested` status now display as green "Final" instead of red "Revision Requested"
+- Bug fixes: `TaskStatus` type now includes `generating_report`, backend `/load` and upload endpoints return `filePath` for pathology and biochemistry files
 
 ### v0.7.3 (2026-02-13)
 
