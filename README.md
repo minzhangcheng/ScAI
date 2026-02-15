@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.7.4
+**Version**: 0.7.5
 
 ## Core Features
 
@@ -28,6 +28,7 @@
 ### Iterative Analysis Workflow with Human-in-the-Loop
 
 - Multi-round collaboration, progressively deepening analysis
+- **Selective Agent Activation**: From round 2 onwards, PI Agent autonomously decides which agents to activate based on analysis needs — Bioinformatics Agent always runs, while Pathology, Biochemistry, and Literature agents are activated only when needed, saving API costs and time
 - **Round Feedback Dialog**: After each round, a modal shows per-agent findings with a configurable countdown timer (default 5 minutes; supports manual-only mode and no-wait auto-continue). Users can provide guidance, upload additional data (targeted to specific agents), or skip to auto-continue
 - User input or file uploads on the last round automatically extends analysis by one additional round
 - Automatic conflict detection and resolution
@@ -39,6 +40,7 @@
 - Each execution is automatically saved as Jupyter Notebook (.ipynb format)
 - **Auto PDF Generation**: Every PNG figure saved automatically gets a companion high-resolution PDF with vectorized fonts (Type 42) for publication-quality editing
 - Supports scanpy and other bioinformatics tools
+- **Docker Pip Install**: Bioinformatics Agent can install pip packages on-the-fly when running in Docker environments
 - Reproducible code (fixed random seed 42)
 - **Batch Effect Assessment**: Automatic batch effect detection step when multiple samples/batches are present — visualizes cells by batch before clustering
 
@@ -395,6 +397,11 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.7.5 (2026-02-15)
+
+- **Selective Agent Activation**: From round 2 onwards, PI Agent autonomously decides which agents (Pathology, Biochemistry, Literature) to activate based on analysis needs. Bioinformatics Agent always runs. Skipped agents receive WebSocket notification. Uses existing `skip_nodes` mechanism in `@with_retry` decorator. New `agents_for_next_round` field in `RoundResult`
+- **Docker Pip Install Support**: Bioinformatics Agent can now install pip packages via subprocess in Docker environments. `_validate_code()` adds special exception for pip/pip3 install commands. System prompt includes package installation guidelines
 
 ### v0.7.4 (2026-02-14)
 

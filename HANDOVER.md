@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.7.4
-**Last Updated**: 2026-02-14
+**Version**: 0.7.5
+**Last Updated**: 2026-02-15
 
 ## Project Overview
 
@@ -74,7 +74,7 @@ intesc/                         # Code directory
 │   │                           # - File download (/api/download with path containment)
 │   │                           # - filePath in /load and upload responses for download support
 │   │
-│   ├── workflow.py             # LangGraph workflow (~1826 lines)
+│   ├── workflow.py             # LangGraph workflow (~1860 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
@@ -86,6 +86,7 @@ intesc/                         # Code directory
 │   │                           # - annotate_clusters_callback for literature-based annotation
 │   │                           # - Deep Research topic merging + gap coverage fallback
 │   │                           # - Report-only resume via generate_report()
+│   │                           # - Selective agent activation (skip_nodes from agents_for_next_round)
 │   │
 │   ├── report_generator.py     # Report generator (~3196 lines)
 │   │                           # - No-sandbox report compilation (v0.7.3 rewrite)
@@ -108,17 +109,18 @@ intesc/                         # Code directory
 │   ├── agents/
 │   │   ├── base.py             # Agent base class
 │   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer)
-│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget)
+│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2)
 │   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~907 lines)
 │   │   └── painter_agent.py    # Painter Agent (graphic abstract)
 │   │
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models (~392 lines)
+│   │   └── schemas.py          # Pydantic data models (~395 lines)
 │   │                           # - AnalysisState: Core state with version control + literature_config + chat_messages + round_wait_seconds
 │   │                           # - TaskStatus: GENERATING_REPORT status added
 │   │                           # - AgentError: Structured error tracking
+│   │                           # - RoundResult: agents_for_next_round for selective activation
 │   │                           # - BiochemistryResult/File: Biochemistry data models
 │   │                           # - PublicationFigure/Table: Publication outputs
 │   │                           # - GraphicAbstract: Painter agent output
@@ -248,6 +250,8 @@ initialize_round ◄────────────────────
 12. **Deep Research Topic Merging**: When using Gemini Deep Research mode, multiple topics are merged into a single comprehensive query (one DR call instead of N). After the DR call, `_evaluate_dr_coverage()` checks which topics were insufficiently covered and falls back to PubMed+LLM for gaps.
 13. **Report-Only Resume**: `generate_report()` method runs only the report generation phase (final report → graphic abstract → detailed report), bypassing analysis rounds. Used when a session completed all analysis but was interrupted during report generation. WebSocket handler detects this condition automatically.
 14. **GENERATING_REPORT Status**: New `TaskStatus.GENERATING_REPORT` marks sessions in report generation phase, enabling detection of interrupted report generation on resume.
+15. **Selective Agent Activation**: From round 2 onwards, PI Agent decides which agents to activate via `RoundResult.agents_for_next_round`. Bioinformatics Agent always runs. `_pi_planning()` builds `skip_nodes` from the previous round's `agents_for_next_round`, and `@with_retry` skips deactivated nodes with WebSocket notification. Each round's `skip_nodes` is rebuilt fresh (not accumulated), so previously skipped agents can be re-activated.
+16. **Docker Pip Install**: Bioinformatics Agent's `_validate_code()` allows `subprocess` calls when all usages are pip/pip3 install commands (safe in Docker environments). System prompt includes package installation guidelines.
 
 **WebSocket Message Types:**
 
@@ -745,6 +749,7 @@ class RoundResult(BaseModel):
     next_steps: List[str]
     conflicts: List[Dict[str, Any]]
     new_findings: bool = True    # For convergence detection
+    agents_for_next_round: List[str]  # PI decides which agents to activate next round
     timestamp: datetime
 ```
 
@@ -1028,16 +1033,16 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 |---------|------|-----------------|
 | FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4273 lines |
 | Report generator (no-sandbox compilation) | `report_generator.py` | ~3196 lines |
-| Workflow graph, orchestration & DR optimization | `workflow.py` | ~1826 lines |
-| Bioinformatics Agent (autonomous + figure budget) | `bioinformatics_agent.py` | ~1570 lines |
-| PI Agent (coordinator + reviewer) | `pi_agent.py` | ~1330 lines |
+| Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1860 lines |
+| Bioinformatics Agent (autonomous + figure budget + pip install) | `bioinformatics_agent.py` | ~1592 lines |
+| PI Agent (coordinator + reviewer + agent activation) | `pi_agent.py` | ~1345 lines |
 | Literature Agent (2 modes + annotation) | `literature_agent.py` | ~907 lines |
 | LLM client (OpenRouter + Google DR) | `llm_client.py` | ~872 lines |
 | Jupyter sandbox (+ auto PDF) | `sandbox.py` | ~793 lines |
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
 | Pathology Agent (batch size 5 + dynamic timeout) | `pathology_agent.py` | ~453 lines |
 | Chunked upload manager | `upload.py` | ~398 lines |
-| Data models & schemas | `schemas.py` | ~392 lines |
+| Data models & schemas | `schemas.py` | ~395 lines |
 | Painter Agent (graphic abstract) | `painter_agent.py` | ~326 lines |
 | Configuration & prompts | `config.py` | ~292 lines |
 | Agent base class | `base.py` | ~246 lines |
@@ -1104,6 +1109,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.7.5 | 2026-02-15 | Selective agent activation (PI decides which agents to activate from round 2+, `agents_for_next_round`), Docker pip install support for bioinformatics agent |
 | 0.7.4 | 2026-02-14 | Figure step budget (MAX_FIGURE_ITERATIONS=5), figure revision max_tokens fix, data download buttons, agent status display fix (generating_report), figure gallery preview + review status fix, MIME type correction |
 | 0.7.3 | 2026-02-13 | Chat delegation, no-sandbox report generation, report-only resume, auto PDF, Deep Research optimization, bioinformatics session restore, batch effect check, configurable round timer, pathology reliability, .pkl in export/import |
 | 0.7.2 | 2026-02-11 | Bug fixes for chat file handling, sandbox message filtering, import path validation |
@@ -1130,5 +1136,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-02-14*
-*Version: 0.7.4*
+*Document updated: 2026-02-15*
+*Version: 0.7.5*
