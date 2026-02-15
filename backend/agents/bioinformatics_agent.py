@@ -392,6 +392,21 @@ class BioinformaticsAgent(BaseAgent):
         """
         for pattern, description in self.DANGEROUS_PATTERNS:
             if re.search(pattern, code):
+                # Allow subprocess when ALL usages are pip install commands (safe in Docker)
+                if 'subprocess' in description:
+                    # Check each line containing 'subprocess'
+                    subprocess_lines = [
+                        line.strip() for line in code.splitlines()
+                        if re.search(r'\bsubprocess\b', line)
+                    ]
+                    pip_pattern = r'subprocess\.\w+\(\s*\[?\s*["\'](?:pip|pip3)["\'].*install'
+                    import_pattern = r'^(?:import|from)\s+subprocess'
+                    non_import_lines = [
+                        line for line in subprocess_lines
+                        if not re.match(import_pattern, line)
+                    ]
+                    if not non_import_lines or all(re.search(pip_pattern, line) for line in non_import_lines):
+                        continue
                 return False, f"Dangerous pattern detected: {description}"
         return True, ""
 
@@ -648,6 +663,13 @@ CELL TYPE ANNOTATION WORKFLOW:
 {self._build_notebook_context()}
 
 {self._build_analysis_context()}
+
+**PACKAGE INSTALLATION**:
+If you need a Python package that is not currently installed, you can install it using:
+- `!pip install package_name` (preferred, Jupyter magic command)
+- After installation, import the package normally in the same or next code cell
+- Only install well-known scientific/bioinformatics packages
+- Example: `!pip install palettable` then `import palettable`
 
 **CRITICAL: DATA PREPROCESSING (MUST DO BEFORE PCA)**
 Before running sc.tl.pca() or any dimensionality reduction:

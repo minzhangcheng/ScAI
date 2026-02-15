@@ -61,9 +61,15 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
     def decorator(func):
         @wraps(func)
         async def wrapper(self, state: 'WorkflowState') -> 'WorkflowState':
-            # Check if node should be skipped
+            # Check if node should be skipped (PI decided this agent is not needed this round)
             if node_name in state.get("skip_nodes", []):
-                logger.info(f"[{self.session_id}] Skipping node {node_name}")
+                logger.info(f"[{self.session_id}] Skipping node {node_name} (not activated by PI)")
+                if hasattr(self, '_send_message'):
+                    await self._send_message(
+                        "status",
+                        f"{node_name} skipped this round (not needed)",
+                        None
+                    )
                 return state
 
             last_error = None
@@ -771,6 +777,7 @@ Be specific and actionable in your response."""
             }
         
         # Normal planning without pre-processed instructions
+        skip_nodes = []  # Empty for round 1; populated for round 2+
         if analysis_state.current_round == 1:
             # First round - generate initial instructions
             instructions = await self.pi_agent.initial_instruction(
@@ -786,7 +793,7 @@ Be specific and actionable in your response."""
                 "biochemistry_tasks": [],
                 "literature_topics": []
             }
-            
+
             # Extract tasks for each agent
             for step in (last_round.next_steps if last_round else []):
                 if step.startswith("[Pathology]"):
@@ -797,17 +804,44 @@ Be specific and actionable in your response."""
                     instructions["biochemistry_tasks"].append(step[14:].strip())
                 elif step.startswith("[Literature]"):
                     instructions["literature_topics"].append(step[12:].strip())
-        
+
+            # Build skip_nodes from PI's agent activation decision
+            agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
+            agents_to_activate.add("bioinformatics")  # Always activate bioinformatics
+
+            skip_nodes = []
+            agent_node_map = {
+                "pathology": "pathology_analysis",
+                "biochemistry": "biochemistry_analysis",
+                "literature": "literature_research",
+            }
+            for agent_key, node_name in agent_node_map.items():
+                if agent_key not in agents_to_activate:
+                    skip_nodes.append(node_name)
+
+            if skip_nodes:
+                activated = [k for k in agent_node_map if k in agents_to_activate]
+                logger.info(
+                    f"[{self.session_id}] Round {analysis_state.current_round}: "
+                    f"PI activated agents: bioinformatics + {activated}, "
+                    f"skipping: {skip_nodes}"
+                )
+
         await self._send_message(
             "message",
             json.dumps(instructions, ensure_ascii=False, indent=2),
             AgentType.PI
         )
-        
-        return {
+
+        result = {
             **state,
-            "pi_instructions": instructions
+            "pi_instructions": instructions,
         }
+        # Only set skip_nodes for round 2+ (round 1 runs all agents)
+        if analysis_state.current_round > 1:
+            result["skip_nodes"] = skip_nodes
+
+        return result
     
     @with_retry("pathology_analysis")
     async def _pathology_analysis(self, state: WorkflowState) -> WorkflowState:

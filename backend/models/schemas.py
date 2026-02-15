@@ -145,6 +145,9 @@ class RoundResult(BaseModel):
     conflicts: List[Dict[str, Any]] = Field(default_factory=list)
     next_steps: List[str] = Field(default_factory=list)
     new_findings: bool = True
+    agents_for_next_round: List[str] = Field(
+        default_factory=lambda: ["bioinformatics", "pathology", "biochemistry", "literature"]
+    )
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class PublicationFigure(BaseModel):

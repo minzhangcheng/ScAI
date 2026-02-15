@@ -538,7 +538,8 @@ Please provide comprehensive analysis in JSON format:
     "next_literature": ["next literature topic"],
     "new_findings": true/false,
     "should_stop": true/false,
-    "stop_reason": "reason for stopping (if applicable)"
+    "stop_reason": "reason for stopping (if applicable)",
+    "agents_for_next_round": ["bioinformatics", ...]
 }}
 
 IMPORTANT: When generating next_* tasks:
@@ -546,6 +547,13 @@ IMPORTANT: When generating next_* tasks:
 - Only propose NEW directions, deeper investigations, or follow-up analyses
 - If a previous round already completed standard processing (QC, clustering, cell annotation), do NOT re-assign these
 - Focus next_* on specific hypotheses, pathway analyses, or validation tasks based on current findings
+
+IMPORTANT: agents_for_next_round controls which agents are ACTIVATED in the next round:
+- "bioinformatics" MUST ALWAYS be included (it is the core analysis agent)
+- Only include "pathology" if new image analysis or re-examination is needed
+- Only include "biochemistry" if biochemistry data needs further analysis or reinterpretation
+- Only include "literature" if new literature search is needed for newly discovered topics
+- EXCLUDE agents that have no meaningful new work to save time and resources
 """
 
         # Try up to 2 times if response is empty
@@ -569,6 +577,12 @@ IMPORTANT: When generating next_* tasks:
         data = self._safe_parse_json(response, default={})
 
         if data and "summary" in data:
+            # Ensure bioinformatics is always included in agents_for_next_round
+            agents_next = data.get("agents_for_next_round",
+                ["bioinformatics", "pathology", "biochemistry", "literature"])
+            if "bioinformatics" not in agents_next:
+                agents_next.insert(0, "bioinformatics")
+
             return RoundResult(
                 round_number=state.current_round,
                 pathology_findings=data.get("pathology_findings", []),
@@ -578,7 +592,8 @@ IMPORTANT: When generating next_* tasks:
                 pi_summary=data.get("summary", ""),
                 conflicts=data.get("conflicts", []),
                 next_steps=self._extract_next_steps(data),
-                new_findings=data.get("new_findings", True)
+                new_findings=data.get("new_findings", True),
+                agents_for_next_round=agents_next,
             )
 
         # If we have a response but couldn't parse JSON, use it as summary
