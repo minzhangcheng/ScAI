@@ -2,14 +2,14 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.7.5
+**Version**: 0.8.0
 
 ## Core Features
 
 ### Six Specialized Agent Collaboration
 
 - **PI Agent**: Project coordinator, manages overall workflow, makes decisions, and reviews publication-quality figures
-- **Pathology Agent**: Analyzes histological sections (supports H&E, Sirius Red, Prussian Blue, and other staining types)
+- **Pathology Agent**: Analyzes histological sections (supports H&E and custom staining types)
 - **Bioinformatics Agent**: Performs autonomous high-throughput sequencing data analysis (scRNA-seq, snRNA-seq, bulk RNA-seq) with checkpoint recovery
 - **Biochemistry Agent**: Interprets biochemical experimental results (3-step analysis: structured indicators → visual image analysis → synthesis & conclusions)
 - **Literature Agent**: Provides literature support (2 modes: Google Gemini Deep Research, PubMed + LLM synthesis) with multi-round iterative search, automatic fallback chain, and literature-based cluster annotation
@@ -20,7 +20,7 @@
 - **Chat Tab**: Free-form conversational interface with the PI Agent after analysis
 - Ask questions about results, request explanations, or discuss next steps
 - **Chat Delegation**: PI can delegate complex requests to specialized agents (Bioinformatics, Pathology, Biochemistry, Literature) — agents execute analysis in the background, then PI synthesizes results into a comprehensive response
-- **File Attachments**: Upload images and data files directly in chat, with per-file agent targeting (PI, Pathology, Bioinformatics, Biochemistry)
+- **File Attachments**: Upload images and data files directly in chat, with per-file agent targeting (PI, Pathology, Bioinformatics, Biochemistry) and treatment group/sample/data type assignment
 - **Figure Display & Generation**: PI can reference existing analysis figures or generate new custom figures on-the-fly via Jupyter sandbox
 - **Stop/Cancel**: Cancel ongoing chat requests or delegation tasks with a stop button
 - Markdown-rendered responses with inline figure display and PNG/PDF download
@@ -29,7 +29,7 @@
 
 - Multi-round collaboration, progressively deepening analysis
 - **Selective Agent Activation**: From round 2 onwards, PI Agent autonomously decides which agents to activate based on analysis needs — Bioinformatics Agent always runs, while Pathology, Biochemistry, and Literature agents are activated only when needed, saving API costs and time
-- **Round Feedback Dialog**: After each round, a modal shows per-agent findings with a configurable countdown timer (default 5 minutes; supports manual-only mode and no-wait auto-continue). Users can provide guidance, upload additional data (targeted to specific agents), or skip to auto-continue
+- **Round Feedback Dialog**: After each round, a modal shows per-agent findings with a configurable countdown timer (default 5 minutes; supports manual-only mode and no-wait auto-continue). Users can provide guidance, upload additional data (targeted to specific agents with treatment group/sample/data type assignment), or skip to auto-continue
 - User input or file uploads on the last round automatically extends analysis by one additional round
 - Automatic conflict detection and resolution
 - Convergence detection for automatic stopping
@@ -235,9 +235,10 @@ Click "New Analysis", enter your research objective, for example:
 
 Upload in the interface:
 
-- **Pathology Sections**: H&E or special staining images (large images auto-split to 1024px tiles)
-- **Sequencing Data**: h5ad format AnnData files, .loom files
-- **Biochemical Indicators**: Manual data entry or upload data tables/images
+- **Define Treatment Groups**: Create experimental groups (e.g., Control, NASH Model, Treatment A) with sample count
+- **Pathology Sections**: H&E or custom staining images, assigned to group/sample (large images auto-split to 1024px tiles)
+- **Sequencing Data**: h5ad format AnnData files, .loom files, assigned to group/sample
+- **Biochemical Indicators**: Manual data entry or upload data tables/images, assigned to group/sample
 
 All uploaded data can be downloaded back to local via the download buttons in the Data panel.
 
@@ -297,7 +298,7 @@ intesc/                         # Code directory
 │   │   ├── literature_agent.py      # Literature Agent (2 research modes + cluster annotation)
 │   │   └── painter_agent.py         # Painter Agent (graphic abstract)
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models (AgentError, state_version)
+│   │   └── schemas.py          # Pydantic data models (DataFile, TreatmentGroup, BiochemistryIndicator)
 │   ├── utils/
 │   │   ├── llm_client.py       # LLM client (OpenRouter + Google Deep Research)
 │   │   ├── sandbox.py          # Jupyter code execution environment
@@ -397,6 +398,15 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.8.0 (2026-02-16)
+
+- **Unified Data Model**: Replaced per-type data models (`PathologyImage`, `BiochemistryResult`/`BiochemistryFile`, `control_seq_path`/`treatment_seq_path`) with unified `DataFile` (section: pathology/sequencing/biochemistry), `TreatmentGroup`, and `BiochemistryIndicator` models
+- **Treatment Groups & Multi-Sample Support**: Users can define experimental groups (e.g., Control, Treatment, NASH Model) with configurable sample counts. All uploaded data is assigned to a group and sample number, enabling structured multi-group comparisons. `build_experimental_design_summary()` generates text descriptions for agent prompts
+- **Unified Upload Endpoint**: Replaced separate `/upload/pathology`, `/upload/snrna_seq`, `/upload/biochemistry` endpoints with single `/upload/data` endpoint. New group CRUD endpoints (`/groups`)
+- **Upload Selectors in Feedback & Chat**: Round Feedback Dialog and Chat Panel file uploads now include treatment group, sample number, and data type selectors (matching DataPanel's existing pattern)
+- **Simplified Pathology Types**: Pathology staining type options simplified to H&E and Other (with custom stain name input for Other)
+- **DataPanel Rewrite**: Complete rewrite of DataPanel for group-centric data organization with inline editing, collapsible sections, and per-file download
 
 ### v0.7.5 (2026-02-15)
 

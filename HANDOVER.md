@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.7.5
-**Last Updated**: 2026-02-15
+**Version**: 0.8.0
+**Last Updated**: 2026-02-16
 
 ## Project Overview
 
@@ -61,10 +61,11 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~4273 lines)
+│   ├── main.py                 # FastAPI entry point (~4158 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
+│   │                           # - Unified data upload (/upload/data) + treatment group CRUD
 │   │                           # - Chunked file upload (10GB support)
 │   │                           # - Report generation task scheduling
 │   │                           # - Base64 stripping for message optimization
@@ -72,7 +73,6 @@ intesc/                         # Code directory
 │   │                           # - Chat delegation (PI delegates to agents)
 │   │                           # - Session export/import (tar.gz/zip/JSON, incl. .pkl)
 │   │                           # - File download (/api/download with path containment)
-│   │                           # - filePath in /load and upload responses for download support
 │   │
 │   ├── workflow.py             # LangGraph workflow (~1860 lines)
 │   │                           # - Multi-Agent coordination
@@ -116,16 +116,18 @@ intesc/                         # Code directory
 │   │   └── painter_agent.py    # Painter Agent (graphic abstract)
 │   │
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models (~395 lines)
-│   │                           # - AnalysisState: Core state with version control + literature_config + chat_messages + round_wait_seconds
-│   │                           # - TaskStatus: GENERATING_REPORT status added
+│   │   └── schemas.py          # Pydantic data models (~481 lines)
+│   │                           # - AnalysisState: Core state with version control + treatment_groups + data_files + biochemistry_indicators
+│   │                           # - TreatmentGroup: Experimental group definition (name, sample_count)
+│   │                           # - DataFile: Universal file record (section: pathology/sequencing/biochemistry, group_id, sample_number)
+│   │                           # - BiochemistryIndicator: Manual biochemistry entry with group/sample
+│   │                           # - TaskStatus: GENERATING_REPORT status
 │   │                           # - AgentError: Structured error tracking
 │   │                           # - RoundResult: agents_for_next_round for selective activation
-│   │                           # - BiochemistryResult/File: Biochemistry data models
 │   │                           # - PublicationFigure/Table: Publication outputs
 │   │                           # - GraphicAbstract: Painter agent output
 │   │                           # - BioinformaticsCheckpoint: Step-level recovery
-│   │                           # - WebSocketMessage: chat_delegation, chat_result, chat_error types added
+│   │                           # - Data helper methods: get_files_by_section/group, build_experimental_design_summary
 │   │
 │   ├── utils/
 │   │   ├── llm_client.py       # LLM client (~872 lines, OpenRouter + Google DR)
@@ -140,7 +142,7 @@ intesc/                         # Code directory
 │   ├── src/
 │   │   ├── App.tsx             # Main application component (+ Chat tab)
 │   │   ├── components/         # React components
-│   │   │   ├── ChatPanel.tsx   # PI Agent free-form chat + delegation (~561 lines)
+│   │   │   ├── ChatPanel.tsx   # PI Agent free-form chat + delegation (~657 lines)
 │   │   │   └── ...             # Other panels (Analysis, Data, Prompts, Results, Report)
 │   │   ├── stores/             # Zustand state (+ chatMessages, chatDelegation, generating_report status)
 │   │   ├── hooks/              # API Hooks
@@ -325,7 +327,7 @@ Free-form conversational interface with the PI Agent, separate from the workflow
 - Builds analysis context from session state (round results, figures, literature reports) for informed responses
 - **Figure Display**: PI references existing figures via `[[FIGURE:name]]` markers — matched against on-disk figure inventory (workspace + reports directories)
 - **Figure Generation**: PI requests new figures via `[[GENERATE_FIGURE:description]]` — system spins up Jupyter sandbox, generates code via LLM, executes it, captures PNG/PDF output
-- File routing: Uploaded images → `pathology_images` or `biochemistry_files` based on target agent
+- File routing: Uploaded files → `data_files` with section based on target agent (pathology/sequencing/biochemistry), with group_id, sample_number, and data_type metadata
 - Chat history stored in `AnalysisState.chat_messages` (last 20 messages used as LLM context)
 - Vision API used when images are attached
 
@@ -551,9 +553,10 @@ class LLMManager:
 | `/api/session/{id}` | GET | Get session status |
 | `/api/session/{id}/load` | GET | Load complete session data |
 | `/api/session/{id}/delete` | DELETE | Delete session |
-| `/api/session/{id}/upload-pathology` | POST | Upload pathology images |
-| `/api/session/{id}/upload-seq` | POST | Upload sequencing data |
-| `/api/session/{id}/upload-biochemistry` | POST | Upload biochemistry data |
+| `/api/session/{id}/upload/data` | POST | Unified data file upload (section + data_type + group_id + sample_number) |
+| `/api/session/{id}/groups` | POST | Create treatment group |
+| `/api/session/{id}/groups/{gid}` | PUT | Update treatment group |
+| `/api/session/{id}/groups/{gid}` | DELETE | Delete treatment group (and associated files) |
 | `/api/session/{id}/detailed-report` | GET | Get generated report |
 | `/api/session/{id}/generate-detailed-report` | POST | Start report generation |
 | `/api/session/{id}/report/download-all-figures` | POST | Download all figures |
@@ -673,14 +676,10 @@ class AnalysisState(BaseModel):
     state_version: int = 0
     last_sync_timestamp: datetime
 
-    # Data paths
-    control_seq_path: Optional[str]
-    treatment_seq_path: Optional[str]
-    control_loom_path: Optional[str]      # For RNA velocity
-    treatment_loom_path: Optional[str]
-    pathology_images: List[PathologyImage]
-    biochemistry_results: List[BiochemistryResult]
-    biochemistry_files: List[BiochemistryFile]
+    # Treatment groups and uploaded data (multi-group, multi-sample)
+    treatment_groups: List[TreatmentGroup]       # Experimental group definitions
+    data_files: List[DataFile]                   # All uploaded files (pathology, sequencing, biochemistry)
+    biochemistry_indicators: List[BiochemistryIndicator]  # Manual biochemistry entries
 
     # Analysis results
     round_results: List[RoundResult]
@@ -698,27 +697,76 @@ class AnalysisState(BaseModel):
     agent_errors: List[AgentError]
 
     # Human-in-the-loop
-    pending_human_input: Optional[str]  # User message waiting to be processed
-    pending_uploaded_files: List[Dict]  # Files uploaded during pause
-    max_rounds: int = 0                 # Dynamic max rounds (0 = use config default)
-    round_wait_seconds: int = 300       # Countdown between rounds (-1=manual, 0=no wait, positive=countdown)
+    pending_human_input: Optional[str]
+    pending_uploaded_files: List[Dict]
+    max_rounds: int = 0
+    round_wait_seconds: int = 300
 
-    # Literature config (per-session, replaces global google_api_key)
-    literature_config: Dict[str, Any]   # mode (gemini_deep_research|pubmed_llm), google_api_key, pubmed_email, max_search_rounds
+    # Literature config (per-session)
+    literature_config: Dict[str, Any]
 
-    # Chat messages (PI Agent free-form chat, separate from workflow)
-    chat_messages: List[Dict[str, Any]] = []  # role, content, timestamp, files, figures
+    # Chat messages (PI Agent free-form chat)
+    chat_messages: List[Dict[str, Any]] = []
 
     # Configuration
     custom_prompts: Dict[str, str]
     custom_models: Dict[str, str]
     custom_temperatures: Dict[str, float]
 
-    # Methods
-    def increment_version(self)
+    # Data helper methods
+    def get_files_by_section(section: str) -> List[DataFile]
+    def get_files_by_group(group_id, section=None) -> List[DataFile]
+    def has_sequencing_data() -> bool
+    def get_group_by_id(group_id) -> Optional[TreatmentGroup]
+    def build_experimental_design_summary() -> str
+    def increment_version()
     def add_error(agent, error_type, message, details) -> AgentError
     def get_unresolved_errors() -> List[AgentError]
     def resolve_error(error_id, resolution)
+```
+
+### TreatmentGroup
+
+```python
+class TreatmentGroup(BaseModel):
+    id: str
+    name: str                          # e.g., "Control", "NASH Model", "Treatment A"
+    description: str = ""
+    sample_count: int = 1              # Number of samples/replicates
+    order: int = 0                     # Display order
+```
+
+### DataFile (Universal File Record)
+
+```python
+class DataFile(BaseModel):
+    id: str
+    filename: str
+    file_path: str                     # Absolute path on disk
+    section: Literal["pathology", "sequencing", "biochemistry"]
+    data_type: str                     # pathology: "H&E"/"Other"/custom; sequencing: "scRNA-seq"/"loom"; biochemistry: "image"/"file"
+    group_id: Optional[str] = None     # TreatmentGroup.id
+    sample_number: Optional[int] = None  # 1-based sample number
+    tiles: List[str] = []              # For pathology: tile paths
+    analysis: Optional[str] = None     # For pathology: analysis result
+    description: Optional[str] = None
+    extracted_data: Optional[Dict] = None  # For biochemistry: extracted values
+    timestamp: datetime
+```
+
+### BiochemistryIndicator
+
+```python
+class BiochemistryIndicator(BaseModel):
+    id: str
+    indicator: str
+    value: float
+    unit: str
+    reference_range: Optional[str] = None
+    interpretation: Optional[str] = None
+    group_id: Optional[str] = None
+    sample_number: Optional[int] = None
+    timestamp: datetime
 ```
 
 ### AgentError
@@ -1031,7 +1079,7 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4273 lines |
+| FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4158 lines |
 | Report generator (no-sandbox compilation) | `report_generator.py` | ~3196 lines |
 | Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1860 lines |
 | Bioinformatics Agent (autonomous + figure budget + pip install) | `bioinformatics_agent.py` | ~1592 lines |
@@ -1042,7 +1090,7 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
 | Pathology Agent (batch size 5 + dynamic timeout) | `pathology_agent.py` | ~453 lines |
 | Chunked upload manager | `upload.py` | ~398 lines |
-| Data models & schemas | `schemas.py` | ~395 lines |
+| Data models & schemas | `schemas.py` | ~481 lines |
 | Painter Agent (graphic abstract) | `painter_agent.py` | ~326 lines |
 | Configuration & prompts | `config.py` | ~292 lines |
 | Agent base class | `base.py` | ~246 lines |
@@ -1051,16 +1099,16 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| API hooks + WebSocket | `useApi.ts` | ~1251 lines |
-| Data upload + download interface | `DataPanel.tsx` | ~1024 lines |
+| API hooks + WebSocket | `useApi.ts` | ~1166 lines |
+| Data upload + download interface | `DataPanel.tsx` | ~980 lines |
 | Real-time message streaming + delegation | `MessageStream.tsx` | ~846 lines |
 | Report generation & download | `ReportPanel.tsx` | ~789 lines |
-| Analysis control + agent status | `AnalysisPanel.tsx` | ~741 lines |
+| Analysis control + agent status | `AnalysisPanel.tsx` | ~751 lines |
 | Session mgmt + export/import | `Sidebar.tsx` | ~624 lines |
-| PI Agent chat + delegation | `ChatPanel.tsx` | ~561 lines |
+| PI Agent chat + delegation | `ChatPanel.tsx` | ~657 lines |
 | Agent prompt + literature config | `PromptsPanel.tsx` | ~509 lines |
-| Round feedback dialog (configurable timer) | `RoundFeedbackDialog.tsx` | ~503 lines |
-| Zustand global state (+ delegation) | `appStore.ts` | ~505 lines |
+| Round feedback dialog (configurable timer) | `RoundFeedbackDialog.tsx` | ~600 lines |
+| Zustand global state (+ delegation) | `appStore.ts` | ~509 lines |
 | Round results + publication outputs | `ResultsPanel.tsx` | ~359 lines |
 | Main application | `App.tsx` | ~309 lines |
 | API + literature configuration | `ConfigPanel.tsx` | ~250 lines |
@@ -1109,6 +1157,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.8.0 | 2026-02-16 | Unified data model (`DataFile` + `TreatmentGroup` + `BiochemistryIndicator` replace per-type models), multi-group multi-sample support, unified `/upload/data` endpoint, group CRUD, upload selectors in feedback dialog & chat, simplified pathology types (H&E + Other), DataPanel rewrite |
 | 0.7.5 | 2026-02-15 | Selective agent activation (PI decides which agents to activate from round 2+, `agents_for_next_round`), Docker pip install support for bioinformatics agent |
 | 0.7.4 | 2026-02-14 | Figure step budget (MAX_FIGURE_ITERATIONS=5), figure revision max_tokens fix, data download buttons, agent status display fix (generating_report), figure gallery preview + review status fix, MIME type correction |
 | 0.7.3 | 2026-02-13 | Chat delegation, no-sandbox report generation, report-only resume, auto PDF, Deep Research optimization, bioinformatics session restore, batch effect check, configurable round timer, pathology reliability, .pkl in export/import |
@@ -1136,5 +1185,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-02-15*
-*Version: 0.7.5*
+*Document updated: 2026-02-16*
+*Version: 0.8.0*
