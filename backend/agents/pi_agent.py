@@ -758,45 +758,52 @@ Please write in academic paper style.
         Returns:
             List of high-level analysis steps to perform
         """
-        # Build data availability info
+        # Build data availability info from unified data_files
+        seq_files = [f for f in state.data_files if f.section == "sequencing"]
         data_info = []
-        if state.control_seq_path:
-            data_info.append(f"- Control group scRNA-seq: {state.control_seq_path}")
-        if state.treatment_seq_path:
-            data_info.append(f"- Treatment group scRNA-seq: {state.treatment_seq_path}")
-        if state.control_loom_path:
-            data_info.append(f"- Control group Loom (RNA velocity): {state.control_loom_path}")
-        if state.treatment_loom_path:
-            data_info.append(f"- Treatment group Loom (RNA velocity): {state.treatment_loom_path}")
-        
-        has_both_groups = state.control_seq_path and state.treatment_seq_path
-        has_velocity = state.control_loom_path or state.treatment_loom_path
-        
+        for f in seq_files:
+            group = state.get_group_by_id(f.group_id)
+            group_label = group.name if group else "Ungrouped"
+            sample_label = f"Sample {f.sample_number}" if f.sample_number else ""
+            label = f"{group_label} {sample_label}".strip()
+            data_info.append(f"- {label} ({f.data_type}): {f.file_path}")
+
+        # Determine analysis characteristics
+        seq_group_ids = set(f.group_id for f in seq_files if f.data_type == "scRNA-seq" and f.group_id)
+        has_multiple_groups = len(seq_group_ids) > 1
+        has_velocity = any(f.data_type == "loom" for f in seq_files)
+
+        # Experimental design summary
+        design_summary = state.build_experimental_design_summary()
+
         prompt = f"""
 ## Project Information
 Project Name: {state.name}
 Research Objective: {state.initial_instruction}
 
-## Uploaded Data
-{chr(10).join(data_info) if data_info else "No data uploaded"}
+## Experimental Design
+{design_summary}
+
+## Uploaded Sequencing Data
+{chr(10).join(data_info) if data_info else "No sequencing data uploaded"}
 
 ## Data Characteristics
-- Control and treatment groups: {"Yes, differential analysis required" if has_both_groups else "Single group only"}
+- Multiple groups for comparison: {"Yes (" + str(len(seq_group_ids)) + " groups), differential/comparative analysis required" if has_multiple_groups else "Single group only"}
 - RNA velocity data: {"Yes, cell trajectory analysis possible" if has_velocity else "No"}
 
 Please plan the single-cell sequencing analysis workflow for this project. Return an ordered list of analysis steps.
 Note: The first step must be loading data.
+{"If multiple groups exist, include steps for merging/integrating data, batch correction, and multi-group comparison analysis." if has_multiple_groups else ""}
 
 Format requirement: Return a JSON array, each element is a brief description of an analysis step.
 Example: ["Load data", "Quality control", "Normalization", ...]
 
 Return only the JSON array, no other content.
 """
-        
+
         response = await self.chat(prompt, temperature=0.3)
-        
+
         try:
-            # Try to extract JSON array
             json_match = re.search(r'\[[\s\S]*\]', response)
             if json_match:
                 steps = json.loads(json_match.group())
@@ -804,8 +811,8 @@ Return only the JSON array, no other content.
                     return steps
         except json.JSONDecodeError:
             pass
-        
-        # Default workflow if parsing fails (adapted based on data availability)
+
+        # Default workflow if parsing fails
         default_steps = [
             "Load data and view basic information",
             "Quality control: filter low-quality cells and genes",
@@ -817,17 +824,17 @@ Return only the JSON array, no other content.
             "Identify marker genes for each cluster",
             "Cell type annotation",
         ]
-        
-        if has_both_groups:
+
+        if has_multiple_groups:
             default_steps.extend([
-                "Differential expression analysis (treatment vs control)",
+                "Multi-group differential expression analysis",
                 "Pathway enrichment analysis",
-                "Cell proportion analysis"
+                "Cell proportion comparison across groups"
             ])
-        
+
         if has_velocity:
             default_steps.append("RNA velocity analysis")
-        
+
         return default_steps
     
     async def generate_bioinformatics_instruction(
@@ -866,17 +873,17 @@ Return only the JSON array, no other content.
         # Build data path info for first step
         data_paths_info = ""
         if step_index == 0 or "load" in current_step.lower() or "read" in current_step.lower():
+            seq_files = [f for f in state.data_files if f.section == "sequencing"]
             data_paths = []
-            if state.control_seq_path:
-                data_paths.append(f"Control group data path: {state.control_seq_path}")
-            if state.treatment_seq_path:
-                data_paths.append(f"Treatment group data path: {state.treatment_seq_path}")
-            if state.control_loom_path:
-                data_paths.append(f"Control group Loom path: {state.control_loom_path}")
-            if state.treatment_loom_path:
-                data_paths.append(f"Treatment group Loom path: {state.treatment_loom_path}")
+            for f in seq_files:
+                group = state.get_group_by_id(f.group_id)
+                group_label = group.name if group else "Ungrouped"
+                sample_label = f"Sample {f.sample_number}" if f.sample_number else ""
+                label = f"{group_label} {sample_label}".strip()
+                data_paths.append(f"{label} ({f.data_type}): {f.file_path}")
             if data_paths:
-                data_paths_info = "\n## Data File Paths\n" + "\n".join(data_paths) + "\n"
+                design = state.build_experimental_design_summary()
+                data_paths_info = f"\n## Experimental Design\n{design}\n\n## Data File Paths\n" + "\n".join(data_paths) + "\n"
         
         prompt = f"""
 ## Project Information

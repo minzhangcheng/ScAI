@@ -17,6 +17,26 @@ import {
   ChevronDown
 } from 'lucide-react'
 import { useTranslation, Language } from '../i18n/translations'
+import { TreatmentGroup } from '../stores/appStore'
+
+// Section-specific data type options (shared with DataPanel)
+const PATHOLOGY_TYPES = ['H&E', 'Other']
+const SEQUENCING_TYPES = ['scRNA-seq', 'Loom']
+const BIOCHEMISTRY_TYPES = ['image', 'file']
+
+function getSection(agent: string): string | null {
+  if (agent === 'pathology') return 'pathology'
+  if (agent === 'bioinformatics') return 'sequencing'
+  if (agent === 'biochemistry') return 'biochemistry'
+  return null
+}
+
+function getTypeOptions(agent: string): string[] {
+  if (agent === 'pathology') return PATHOLOGY_TYPES
+  if (agent === 'bioinformatics') return SEQUENCING_TYPES
+  if (agent === 'biochemistry') return BIOCHEMISTRY_TYPES
+  return []
+}
 
 interface RoundSummary {
   round: number
@@ -38,6 +58,9 @@ interface RoundSummary {
 export interface UploadedFileWithAgent {
   file: File
   targetAgent: string
+  groupId?: string
+  sampleNumber?: number
+  dataType?: string
 }
 
 interface RoundFeedbackDialogProps {
@@ -46,6 +69,7 @@ interface RoundFeedbackDialogProps {
   roundSummary: RoundSummary
   language: Language
   countdownSeconds: number  // -1=manual skip only, 0=no wait (auto-skip), positive=countdown
+  treatmentGroups: TreatmentGroup[]
   onSend: (message: string, files: UploadedFileWithAgent[]) => Promise<void>
   onSkip: () => Promise<void>
 }
@@ -63,6 +87,7 @@ export function RoundFeedbackDialog({
   roundSummary,
   language,
   countdownSeconds,
+  treatmentGroups,
   onSend,
   onSkip,
 }: RoundFeedbackDialogProps) {
@@ -197,8 +222,29 @@ export function RoundFeedbackDialog({
   }, [])
 
   const updateFileAgent = useCallback((index: number, agent: string) => {
-    setFiles(prev => prev.map((f, i) => i === index ? { ...f, targetAgent: agent } : f))
+    const types = getTypeOptions(agent)
+    setFiles(prev => prev.map((f, i) => i === index
+      ? { ...f, targetAgent: agent, groupId: undefined, sampleNumber: undefined, dataType: types[0] || undefined }
+      : f))
     setOpenDropdownIndex(null)
+  }, [])
+
+  const updateFileGroup = useCallback((index: number, groupId: string | undefined) => {
+    setFiles(prev => prev.map((f, i) => i === index
+      ? { ...f, groupId, sampleNumber: undefined }
+      : f))
+  }, [])
+
+  const updateFileSample = useCallback((index: number, sampleNumber: number | undefined) => {
+    setFiles(prev => prev.map((f, i) => i === index
+      ? { ...f, sampleNumber }
+      : f))
+  }, [])
+
+  const updateFileType = useCallback((index: number, dataType: string) => {
+    setFiles(prev => prev.map((f, i) => i === index
+      ? { ...f, dataType }
+      : f))
   }, [])
 
   // Close dropdown when clicking outside
@@ -378,47 +424,98 @@ export function RoundFeedbackDialog({
 
           {/* File list */}
           {files.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {files.map((f, index) => (
-                <div key={index} className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs">
-                  <span className="text-slate-700 max-w-[120px] truncate" title={f.file.name}>
-                    {f.file.name}
-                  </span>
-                  <span className="text-slate-400">→</span>
-                  {/* Agent selector dropdown */}
-                  <div className="relative">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setOpenDropdownIndex(openDropdownIndex === index ? null : index) }}
-                      className="flex items-center gap-0.5 text-blue-600 hover:text-blue-800 font-medium"
-                    >
-                      {AGENT_OPTIONS.find(a => a.value === f.targetAgent)?.[language === 'zh' ? 'labelZh' : 'label'] || f.targetAgent}
-                      <ChevronDown className="w-3 h-3" />
-                    </button>
-                    {openDropdownIndex === index && (
-                      <div className="absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-10 py-1 min-w-[120px]">
-                        {AGENT_OPTIONS.map(agent => (
-                          <button
-                            key={agent.value}
-                            onClick={(e) => { e.stopPropagation(); updateFileAgent(index, agent.value) }}
-                            className={`w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 ${
-                              f.targetAgent === agent.value ? 'text-blue-600 font-medium' : 'text-slate-700'
-                            }`}
-                          >
-                            {language === 'zh' ? agent.labelZh : agent.label}
-                          </button>
-                        ))}
+            <div className="space-y-1.5">
+              {files.map((f, index) => {
+                const section = getSection(f.targetAgent)
+                const typeOptions = getTypeOptions(f.targetAgent)
+                const selectedGroupObj = treatmentGroups.find(g => g.id === f.groupId)
+                const maxSamples = selectedGroupObj?.sampleCount || 0
+
+                return (
+                  <div key={index} className="bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs space-y-1">
+                    {/* Row 1: filename + Agent + delete */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-700 max-w-[140px] truncate" title={f.file.name}>
+                        {f.file.name}
+                      </span>
+                      <span className="text-slate-400">→</span>
+                      {/* Agent selector dropdown */}
+                      <div className="relative">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setOpenDropdownIndex(openDropdownIndex === index ? null : index) }}
+                          className="flex items-center gap-0.5 text-blue-600 hover:text-blue-800 font-medium"
+                        >
+                          {AGENT_OPTIONS.find(a => a.value === f.targetAgent)?.[language === 'zh' ? 'labelZh' : 'label'] || f.targetAgent}
+                          <ChevronDown className="w-3 h-3" />
+                        </button>
+                        {openDropdownIndex === index && (
+                          <div className="absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-10 py-1 min-w-[120px]">
+                            {AGENT_OPTIONS.map(agent => (
+                              <button
+                                key={agent.value}
+                                onClick={(e) => { e.stopPropagation(); updateFileAgent(index, agent.value) }}
+                                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50 ${
+                                  f.targetAgent === agent.value ? 'text-blue-600 font-medium' : 'text-slate-700'
+                                }`}
+                              >
+                                {language === 'zh' ? agent.labelZh : agent.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => removeFile(index)}
+                        className="text-slate-400 hover:text-red-500 ml-auto"
+                        title={t('removeFile')}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+
+                    {/* Row 2: Group + Sample + Type — only for non-PI agents */}
+                    {section && (
+                      <div className="flex items-center gap-1.5 pl-1">
+                        {/* Treatment group */}
+                        <select
+                          value={f.groupId || '_none'}
+                          onChange={(e) => updateFileGroup(index, e.target.value === '_none' ? undefined : e.target.value)}
+                          className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white max-w-[100px]"
+                        >
+                          <option value="_none">{language === 'zh' ? '无分组' : 'No Group'}</option>
+                          {treatmentGroups.map(g => (
+                            <option key={g.id} value={g.id}>{g.name}</option>
+                          ))}
+                        </select>
+
+                        {/* Sample number */}
+                        <select
+                          value={f.sampleNumber != null ? String(f.sampleNumber) : '_none'}
+                          disabled={!f.groupId}
+                          onChange={(e) => updateFileSample(index, e.target.value === '_none' ? undefined : parseInt(e.target.value))}
+                          className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white disabled:opacity-40 max-w-[60px]"
+                        >
+                          <option value="_none">-</option>
+                          {Array.from({ length: maxSamples }, (_, i) => (
+                            <option key={i + 1} value={String(i + 1)}>S{i + 1}</option>
+                          ))}
+                        </select>
+
+                        {/* Data type */}
+                        <select
+                          value={f.dataType || typeOptions[0] || ''}
+                          onChange={(e) => updateFileType(index, e.target.value)}
+                          className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white max-w-[90px]"
+                        >
+                          {typeOptions.map(opt => (
+                            <option key={opt} value={opt}>{opt}</option>
+                          ))}
+                        </select>
                       </div>
                     )}
                   </div>
-                  <button
-                    onClick={() => removeFile(index)}
-                    className="text-slate-400 hover:text-red-500 ml-1"
-                    title={t('removeFile')}
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
 

@@ -21,7 +21,7 @@ MAX_NODE_RETRIES = 3
 
 from .models.schemas import (
     AnalysisState, AgentType, TaskStatus, RoundResult,
-    WebSocketMessage, AgentMessage, MessageRole, BiochemistryResult,
+    WebSocketMessage, AgentMessage, MessageRole, BiochemistryIndicator,
     PublicationFigure, FigureReviewStatus
 )
 from .agents.pi_agent import PIAgent
@@ -133,7 +133,7 @@ class WorkflowState(TypedDict, total=False):
     human_guidance_processed: bool
     # User input processing fields
     user_action: Optional[str]
-    new_pathology_images: List[Dict[str, Any]]
+    new_data_files: List[Dict[str, Any]]
     adjusted_instructions: Optional[Dict[str, Any]]
     data_requests: Optional[List[Dict[str, Any]]]
     # Retry mechanism fields
@@ -630,7 +630,7 @@ Be specific and actionable in your response."""
         # Process pending human input (if any)
         human_guidance = None
         user_action = None
-        new_pathology_images = []
+        new_data_files = []
         adjusted_instructions = None
         
         if analysis_state.pending_human_input or analysis_state.pending_uploaded_files:
@@ -681,13 +681,14 @@ Be specific and actionable in your response."""
             # Process file assignments from PI
             file_assignments = pi_response.get("file_assignments", {})
 
-            # Track new pathology images for prioritized analysis
+            # Track new data files for prioritized analysis
             if file_assignments.get("pathology"):
                 for file_info in file_assignments["pathology"]:
                     if file_info:
-                        new_pathology_images.append({
+                        new_data_files.append({
+                            "section": "pathology",
                             "filename": file_info.get("filename"),
-                            "image_type": file_info.get("image_type", "user_upload"),
+                            "data_type": file_info.get("image_type", "user_upload"),
                             "reason": file_info.get("reason", "")
                         })
 
@@ -698,13 +699,13 @@ Be specific and actionable in your response."""
                     if isinstance(data, dict) and "value" in data:
                         try:
                             value = float(data["value"])
-                            result = BiochemistryResult(
+                            result = BiochemistryIndicator(
                                 indicator=indicator,
                                 value=value,
                                 unit=data.get("unit", ""),
                                 interpretation=data.get("interpretation")
                             )
-                            analysis_state.biochemistry_results.append(result)
+                            analysis_state.biochemistry_indicators.append(result)
                             logger.info(f"[{self.session_id}] Added biochemistry value: {indicator}={value} {data.get('unit', '')}")
                         except (ValueError, TypeError) as e:
                             logger.warning(f"[{self.session_id}] Failed to parse biochemistry value for {indicator}: {e}")
@@ -734,7 +735,7 @@ Be specific and actionable in your response."""
             "current_round": analysis_state.current_round,
             "human_guidance": human_guidance,
             "user_action": user_action,
-            "new_pathology_images": new_pathology_images,
+            "new_data_files": new_data_files,
             "adjusted_instructions": adjusted_instructions,
             "pathology_result": None,
             "bioinformatics_result": None,
@@ -853,11 +854,12 @@ Be specific and actionable in your response."""
         if not tasks:
             tasks = ["Perform standard pathology analysis"]
 
-        logger.info(f"[{self.session_id}] Starting pathology analysis with {len(analysis_state.pathology_images)} images")
+        pathology_files = analysis_state.get_files_by_section("pathology")
+        logger.info(f"[{self.session_id}] Starting pathology analysis with {len(pathology_files)} images")
         await self._send_message("status", "Pathology analysis starting...", AgentType.PATHOLOGY)
         
         # Check if images are available
-        if not analysis_state.pathology_images:
+        if not pathology_files:
             await self._send_message(
                 "result",
                 {
@@ -875,7 +877,7 @@ Be specific and actionable in your response."""
         # Log image count
         await self._send_message(
             "status", 
-            f"Analyzing {len(analysis_state.pathology_images)} pathology image(s)...", 
+            f"Analyzing {len(pathology_files)} pathology image(s)...", 
             AgentType.PATHOLOGY
         )
         
@@ -924,12 +926,13 @@ Be specific and actionable in your response."""
         analysis_state = state["analysis_state"]
 
         logger.info(f"[{self.session_id}] Starting bioinformatics analysis")
-        logger.info(f"[{self.session_id}] Control seq: {analysis_state.control_seq_path}, Treatment seq: {analysis_state.treatment_seq_path}")
+        seq_files = analysis_state.get_files_by_section("sequencing")
+        logger.info(f"[{self.session_id}] Sequencing files: {len(seq_files)}")
 
         await self._send_message("status", "Starting bioinformatics analysis...", AgentType.BIOINFORMATICS)
         
         # Check if data is available
-        if not analysis_state.control_seq_path and not analysis_state.treatment_seq_path:
+        if not analysis_state.has_sequencing_data():
             await self._send_message(
                 "result",
                 {"message": "Please upload sequencing data first", "findings": []},
@@ -1052,7 +1055,8 @@ Report key findings when you complete each major analysis phase."""
 
         tasks = instructions.get("biochemistry_tasks", [])
 
-        logger.info(f"[{self.session_id}] Starting biochemistry analysis with {len(analysis_state.biochemistry_results)} results and {len(analysis_state.biochemistry_files)} files")
+        bio_files = analysis_state.get_files_by_section("biochemistry")
+        logger.info(f"[{self.session_id}] Starting biochemistry analysis with {len(analysis_state.biochemistry_indicators)} indicators and {len(bio_files)} files")
         logger.info(f"[{self.session_id}] Biochemistry tasks: {tasks}")
 
         await self._send_message("status", "Biochemistry analysis in progress...", AgentType.BIOCHEMISTRY)

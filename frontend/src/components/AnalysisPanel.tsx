@@ -92,12 +92,12 @@ export function AnalysisPanel() {
     }
 
     // Session completed → all agents with messages show as done
-    if (currentSession.status === 'completed') {
+    if (currentSession?.status === 'completed') {
       return 'done'
     }
 
     // Report generation phase → analysis agents stay done, only PI/Painter may be working
-    if (currentSession.status === 'generating_report') {
+    if (currentSession?.status === 'generating_report') {
       const analysisAgents = ['pathology', 'bioinformatics', 'biochemistry', 'literature']
       if (analysisAgents.includes(agentId)) {
         return 'done'
@@ -237,17 +237,26 @@ export function AnalysisPanel() {
     // Upload files to their respective agent endpoints
     const uploadedData: Array<{ type: string; filename: string; id?: string }> = []
 
-    for (const { file, targetAgent } of files) {
+    for (const { file, targetAgent, groupId, sampleNumber, dataType } of files) {
       try {
         const formData = new FormData()
         formData.append('file', file)
 
         let endpoint: string
-        if (targetAgent === 'pathology') {
-          formData.append('image_type', 'user_upload')
-          endpoint = `${API_BASE}/session/${currentSession.id}/upload/pathology`
-        } else if (targetAgent === 'biochemistry') {
-          endpoint = `${API_BASE}/session/${currentSession.id}/upload/biochemistry`
+        const section = targetAgent === 'pathology' ? 'pathology'
+                      : targetAgent === 'bioinformatics' ? 'sequencing'
+                      : targetAgent === 'biochemistry' ? 'biochemistry'
+                      : null
+
+        if (section) {
+          formData.append('section', section)
+          formData.append('data_type', dataType || (
+            section === 'pathology' ? 'user_upload'
+            : section === 'sequencing' ? 'user_upload'
+            : (file.type.startsWith('image/') ? 'image' : 'file')))
+          if (groupId) formData.append('group_id', groupId)
+          if (sampleNumber != null) formData.append('sample_number', String(sampleNumber))
+          endpoint = `${API_BASE}/session/${currentSession.id}/upload/data`
         } else {
           endpoint = `${API_BASE}/session/${currentSession.id}/upload/file`
         }
@@ -732,6 +741,7 @@ export function AnalysisPanel() {
           roundSummary={feedbackRoundData}
           language={language}
           countdownSeconds={useAppStore.getState().roundWaitSeconds}
+          treatmentGroups={currentSession.treatmentGroups || []}
           onSend={handleDialogSend}
           onSkip={handleDialogSkip}
         />

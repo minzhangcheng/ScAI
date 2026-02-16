@@ -1170,10 +1170,13 @@ print("Use try_import('module_name') to safely import optional packages")
 
         # Set output directories and data paths
         data_paths = []
-        if state.control_seq_path:
-            data_paths.append(f'DATA_PATH_CONTROL = "{state.control_seq_path}"')
-        if state.treatment_seq_path:
-            data_paths.append(f'DATA_PATH_TREATMENT = "{state.treatment_seq_path}"')
+        for df in state.data_files:
+            if df.section == "sequencing" and df.data_type == "scRNA-seq":
+                group = state.get_group_by_id(df.group_id)
+                group_name = (group.name if group else "UNGROUPED").upper().replace(" ", "_")
+                sample_suffix = f"_S{df.sample_number}" if df.sample_number else ""
+                var_name = f"DATA_PATH_{group_name}{sample_suffix}"
+                data_paths.append(f'{var_name} = "{df.file_path}"')
 
         dir_code = f"""
 FIGURES_DIR = Path("{self.figures_dir}")
@@ -1279,14 +1282,12 @@ print("Data loader ready. Use load_data(file_path) to load data files.")
         if workspace_session_dir.exists():
             search_dirs.append(workspace_session_dir)
 
-        # 2. Upload directory (original data + possible processed files)
-        upload_dir = None
-        if state.control_seq_path:
-            upload_dir = Path(state.control_seq_path).parent
-        elif state.treatment_seq_path:
-            upload_dir = Path(state.treatment_seq_path).parent
-        if upload_dir and upload_dir.exists():
-            search_dirs.append(upload_dir)
+        # 2. Upload directories (original data + possible processed files)
+        seq_files = [f for f in state.data_files if f.section == "sequencing"]
+        for sf in seq_files:
+            upload_dir = Path(sf.file_path).parent
+            if upload_dir.exists() and upload_dir not in search_dirs:
+                search_dirs.append(upload_dir)
 
         if not search_dirs:
             logger.warning("No directories to search for processed data")
@@ -1317,13 +1318,13 @@ print("Data loader ready. Use load_data(file_path) to load data files.")
 print("\\n=== Available Data Files ===")
 print("No pre-processed data found. You may need to load and process the raw data.")
 """
-            if state.control_seq_path:
-                info_code += f"""
-print(f"Control data: {{DATA_PATH_CONTROL}}")
-"""
-            if state.treatment_seq_path:
-                info_code += f"""
-print(f"Treatment data: {{DATA_PATH_TREATMENT}}")
+            for df in state.data_files:
+                if df.section == "sequencing" and df.data_type == "scRNA-seq":
+                    group = state.get_group_by_id(df.group_id)
+                    group_name = (group.name if group else "Ungrouped")
+                    sample_suffix = f" Sample {df.sample_number}" if df.sample_number else ""
+                    info_code += f"""
+print(f"{group_name}{sample_suffix} data: {df.file_path}")
 """
             await self.sandbox.execute(info_code)
             return

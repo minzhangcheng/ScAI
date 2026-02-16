@@ -98,10 +98,12 @@ class LLMLogger:
         try:
             # Convert to dict
             data = asdict(interaction)
-            
+
             # Truncate long messages for the log (keep full in separate field)
             log_data = data.copy()
-            
+
+            LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
             # Write to daily log
             daily_path = self._get_daily_log_path()
             with open(daily_path, "a", encoding="utf-8") as f:

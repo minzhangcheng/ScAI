@@ -1,373 +1,879 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useDropzone } from 'react-dropzone'
-import { useAppStore } from '../stores/appStore'
+import { useAppStore, TreatmentGroup, DataFile as DataFileType, BiochemistryIndicator } from '../stores/appStore'
 import { useSession } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import {
   Upload,
-  Image as ImageIcon,
-  FileSpreadsheet,
   FlaskConical,
   Plus,
   Check,
   File,
-  Zap,
   Trash2,
-  Download
+  Download,
+  ChevronDown,
+  ChevronUp,
+  Users,
+  Grid3X3,
+  Microscope,
+  Dna,
 } from 'lucide-react'
 
-export function DataPanel() {
-  const { currentSession, language } = useAppStore()
-  const { 
-    uploadPathology, 
-    uploadSnRNASeq, 
-    uploadLoom, 
-    addBiochemistry, 
-    uploadBiochemistryFile,
-    deletePathologyImage,
-    deleteBiochemistryFile,
-    deleteBiochemistryResult,
-    deleteSequencing,
-    deleteLoom
-  } = useSession()
-  const { t } = useTranslation(language)
+// --- Data type options ---
+const PATHOLOGY_TYPES = ['H&E', 'Other']
+const SEQUENCING_TYPES = ['scRNA-seq', 'Loom']
+const BIOCHEMISTRY_TYPES = ['image', 'file']
 
-  const handleDownload = useCallback((filePath: string, filename: string) => {
-    const url = `/api/download?path=${encodeURIComponent(filePath)}`
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-  }, [])
+// Allowed extensions per section + data type (used for manual validation instead of
+// react-dropzone accept filter, which silently rejects files with unrecognized MIME types
+// like .h5, .h5ad, .loom)
+function getAllowedExtensions(section: string, dataType: string): string[] {
+  if (section === 'pathology') return ['.png', '.jpg', '.jpeg', '.tiff', '.tif']
+  if (section === 'sequencing') {
+    if (dataType === 'Loom') return ['.loom']
+    return ['.h5ad', '.h5']
+  }
+  if (section === 'biochemistry') {
+    if (dataType === 'image') return ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp']
+    return ['.csv', '.txt', '.tsv', '.xls', '.xlsx']
+  }
+  return []
+}
 
-  // Pathology states
-  const [stainType, setStainType] = useState<'H&E' | 'Other'>('H&E')
-  const [customStainType, setCustomStainType] = useState('')
-  const [uploadingPathology, setUploadingPathology] = useState(false)
-  const [pathologyProgress, setPathologyProgress] = useState(0)
-  
-  // Sequencing states
-  const [uploadingControl, setUploadingControl] = useState(false)
-  const [uploadingTreatment, setUploadingTreatment] = useState(false)
-  const [controlProgress, setControlProgress] = useState(0)
-  const [treatmentProgress, setTreatmentProgress] = useState(0)
-  
-  // Loom file states
-  const [uploadingControlLoom, setUploadingControlLoom] = useState(false)
-  const [uploadingTreatmentLoom, setUploadingTreatmentLoom] = useState(false)
-  const [controlLoomProgress, setControlLoomProgress] = useState(0)
-  const [treatmentLoomProgress, setTreatmentLoomProgress] = useState(0)
-  
-  // Biochemistry states
-  const [showBioForm, setShowBioForm] = useState(false)
-  const [bioIndicator, setBioIndicator] = useState('')
-  const [bioValue, setBioValue] = useState('')
-  const [bioUnit, setBioUnit] = useState('')
-  const [uploadingBioFile, setUploadingBioFile] = useState(false)
-  const [bioFileProgress, setBioFileProgress] = useState(0)
+// ============================================================
+// GroupManager Component
+// ============================================================
+function GroupManager({
+  groups,
+  onAdd,
+  onUpdate,
+  onDelete,
+  language,
+  t,
+}: {
+  groups: TreatmentGroup[]
+  onAdd: (name: string, description: string, sampleCount: number) => Promise<any>
+  onUpdate: (id: string, updates: { name?: string; description?: string; sampleCount?: number }) => Promise<any>
+  onDelete: (id: string) => Promise<void>
+  language: string
+  t: (key: any, params?: any) => string
+}) {
+  const [adding, setAdding] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newDesc, setNewDesc] = useState('')
+  const [newSampleCount, setNewSampleCount] = useState(1)
+  const [editingId, setEditingId] = useState<string | null>(null)
 
-  // Track active intervals for cleanup on unmount
+  const handleAdd = async () => {
+    if (!newName.trim()) return
+    try {
+      await onAdd(newName.trim(), newDesc.trim(), newSampleCount)
+      setNewName('')
+      setNewDesc('')
+      setNewSampleCount(1)
+      setAdding(false)
+    } catch (e) {
+      console.error('Failed to add group:', e)
+    }
+  }
+
+  const handleDelete = async (id: string) => {
+    if (!confirm(t('deleteGroupConfirm'))) return
+    try {
+      await onDelete(id)
+    } catch (e) {
+      console.error('Failed to delete group:', e)
+    }
+  }
+
+  return (
+    <section className="mb-8">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Users className="w-5 h-5 text-indigo-500" />
+          <div>
+            <h3 className="text-lg font-semibold text-slate-900">{t('treatmentGroups')}</h3>
+            <p className="text-sm text-slate-500">{t('treatmentGroupsDesc')}</p>
+          </div>
+        </div>
+        <button
+          onClick={() => setAdding(true)}
+          className="flex items-center gap-1.5 px-3 py-2 bg-indigo-100 text-indigo-700 rounded-lg text-sm font-medium hover:bg-indigo-200 transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          {t('addGroup')}
+        </button>
+      </div>
+
+      {/* Group Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        {groups.map((group) => (
+          <div
+            key={group.id}
+            className="border border-slate-200 rounded-xl p-4 bg-white hover:border-indigo-200 transition-colors"
+          >
+            {editingId === group.id ? (
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  defaultValue={group.name}
+                  onBlur={(e) => {
+                    const val = e.target.value.trim()
+                    if (val && val !== group.name) onUpdate(group.id, { name: val })
+                  }}
+                  className="w-full px-2 py-1 border border-slate-300 rounded text-sm font-medium"
+                  autoFocus
+                />
+                <input
+                  type="text"
+                  defaultValue={group.description}
+                  onBlur={(e) => {
+                    const val = e.target.value.trim()
+                    if (val !== group.description) onUpdate(group.id, { description: val })
+                  }}
+                  placeholder={t('groupDescPlaceholder')}
+                  className="w-full px-2 py-1 border border-slate-300 rounded text-xs"
+                />
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-500">{t('sampleCount')}:</label>
+                  <input
+                    type="number"
+                    defaultValue={group.sampleCount}
+                    min={1}
+                    max={100}
+                    onBlur={(e) => {
+                      const val = parseInt(e.target.value) || 1
+                      if (val !== group.sampleCount) onUpdate(group.id, { sampleCount: val })
+                    }}
+                    className="w-16 px-2 py-1 border border-slate-300 rounded text-xs"
+                  />
+                </div>
+                <button
+                  onClick={() => setEditingId(null)}
+                  className="text-xs text-indigo-600 hover:underline"
+                >
+                  {language === 'zh' ? '完成' : 'Done'}
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-1">
+                  <h4
+                    className="font-semibold text-sm text-slate-900 cursor-pointer hover:text-indigo-600"
+                    onClick={() => setEditingId(group.id)}
+                    title={language === 'zh' ? '点击编辑' : 'Click to edit'}
+                  >
+                    {group.name}
+                  </h4>
+                  <button
+                    onClick={() => handleDelete(group.id)}
+                    className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                {group.description && (
+                  <p className="text-xs text-slate-500 mb-2 line-clamp-2">{group.description}</p>
+                )}
+                <div className="flex items-center gap-1 text-xs text-slate-500">
+                  <span className="px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded font-medium">
+                    {group.sampleCount} {t('sample')}{group.sampleCount > 1 && language === 'en' ? 's' : ''}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+        ))}
+
+        {/* Add New Group Card */}
+        {adding && (
+          <div className="border-2 border-dashed border-indigo-300 rounded-xl p-4 bg-indigo-50/50">
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder={t('groupNamePlaceholder')}
+                className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm"
+                autoFocus
+                onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+              />
+              <input
+                type="text"
+                value={newDesc}
+                onChange={(e) => setNewDesc(e.target.value)}
+                placeholder={t('groupDescPlaceholder')}
+                className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs"
+              />
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-slate-600">{t('sampleCount')}:</label>
+                <input
+                  type="number"
+                  value={newSampleCount}
+                  onChange={(e) => setNewSampleCount(Math.max(1, parseInt(e.target.value) || 1))}
+                  min={1}
+                  max={100}
+                  className="w-16 px-2 py-1 border border-slate-300 rounded text-xs"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setAdding(false)}
+                  className="px-3 py-1 text-xs text-slate-600 hover:bg-slate-200 rounded"
+                >
+                  {t('cancel')}
+                </button>
+                <button
+                  onClick={handleAdd}
+                  disabled={!newName.trim()}
+                  className="px-3 py-1 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {t('add')}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {groups.length === 0 && !adding && (
+        <p className="text-center text-sm text-slate-400 py-4">{t('noGroups')}</p>
+      )}
+    </section>
+  )
+}
+
+// ============================================================
+// DataSection Component (reusable for pathology/sequencing/biochemistry)
+// ============================================================
+function DataSection({
+  section,
+  title,
+  description,
+  icon: Icon,
+  iconColor,
+  groups,
+  dataFiles,
+  typeOptions,
+  multipleFiles,
+  onUpload,
+  onDelete,
+  language,
+  t,
+  children,
+}: {
+  section: 'pathology' | 'sequencing' | 'biochemistry'
+  title: string
+  description: string
+  icon: any
+  iconColor: string
+  groups: TreatmentGroup[]
+  dataFiles: DataFileType[]
+  typeOptions: string[]
+  multipleFiles: boolean
+  onUpload: (file: File, section: 'pathology' | 'sequencing' | 'biochemistry', dataType: string, groupId?: string, sampleNumber?: number) => Promise<any>
+  onDelete: (fileId: string) => Promise<void>
+  language: string
+  t: (key: any, params?: any) => string
+  children?: React.ReactNode
+}) {
+  const [selectedGroup, setSelectedGroup] = useState<string>('_none')
+  const [selectedSample, setSelectedSample] = useState<string>('_none')
+  const [selectedType, setSelectedType] = useState(typeOptions[0])
+  const [customType, setCustomType] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [collapsed, setCollapsed] = useState(false)
+
   const activeIntervalsRef = useRef<Set<ReturnType<typeof setInterval>>>(new Set())
-
-  // Cleanup all intervals on unmount
   useEffect(() => {
     return () => {
-      activeIntervalsRef.current.forEach(interval => clearInterval(interval))
+      activeIntervalsRef.current.forEach(i => clearInterval(i))
+    }
+  }, [])
+
+  const selectedGroupObj = groups.find(g => g.id === selectedGroup)
+  const maxSamples = selectedGroupObj?.sampleCount || 0
+  const isNoGroup = selectedGroup === '_none'
+
+  const actualType = selectedType === 'Other' ? (customType || 'Other') : selectedType
+
+  const sectionFiles = dataFiles.filter(f => f.section === section)
+
+  // Manual extension validation (avoids react-dropzone silent rejection of
+  // scientific file formats like .h5/.h5ad/.loom whose MIME types browsers don't recognize)
+  const onDrop = useCallback(async (files: File[]) => {
+    if (files.length === 0) return
+
+    const allowedExts = getAllowedExtensions(section, selectedType)
+    const validFiles = allowedExts.length === 0
+      ? files
+      : files.filter(f => {
+          const ext = '.' + (f.name.split('.').pop()?.toLowerCase() || '')
+          return allowedExts.includes(ext)
+        })
+    const rejectedFiles = files.filter(f => !validFiles.includes(f))
+
+    if (rejectedFiles.length > 0) {
+      const names = rejectedFiles.map(f => f.name).join(', ')
+      alert(language === 'zh'
+        ? `不支持的文件格式: ${names}\n支持: ${allowedExts.join(', ')}`
+        : `Unsupported format: ${names}\nSupported: ${allowedExts.join(', ')}`)
+    }
+    if (validFiles.length === 0) return
+
+    setUploading(true)
+    setProgress(0)
+
+    const groupId = isNoGroup ? undefined : selectedGroup
+    const sampleNum = isNoGroup || selectedSample === '_none' ? undefined : parseInt(selectedSample)
+
+    try {
+      for (let i = 0; i < validFiles.length; i++) {
+        const interval = setInterval(() => {
+          setProgress(prev => Math.min(prev + 10, 90))
+        }, 200)
+        activeIntervalsRef.current.add(interval)
+
+        await onUpload(validFiles[i], section, actualType, groupId, sampleNum)
+
+        clearInterval(interval)
+        activeIntervalsRef.current.delete(interval)
+        setProgress(((i + 1) / validFiles.length) * 100)
+      }
+    } catch (e) {
+      console.error('Upload failed:', e)
+      const msg = e instanceof Error ? e.message : String(e)
+      alert(language === 'zh' ? `上传失败: ${msg}` : `Upload failed: ${msg}`)
+    } finally {
+      activeIntervalsRef.current.forEach(i => clearInterval(i))
       activeIntervalsRef.current.clear()
+      setUploading(false)
+      setProgress(0)
     }
-  }, [])
+  }, [section, selectedType, actualType, selectedGroup, selectedSample, isNoGroup, onUpload, language])
 
-  // Helper to create tracked interval (stable reference)
-  const createTrackedInterval = useCallback((callback: () => void, delay: number) => {
-    const interval = setInterval(callback, delay)
-    activeIntervalsRef.current.add(interval)
-    return interval
-  }, [])
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    multiple: multipleFiles,
+    disabled: uploading,
+  })
 
-  // Helper to clear tracked interval (stable reference)
-  const clearTrackedInterval = useCallback((interval: ReturnType<typeof setInterval> | null) => {
-    if (interval) {
-      clearInterval(interval)
-      activeIntervalsRef.current.delete(interval)
-    }
-  }, [])
-
-  // Get the actual stain type to use
-  const getStainTypeValue = () => {
-    if (stainType === 'H&E') return 'H&E'
-    return customStainType || 'Other'
+  const getGroupName = (groupId?: string) => {
+    if (!groupId) return t('noGroupDistinction')
+    return groups.find(g => g.id === groupId)?.name || groupId
   }
 
-  // Pathology dropzone with progress simulation
-  const onDropPathology = useCallback(async (files: File[]) => {
-    if (!currentSession || files.length === 0) return
+  return (
+    <section className="border border-slate-200 rounded-xl overflow-hidden">
+      {/* Header */}
+      <div
+        className="flex items-center justify-between px-4 py-3 bg-slate-50 cursor-pointer select-none"
+        onClick={() => setCollapsed(!collapsed)}
+      >
+        <div className="flex items-center gap-2">
+          <Icon className={`w-5 h-5 ${iconColor}`} />
+          <div>
+            <h3 className="text-base font-semibold text-slate-900">{title}</h3>
+            <p className="text-xs text-slate-500">{description}</p>
+          </div>
+          {sectionFiles.length > 0 && (
+            <span className="ml-2 px-2 py-0.5 bg-slate-200 text-slate-600 rounded-full text-xs font-medium">
+              {sectionFiles.length}
+            </span>
+          )}
+        </div>
+        {collapsed ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronUp className="w-4 h-4 text-slate-400" />}
+      </div>
 
-    const finalStainType = getStainTypeValue()
-    if (stainType === 'Other' && !customStainType) {
-      alert(language === 'zh' ? '请输入染色类型' : 'Please enter stain type')
-      return
-    }
+      {!collapsed && (
+        <div className="p-4 space-y-4">
+          {/* Dropdowns row */}
+          <div className="flex flex-wrap items-end gap-3">
+            {/* Group dropdown */}
+            <div className="min-w-[140px]">
+              <label className="block text-xs text-slate-500 mb-1">{t('selectGroup')}</label>
+              <select
+                value={selectedGroup}
+                onChange={(e) => {
+                  setSelectedGroup(e.target.value)
+                  if (e.target.value === '_none') setSelectedSample('_none')
+                }}
+                className="w-full px-2 py-1.5 border border-slate-300 rounded-lg text-sm bg-white"
+              >
+                <option value="_none">{t('noGroupDistinction')}</option>
+                {groups.map(g => (
+                  <option key={g.id} value={g.id}>{g.name}</option>
+                ))}
+              </select>
+            </div>
 
-    setUploadingPathology(true)
-    setPathologyProgress(0)
+            {/* Sample dropdown */}
+            <div className="min-w-[120px]">
+              <label className="block text-xs text-slate-500 mb-1">{t('selectSample')}</label>
+              <select
+                value={selectedSample}
+                onChange={(e) => setSelectedSample(e.target.value)}
+                disabled={isNoGroup}
+                className="w-full px-2 py-1.5 border border-slate-300 rounded-lg text-sm bg-white disabled:opacity-50 disabled:bg-slate-100"
+              >
+                <option value="_none">{t('noSampleDistinction')}</option>
+                {!isNoGroup && Array.from({ length: maxSamples }, (_, i) => (
+                  <option key={i + 1} value={String(i + 1)}>
+                    {t('sample')} {i + 1}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-    let progressInterval: ReturnType<typeof setInterval> | null = null
+            {/* Data type dropdown */}
+            <div className="min-w-[160px]">
+              <label className="block text-xs text-slate-500 mb-1">{t('selectDataType')}</label>
+              <select
+                value={selectedType}
+                onChange={(e) => setSelectedType(e.target.value)}
+                className="w-full px-2 py-1.5 border border-slate-300 rounded-lg text-sm bg-white"
+              >
+                {typeOptions.map(opt => (
+                  <option key={opt} value={opt}>{opt}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Custom type input for "Other" */}
+            {selectedType === 'Other' && (
+              <div className="min-w-[140px]">
+                <label className="block text-xs text-slate-500 mb-1">{t('customType')}</label>
+                <input
+                  type="text"
+                  value={customType}
+                  onChange={(e) => setCustomType(e.target.value)}
+                  placeholder={language === 'zh' ? '如 Sirius Red' : 'e.g. Sirius Red'}
+                  className="w-full px-2 py-1.5 border border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Upload Area */}
+          <div
+            {...getRootProps()}
+            className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-all ${
+              uploading
+                ? 'border-slate-300 bg-slate-50 cursor-not-allowed'
+                : isDragActive
+                  ? 'border-indigo-500 bg-indigo-50'
+                  : 'border-slate-300 hover:border-indigo-400 hover:bg-slate-50'
+            }`}
+          >
+            <input {...getInputProps()} />
+            <Upload className="w-7 h-7 text-slate-400 mx-auto mb-1.5" />
+            <p className="text-slate-600 font-medium text-sm">
+              {uploading
+                ? (language === 'zh' ? '上传中...' : 'Uploading...')
+                : isDragActive
+                  ? (language === 'zh' ? '释放以上传' : 'Release to upload')
+                  : t('dragOrClick')}
+            </p>
+          </div>
+
+          {/* Upload Progress */}
+          {uploading && (
+            <div>
+              <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+                <span>{language === 'zh' ? '上传进度' : 'Progress'}</span>
+                <span>{Math.round(progress)}%</span>
+              </div>
+              <div className="w-full bg-slate-200 rounded-full h-1.5">
+                <div
+                  className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Extra children (e.g. indicator form) */}
+          {children}
+
+          {/* File List Table */}
+          {sectionFiles.length > 0 && (
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium text-slate-600">{t('filename')}</th>
+                    <th className="px-3 py-2 text-left font-medium text-slate-600">{t('group')}</th>
+                    <th className="px-3 py-2 text-left font-medium text-slate-600">{t('sample')}</th>
+                    <th className="px-3 py-2 text-left font-medium text-slate-600">{t('dataType')}</th>
+                    <th className="px-3 py-2 text-right font-medium text-slate-600 w-20">{t('actions')}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {sectionFiles.map(file => (
+                    <tr key={file.id} className="hover:bg-slate-50">
+                      <td className="px-3 py-2 text-slate-900">
+                        <div className="flex items-center gap-1.5">
+                          <File className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                          <span className="truncate max-w-[200px]">{file.filename}</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-slate-600 text-xs">
+                        {getGroupName(file.groupId)}
+                      </td>
+                      <td className="px-3 py-2 text-slate-600 text-xs">
+                        {file.sampleNumber ? `${t('sample')} ${file.sampleNumber}` : '-'}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className="px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-xs font-medium">
+                          {file.dataType}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          {file.filePath && (
+                            <a
+                              href={`/api/download?path=${encodeURIComponent(file.filePath)}`}
+                              download={file.filename}
+                              className="p-1 text-slate-400 hover:text-blue-500 hover:bg-blue-50 rounded transition-colors"
+                              title={language === 'zh' ? '下载' : 'Download'}
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                            </a>
+                          )}
+                          <button
+                            onClick={() => onDelete(file.id)}
+                            className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                            title={language === 'zh' ? '删除' : 'Delete'}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+// ============================================================
+// IndicatorForm Component (for biochemistry manual input)
+// ============================================================
+function IndicatorForm({
+  groups,
+  indicators,
+  onAdd,
+  onDelete,
+  language,
+  t,
+}: {
+  groups: TreatmentGroup[]
+  indicators: BiochemistryIndicator[]
+  onAdd: (indicator: string, value: number, unit: string, groupId?: string, sampleNumber?: number) => Promise<any>
+  onDelete: (id: string) => Promise<void>
+  language: string
+  t: (key: any, params?: any) => string
+}) {
+  const [showForm, setShowForm] = useState(false)
+  const [indicator, setIndicator] = useState('')
+  const [value, setValue] = useState('')
+  const [unit, setUnit] = useState('')
+  const [groupId, setGroupId] = useState<string>('_none')
+  const [sampleNum, setSampleNum] = useState<string>('_none')
+
+  const selectedGroup = groups.find(g => g.id === groupId)
+  const isNoGroup = groupId === '_none'
+
+  const handleAdd = async () => {
+    const numValue = parseFloat(value)
+    if (!indicator || isNaN(numValue) || !unit) return
 
     try {
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i]
-        // Simulate progress for large files
-        progressInterval = createTrackedInterval(() => {
-          setPathologyProgress(prev => Math.min(prev + 10, 90))
-        }, 200)
-
-        await uploadPathology(file, finalStainType)
-
-        clearTrackedInterval(progressInterval)
-        progressInterval = null
-        setPathologyProgress(((i + 1) / files.length) * 100)
-      }
+      await onAdd(
+        indicator,
+        numValue,
+        unit,
+        isNoGroup ? undefined : groupId,
+        isNoGroup || sampleNum === '_none' ? undefined : parseInt(sampleNum),
+      )
+      setIndicator('')
+      setValue('')
+      setUnit('')
     } catch (e) {
-      console.error('Upload failed:', e)
-    } finally {
-      clearTrackedInterval(progressInterval)
-      setUploadingPathology(false)
-      setPathologyProgress(0)
-    }
-  }, [currentSession, stainType, customStainType, uploadPathology, language, createTrackedInterval, clearTrackedInterval])
-
-  const { getRootProps: getPathologyRootProps, getInputProps: getPathologyInputProps, isDragActive: isPathologyDragActive } = useDropzone({
-    onDrop: onDropPathology,
-    accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.tiff', '.tif']
-    },
-    disabled: uploadingPathology
-  })
-
-  // Control group dropzone
-  const onDropControl = useCallback(async (files: File[]) => {
-    if (!currentSession || files.length === 0) return
-
-    setUploadingControl(true)
-    setControlProgress(0)
-
-    let progressInterval: ReturnType<typeof setInterval> | null = null
-
-    try {
-      progressInterval = createTrackedInterval(() => {
-        setControlProgress(prev => Math.min(prev + 5, 90))
-      }, 300)
-
-      await uploadSnRNASeq(files[0], 'control')
-
-      clearTrackedInterval(progressInterval)
-      progressInterval = null
-      setControlProgress(100)
-    } catch (e) {
-      console.error('Upload failed:', e)
-    } finally {
-      clearTrackedInterval(progressInterval)
-      setTimeout(() => {
-        setUploadingControl(false)
-        setControlProgress(0)
-      }, 500)
-    }
-  }, [currentSession, uploadSnRNASeq, createTrackedInterval, clearTrackedInterval])
-
-  // Treatment group dropzone
-  const onDropTreatment = useCallback(async (files: File[]) => {
-    if (!currentSession || files.length === 0) return
-
-    setUploadingTreatment(true)
-    setTreatmentProgress(0)
-
-    let progressInterval: ReturnType<typeof setInterval> | null = null
-
-    try {
-      progressInterval = createTrackedInterval(() => {
-        setTreatmentProgress(prev => Math.min(prev + 5, 90))
-      }, 300)
-
-      await uploadSnRNASeq(files[0], 'treatment')
-
-      clearTrackedInterval(progressInterval)
-      progressInterval = null
-      setTreatmentProgress(100)
-    } catch (e) {
-      console.error('Upload failed:', e)
-    } finally {
-      clearTrackedInterval(progressInterval)
-      setTimeout(() => {
-        setUploadingTreatment(false)
-        setTreatmentProgress(0)
-      }, 500)
-    }
-  }, [currentSession, uploadSnRNASeq, createTrackedInterval, clearTrackedInterval])
-
-  const { getRootProps: getControlRootProps, getInputProps: getControlInputProps, isDragActive: isControlDragActive } = useDropzone({
-    onDrop: onDropControl,
-    accept: {
-      'application/octet-stream': ['.h5ad', '.h5'],
-      'application/x-hdf5': ['.h5ad', '.h5'],
-      'application/gzip': ['.h5ad.gz']
-    },
-    multiple: false,
-    disabled: uploadingControl
-  })
-
-  const { getRootProps: getTreatmentRootProps, getInputProps: getTreatmentInputProps, isDragActive: isTreatmentDragActive } = useDropzone({
-    onDrop: onDropTreatment,
-    accept: {
-      'application/octet-stream': ['.h5ad', '.h5'],
-      'application/x-hdf5': ['.h5ad', '.h5'],
-      'application/gzip': ['.h5ad.gz']
-    },
-    multiple: false,
-    disabled: uploadingTreatment
-  })
-
-  // Control group loom dropzone
-  const onDropControlLoom = useCallback(async (files: File[]) => {
-    if (!currentSession || files.length === 0) return
-
-    setUploadingControlLoom(true)
-    setControlLoomProgress(0)
-
-    let progressInterval: ReturnType<typeof setInterval> | null = null
-
-    try {
-      progressInterval = createTrackedInterval(() => {
-        setControlLoomProgress(prev => Math.min(prev + 5, 90))
-      }, 300)
-
-      await uploadLoom(files[0], 'control')
-
-      clearTrackedInterval(progressInterval)
-      progressInterval = null
-      setControlLoomProgress(100)
-    } catch (e) {
-      console.error('Upload failed:', e)
-    } finally {
-      clearTrackedInterval(progressInterval)
-      setTimeout(() => {
-        setUploadingControlLoom(false)
-        setControlLoomProgress(0)
-      }, 500)
-    }
-  }, [currentSession, uploadLoom, createTrackedInterval, clearTrackedInterval])
-
-  // Treatment group loom dropzone
-  const onDropTreatmentLoom = useCallback(async (files: File[]) => {
-    if (!currentSession || files.length === 0) return
-
-    setUploadingTreatmentLoom(true)
-    setTreatmentLoomProgress(0)
-
-    let progressInterval: ReturnType<typeof setInterval> | null = null
-
-    try {
-      progressInterval = createTrackedInterval(() => {
-        setTreatmentLoomProgress(prev => Math.min(prev + 5, 90))
-      }, 300)
-
-      await uploadLoom(files[0], 'treatment')
-
-      clearTrackedInterval(progressInterval)
-      progressInterval = null
-      setTreatmentLoomProgress(100)
-    } catch (e) {
-      console.error('Upload failed:', e)
-    } finally {
-      clearTrackedInterval(progressInterval)
-      setTimeout(() => {
-        setUploadingTreatmentLoom(false)
-        setTreatmentLoomProgress(0)
-      }, 500)
-    }
-  }, [currentSession, uploadLoom, createTrackedInterval, clearTrackedInterval])
-
-  const { getRootProps: getControlLoomRootProps, getInputProps: getControlLoomInputProps, isDragActive: isControlLoomDragActive } = useDropzone({
-    onDrop: onDropControlLoom,
-    accept: {
-      'application/octet-stream': ['.loom'],
-    },
-    multiple: false,
-    disabled: uploadingControlLoom
-  })
-
-  const { getRootProps: getTreatmentLoomRootProps, getInputProps: getTreatmentLoomInputProps, isDragActive: isTreatmentLoomDragActive } = useDropzone({
-    onDrop: onDropTreatmentLoom,
-    accept: {
-      'application/octet-stream': ['.loom'],
-    },
-    multiple: false,
-    disabled: uploadingTreatmentLoom
-  })
-
-  const handleAddBiochemistry = async () => {
-    if (!bioIndicator || !bioValue || !bioUnit) return
-
-    const numValue = parseFloat(bioValue)
-    if (isNaN(numValue)) {
-      alert(language === 'zh' ? '请输入有效的数值' : 'Please enter a valid number')
-      return
-    }
-
-    try {
-      await addBiochemistry(bioIndicator, numValue, bioUnit)
-      setBioIndicator('')
-      setBioValue('')
-      setBioUnit('')
-      setShowBioForm(false)
-    } catch (e) {
-      console.error('Failed to add biochemistry:', e)
+      console.error('Failed to add indicator:', e)
     }
   }
 
-  // Biochemistry file upload handler
-  const onDropBioFile = useCallback(async (files: File[]) => {
-    if (!currentSession || files.length === 0) return
+  const getGroupName = (gId?: string) => {
+    if (!gId) return '-'
+    return groups.find(g => g.id === gId)?.name || gId
+  }
 
-    setUploadingBioFile(true)
-    setBioFileProgress(0)
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h4 className="text-sm font-medium text-slate-700">
+          {language === 'zh' ? '手动输入指标' : 'Manual Indicators'}
+        </h4>
+        <button
+          onClick={() => setShowForm(!showForm)}
+          className="flex items-center gap-1 px-2 py-1 bg-amber-100 text-amber-700 rounded text-xs font-medium hover:bg-amber-200 transition-colors"
+        >
+          <Plus className="w-3 h-3" />
+          {t('addIndicator')}
+        </button>
+      </div>
 
-    let progressInterval: ReturnType<typeof setInterval> | null = null
+      {showForm && (
+        <div className="p-3 bg-slate-50 rounded-lg space-y-2">
+          <div className="flex flex-wrap gap-2">
+            <select
+              value={groupId}
+              onChange={(e) => {
+                setGroupId(e.target.value)
+                if (e.target.value === '_none') setSampleNum('_none')
+              }}
+              className="px-2 py-1.5 border border-slate-300 rounded text-xs bg-white"
+            >
+              <option value="_none">{t('noGroupDistinction')}</option>
+              {groups.map(g => (
+                <option key={g.id} value={g.id}>{g.name}</option>
+              ))}
+            </select>
+            <select
+              value={sampleNum}
+              onChange={(e) => setSampleNum(e.target.value)}
+              disabled={isNoGroup}
+              className="px-2 py-1.5 border border-slate-300 rounded text-xs bg-white disabled:opacity-50"
+            >
+              <option value="_none">{t('noSampleDistinction')}</option>
+              {!isNoGroup && selectedGroup && Array.from({ length: selectedGroup.sampleCount }, (_, i) => (
+                <option key={i + 1} value={String(i + 1)}>{t('sample')} {i + 1}</option>
+              ))}
+            </select>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <input
+              type="text"
+              value={indicator}
+              onChange={(e) => setIndicator(e.target.value)}
+              placeholder={t('indicatorName')}
+              className="px-2 py-1.5 border border-slate-300 rounded text-sm"
+            />
+            <input
+              type="number"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder={t('value')}
+              className="px-2 py-1.5 border border-slate-300 rounded text-sm"
+            />
+            <input
+              type="text"
+              value={unit}
+              onChange={(e) => setUnit(e.target.value)}
+              placeholder={t('unit')}
+              className="px-2 py-1.5 border border-slate-300 rounded text-sm"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => setShowForm(false)}
+              className="px-3 py-1 text-xs text-slate-600 hover:bg-slate-200 rounded"
+            >
+              {t('cancel')}
+            </button>
+            <button
+              onClick={handleAdd}
+              disabled={!indicator || !value || !unit}
+              className="px-3 py-1 text-xs bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50"
+            >
+              {t('add')}
+            </button>
+          </div>
+        </div>
+      )}
 
-    try {
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i]
-        progressInterval = createTrackedInterval(() => {
-          setBioFileProgress(prev => Math.min(prev + 10, 90))
-        }, 200)
+      {/* Indicators table */}
+      {indicators.length > 0 && (
+        <div className="border border-slate-200 rounded-lg overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('indicator')}</th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('value')}</th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('unit')}</th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('group')}</th>
+                <th className="px-3 py-2 text-left font-medium text-slate-600">{t('sample')}</th>
+                <th className="px-3 py-2 text-right font-medium text-slate-600 w-12"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {indicators.map(ind => (
+                <tr key={ind.id} className="hover:bg-slate-50">
+                  <td className="px-3 py-2 font-medium text-slate-900">{ind.indicator}</td>
+                  <td className="px-3 py-2 text-slate-600">{ind.value}</td>
+                  <td className="px-3 py-2 text-slate-500">{ind.unit}</td>
+                  <td className="px-3 py-2 text-xs text-slate-500">{getGroupName(ind.groupId)}</td>
+                  <td className="px-3 py-2 text-xs text-slate-500">
+                    {ind.sampleNumber ? `${t('sample')} ${ind.sampleNumber}` : '-'}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      onClick={() => onDelete(ind.id)}
+                      className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
 
-        await uploadBiochemistryFile(file)
+// ============================================================
+// DataOverviewMatrix Component
+// ============================================================
+function DataOverviewMatrix({
+  groups,
+  dataFiles,
+  indicators,
+  language,
+  t,
+}: {
+  groups: TreatmentGroup[]
+  dataFiles: DataFileType[]
+  indicators: BiochemistryIndicator[]
+  language: string
+  t: (key: any, params?: any) => string
+}) {
+  if (groups.length === 0) return null
 
-        clearTrackedInterval(progressInterval)
-        progressInterval = null
-        setBioFileProgress(((i + 1) / files.length) * 100)
-      }
-    } catch (e) {
-      console.error('Failed to upload biochemistry file:', e)
-    } finally {
-      clearTrackedInterval(progressInterval)
-      setUploadingBioFile(false)
-      setBioFileProgress(0)
-    }
-  }, [currentSession, uploadBiochemistryFile, createTrackedInterval, clearTrackedInterval])
+  const sections = [
+    { key: 'pathology', label: t('pathologySlides'), icon: Microscope, color: 'violet' },
+    { key: 'sequencing', label: t('sequencingData'), icon: Dna, color: 'blue' },
+    { key: 'biochemistry', label: t('biochemistryIndicators'), icon: FlaskConical, color: 'amber' },
+  ]
 
-  const { getRootProps: getBioFileRootProps, getInputProps: getBioFileInputProps, isDragActive: isBioFileDragActive } = useDropzone({
-    onDrop: onDropBioFile,
-    accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'],
-      'text/*': ['.csv', '.txt', '.tsv'],
-      'application/vnd.ms-excel': ['.xls'],
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx']
-    },
-    multiple: true,
-    disabled: uploadingBioFile
-  })
+  // Also count files not assigned to any group
+  const ungroupedFiles = dataFiles.filter(f => !f.groupId)
+  const ungroupedIndicators = indicators.filter(i => !i.groupId)
+
+  return (
+    <section className="mt-8">
+      <div className="flex items-center gap-2 mb-3">
+        <Grid3X3 className="w-5 h-5 text-slate-500" />
+        <div>
+          <h3 className="text-lg font-semibold text-slate-900">{t('dataOverview')}</h3>
+          <p className="text-sm text-slate-500">{t('dataOverviewDesc')}</p>
+        </div>
+      </div>
+
+      <div className="border border-slate-200 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50">
+            <tr>
+              <th className="px-4 py-2.5 text-left font-medium text-slate-600">{t('group')}</th>
+              {sections.map(s => (
+                <th key={s.key} className="px-4 py-2.5 text-center font-medium text-slate-600">
+                  {s.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {groups.map(group => {
+              const groupFiles = dataFiles.filter(f => f.groupId === group.id)
+              const groupIndicators = indicators.filter(i => i.groupId === group.id)
+              return (
+                <tr key={group.id} className="hover:bg-slate-50">
+                  <td className="px-4 py-2.5 font-medium text-slate-900">
+                    {group.name}
+                    <span className="text-xs text-slate-400 ml-1">
+                      ({group.sampleCount} {t('sample')}{group.sampleCount > 1 && language === 'en' ? 's' : ''})
+                    </span>
+                  </td>
+                  {sections.map(s => {
+                    const fileCount = groupFiles.filter(f => f.section === s.key).length
+                    const indCount = s.key === 'biochemistry' ? groupIndicators.length : 0
+                    const total = fileCount + indCount
+                    return (
+                      <td key={s.key} className="px-4 py-2.5 text-center">
+                        {total > 0 ? (
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-${s.color}-100 text-${s.color}-700`}>
+                            <Check className="w-3 h-3" />
+                            {fileCount > 0 && t('filesCount', { n: fileCount })}
+                            {fileCount > 0 && indCount > 0 && ' + '}
+                            {indCount > 0 && t('indicatorsCount', { n: indCount })}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300">-</span>
+                        )}
+                      </td>
+                    )
+                  })}
+                </tr>
+              )
+            })}
+
+            {/* Ungrouped row */}
+            {(ungroupedFiles.length > 0 || ungroupedIndicators.length > 0) && (
+              <tr className="hover:bg-slate-50 bg-slate-50/50">
+                <td className="px-4 py-2.5 text-slate-500 italic text-xs">
+                  {t('noGroupDistinction')}
+                </td>
+                {sections.map(s => {
+                  const fileCount = ungroupedFiles.filter(f => f.section === s.key).length
+                  const indCount = s.key === 'biochemistry' ? ungroupedIndicators.length : 0
+                  const total = fileCount + indCount
+                  return (
+                    <td key={s.key} className="px-4 py-2.5 text-center">
+                      {total > 0 ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-200 text-slate-600">
+                          {fileCount > 0 && t('filesCount', { n: fileCount })}
+                          {fileCount > 0 && indCount > 0 && ' + '}
+                          {indCount > 0 && t('indicatorsCount', { n: indCount })}
+                        </span>
+                      ) : (
+                        <span className="text-slate-300">-</span>
+                      )}
+                    </td>
+                  )
+                })}
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )
+}
+
+// ============================================================
+// Main DataPanel Component
+// ============================================================
+export function DataPanel() {
+  const { currentSession, language } = useAppStore()
+  const {
+    addGroup,
+    updateGroup,
+    deleteGroup,
+    uploadData,
+    deleteDataFile,
+    addIndicator,
+    deleteIndicator,
+  } = useSession()
+  const { t } = useTranslation(language)
 
   if (!currentSession) {
     return (
@@ -385,640 +891,90 @@ export function DataPanel() {
     )
   }
 
+  const groups = currentSession.treatmentGroups || []
+  const dataFiles = currentSession.dataFiles || []
+  const indicators = currentSession.biochemistryIndicators || []
+
   return (
-    <div className="space-y-8">
-      {/* Pathology Images */}
-      <section>
-        <div className="mb-4">
-          <h3 className="text-lg font-semibold text-slate-900">{t('pathologySlides')}</h3>
-          <p className="text-sm text-slate-500">{t('pathologySlidesDesc')}</p>
-        </div>
+    <div className="space-y-6">
+      {/* Treatment Groups */}
+      <GroupManager
+        groups={groups}
+        onAdd={addGroup}
+        onUpdate={updateGroup}
+        onDelete={deleteGroup}
+        language={language}
+        t={t}
+      />
 
-        {/* Stain Type Selection */}
-        <div className="flex items-center gap-4 mb-4">
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-slate-600">
-              {language === 'zh' ? '染色类型:' : 'Stain Type:'}
-            </label>
-            <select
-              value={stainType}
-              onChange={(e) => setStainType(e.target.value as 'H&E' | 'Other')}
-              className="px-3 py-2 border border-slate-300 rounded-lg text-sm"
-            >
-              <option value="H&E">H&E</option>
-              <option value="Other">{language === 'zh' ? '其他' : 'Other'}</option>
-            </select>
-          </div>
-          
-          {stainType === 'Other' && (
-            <input
-              type="text"
-              value={customStainType}
-              onChange={(e) => setCustomStainType(e.target.value)}
-              placeholder={language === 'zh' ? '输入染色类型 (如 Sirius Red)' : 'Enter stain type (e.g., Sirius Red)'}
-              className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm"
-            />
-          )}
-        </div>
+      {/* Pathology Section */}
+      <DataSection
+        section="pathology"
+        title={t('pathologySlides')}
+        description={t('pathologySlidesDesc')}
+        icon={Microscope}
+        iconColor="text-violet-500"
+        groups={groups}
+        dataFiles={dataFiles}
+        typeOptions={PATHOLOGY_TYPES}
+        multipleFiles={true}
+        onUpload={uploadData}
+        onDelete={deleteDataFile}
+        language={language}
+        t={t}
+      />
 
-        {/* Upload Area */}
-        <div
-          {...getPathologyRootProps()}
-          className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
-            uploadingPathology 
-              ? 'border-violet-300 bg-violet-50 cursor-not-allowed'
-              : isPathologyDragActive
-                ? 'border-violet-500 bg-violet-50'
-                : 'border-slate-300 hover:border-violet-400 hover:bg-slate-50'
-          }`}
-        >
-          <input {...getPathologyInputProps()} />
-          <ImageIcon className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-          <p className="text-slate-600 font-medium text-sm">
-            {uploadingPathology 
-              ? (language === 'zh' ? '上传中...' : 'Uploading...')
-              : isPathologyDragActive 
-                ? (language === 'zh' ? '释放以上传' : 'Release to upload') 
-                : t('dragOrClick')}
-          </p>
-          <p className="text-xs text-slate-400 mt-1">
-            {t('supportedFormats')}
-          </p>
-        </div>
+      {/* Sequencing Section */}
+      <DataSection
+        section="sequencing"
+        title={t('sequencingData')}
+        description={t('sequencingDataDesc')}
+        icon={Dna}
+        iconColor="text-blue-500"
+        groups={groups}
+        dataFiles={dataFiles}
+        typeOptions={SEQUENCING_TYPES}
+        multipleFiles={true}
+        onUpload={uploadData}
+        onDelete={deleteDataFile}
+        language={language}
+        t={t}
+      />
 
-        {/* Upload Progress */}
-        {uploadingPathology && (
-          <div className="mt-3">
-            <div className="flex items-center justify-between text-sm text-slate-600 mb-1">
-              <span>{language === 'zh' ? '上传进度' : 'Upload Progress'}</span>
-              <span>{Math.round(pathologyProgress)}%</span>
-            </div>
-            <div className="w-full bg-slate-200 rounded-full h-2">
-              <div 
-                className="bg-violet-600 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${pathologyProgress}%` }}
-              />
-            </div>
-          </div>
-        )}
+      {/* Biochemistry Section */}
+      <DataSection
+        section="biochemistry"
+        title={t('biochemistryIndicators')}
+        description={t('biochemistryIndicatorsDesc')}
+        icon={FlaskConical}
+        iconColor="text-amber-500"
+        groups={groups}
+        dataFiles={dataFiles}
+        typeOptions={BIOCHEMISTRY_TYPES}
+        multipleFiles={true}
+        onUpload={uploadData}
+        onDelete={deleteDataFile}
+        language={language}
+        t={t}
+      >
+        <IndicatorForm
+          groups={groups}
+          indicators={indicators}
+          onAdd={addIndicator}
+          onDelete={deleteIndicator}
+          language={language}
+          t={t}
+        />
+      </DataSection>
 
-        {/* Uploaded Files List */}
-        {currentSession.pathologyImages.length > 0 && (
-          <div className="mt-4 border border-slate-200 rounded-xl overflow-hidden">
-            <table className="w-full">
-              <thead className="bg-slate-50">
-                <tr>
-                  <th className="px-4 py-2 text-left text-sm font-medium text-slate-600">
-                    {language === 'zh' ? '文件名' : 'Filename'}
-                  </th>
-                  <th className="px-4 py-2 text-left text-sm font-medium text-slate-600">
-                    {language === 'zh' ? '染色类型' : 'Stain Type'}
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {currentSession.pathologyImages.map((img) => (
-                  <tr key={img.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-2 text-sm text-slate-900">
-                      <div className="flex items-center gap-2">
-                        <File className="w-4 h-4 text-slate-400" />
-                        {img.filename}
-                      </div>
-                    </td>
-                    <td className="px-4 py-2 text-sm text-slate-600">
-                      <div className="flex items-center justify-between">
-                        <span className="px-2 py-1 bg-violet-100 text-violet-700 rounded text-xs font-medium">
-                          {img.imageType}
-                        </span>
-                        <div className="flex items-center gap-1">
-                          {img.filePath && (
-                            <button
-                              onClick={() => handleDownload(img.filePath!, img.filename)}
-                              className="p-1 text-slate-400 hover:text-blue-500 hover:bg-blue-50 rounded transition-colors"
-                              title={language === 'zh' ? '下载' : 'Download'}
-                            >
-                              <Download className="w-4 h-4" />
-                            </button>
-                          )}
-                          <button
-                            onClick={() => deletePathologyImage(img.id)}
-                            className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                            title={language === 'zh' ? '删除' : 'Delete'}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {/* snRNA-seq Data */}
-      <section>
-        <div className="mb-4">
-          <h3 className="text-lg font-semibold text-slate-900">{t('sequencingData')}</h3>
-          <p className="text-sm text-slate-500">{t('sequencingDataDesc')}</p>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Control Group */}
-          <div>
-            <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-              <span className="w-3 h-3 bg-blue-500 rounded-full"></span>
-              {language === 'zh' ? '对照组 (Control)' : 'Control Group'}
-            </h4>
-            
-            {currentSession.controlSeqPath ? (
-              <div className="flex items-center gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl">
-                <Check className="w-5 h-5 text-blue-600" />
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-blue-900 text-sm">{t('dataUploaded')}</p>
-                  <p className="text-xs text-blue-600 truncate">
-                    {currentSession.controlSeqPath.split('/').pop()}
-                  </p>
-                </div>
-                <button
-                  onClick={() => handleDownload(currentSession.controlSeqPath!, currentSession.controlSeqPath!.split('/').pop()!)}
-                  className="p-1.5 text-blue-400 hover:text-blue-600 hover:bg-blue-100 rounded transition-colors"
-                  title={language === 'zh' ? '下载' : 'Download'}
-                >
-                  <Download className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => deleteSequencing('control')}
-                  className="p-1.5 text-blue-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                  title={language === 'zh' ? '删除' : 'Delete'}
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ) : (
-              <>
-                <div
-                  {...getControlRootProps()}
-                  className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
-                    uploadingControl
-                      ? 'border-blue-300 bg-blue-50 cursor-not-allowed'
-                      : isControlDragActive
-                        ? 'border-blue-500 bg-blue-50'
-                        : 'border-slate-300 hover:border-blue-400 hover:bg-slate-50'
-                  }`}
-                >
-                  <input {...getControlInputProps()} />
-                  <FileSpreadsheet className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                  <p className="text-slate-600 font-medium text-sm">
-                    {uploadingControl 
-                      ? (language === 'zh' ? '上传中...' : 'Uploading...')
-                      : (language === 'zh' ? '上传对照组数据' : 'Upload control data')}
-                  </p>
-                  <p className="text-xs text-slate-400 mt-1">
-                    .h5ad / .h5
-                  </p>
-                </div>
-                
-                {uploadingControl && (
-                  <div className="mt-2">
-                    <div className="w-full bg-slate-200 rounded-full h-1.5">
-                      <div 
-                        className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
-                        style={{ width: `${controlProgress}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-
-          {/* Treatment Group */}
-          <div>
-            <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-              <span className="w-3 h-3 bg-orange-500 rounded-full"></span>
-              {language === 'zh' ? '实验组 (Treatment)' : 'Treatment Group'}
-            </h4>
-            
-            {currentSession.treatmentSeqPath ? (
-              <div className="flex items-center gap-3 p-4 bg-orange-50 border border-orange-200 rounded-xl">
-                <Check className="w-5 h-5 text-orange-600" />
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-orange-900 text-sm">{t('dataUploaded')}</p>
-                  <p className="text-xs text-orange-600 truncate">
-                    {currentSession.treatmentSeqPath.split('/').pop()}
-                  </p>
-                </div>
-                <button
-                  onClick={() => handleDownload(currentSession.treatmentSeqPath!, currentSession.treatmentSeqPath!.split('/').pop()!)}
-                  className="p-1.5 text-orange-400 hover:text-orange-600 hover:bg-orange-100 rounded transition-colors"
-                  title={language === 'zh' ? '下载' : 'Download'}
-                >
-                  <Download className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => deleteSequencing('treatment')}
-                  className="p-1.5 text-orange-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                  title={language === 'zh' ? '删除' : 'Delete'}
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ) : (
-              <>
-                <div
-                  {...getTreatmentRootProps()}
-                  className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
-                    uploadingTreatment
-                      ? 'border-orange-300 bg-orange-50 cursor-not-allowed'
-                      : isTreatmentDragActive
-                        ? 'border-orange-500 bg-orange-50'
-                        : 'border-slate-300 hover:border-orange-400 hover:bg-slate-50'
-                  }`}
-                >
-                  <input {...getTreatmentInputProps()} />
-                  <FileSpreadsheet className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                  <p className="text-slate-600 font-medium text-sm">
-                    {uploadingTreatment 
-                      ? (language === 'zh' ? '上传中...' : 'Uploading...')
-                      : (language === 'zh' ? '上传实验组数据' : 'Upload treatment data')}
-                  </p>
-                  <p className="text-xs text-slate-400 mt-1">
-                    .h5ad / .h5
-                  </p>
-                </div>
-                
-                {uploadingTreatment && (
-                  <div className="mt-2">
-                    <div className="w-full bg-slate-200 rounded-full h-1.5">
-                      <div 
-                        className="bg-orange-600 h-1.5 rounded-full transition-all duration-300"
-                        style={{ width: `${treatmentProgress}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-
-        <p className="text-xs text-slate-400 mt-3">
-          {t('supportedH5ad')}
-        </p>
-      </section>
-
-      {/* RNA Velocity - Loom Files */}
-      <section>
-        <div className="mb-4">
-          <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-            <Zap className="w-5 h-5 text-purple-500" />
-            {language === 'zh' ? 'RNA 速率分析 (Loom 文件)' : 'RNA Velocity (Loom Files)'}
-          </h3>
-          <p className="text-sm text-slate-500">
-            {language === 'zh' 
-              ? '上传 velocyto 生成的 loom 文件，用于 RNA 速率分析 (可选)'
-              : 'Upload loom files generated by velocyto for RNA velocity analysis (optional)'}
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Control Group Loom */}
-          <div>
-            <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-              <span className="w-3 h-3 bg-purple-400 rounded-full"></span>
-              {language === 'zh' ? '对照组 Loom' : 'Control Loom'}
-            </h4>
-            
-            {currentSession.controlLoomPath ? (
-              <div className="flex items-center gap-3 p-4 bg-purple-50 border border-purple-200 rounded-xl">
-                <Check className="w-5 h-5 text-purple-600" />
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-purple-900 text-sm">{t('dataUploaded')}</p>
-                  <p className="text-xs text-purple-600 truncate">
-                    {currentSession.controlLoomPath.split('/').pop()}
-                  </p>
-                </div>
-                <button
-                  onClick={() => handleDownload(currentSession.controlLoomPath!, currentSession.controlLoomPath!.split('/').pop()!)}
-                  className="p-1.5 text-purple-400 hover:text-purple-600 hover:bg-purple-100 rounded transition-colors"
-                  title={language === 'zh' ? '下载' : 'Download'}
-                >
-                  <Download className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => deleteLoom('control')}
-                  className="p-1.5 text-purple-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                  title={language === 'zh' ? '删除' : 'Delete'}
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ) : (
-              <>
-                <div
-                  {...getControlLoomRootProps()}
-                  className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
-                    uploadingControlLoom
-                      ? 'border-purple-300 bg-purple-50 cursor-not-allowed'
-                      : isControlLoomDragActive
-                        ? 'border-purple-500 bg-purple-50'
-                        : 'border-slate-300 hover:border-purple-400 hover:bg-slate-50'
-                  }`}
-                >
-                  <input {...getControlLoomInputProps()} />
-                  <Zap className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                  <p className="text-slate-600 font-medium text-sm">
-                    {uploadingControlLoom 
-                      ? (language === 'zh' ? '上传中...' : 'Uploading...')
-                      : (language === 'zh' ? '上传对照组 Loom' : 'Upload control loom')}
-                  </p>
-                  <p className="text-xs text-slate-400 mt-1">
-                    .loom
-                  </p>
-                </div>
-                
-                {uploadingControlLoom && (
-                  <div className="mt-2">
-                    <div className="w-full bg-slate-200 rounded-full h-1.5">
-                      <div 
-                        className="bg-purple-600 h-1.5 rounded-full transition-all duration-300"
-                        style={{ width: `${controlLoomProgress}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-
-          {/* Treatment Group Loom */}
-          <div>
-            <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
-              <span className="w-3 h-3 bg-pink-500 rounded-full"></span>
-              {language === 'zh' ? '实验组 Loom' : 'Treatment Loom'}
-            </h4>
-            
-            {currentSession.treatmentLoomPath ? (
-              <div className="flex items-center gap-3 p-4 bg-pink-50 border border-pink-200 rounded-xl">
-                <Check className="w-5 h-5 text-pink-600" />
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-pink-900 text-sm">{t('dataUploaded')}</p>
-                  <p className="text-xs text-pink-600 truncate">
-                    {currentSession.treatmentLoomPath.split('/').pop()}
-                  </p>
-                </div>
-                <button
-                  onClick={() => handleDownload(currentSession.treatmentLoomPath!, currentSession.treatmentLoomPath!.split('/').pop()!)}
-                  className="p-1.5 text-pink-400 hover:text-pink-600 hover:bg-pink-100 rounded transition-colors"
-                  title={language === 'zh' ? '下载' : 'Download'}
-                >
-                  <Download className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => deleteLoom('treatment')}
-                  className="p-1.5 text-pink-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                  title={language === 'zh' ? '删除' : 'Delete'}
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ) : (
-              <>
-                <div
-                  {...getTreatmentLoomRootProps()}
-                  className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
-                    uploadingTreatmentLoom
-                      ? 'border-pink-300 bg-pink-50 cursor-not-allowed'
-                      : isTreatmentLoomDragActive
-                        ? 'border-pink-500 bg-pink-50'
-                        : 'border-slate-300 hover:border-pink-400 hover:bg-slate-50'
-                  }`}
-                >
-                  <input {...getTreatmentLoomInputProps()} />
-                  <Zap className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                  <p className="text-slate-600 font-medium text-sm">
-                    {uploadingTreatmentLoom 
-                      ? (language === 'zh' ? '上传中...' : 'Uploading...')
-                      : (language === 'zh' ? '上传实验组 Loom' : 'Upload treatment loom')}
-                  </p>
-                  <p className="text-xs text-slate-400 mt-1">
-                    .loom
-                  </p>
-                </div>
-                
-                {uploadingTreatmentLoom && (
-                  <div className="mt-2">
-                    <div className="w-full bg-slate-200 rounded-full h-1.5">
-                      <div 
-                        className="bg-pink-600 h-1.5 rounded-full transition-all duration-300"
-                        style={{ width: `${treatmentLoomProgress}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-
-        <p className="text-xs text-slate-400 mt-3">
-          {language === 'zh' 
-            ? '支持 velocyto 或 loompy 生成的 .loom 格式文件，用于 scVelo RNA 速率分析'
-            : 'Supports .loom files from velocyto or loompy for scVelo RNA velocity analysis'}
-        </p>
-      </section>
-
-      {/* Biochemistry Results */}
-      <section>
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-lg font-semibold text-slate-900">{t('biochemistryIndicators')}</h3>
-            <p className="text-sm text-slate-500">{t('biochemistryIndicatorsDesc')}</p>
-          </div>
-          
-          <button
-            onClick={() => setShowBioForm(true)}
-            className="flex items-center gap-2 px-3 py-2 bg-amber-100 text-amber-700 rounded-lg text-sm font-medium hover:bg-amber-200 transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            {t('addIndicator')}
-          </button>
-        </div>
-
-        {/* File/Image Upload */}
-        <div
-          {...getBioFileRootProps()}
-          className={`
-            mb-4 p-6 border-2 border-dashed rounded-xl transition-all cursor-pointer
-            ${isBioFileDragActive 
-              ? 'border-amber-500 bg-amber-50' 
-              : 'border-slate-300 hover:border-amber-400 hover:bg-amber-50/50'}
-            ${uploadingBioFile ? 'opacity-50 cursor-not-allowed' : ''}
-          `}
-        >
-          <input {...getBioFileInputProps()} />
-          <div className="text-center">
-            {uploadingBioFile ? (
-              <>
-                <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden mb-2">
-                  <div 
-                    className="h-full bg-amber-500 transition-all"
-                    style={{ width: `${bioFileProgress}%` }}
-                  />
-                </div>
-                <p className="text-sm text-slate-600">{language === 'zh' ? '上传中...' : 'Uploading...'}</p>
-              </>
-            ) : (
-              <>
-                <div className="flex justify-center gap-2 mb-2">
-                  <ImageIcon className="w-6 h-6 text-amber-400" />
-                  <FileSpreadsheet className="w-6 h-6 text-amber-400" />
-                </div>
-                <p className="text-sm text-slate-600">
-                  {language === 'zh' 
-                    ? '拖拽上传生化数据图片或文件 (Excel, CSV, 图片)' 
-                    : 'Drop biochemistry images or files here (Excel, CSV, images)'}
-                </p>
-                <p className="text-xs text-slate-400 mt-1">
-                  {language === 'zh'
-                    ? '支持实验结果截图、数据表格等'
-                    : 'Supports screenshots of results, data tables, etc.'}
-                </p>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Uploaded Files List */}
-        {currentSession.biochemistryFiles && currentSession.biochemistryFiles.length > 0 && (
-          <div className="mb-4 p-3 bg-amber-50 rounded-xl">
-            <p className="text-sm font-medium text-amber-700 mb-2">
-              {language === 'zh' ? '已上传文件' : 'Uploaded Files'}
-            </p>
-            <div className="space-y-1">
-              {currentSession.biochemistryFiles.map((file) => (
-                <div key={file.id} className="flex items-center gap-2 text-sm text-amber-600">
-                  {file.fileType === 'image' ? (
-                    <ImageIcon className="w-4 h-4" />
-                  ) : (
-                    <FileSpreadsheet className="w-4 h-4" />
-                  )}
-                  <span className="flex-1">{file.filename}</span>
-                  <Check className="w-4 h-4 text-green-500" />
-                  {file.filePath && (
-                    <button
-                      onClick={() => handleDownload(file.filePath!, file.filename)}
-                      className="p-1 text-amber-400 hover:text-blue-500 hover:bg-blue-50 rounded transition-colors"
-                      title={language === 'zh' ? '下载' : 'Download'}
-                    >
-                      <Download className="w-4 h-4" />
-                    </button>
-                  )}
-                  <button
-                    onClick={() => deleteBiochemistryFile(file.id)}
-                    className="p-1 text-amber-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                    title={language === 'zh' ? '删除' : 'Delete'}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Add Form */}
-        {showBioForm && (
-          <div className="p-4 bg-slate-50 rounded-xl mb-4">
-            <div className="grid grid-cols-3 gap-3">
-              <input
-                type="text"
-                value={bioIndicator}
-                onChange={(e) => setBioIndicator(e.target.value)}
-                placeholder={t('indicatorName')}
-                className="px-3 py-2 border border-slate-300 rounded-lg text-sm"
-              />
-              <input
-                type="number"
-                value={bioValue}
-                onChange={(e) => setBioValue(e.target.value)}
-                placeholder={t('value')}
-                className="px-3 py-2 border border-slate-300 rounded-lg text-sm"
-              />
-              <input
-                type="text"
-                value={bioUnit}
-                onChange={(e) => setBioUnit(e.target.value)}
-                placeholder={t('unit')}
-                className="px-3 py-2 border border-slate-300 rounded-lg text-sm"
-              />
-            </div>
-            <div className="flex justify-end gap-2 mt-3">
-              <button
-                onClick={() => setShowBioForm(false)}
-                className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-200 rounded-lg"
-              >
-                {t('cancel')}
-              </button>
-              <button
-                onClick={handleAddBiochemistry}
-                disabled={!bioIndicator || !bioValue || !bioUnit}
-                className="px-3 py-1.5 text-sm bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50"
-              >
-                {t('add')}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Results Table */}
-        {currentSession.biochemistryResults.length > 0 ? (
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-            <table className="w-full">
-              <thead className="bg-slate-50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-slate-600">{t('indicator')}</th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-slate-600">{t('value')}</th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-slate-600">{t('unit')}</th>
-                  <th className="px-4 py-3 text-right text-sm font-medium text-slate-600 w-16"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {currentSession.biochemistryResults.map((result) => (
-                  <tr key={result.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-3 text-sm text-slate-900 font-medium">
-                      {result.indicator}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-slate-600">
-                      {result.value}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-slate-500">
-                      {result.unit}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => deleteBiochemistryResult(result.id)}
-                        className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                        title={language === 'zh' ? '删除' : 'Delete'}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : !currentSession.biochemistryFiles?.length && (
-          <div className="text-center py-8 text-slate-400">
-            <FlaskConical className="w-10 h-10 mx-auto mb-2 opacity-50" />
-            <p>{t('noBiochemistryData')}</p>
-          </div>
-        )}
-      </section>
+      {/* Data Overview Matrix */}
+      <DataOverviewMatrix
+        groups={groups}
+        dataFiles={dataFiles}
+        indicators={indicators}
+        language={language}
+        t={t}
+      />
     </div>
   )
 }

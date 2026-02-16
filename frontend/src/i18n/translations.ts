@@ -128,15 +128,15 @@ export const translations = {
     // Data Panel
     pathologySlides: '病理切片',
     pathologySlidesDesc: '上传 H&E 或特殊染色切片',
-    dragOrClick: '拖拽图片到这里，或点击选择',
+    dragOrClick: '拖拽文件到这里，或点击选择',
     supportedFormats: '支持 PNG, JPEG, TIFF 格式',
-    sequencingData: '单细胞测序数据',
-    sequencingDataDesc: '上传 h5ad 或 10x Genomics h5 格式文件',
+    sequencingData: '测序数据',
+    sequencingDataDesc: '上传单细胞测序数据或 Loom 文件',
     uploadSequencing: '点击或拖拽上传测序数据',
-    supportedH5ad: '支持 .h5ad (AnnData) 或 .h5 (10x Genomics)',
+    supportedH5ad: '支持 .h5ad, .h5 (scRNA-seq) 或 .loom (RNA velocity)',
     dataUploaded: '数据已上传',
     biochemistryIndicators: '生化指标',
-    biochemistryIndicatorsDesc: '输入实验测得的生化数据',
+    biochemistryIndicatorsDesc: '上传数据文件或手动输入生化指标',
     addIndicator: '添加指标',
     indicatorName: '指标名称 (如 ALT)',
     value: '数值',
@@ -146,7 +146,38 @@ export const translations = {
     indicator: '指标',
     uploadData: '上传分析数据',
     uploadDataDesc: '请先创建一个分析会话，然后上传病理切片、单细胞测序数据和生化指标。',
-    
+
+    // Treatment groups
+    treatmentGroups: '处理组',
+    treatmentGroupsDesc: '定义实验的处理组和样本数',
+    addGroup: '添加处理组',
+    groupName: '组名',
+    groupNamePlaceholder: '如：对照组、模型组',
+    groupDescription: '描述',
+    groupDescPlaceholder: '详细描述（可选）',
+    sampleCount: '样本数',
+    noGroupDistinction: '不区分处理组',
+    noSampleDistinction: '不区分样本',
+    deleteGroupConfirm: '删除此处理组将同时移除其关联的所有数据，确定？',
+    noGroups: '请先添加处理组',
+
+    // Data section
+    selectGroup: '选择处理组',
+    selectSample: '选择样本',
+    selectDataType: '选择数据类型',
+    sample: '样本',
+    filename: '文件名',
+    group: '组别',
+    dataType: '类型',
+    actions: '操作',
+    noFiles: '暂无文件',
+
+    // Data overview
+    dataOverview: '数据总览',
+    dataOverviewDesc: '各处理组的数据上传情况',
+    filesCount: '{n} 个文件',
+    indicatorsCount: '{n} 项指标',
+
     // Stain types
     heStain: 'H&E 染色',
     siriusRed: 'Sirius Red (纤维化)',
@@ -154,6 +185,15 @@ export const translations = {
     oilRedO: 'Oil Red O (脂肪)',
     pas: 'PAS (糖原)',
     other: '其他',
+    customType: '自定义类型',
+
+    // Sequencing types
+    scRNASeq: 'scRNA-seq (h5ad/h5)',
+    loom: 'Loom (RNA velocity)',
+
+    // Biochemistry types
+    bioImage: '图片',
+    bioFile: '数据文件 (CSV/Excel)',
     
     // Prompts Panel
     selectAgent: '选择 Agent',
@@ -441,15 +481,15 @@ export const translations = {
     // Data Panel
     pathologySlides: 'Pathology Slides',
     pathologySlidesDesc: 'Upload H&E or special stain slides',
-    dragOrClick: 'Drag images here, or click to select',
+    dragOrClick: 'Drag files here, or click to select',
     supportedFormats: 'Supports PNG, JPEG, TIFF formats',
-    sequencingData: 'Single-cell Sequencing Data',
-    sequencingDataDesc: 'Upload h5ad or 10x Genomics h5 format file',
+    sequencingData: 'Sequencing Data',
+    sequencingDataDesc: 'Upload single-cell sequencing data or Loom files',
     uploadSequencing: 'Click or drag to upload sequencing data',
-    supportedH5ad: 'Supports .h5ad (AnnData) or .h5 (10x Genomics)',
+    supportedH5ad: 'Supports .h5ad, .h5 (scRNA-seq) or .loom (RNA velocity)',
     dataUploaded: 'Data Uploaded',
     biochemistryIndicators: 'Biochemistry Indicators',
-    biochemistryIndicatorsDesc: 'Enter experimental biochemistry data',
+    biochemistryIndicatorsDesc: 'Upload data files or manually enter biochemistry indicators',
     addIndicator: 'Add Indicator',
     indicatorName: 'Indicator name (e.g., ALT)',
     value: 'Value',
@@ -459,7 +499,38 @@ export const translations = {
     indicator: 'Indicator',
     uploadData: 'Upload Analysis Data',
     uploadDataDesc: 'Please create an analysis session first, then upload pathology slides, single-cell sequencing data, and biochemistry indicators.',
-    
+
+    // Treatment groups
+    treatmentGroups: 'Treatment Groups',
+    treatmentGroupsDesc: 'Define experimental groups and sample counts',
+    addGroup: 'Add Group',
+    groupName: 'Group Name',
+    groupNamePlaceholder: 'e.g., Control, Model',
+    groupDescription: 'Description',
+    groupDescPlaceholder: 'Detailed description (optional)',
+    sampleCount: 'Samples',
+    noGroupDistinction: 'No group distinction',
+    noSampleDistinction: 'No sample distinction',
+    deleteGroupConfirm: 'Deleting this group will also remove all associated data. Continue?',
+    noGroups: 'Please add treatment groups first',
+
+    // Data section
+    selectGroup: 'Select Group',
+    selectSample: 'Select Sample',
+    selectDataType: 'Select Data Type',
+    sample: 'Sample',
+    filename: 'Filename',
+    group: 'Group',
+    dataType: 'Type',
+    actions: 'Actions',
+    noFiles: 'No files',
+
+    // Data overview
+    dataOverview: 'Data Overview',
+    dataOverviewDesc: 'Upload status for each treatment group',
+    filesCount: '{n} files',
+    indicatorsCount: '{n} indicators',
+
     // Stain types
     heStain: 'H&E Stain',
     siriusRed: 'Sirius Red (Fibrosis)',
@@ -467,6 +538,15 @@ export const translations = {
     oilRedO: 'Oil Red O (Lipid)',
     pas: 'PAS (Glycogen)',
     other: 'Other',
+    customType: 'Custom type',
+
+    // Sequencing types
+    scRNASeq: 'scRNA-seq (h5ad/h5)',
+    loom: 'Loom (RNA velocity)',
+
+    // Biochemistry types
+    bioImage: 'Image',
+    bioFile: 'Data file (CSV/Excel)',
     
     // Prompts Panel
     selectAgent: 'Select Agent',

@@ -33,7 +33,7 @@ from .config import (
 )
 from .models.schemas import (
     AnalysisState, APIRequest, APIResponse, TaskStatus,
-    WebSocketMessage, AgentType, PathologyImage, BiochemistryResult, BiochemistryFile
+    WebSocketMessage, AgentType, TreatmentGroup, DataFile, BiochemistryIndicator
 )
 from .workflow import SingleCellAnalysisWorkflow
 from .utils.llm_client import OpenAICompatibleClient, LLMManager
@@ -200,6 +200,7 @@ def save_session_to_disk(session_id: str, state: AnalysisState):
     import tempfile
     try:
         session_file = SESSION_DIR / f"{session_id}.json"
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
         # Use atomic write: write to temp file first, then rename
         # This prevents data corruption if the process crashes during write
         fd, tmp_path = tempfile.mkstemp(
@@ -282,6 +283,7 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
             try:
                 with open(session_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                data_files = data.get("data_files", [])
                 sessions_list.append({
                     "id": data.get("id", session_file.stem),
                     "name": data.get("name", "Unknown"),
@@ -289,9 +291,9 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
                     "created_at": data.get("created_at", ""),
                     "updated_at": data.get("updated_at", ""),
                     "current_round": data.get("current_round", 0),
-                    "has_pathology": len(data.get("pathology_images", [])) > 0,
-                    "has_sequencing": bool(data.get("control_seq_path") or data.get("treatment_seq_path")),
-                    "has_biochemistry": len(data.get("biochemistry_results", [])) > 0 or len(data.get("biochemistry_files", [])) > 0,
+                    "has_pathology": any(f.get("section") == "pathology" for f in data_files),
+                    "has_sequencing": any(f.get("section") == "sequencing" for f in data_files),
+                    "has_biochemistry": any(f.get("section") == "biochemistry" for f in data_files) or len(data.get("biochemistry_indicators", [])) > 0,
                 })
             except Exception as e:
                 logger.warning(f"Failed to read session file {session_file}: {e}")
@@ -348,6 +350,20 @@ class BiochemistryInput(BaseModel):
     indicator: str = Field(..., min_length=1, max_length=200, description="Biochemistry indicator name")
     value: float = Field(..., description="Indicator value")
     unit: str = Field(..., max_length=50, description="Measurement unit")
+    group_id: Optional[str] = None
+    sample_number: Optional[int] = None
+
+
+class GroupCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str = ""
+    sample_count: int = Field(1, ge=1, le=100)
+
+
+class GroupUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    sample_count: Optional[int] = Field(None, ge=1, le=100)
 
 
 # Endpoints
@@ -508,9 +524,9 @@ async def list_sessions():
             "created_at": state.created_at.isoformat() if state.created_at else "",
             "updated_at": state.updated_at.isoformat() if state.updated_at else "",
             "current_round": state.current_round,
-            "has_pathology": len(state.pathology_images) > 0,
-            "has_sequencing": bool(state.control_seq_path or state.treatment_seq_path),
-            "has_biochemistry": len(state.biochemistry_results) > 0 or len(state.biochemistry_files) > 0,
+            "has_pathology": any(f.section == "pathology" for f in state.data_files),
+            "has_sequencing": state.has_sequencing_data(),
+            "has_biochemistry": any(f.section == "biochemistry" for f in state.data_files) or len(state.biochemistry_indicators) > 0,
         })
     
     # Sort by updated_at descending
@@ -568,14 +584,22 @@ async def load_session(session_id: str):
         "created_at": state.created_at.isoformat() if state.created_at else "",
         "updated_at": state.updated_at.isoformat() if state.updated_at else "",
         "initial_instruction": state.initial_instruction,
-        # Data uploads
-        "pathology_images": [{"id": img.id, "filename": img.filename, "imageType": img.image_type, "filePath": img.original_path} for img in state.pathology_images],
-        "biochemistry_results": [{"id": r.id, "indicator": r.indicator, "value": r.value, "unit": r.unit} for r in state.biochemistry_results],
-        "biochemistry_files": [{"id": f.id, "filename": f.filename, "fileType": f.file_type, "filePath": f.file_path} for f in state.biochemistry_files],
-        "control_seq_path": state.control_seq_path,
-        "treatment_seq_path": state.treatment_seq_path,
-        "control_loom_path": state.control_loom_path,
-        "treatment_loom_path": state.treatment_loom_path,
+        # Treatment groups and data uploads
+        "treatment_groups": [
+            {"id": g.id, "name": g.name, "description": g.description, "sampleCount": g.sample_count, "order": g.order}
+            for g in state.treatment_groups
+        ],
+        "data_files": [
+            {"id": f.id, "filename": f.filename, "filePath": f.file_path, "section": f.section, "dataType": f.data_type,
+             "groupId": f.group_id, "sampleNumber": f.sample_number, "description": f.description, "timestamp": f.timestamp.isoformat() if f.timestamp else ""}
+            for f in state.data_files
+        ],
+        "biochemistry_indicators": [
+            {"id": r.id, "indicator": r.indicator, "value": r.value, "unit": r.unit,
+             "referenceRange": r.reference_range, "interpretation": r.interpretation,
+             "groupId": r.group_id, "sampleNumber": r.sample_number}
+            for r in state.biochemistry_indicators
+        ],
         # Analysis results - complete round results
         "round_results": [
             {
@@ -765,63 +789,178 @@ async def get_session(session_id: str):
         "current_round": state.current_round,
         "created_at": state.created_at.isoformat(),
         "updated_at": state.updated_at.isoformat(),
-        "has_pathology": len(state.pathology_images) > 0,
-        "has_control_seq": state.control_seq_path is not None,
-        "has_treatment_seq": state.treatment_seq_path is not None,
-        "has_control_loom": state.control_loom_path is not None,
-        "has_treatment_loom": state.treatment_loom_path is not None,
-        "has_biochemistry": len(state.biochemistry_results) > 0,
+        "has_pathology": any(f.section == "pathology" for f in state.data_files),
+        "has_sequencing": state.has_sequencing_data(),
+        "has_biochemistry": any(f.section == "biochemistry" for f in state.data_files) or len(state.biochemistry_indicators) > 0,
+        "treatment_groups": len(state.treatment_groups),
+        "data_files_count": len(state.data_files),
         "round_count": len(state.round_results)
     }
 
 
-@app.post("/api/session/{session_id}/upload/pathology")
-async def upload_pathology(
-    session_id: str,
-    file: UploadFile = File(...),
-    image_type: str = Form("H&E")
-):
-    """Upload pathology image"""
+@app.post("/api/session/{session_id}/groups")
+async def create_group(session_id: str, request: GroupCreateRequest):
+    """Create a new treatment group"""
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Save file with absolute path (sanitize filename to prevent path traversal)
-    sanitized_name = safe_filename(file.filename)
-    if not sanitized_name:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    upload_parent = UPLOAD_DIR / session_id / "pathology"
-    file_path = upload_parent / sanitized_name
-    upload_parent.mkdir(parents=True, exist_ok=True)
-    validate_path_within(file_path, upload_parent)
 
-    await stream_save_file(file, file_path)
-
-    # Create PathologyImage record with absolute path
-    img = PathologyImage(
-        filename=sanitized_name,
-        image_type=image_type,
-        original_path=str(file_path)
+    group = TreatmentGroup(
+        name=request.name,
+        description=request.description,
+        sample_count=request.sample_count,
+        order=len(state.treatment_groups)
     )
-    
-    state.pathology_images.append(img)
-
-    # If workflow is waiting for input or completed, register as pending file
-    # so the next round will process this image through the PI agent
-    if state.status in (TaskStatus.WAITING_INPUT, TaskStatus.COMPLETED):
-        state.pending_uploaded_files.append({
-            "type": "image",
-            "filename": sanitized_name,
-            "id": img.id
-        })
-
-    # Auto-save session
+    state.treatment_groups.append(group)
     await asyncio.to_thread(save_session_to_disk, session_id, state)
 
     return APIResponse(
         success=True,
-        message=f"Pathology image uploaded: {sanitized_name}",
-        data={"image_id": img.id, "image_type": image_type, "file_path": str(file_path)}
+        message=f"Treatment group created: {request.name}",
+        data={"id": group.id, "name": group.name, "description": group.description,
+              "sampleCount": group.sample_count, "order": group.order}
+    )
+
+
+@app.put("/api/session/{session_id}/groups/{group_id}")
+async def update_group(session_id: str, group_id: str, request: GroupUpdateRequest):
+    """Update a treatment group"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    group = state.get_group_by_id(group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    if request.name is not None:
+        group.name = request.name
+    if request.description is not None:
+        group.description = request.description
+    if request.sample_count is not None:
+        group.sample_count = request.sample_count
+
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    return APIResponse(
+        success=True,
+        message=f"Group updated: {group.name}",
+        data={"id": group.id, "name": group.name, "description": group.description,
+              "sampleCount": group.sample_count, "order": group.order}
+    )
+
+
+@app.delete("/api/session/{session_id}/groups/{group_id}")
+async def delete_group(session_id: str, group_id: str):
+    """Delete a treatment group and all associated data files"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    group = state.get_group_by_id(group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    # Delete associated data files from disk
+    files_to_remove = [f for f in state.data_files if f.group_id == group_id]
+    for df in files_to_remove:
+        try:
+            if os.path.exists(df.file_path):
+                os.remove(df.file_path)
+        except Exception as e:
+            logger.warning(f"Failed to delete file {df.file_path}: {e}")
+
+    # Remove files and indicators from state
+    state.data_files = [f for f in state.data_files if f.group_id != group_id]
+    state.biochemistry_indicators = [i for i in state.biochemistry_indicators if i.group_id != group_id]
+    state.treatment_groups = [g for g in state.treatment_groups if g.id != group_id]
+
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    return APIResponse(
+        success=True,
+        message=f"Group deleted: {group.name} (and {len(files_to_remove)} associated files)"
+    )
+
+
+@app.post("/api/session/{session_id}/upload/data")
+async def upload_data(
+    session_id: str,
+    file: UploadFile = File(...),
+    section: str = Form(...),
+    data_type: str = Form(...),
+    group_id: Optional[str] = Form(None),
+    sample_number: Optional[int] = Form(None),
+    description: Optional[str] = Form(None)
+):
+    """Unified data file upload endpoint"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Validate section
+    if section not in ("pathology", "sequencing", "biochemistry"):
+        raise HTTPException(status_code=400, detail="Section must be 'pathology', 'sequencing', or 'biochemistry'")
+
+    # Validate group_id if provided
+    if group_id and group_id != "none":
+        group = state.get_group_by_id(group_id)
+        if group is None:
+            raise HTTPException(status_code=400, detail="Group not found")
+        # Validate sample_number
+        if sample_number is not None and sample_number > group.sample_count:
+            raise HTTPException(status_code=400, detail=f"Sample number exceeds group sample count ({group.sample_count})")
+    else:
+        group_id = None
+        sample_number = None  # No sample distinction when no group
+
+    # Build storage path
+    if group_id:
+        sample_dir = str(sample_number) if sample_number else "_unsorted"
+        upload_parent = UPLOAD_DIR / session_id / section / group_id / sample_dir
+    else:
+        upload_parent = UPLOAD_DIR / session_id / section / "_ungrouped"
+
+    sanitized_name = safe_filename(file.filename)
+    if not sanitized_name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    file_path = upload_parent / sanitized_name
+    upload_parent.mkdir(parents=True, exist_ok=True)
+    validate_path_within(file_path, upload_parent)
+
+    # For large sequencing files, use stream save
+    if section == "sequencing":
+        await stream_save_file(file, file_path)
+    else:
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+    # Create DataFile record
+    data_file = DataFile(
+        filename=sanitized_name,
+        file_path=str(file_path),
+        section=section,
+        data_type=data_type,
+        group_id=group_id,
+        sample_number=sample_number,
+        description=description
+    )
+    state.data_files.append(data_file)
+
+    # Register as pending if workflow is waiting
+    if state.status in (TaskStatus.WAITING_INPUT, TaskStatus.COMPLETED):
+        state.pending_uploaded_files.append({
+            "type": section,
+            "filename": sanitized_name,
+            "id": data_file.id
+        })
+
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+
+    return APIResponse(
+        success=True,
+        message=f"{section} {data_type} uploaded: {sanitized_name}",
+        data={"file_id": data_file.id, "section": section, "data_type": data_type,
+              "file_path": str(file_path), "group_id": group_id, "sample_number": sample_number}
     )
 
 
@@ -855,88 +994,6 @@ async def upload_generic_file(
     )
 
 
-@app.post("/api/session/{session_id}/upload/snrna_seq")
-async def upload_snrna_seq(
-    session_id: str,
-    file: UploadFile = File(...),
-    group: str = Form("control")  # 'control' or 'treatment'
-):
-    """Upload snRNA-seq data file (h5ad or 10x format)"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Validate group
-    if group not in ["control", "treatment"]:
-        raise HTTPException(status_code=400, detail="Invalid group. Must be 'control' or 'treatment'")
-    
-    # Save file with absolute path (sanitize filename to prevent path traversal)
-    sanitized_name = safe_filename(file.filename)
-    if not sanitized_name:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    upload_parent = UPLOAD_DIR / session_id / "snrna_seq" / group
-    file_path = upload_parent / sanitized_name
-    upload_parent.mkdir(parents=True, exist_ok=True)
-    validate_path_within(file_path, upload_parent)
-
-    await stream_save_file(file, file_path)
-
-    # Update the appropriate path based on group (use absolute path)
-    if group == "control":
-        state.control_seq_path = str(file_path)
-    else:
-        state.treatment_seq_path = str(file_path)
-    
-    # Auto-save session
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
-    
-    return APIResponse(
-        success=True,
-        message=f"{group.capitalize()} snRNA-seq data uploaded: {sanitized_name}",
-        data={"group": group, "file_path": str(file_path)}
-    )
-
-
-@app.post("/api/session/{session_id}/upload/loom")
-async def upload_loom(
-    session_id: str,
-    file: UploadFile = File(...),
-    group: str = Form("control")  # 'control' or 'treatment'
-):
-    """Upload loom file for RNA velocity analysis"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Validate group
-    if group not in ["control", "treatment"]:
-        raise HTTPException(status_code=400, detail="Invalid group. Must be 'control' or 'treatment'")
-    
-    # Save file with absolute path (sanitize filename to prevent path traversal)
-    sanitized_name = safe_filename(file.filename)
-    if not sanitized_name:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    upload_parent = UPLOAD_DIR / session_id / "loom" / group
-    file_path = upload_parent / sanitized_name
-    upload_parent.mkdir(parents=True, exist_ok=True)
-    validate_path_within(file_path, upload_parent)
-
-    await stream_save_file(file, file_path)
-
-    # Update the appropriate path based on group (use absolute path)
-    if group == "control":
-        state.control_loom_path = str(file_path)
-    else:
-        state.treatment_loom_path = str(file_path)
-    
-    # Auto-save session
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
-    
-    return APIResponse(
-        success=True,
-        message=f"{group.capitalize()} loom file uploaded: {sanitized_name}",
-        data={"group": group, "file_path": str(file_path)}
-    )
 
 
 @app.post("/api/session/{session_id}/save")
@@ -953,273 +1010,95 @@ async def save_session(session_id: str):
     )
 
 
-@app.post("/api/session/{session_id}/biochemistry")
-async def add_biochemistry(session_id: str, request: BiochemistryInput):
-    """Add biochemistry result"""
+@app.post("/api/session/{session_id}/indicators")
+async def add_indicator(session_id: str, request: BiochemistryInput):
+    """Add a manual biochemistry indicator"""
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Validate value is a finite number (not NaN or Inf)
     import math
     if math.isnan(request.value) or math.isinf(request.value):
         raise HTTPException(status_code=400, detail="Value must be a finite number (not NaN or Infinity)")
-
-    # Validate indicator and unit are not just whitespace
     if not request.indicator.strip():
         raise HTTPException(status_code=400, detail="Indicator name cannot be empty or whitespace")
     if not request.unit.strip():
         raise HTTPException(status_code=400, detail="Unit cannot be empty or whitespace")
 
-    result = BiochemistryResult(
+    # Validate group_id if provided
+    group_id = request.group_id
+    sample_number = request.sample_number
+    if group_id and group_id != "none":
+        group = state.get_group_by_id(group_id)
+        if group is None:
+            raise HTTPException(status_code=400, detail="Group not found")
+        if sample_number is not None and sample_number > group.sample_count:
+            raise HTTPException(status_code=400, detail=f"Sample number exceeds group sample count ({group.sample_count})")
+    else:
+        group_id = None
+        sample_number = None
+
+    indicator = BiochemistryIndicator(
         indicator=request.indicator.strip(),
         value=request.value,
-        unit=request.unit.strip()
+        unit=request.unit.strip(),
+        group_id=group_id,
+        sample_number=sample_number
     )
-
-    state.biochemistry_results.append(result)
-
-    # Auto-save session
+    state.biochemistry_indicators.append(indicator)
     await asyncio.to_thread(save_session_to_disk, session_id, state)
-    
+
     return APIResponse(
         success=True,
-        message=f"Biochemistry result added: {request.indicator}",
-        data={"result_id": result.id}
+        message=f"Biochemistry indicator added: {request.indicator}",
+        data={"indicator_id": indicator.id}
     )
 
 
-@app.post("/api/session/{session_id}/upload/biochemistry")
-async def upload_biochemistry_file(
-    session_id: str,
-    file: UploadFile = File(...),
-    description: Optional[str] = Form(None)
-):
-    """Upload biochemistry file (image or data file like csv, xlsx, txt)"""
+@app.delete("/api/session/{session_id}/indicators/{indicator_id}")
+async def delete_indicator(session_id: str, indicator_id: str):
+    """Delete a biochemistry indicator"""
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Determine file type
-    sanitized_name = safe_filename(file.filename)
-    if not sanitized_name:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    filename_lower = sanitized_name.lower()
-    if filename_lower.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')):
-        file_type = 'image'
-    else:
-        file_type = 'file'
 
-    # Save file (sanitize filename to prevent path traversal)
-    upload_parent = UPLOAD_DIR / session_id / "biochemistry"
-    file_path = upload_parent / sanitized_name
-    upload_parent.mkdir(parents=True, exist_ok=True)
-    validate_path_within(file_path, upload_parent)
+    # Find the indicator name before deletion (for response message)
+    deleted_name = next((ind.indicator for ind in state.biochemistry_indicators if ind.id == indicator_id), None)
+    if deleted_name is None:
+        raise HTTPException(status_code=404, detail="Indicator not found")
 
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
-
-    # Create biochemistry file record
-    bio_file = BiochemistryFile(
-        filename=sanitized_name,
-        file_type=file_type,
-        file_path=str(file_path),
-        description=description
-    )
-    
-    state.biochemistry_files.append(bio_file)
-    
-    # Notify via WebSocket if connected
-    if session_id in websockets:
-        try:
-            await websockets[session_id].send_json({
-                "type": "data_uploaded",
-                "data_type": "biochemistry_file",
-                "message": f"Biochemistry {file_type} uploaded: {sanitized_name}",
-                "file_id": bio_file.id,
-                "file_type": file_type
-            })
-        except Exception:
-            pass  # WebSocket may not be connected
-    
-    # Auto-save session
+    state.biochemistry_indicators = [ind for ind in state.biochemistry_indicators if ind.id != indicator_id]
     await asyncio.to_thread(save_session_to_disk, session_id, state)
-    
-    return APIResponse(
-        success=True,
-        message=f"Biochemistry {file_type} uploaded: {sanitized_name}",
-        data={
-            "file_id": bio_file.id,
-            "file_type": file_type,
-            "file_path": str(file_path)
-        }
-    )
+    return APIResponse(success=True, message=f"Indicator deleted: {deleted_name}")
 
 
 # ============ DELETE ENDPOINTS ============
 
-@app.delete("/api/session/{session_id}/pathology/{image_id}")
-async def delete_pathology(session_id: str, image_id: str):
-    """Delete a pathology image"""
+@app.delete("/api/session/{session_id}/data/{file_id}")
+async def delete_data_file(session_id: str, file_id: str):
+    """Delete any data file (pathology, sequencing, or biochemistry)"""
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Find and remove the image
-    for i, img in enumerate(state.pathology_images):
-        if img.id == image_id:
+
+    for i, df in enumerate(state.data_files):
+        if df.id == file_id:
             # Delete file from disk
             try:
-                if os.path.exists(img.original_path):
-                    os.remove(img.original_path)
+                if os.path.exists(df.file_path):
+                    os.remove(df.file_path)
             except Exception as e:
-                logger.warning(f"Failed to delete file {img.original_path}: {e}")
-            
-            # Remove from state
-            state.pathology_images.pop(i)
-            
-            # Auto-save session
+                logger.warning(f"Failed to delete file {df.file_path}: {e}")
+
+            state.data_files.pop(i)
             await asyncio.to_thread(save_session_to_disk, session_id, state)
-            
+
             return APIResponse(
                 success=True,
-                message=f"Pathology image deleted: {img.filename}"
+                message=f"{df.section} file deleted: {df.filename}"
             )
-    
-    raise HTTPException(status_code=404, detail="Image not found")
 
-
-@app.delete("/api/session/{session_id}/biochemistry/file/{file_id}")
-async def delete_biochemistry_file(session_id: str, file_id: str):
-    """Delete a biochemistry file"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Find and remove the file
-    for i, bio_file in enumerate(state.biochemistry_files):
-        if bio_file.id == file_id:
-            # Delete file from disk
-            try:
-                if os.path.exists(bio_file.file_path):
-                    os.remove(bio_file.file_path)
-            except Exception as e:
-                logger.warning(f"Failed to delete file {bio_file.file_path}: {e}")
-            
-            # Remove from state
-            state.biochemistry_files.pop(i)
-            
-            # Auto-save session
-            await asyncio.to_thread(save_session_to_disk, session_id, state)
-            
-            return APIResponse(
-                success=True,
-                message=f"Biochemistry file deleted: {bio_file.filename}"
-            )
-    
-    raise HTTPException(status_code=404, detail="File not found")
-
-
-@app.delete("/api/session/{session_id}/biochemistry/result/{result_id}")
-async def delete_biochemistry_result(session_id: str, result_id: str):
-    """Delete a biochemistry result (manual entry)"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Find and remove the result
-    for i, result in enumerate(state.biochemistry_results):
-        if result.id == result_id:
-            state.biochemistry_results.pop(i)
-            
-            # Auto-save session
-            await asyncio.to_thread(save_session_to_disk, session_id, state)
-            
-            return APIResponse(
-                success=True,
-                message=f"Biochemistry result deleted: {result.indicator}"
-            )
-    
-    raise HTTPException(status_code=404, detail="Result not found")
-
-
-@app.delete("/api/session/{session_id}/sequencing/{group}")
-async def delete_sequencing(session_id: str, group: str):
-    """Delete sequencing data (control or treatment)"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    if group not in ["control", "treatment"]:
-        raise HTTPException(status_code=400, detail="Group must be 'control' or 'treatment'")
-    
-    # Get the path and clear it
-    if group == "control":
-        file_path = state.control_seq_path
-        if file_path:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception as e:
-                logger.warning(f"Failed to delete file {file_path}: {e}")
-            state.control_seq_path = None
-    else:
-        file_path = state.treatment_seq_path
-        if file_path:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception as e:
-                logger.warning(f"Failed to delete file {file_path}: {e}")
-            state.treatment_seq_path = None
-    
-    # Auto-save session
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
-    
-    return APIResponse(
-        success=True,
-        message=f"{group.capitalize()} sequencing data deleted"
-    )
-
-
-@app.delete("/api/session/{session_id}/loom/{group}")
-async def delete_loom(session_id: str, group: str):
-    """Delete loom file (control or treatment)"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    if group not in ["control", "treatment"]:
-        raise HTTPException(status_code=400, detail="Group must be 'control' or 'treatment'")
-    
-    # Get the path and clear it
-    if group == "control":
-        file_path = state.control_loom_path
-        if file_path:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception as e:
-                logger.warning(f"Failed to delete file {file_path}: {e}")
-            state.control_loom_path = None
-    else:
-        file_path = state.treatment_loom_path
-        if file_path:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception as e:
-                logger.warning(f"Failed to delete file {file_path}: {e}")
-            state.treatment_loom_path = None
-    
-    # Auto-save session
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
-    
-    return APIResponse(
-        success=True,
-        message=f"{group.capitalize()} loom file deleted"
-    )
+    raise HTTPException(status_code=404, detail="Data file not found")
 
 
 @app.post("/api/session/{session_id}/prompts")
@@ -2343,8 +2222,8 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     
     # Debug: log state data paths
     logger.info(f"Report generation for session {session_id}")
-    logger.info(f"  control_seq_path: {state.control_seq_path}")
-    logger.info(f"  treatment_seq_path: {state.treatment_seq_path}")
+    seq_files = state.get_files_by_section("sequencing")
+    logger.info(f"  sequencing files: {len(seq_files)}")
     logger.info(f"  state.status: {state.status}")
     logger.info(f"  round_results count: {len(state.round_results)}")
     
@@ -3021,24 +2900,21 @@ async def complete_chunked_upload(
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["error"])
 
-    # Update session state
-    if file_type == "snrna_seq":
-        if group == "treatment":
-            state.treatment_seq_path = str(final_path.resolve())
-        else:
-            state.control_seq_path = str(final_path.resolve())
-    elif file_type == "loom":
-        if group == "treatment":
-            state.treatment_loom_path = str(final_path.resolve())
-        else:
-            state.control_loom_path = str(final_path.resolve())
-    elif file_type == "pathology":
-        img = PathologyImage(
-            filename=filename,
-            image_type="uploaded",
-            original_path=str(final_path.resolve())
-        )
-        state.pathology_images.append(img)
+    # Update session state - create DataFile for all chunked uploads
+    section_map = {"snrna_seq": "sequencing", "loom": "sequencing", "pathology": "pathology", "biochemistry": "biochemistry"}
+    type_map = {"snrna_seq": "scRNA-seq", "loom": "loom", "pathology": "uploaded", "biochemistry": "file"}
+    section = section_map.get(file_type, file_type)
+    data_type = type_map.get(file_type, file_type)
+
+    data_file = DataFile(
+        filename=filename,
+        file_path=str(final_path.resolve()),
+        section=section,
+        data_type=data_type,
+        group_id=status.get("group_id"),
+        sample_number=status.get("sample_number"),
+    )
+    state.data_files.append(data_file)
 
     await asyncio.to_thread(save_session_to_disk, session_id, state)
 
@@ -3195,20 +3071,15 @@ def _build_chat_context(state: AnalysisState) -> tuple:
     parts.append(f"Current Round: {state.current_round}")
     parts.append(f"Status: {state.status.value}")
 
-    # Pathology summary
-    if state.pathology_images:
-        parts.append(f"Pathology Images: {len(state.pathology_images)} uploaded")
+    # Experimental design summary
+    design_summary = state.build_experimental_design_summary()
+    if design_summary:
+        parts.append(design_summary)
 
-    # Biochemistry summary
-    if state.biochemistry_results:
-        indicators = [f"{r.indicator}={r.value}{r.unit}" for r in state.biochemistry_results]
+    # Biochemistry indicators summary
+    if state.biochemistry_indicators:
+        indicators = [f"{r.indicator}={r.value}{r.unit}" for r in state.biochemistry_indicators]
         parts.append(f"Biochemistry: {', '.join(indicators)}")
-
-    # Sequencing data
-    if state.control_seq_path:
-        parts.append(f"Control scRNA-seq: uploaded")
-    if state.treatment_seq_path:
-        parts.append(f"Treatment scRNA-seq: uploaded")
 
     # Round results (last 3)
     for rr in state.round_results[-3:]:
@@ -3929,6 +3800,9 @@ async def chat_with_pi(
     session_id: str,
     message: str = Form(...),
     target_agents: str = Form(default="[]"),
+    file_groups: str = Form(default="[]"),
+    file_samples: str = Form(default="[]"),
+    file_types: str = Form(default="[]"),
     files: List[UploadFile] = File(default=[]),
 ):
     """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
@@ -3940,13 +3814,18 @@ async def chat_with_pi(
     if config is None:
         raise HTTPException(status_code=400, detail="API configuration not set")
 
-    # Parse per-file target agents
-    try:
-        per_file_agents = json.loads(target_agents)
-        if not isinstance(per_file_agents, list):
-            per_file_agents = []
-    except (json.JSONDecodeError, TypeError):
-        per_file_agents = []
+    # Parse per-file metadata arrays
+    def _parse_json_list(raw: str) -> list:
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    per_file_agents = _parse_json_list(target_agents)
+    per_file_groups = _parse_json_list(file_groups)
+    per_file_samples = _parse_json_list(file_samples)
+    per_file_types = _parse_json_list(file_types)
 
     # --- Save uploaded files ---
     import base64
@@ -3977,11 +3856,17 @@ async def chat_with_pi(
         file_type = "image" if is_image else "file"
         file_agent = per_file_agents[idx] if idx < len(per_file_agents) else "pi"
 
+        file_group = per_file_groups[idx] if idx < len(per_file_groups) else None
+        file_sample = per_file_samples[idx] if idx < len(per_file_samples) else None
+        file_dtype = per_file_types[idx] if idx < len(per_file_types) else None
+
         saved_files.append({
             "filename": dest.name,
-            "type": file_type,
+            "type": file_dtype or file_type,
             "path": str(dest),
             "target_agent": file_agent,
+            "group_id": file_group,
+            "sample_number": file_sample,
         })
 
         # Load image as base64 for vision API
@@ -3999,19 +3884,18 @@ async def chat_with_pi(
                 pass
 
     # --- Register files to target agent state (per-file) ---
+    _agent_section_map = {"pathology": "pathology", "bioinformatics": "sequencing", "biochemistry": "biochemistry"}
     for sf in saved_files:
         agent = sf["target_agent"]
-        if agent == "pathology" and sf["type"] == "image":
-            state.pathology_images.append(PathologyImage(
+        section = _agent_section_map.get(agent)
+        if section:
+            state.data_files.append(DataFile(
                 filename=sf["filename"],
-                image_type="uploaded_via_chat",
-                original_path=sf["path"],
-            ))
-        elif agent == "biochemistry":
-            state.biochemistry_files.append(BiochemistryFile(
-                filename=sf["filename"],
-                file_type=sf["type"],
                 file_path=sf["path"],
+                section=section,
+                data_type=sf.get("type") or "uploaded_via_chat",
+                group_id=sf.get("group_id"),
+                sample_number=sf.get("sample_number"),
                 description="Uploaded via chat",
             ))
 

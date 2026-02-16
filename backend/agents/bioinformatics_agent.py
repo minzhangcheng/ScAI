@@ -448,30 +448,37 @@ class BioinformaticsAgent(BaseAgent):
     def _build_data_context(self, state: AnalysisState) -> str:
         """Build context about available data"""
         data_parts = ["=== Available Data ===\n"]
-        
-        has_data = False
-        
-        if state.control_seq_path:
-            has_data = True
-            data_parts.append(f"Control scRNA-seq: {state.control_seq_path}")
-            data_parts.append(f"  Load: adata_control = sc.read_h5ad('{state.control_seq_path}')")
-            
-        if state.treatment_seq_path:
-            has_data = True
-            data_parts.append(f"Treatment scRNA-seq: {state.treatment_seq_path}")
-            data_parts.append(f"  Load: adata_treatment = sc.read_h5ad('{state.treatment_seq_path}')")
-            
-        if state.control_loom_path:
-            has_data = True
-            data_parts.append(f"Control Loom (velocity): {state.control_loom_path}")
-            
-        if state.treatment_loom_path:
-            has_data = True
-            data_parts.append(f"Treatment Loom (velocity): {state.treatment_loom_path}")
-        
-        if not has_data:
+
+        # Experimental design overview
+        design = state.build_experimental_design_summary()
+        if design:
+            data_parts.append(design)
+            data_parts.append("")
+
+        # List sequencing files with group/sample context
+        seq_files = [f for f in state.data_files if f.section == "sequencing"]
+        var_name_counts: dict = {}  # Track usage to disambiguate duplicates
+        if seq_files:
+            data_parts.append("Sequencing Data Files:")
+            for f in seq_files:
+                group = state.get_group_by_id(f.group_id)
+                group_label = group.name if group else "Ungrouped"
+                sample_label = f"Sample {f.sample_number}" if f.sample_number else ""
+                label = f"{group_label} {sample_label}".strip()
+
+                data_parts.append(f"  {label} ({f.data_type}): {f.file_path}")
+                if f.data_type == "scRNA-seq":
+                    # Generate a safe variable name for loading (deduplicate)
+                    base_name = (group_label.lower().replace(" ", "_") +
+                                (f"_s{f.sample_number}" if f.sample_number else ""))
+                    var_name_counts[base_name] = var_name_counts.get(base_name, 0) + 1
+                    var_name = f"{base_name}_{var_name_counts[base_name]}" if var_name_counts[base_name] > 1 else base_name
+                    data_parts.append(f"    Load: adata_{var_name} = sc.read_h5ad('{f.file_path}')")
+                elif f.data_type == "loom":
+                    data_parts.append(f"    Loom file for RNA velocity analysis")
+        else:
             data_parts.append("⚠️ No sequencing data uploaded")
-        
+
         return "\n".join(data_parts)
     
     def _build_analysis_context(self) -> str:
@@ -1182,7 +1189,7 @@ plt.close('all')
         self.analysis_context = {}
         self.last_result = None
 
-        if not state.control_seq_path and not state.treatment_seq_path:
+        if not state.has_sequencing_data():
             return {
                 "status": "waiting_input",
                 "message": "Please upload snRNA-seq data file",

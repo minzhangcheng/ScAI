@@ -59,27 +59,35 @@ export interface GraphicAbstract {
   createdAt: string
 }
 
-export interface PathologyImage {
+export interface TreatmentGroup {
   id: string
-  filename: string
-  imageType: string
-  preview?: string
-  filePath?: string
+  name: string
+  description: string
+  sampleCount: number
+  order: number
 }
 
-export interface BiochemistryResult {
+export interface DataFile {
+  id: string
+  filename: string
+  filePath: string
+  section: 'pathology' | 'sequencing' | 'biochemistry'
+  dataType: string
+  groupId?: string
+  sampleNumber?: number
+  description?: string
+  timestamp: string
+}
+
+export interface BiochemistryIndicator {
   id: string
   indicator: string
   value: number
   unit: string
-}
-
-export interface BiochemistryFile {
-  id: string
-  filename: string
-  fileType: 'image' | 'file'
-  description?: string
-  filePath?: string
+  referenceRange?: string
+  interpretation?: string
+  groupId?: string
+  sampleNumber?: number
 }
 
 export interface RoundResult {
@@ -98,13 +106,9 @@ export interface Session {
   currentRound: number
   createdAt: string
   instruction: string
-  pathologyImages: PathologyImage[]
-  controlSeqPath?: string      // Control group sequencing data (.h5ad)
-  treatmentSeqPath?: string    // Treatment group sequencing data (.h5ad)
-  controlLoomPath?: string     // Control group loom file for RNA velocity
-  treatmentLoomPath?: string   // Treatment group loom file for RNA velocity
-  biochemistryResults: BiochemistryResult[]
-  biochemistryFiles?: BiochemistryFile[]  // Uploaded files/images for biochemistry
+  treatmentGroups: TreatmentGroup[]
+  dataFiles: DataFile[]
+  biochemistryIndicators: BiochemistryIndicator[]
   roundResults: RoundResult[]
   finalSummary?: string
   // Publication-quality outputs

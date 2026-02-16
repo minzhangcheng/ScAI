@@ -12,9 +12,31 @@ const AGENT_OPTIONS = [
   { value: 'biochemistry', labelKey: 'chatTargetBiochemistry' as const },
 ]
 
+// Section-specific data type options
+const PATHOLOGY_TYPES = ['H&E', 'Other']
+const SEQUENCING_TYPES = ['scRNA-seq', 'Loom']
+const BIOCHEMISTRY_TYPES = ['image', 'file']
+
+function getSection(agent: string): string | null {
+  if (agent === 'pathology') return 'pathology'
+  if (agent === 'bioinformatics') return 'sequencing'
+  if (agent === 'biochemistry') return 'biochemistry'
+  return null
+}
+
+function getTypeOptions(agent: string): string[] {
+  if (agent === 'pathology') return PATHOLOGY_TYPES
+  if (agent === 'bioinformatics') return SEQUENCING_TYPES
+  if (agent === 'biochemistry') return BIOCHEMISTRY_TYPES
+  return []
+}
+
 interface SelectedFileWithAgent {
   file: File
   targetAgent: string
+  groupId?: string
+  sampleNumber?: number
+  dataType?: string
 }
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg'])
@@ -156,8 +178,29 @@ export function ChatPanel() {
   }
 
   const handleFileAgentChange = (index: number, agent: string) => {
+    const types = getTypeOptions(agent)
     setSelectedFiles((prev) =>
-      prev.map((item, i) => (i === index ? { ...item, targetAgent: agent } : item))
+      prev.map((item, i) => (i === index
+        ? { ...item, targetAgent: agent, groupId: undefined, sampleNumber: undefined, dataType: types[0] || undefined }
+        : item))
+    )
+  }
+
+  const handleFileGroupChange = (index: number, groupId: string | undefined) => {
+    setSelectedFiles((prev) =>
+      prev.map((item, i) => (i === index ? { ...item, groupId, sampleNumber: undefined } : item))
+    )
+  }
+
+  const handleFileSampleChange = (index: number, sampleNumber: number | undefined) => {
+    setSelectedFiles((prev) =>
+      prev.map((item, i) => (i === index ? { ...item, sampleNumber } : item))
+    )
+  }
+
+  const handleFileTypeChange = (index: number, dataType: string) => {
+    setSelectedFiles((prev) =>
+      prev.map((item, i) => (i === index ? { ...item, dataType } : item))
     )
   }
 
@@ -193,8 +236,11 @@ export function ChatPanel() {
     try {
       const formData = new FormData()
       formData.append('message', message)
-      // Send per-file target agents as JSON array
+      // Send per-file metadata as JSON arrays
       formData.append('target_agents', JSON.stringify(filesToSend.map((sf) => sf.targetAgent)))
+      formData.append('file_groups', JSON.stringify(filesToSend.map((sf) => sf.groupId || null)))
+      formData.append('file_samples', JSON.stringify(filesToSend.map((sf) => sf.sampleNumber || null)))
+      formData.append('file_types', JSON.stringify(filesToSend.map((sf) => sf.dataType || null)))
       filesToSend.forEach((sf) => formData.append('files', sf.file))
 
       // Use raw fetch (not apiFetch) because FormData needs no Content-Type header
@@ -440,39 +486,89 @@ export function ChatPanel() {
         </div>
       )}
 
-      {/* Selected files preview with per-file agent selector */}
+      {/* Selected files preview with per-file agent/group/sample/type selectors */}
       {selectedFiles.length > 0 && (
         <div className="mx-4 mb-2 space-y-1.5">
-          {selectedFiles.map(({ file, targetAgent }, i) => {
-            const preview = filePreviews[file.name + file.size]
+          {selectedFiles.map((sf, i) => {
+            const preview = filePreviews[sf.file.name + sf.file.size]
+            const section = getSection(sf.targetAgent)
+            const typeOptions = getTypeOptions(sf.targetAgent)
+            const groups = currentSession?.treatmentGroups || []
+            const selectedGroupObj = groups.find(g => g.id === sf.groupId)
+            const maxSamples = selectedGroupObj?.sampleCount || 0
+
             return (
               <div
                 key={i}
-                className="flex items-center gap-2 bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700"
+                className="bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 space-y-1"
               >
-                {preview ? (
-                  <img src={preview} alt="" className="w-6 h-6 rounded object-cover shrink-0" />
-                ) : (
-                  <FileText className="w-4 h-4 text-slate-400 shrink-0" />
+                {/* Row 1: preview + filename + agent + delete */}
+                <div className="flex items-center gap-2">
+                  {preview ? (
+                    <img src={preview} alt="" className="w-6 h-6 rounded object-cover shrink-0" />
+                  ) : (
+                    <FileText className="w-4 h-4 text-slate-400 shrink-0" />
+                  )}
+                  <span className="truncate max-w-[140px]">{sf.file.name}</span>
+                  <select
+                    value={sf.targetAgent}
+                    onChange={(e) => handleFileAgentChange(i, e.target.value)}
+                    className="ml-auto shrink-0 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-600 bg-white focus:ring-1 focus:ring-violet-500"
+                  >
+                    {AGENT_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {t(opt.labelKey)}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => handleRemoveFile(i)}
+                    className="p-0.5 hover:bg-slate-200 rounded shrink-0"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+
+                {/* Row 2: group + sample + type — only for non-PI agents */}
+                {section && (
+                  <div className="flex items-center gap-1.5 pl-1">
+                    {/* Treatment group */}
+                    <select
+                      value={sf.groupId || '_none'}
+                      onChange={(e) => handleFileGroupChange(i, e.target.value === '_none' ? undefined : e.target.value)}
+                      className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white max-w-[100px]"
+                    >
+                      <option value="_none">{language === 'zh' ? '无分组' : 'No Group'}</option>
+                      {groups.map(g => (
+                        <option key={g.id} value={g.id}>{g.name}</option>
+                      ))}
+                    </select>
+
+                    {/* Sample number */}
+                    <select
+                      value={sf.sampleNumber != null ? String(sf.sampleNumber) : '_none'}
+                      disabled={!sf.groupId}
+                      onChange={(e) => handleFileSampleChange(i, e.target.value === '_none' ? undefined : parseInt(e.target.value))}
+                      className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white disabled:opacity-40 max-w-[60px]"
+                    >
+                      <option value="_none">-</option>
+                      {Array.from({ length: maxSamples }, (_, j) => (
+                        <option key={j + 1} value={String(j + 1)}>S{j + 1}</option>
+                      ))}
+                    </select>
+
+                    {/* Data type */}
+                    <select
+                      value={sf.dataType || typeOptions[0] || ''}
+                      onChange={(e) => handleFileTypeChange(i, e.target.value)}
+                      className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white max-w-[90px]"
+                    >
+                      {typeOptions.map(opt => (
+                        <option key={opt} value={opt}>{opt}</option>
+                      ))}
+                    </select>
+                  </div>
                 )}
-                <span className="truncate max-w-[160px]">{file.name}</span>
-                <select
-                  value={targetAgent}
-                  onChange={(e) => handleFileAgentChange(i, e.target.value)}
-                  className="ml-auto shrink-0 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-600 bg-white focus:ring-1 focus:ring-violet-500"
-                >
-                  {AGENT_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {t(opt.labelKey)}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  onClick={() => handleRemoveFile(i)}
-                  className="p-0.5 hover:bg-slate-200 rounded shrink-0"
-                >
-                  <X className="w-3 h-3" />
-                </button>
               </div>
             )
           })}

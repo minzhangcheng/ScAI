@@ -96,34 +96,54 @@ class BioinformaticsCheckpoint(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
-class PathologyImage(BaseModel):
-    """Pathology image and analysis"""
+class TreatmentGroup(BaseModel):
+    """A treatment/experimental group definition"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str                          # e.g., "Control", "NASH Model", "Treatment A"
+    description: str = ""              # Detailed description of what this group represents
+    sample_count: int = 1              # Number of samples/replicates in this group
+    order: int = 0                     # Display order
+
+class DataFile(BaseModel):
+    """Universal file record for all uploaded data (pathology, sequencing, biochemistry)"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     filename: str
-    image_type: str  # H&E, Sirius Red, Perls Blue, etc.
-    original_path: str
-    tiles: List[str] = Field(default_factory=list)  # Paths to tiles
-    analysis: Optional[str] = None
+    file_path: str                     # Absolute path on disk
+
+    # Section: which data section this belongs to
+    section: Literal["pathology", "sequencing", "biochemistry"]
+
+    # Data type within the section
+    # pathology: "H&E", "Sirius Red", "Perls Blue", "Oil Red O", "PAS", or custom
+    # sequencing: "scRNA-seq", "loom"
+    # biochemistry: "image", "file"
+    data_type: str
+
+    # Group and sample assignment
+    group_id: Optional[str] = None     # TreatmentGroup.id, or None for "No group distinction"
+    sample_number: Optional[int] = None  # 1-based sample number, or None for "No sample distinction"
+
+    # Section-specific metadata
+    tiles: List[str] = Field(default_factory=list)       # For pathology: tile paths
+    analysis: Optional[str] = None                        # For pathology: analysis result
+    description: Optional[str] = None                     # User-provided description
+    extracted_data: Optional[Dict[str, Any]] = None       # For biochemistry: extracted values
+
     timestamp: datetime = Field(default_factory=datetime.now)
 
-class BiochemistryResult(BaseModel):
-    """Biochemistry experiment result"""
+class BiochemistryIndicator(BaseModel):
+    """Manual biochemistry entry (indicator name + value + unit) with group/sample association"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     indicator: str
     value: float
     unit: str
     reference_range: Optional[str] = None
     interpretation: Optional[str] = None
-    timestamp: datetime = Field(default_factory=datetime.now)
 
-class BiochemistryFile(BaseModel):
-    """Biochemistry file (image or data file)"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    filename: str
-    file_type: str  # 'image' or 'file' (csv, xlsx, txt, etc.)
-    file_path: str
-    description: Optional[str] = None
-    extracted_data: Optional[Dict[str, Any]] = None  # Extracted values from file/image
+    # Group and sample
+    group_id: Optional[str] = None
+    sample_number: Optional[int] = None
+
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class LiteratureReport(BaseModel):
@@ -212,14 +232,10 @@ class AnalysisState(BaseModel):
     # Code execution history (for reproducibility)
     code_history: List[CodeExecution] = Field(default_factory=list)
     
-    # Uploaded data
-    pathology_images: List[PathologyImage] = Field(default_factory=list)
-    biochemistry_results: List[BiochemistryResult] = Field(default_factory=list)
-    biochemistry_files: List[BiochemistryFile] = Field(default_factory=list)  # Uploaded files/images
-    control_seq_path: Optional[str] = None     # Path to control group scRNA-seq data (.h5ad)
-    treatment_seq_path: Optional[str] = None   # Path to treatment group scRNA-seq data (.h5ad)
-    control_loom_path: Optional[str] = None    # Path to control group loom file (for RNA velocity)
-    treatment_loom_path: Optional[str] = None  # Path to treatment group loom file (for RNA velocity)
+    # Treatment groups and uploaded data (multi-group, multi-sample)
+    treatment_groups: List[TreatmentGroup] = Field(default_factory=list)
+    data_files: List[DataFile] = Field(default_factory=list)
+    biochemistry_indicators: List[BiochemistryIndicator] = Field(default_factory=list)
     
     # Literature reports
     literature_reports: List[LiteratureReport] = Field(default_factory=list)
@@ -270,6 +286,73 @@ class AnalysisState(BaseModel):
 
     # Error tracking for parallel analysis
     agent_errors: List[AgentError] = Field(default_factory=list)
+
+    # --- Data helper methods ---
+
+    def get_files_by_section(self, section: str) -> List[DataFile]:
+        """Get all data files for a section (pathology/sequencing/biochemistry)"""
+        return [f for f in self.data_files if f.section == section]
+
+    def get_files_by_group(self, group_id: Optional[str], section: Optional[str] = None) -> List[DataFile]:
+        """Get data files for a specific group, optionally filtered by section"""
+        files = [f for f in self.data_files if f.group_id == group_id]
+        if section:
+            files = [f for f in files if f.section == section]
+        return files
+
+    def has_sequencing_data(self) -> bool:
+        """Check if any sequencing data is uploaded"""
+        return any(f.section == "sequencing" for f in self.data_files)
+
+    def get_group_by_id(self, group_id: Optional[str]) -> Optional[TreatmentGroup]:
+        """Lookup a treatment group by ID"""
+        if group_id is None:
+            return None
+        for g in self.treatment_groups:
+            if g.id == group_id:
+                return g
+        return None
+
+    def build_experimental_design_summary(self) -> str:
+        """Generate a text description of the experimental design for agent prompts."""
+        from collections import Counter
+        if not self.treatment_groups:
+            # Check if there are ungrouped files
+            if self.data_files:
+                parts = ["Experimental Design: No groups defined (ungrouped data)"]
+                for section in ["pathology", "sequencing", "biochemistry"]:
+                    section_files = self.get_files_by_section(section)
+                    if section_files:
+                        types = Counter(f.data_type for f in section_files)
+                        parts.append(f"  {section}: {dict(types)}")
+                return "\n".join(parts)
+            return "No experimental groups or data defined."
+
+        parts = [f"Experimental Design: {len(self.treatment_groups)} group(s)"]
+        for g in sorted(self.treatment_groups, key=lambda x: x.order):
+            parts.append(f"  - {g.name} ({g.sample_count} sample(s)): {g.description}")
+            group_files = self.get_files_by_group(g.id)
+            for section in ["pathology", "sequencing", "biochemistry"]:
+                section_files = [f for f in group_files if f.section == section]
+                if section_files:
+                    types = Counter(f.data_type for f in section_files)
+                    parts.append(f"    {section}: {dict(types)}")
+
+        # Also show ungrouped data
+        ungrouped = self.get_files_by_group(None)
+        if ungrouped:
+            parts.append("  - Ungrouped data:")
+            for section in ["pathology", "sequencing", "biochemistry"]:
+                section_files = [f for f in ungrouped if f.section == section]
+                if section_files:
+                    types = Counter(f.data_type for f in section_files)
+                    parts.append(f"    {section}: {dict(types)}")
+
+        # Show biochemistry indicators summary
+        if self.biochemistry_indicators:
+            parts.append(f"  Biochemistry indicators: {len(self.biochemistry_indicators)} manual entries")
+
+        return "\n".join(parts)
 
     def increment_version(self):
         """Atomically increment state version for synchronization
@@ -360,7 +443,10 @@ class APIResponse(BaseModel):
 class UploadRequest(BaseModel):
     """Request to upload data"""
     session_id: str
-    upload_type: Literal["pathology", "biochemistry", "snrna_seq"]
+    section: Literal["pathology", "sequencing", "biochemistry"]
+    data_type: str
+    group_id: Optional[str] = None
+    sample_number: Optional[int] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class WebSocketMessage(BaseModel):

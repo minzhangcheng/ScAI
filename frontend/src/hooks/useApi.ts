@@ -125,9 +125,9 @@ export function useSession() {
         currentRound: 0,
         createdAt: new Date().toISOString(),
         instruction,
-        pathologyImages: [],
-        biochemistryResults: [],
-        biochemistryFiles: [],
+        treatmentGroups: [],
+        dataFiles: [],
+        biochemistryIndicators: [],
         roundResults: [],
       }
       
@@ -172,13 +172,22 @@ export function useSession() {
         currentRound: data.current_round || 0,
         createdAt: data.created_at || new Date().toISOString(),
         instruction: data.initial_instruction || '',
-        pathologyImages: data.pathology_images || [],
-        biochemistryResults: data.biochemistry_results || [],
-        biochemistryFiles: data.biochemistry_files || [],
-        controlSeqPath: data.control_seq_path,
-        treatmentSeqPath: data.treatment_seq_path,
-        controlLoomPath: data.control_loom_path,
-        treatmentLoomPath: data.treatment_loom_path,
+        treatmentGroups: (data.treatment_groups || []).map((g: any) => ({
+          id: g.id, name: g.name, description: g.description || '',
+          sampleCount: g.sampleCount ?? g.sample_count ?? 1, order: g.order ?? 0,
+        })),
+        dataFiles: (data.data_files || []).map((f: any) => ({
+          id: f.id, filename: f.filename, filePath: f.filePath ?? f.file_path ?? '',
+          section: f.section, dataType: f.dataType ?? f.data_type ?? '',
+          groupId: f.groupId ?? f.group_id, sampleNumber: f.sampleNumber ?? f.sample_number,
+          description: f.description, timestamp: f.timestamp || '',
+        })),
+        biochemistryIndicators: (data.biochemistry_indicators || []).map((r: any) => ({
+          id: r.id, indicator: r.indicator, value: r.value, unit: r.unit,
+          referenceRange: r.referenceRange ?? r.reference_range,
+          interpretation: r.interpretation,
+          groupId: r.groupId ?? r.group_id, sampleNumber: r.sampleNumber ?? r.sample_number,
+        })),
         roundResults: transformedRoundResults,
         finalSummary: data.final_summary,
         // Publication outputs (snake_case → camelCase)
@@ -195,7 +204,17 @@ export function useSession() {
           revisionCount: f.revision_count ?? f.revisionCount ?? 0,
           createdAt: f.created_at || f.createdAt || '',
         })),
-        publicationTables: data.publication_tables || [],
+        publicationTables: (data.publication_tables || []).map((t: any) => ({
+          id: t.id,
+          name: t.name,
+          description: t.description,
+          csvPath: t.csv_path || t.csvPath || '',
+          columns: Array.isArray(t.columns) ? t.columns : [],
+          previewData: Array.isArray(t.preview_data) ? t.preview_data : (t.previewData || []),
+          reviewStatus: t.review_status || t.reviewStatus || 'pending',
+          piFeedback: t.pi_feedback || t.piFeedback,
+          createdAt: t.created_at || t.createdAt || '',
+        })),
         graphicAbstract: data.graphic_abstract ? {
           id: data.graphic_abstract.id,
           prompt: data.graphic_abstract.prompt || '',
@@ -310,199 +329,169 @@ export function useSession() {
     }
   }, [currentSession])
 
-  const uploadPathology = useCallback(async (file: File, imageType: string) => {
-    // Get fresh session state to avoid closure issues
+  // --- Group CRUD ---
+  const addGroup = useCallback(async (name: string, description: string, sampleCount: number) => {
     const session = useAppStore.getState().currentSession
     if (!session) throw new Error('No active session')
-
-    // Ensure session exists first
     await ensureSession()
 
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('image_type', imageType)
-
-    const response = await fetch(
-      `${API_BASE}/session/${session.id}/upload/pathology`,
-      { method: 'POST', body: formData }
-    )
-
-    if (!response.ok) {
-      throw new Error('Failed to upload pathology image')
-    }
-
-    const data = await response.json()
-
-    // Get latest session state for update
-    const latestSession = useAppStore.getState().currentSession
-    useAppStore.getState().updateSession({
-      pathologyImages: [
-        ...(latestSession?.pathologyImages || []),
-        {
-          id: data.data.image_id,
-          filename: file.name,
-          imageType: imageType,
-          preview: URL.createObjectURL(file),
-          filePath: data.data.file_path,
-        },
-      ],
-    })
-
-    return data
-  }, [ensureSession])
-  
-  const uploadSnRNASeq = useCallback(async (file: File, group: 'control' | 'treatment') => {
-    // Get fresh session state to avoid closure issues
-    const session = useAppStore.getState().currentSession
-    if (!session) throw new Error('No active session')
-
-    // Ensure session exists first
-    await ensureSession()
-
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('group', group)
-
-    const response = await fetch(
-      `${API_BASE}/session/${session.id}/upload/snrna_seq`,
-      { method: 'POST', body: formData }
-    )
-
-    if (!response.ok) {
-      throw new Error('Failed to upload snRNA-seq data')
-    }
-
-    const data = await response.json()
-
-    // Update session state with the uploaded file path
-    if (group === 'control') {
-      useAppStore.getState().updateSession({ controlSeqPath: data.data.file_path })
-    } else {
-      useAppStore.getState().updateSession({ treatmentSeqPath: data.data.file_path })
-    }
-
-    return data
-  }, [ensureSession])
-
-  const uploadLoom = useCallback(async (file: File, group: 'control' | 'treatment') => {
-    // Get fresh session state to avoid closure issues
-    const session = useAppStore.getState().currentSession
-    if (!session) throw new Error('No active session')
-
-    // Ensure session exists first
-    await ensureSession()
-
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('group', group)
-
-    const response = await fetch(
-      `${API_BASE}/session/${session.id}/upload/loom`,
-      { method: 'POST', body: formData }
-    )
-
-    if (!response.ok) {
-      throw new Error('Failed to upload loom file')
-    }
-
-    const data = await response.json()
-
-    // Update session state with the uploaded file path
-    if (group === 'control') {
-      useAppStore.getState().updateSession({ controlLoomPath: data.data.file_path })
-    } else {
-      useAppStore.getState().updateSession({ treatmentLoomPath: data.data.file_path })
-    }
-
-    return data
-  }, [ensureSession])
-  
-  const addBiochemistry = useCallback(async (
-    indicator: string,
-    value: number,
-    unit: string
-  ) => {
-    // Get fresh session state to avoid closure issues
-    const session = useAppStore.getState().currentSession
-    if (!session) throw new Error('No active session')
-
-    const response = await apiFetch<any>(`/session/${session.id}/biochemistry`, {
+    const response = await apiFetch<any>(`/session/${session.id}/groups`, {
       method: 'POST',
-      body: JSON.stringify({
-        session_id: session.id,
-        indicator,
-        value,
-        unit,
-      }),
+      body: JSON.stringify({ name, description, sample_count: sampleCount }),
     })
 
-    // Get latest session state for update
     const latestSession = useAppStore.getState().currentSession
     useAppStore.getState().updateSession({
-      biochemistryResults: [
-        ...(latestSession?.biochemistryResults || []),
-        {
-          id: response.data.result_id,
-          indicator,
-          value,
-          unit,
-        },
-      ],
+      treatmentGroups: [...(latestSession?.treatmentGroups || []), response.data],
+    })
+    return response
+  }, [ensureSession])
+
+  const updateGroup = useCallback(async (groupId: string, updates: { name?: string; description?: string; sampleCount?: number }) => {
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+
+    const body: any = {}
+    if (updates.name !== undefined) body.name = updates.name
+    if (updates.description !== undefined) body.description = updates.description
+    if (updates.sampleCount !== undefined) body.sample_count = updates.sampleCount
+
+    const response = await apiFetch<any>(`/session/${session.id}/groups/${groupId}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
     })
 
+    const latestSession = useAppStore.getState().currentSession
+    useAppStore.getState().updateSession({
+      treatmentGroups: (latestSession?.treatmentGroups || []).map(g =>
+        g.id === groupId ? { ...g, ...response.data } : g
+      ),
+    })
     return response
   }, [])
-  
-  const uploadBiochemistryFile = useCallback(async (
-    file: File,
-    description?: string
-  ) => {
-    // Get fresh session state to avoid closure issues
+
+  const deleteGroup = useCallback(async (groupId: string) => {
     const session = useAppStore.getState().currentSession
     if (!session) throw new Error('No active session')
 
-    // Ensure session exists first
+    await apiFetch(`/session/${session.id}/groups/${groupId}`, { method: 'DELETE' })
+
+    const latestSession = useAppStore.getState().currentSession
+    useAppStore.getState().updateSession({
+      treatmentGroups: (latestSession?.treatmentGroups || []).filter(g => g.id !== groupId),
+      dataFiles: (latestSession?.dataFiles || []).filter(f => f.groupId !== groupId),
+      biochemistryIndicators: (latestSession?.biochemistryIndicators || []).filter(i => i.groupId !== groupId),
+    })
+  }, [])
+
+  // --- Unified data upload ---
+  const uploadData = useCallback(async (
+    file: File,
+    section: 'pathology' | 'sequencing' | 'biochemistry',
+    dataType: string,
+    groupId?: string,
+    sampleNumber?: number,
+    description?: string
+  ) => {
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
     await ensureSession()
 
     const formData = new FormData()
     formData.append('file', file)
-    if (description) {
-      formData.append('description', description)
-    }
+    formData.append('section', section)
+    formData.append('data_type', dataType)
+    if (groupId) formData.append('group_id', groupId)
+    if (sampleNumber != null) formData.append('sample_number', String(sampleNumber))
+    if (description) formData.append('description', description)
 
     const response = await fetch(
-      `${API_BASE}/session/${session.id}/upload/biochemistry`,
-      {
-        method: 'POST',
-        body: formData,
-      }
+      `${API_BASE}/session/${session.id}/upload/data`,
+      { method: 'POST', body: formData }
     )
-
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: 'Upload failed' }))
-      throw new Error(error.detail || 'Upload failed')
+      const err = await response.json().catch(() => ({ detail: 'Upload failed' }))
+      throw new Error(err.detail || 'Upload failed')
     }
-
     const data = await response.json()
 
-    // Get latest session state to avoid closure issues
-    const latestSession = useAppStore.getState().currentSession
-    const existingFiles = latestSession?.biochemistryFiles || []
-
-    const newFile = {
-      id: data.data.file_id,
-      filename: file.name,
-      fileType: data.data.file_type as 'image' | 'file',
-      filePath: data.data.file_path,
+    // Refresh dataFiles from server to ensure frontend state matches backend
+    try {
+      const refreshData = await apiFetch<any>(`/session/${session.id}/load`)
+      const current = useAppStore.getState().currentSession
+      if (current && current.id === session.id) {
+        useAppStore.getState().updateSession({
+          dataFiles: (refreshData.data_files || []).map((f: any) => ({
+            id: f.id, filename: f.filename, filePath: f.filePath ?? f.file_path ?? '',
+            section: f.section, dataType: f.dataType ?? f.data_type ?? '',
+            groupId: f.groupId ?? f.group_id, sampleNumber: f.sampleNumber ?? f.sample_number,
+            description: f.description, timestamp: f.timestamp || '',
+          })),
+        })
+      }
+    } catch {
+      // Fallback: manually append the new file if refresh fails
+      const latestSession = useAppStore.getState().currentSession
+      if (latestSession) {
+        useAppStore.getState().updateSession({
+          dataFiles: [...(latestSession.dataFiles || []), {
+            id: data.data.file_id, filename: file.name, filePath: data.data.file_path,
+            section, dataType, groupId: data.data.group_id || undefined,
+            sampleNumber: data.data.sample_number || undefined, description,
+            timestamp: new Date().toISOString(),
+          }],
+        })
+      }
     }
-
-    // Update session with new file using store's method directly
-    useAppStore.getState().updateSession({
-      biochemistryFiles: [...existingFiles, newFile],
-    })
-
     return data
   }, [ensureSession])
+
+  const deleteDataFile = useCallback(async (fileId: string) => {
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+
+    await apiFetch(`/session/${session.id}/data/${fileId}`, { method: 'DELETE' })
+
+    const latestSession = useAppStore.getState().currentSession
+    useAppStore.getState().updateSession({
+      dataFiles: (latestSession?.dataFiles || []).filter(f => f.id !== fileId),
+    })
+  }, [])
+
+  // --- Biochemistry indicators ---
+  const addIndicator = useCallback(async (
+    indicator: string, value: number, unit: string,
+    groupId?: string, sampleNumber?: number
+  ) => {
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+
+    const response = await apiFetch<any>(`/session/${session.id}/indicators`, {
+      method: 'POST',
+      body: JSON.stringify({ indicator, value, unit, group_id: groupId, sample_number: sampleNumber }),
+    })
+
+    const latestSession = useAppStore.getState().currentSession
+    useAppStore.getState().updateSession({
+      biochemistryIndicators: [
+        ...(latestSession?.biochemistryIndicators || []),
+        { id: response.data.indicator_id, indicator, value, unit, referenceRange: undefined, interpretation: undefined, groupId, sampleNumber },
+      ],
+    })
+    return response
+  }, [])
+
+  const deleteIndicator = useCallback(async (indicatorId: string) => {
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+
+    await apiFetch(`/session/${session.id}/indicators/${indicatorId}`, { method: 'DELETE' })
+
+    const latestSession = useAppStore.getState().currentSession
+    useAppStore.getState().updateSession({
+      biochemistryIndicators: (latestSession?.biochemistryIndicators || []).filter(i => i.id !== indicatorId),
+    })
+  }, [])
   
   const startAnalysis = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
@@ -654,77 +643,6 @@ export function useSession() {
     return apiFetch<any>(`/session/${currentSession.id}/report`)
   }, [currentSession])
   
-  // Delete functions
-  const deletePathologyImage = useCallback(async (imageId: string) => {
-    if (!currentSession) throw new Error('No active session')
-    
-    await apiFetch(`/session/${currentSession.id}/pathology/${imageId}`, {
-      method: 'DELETE',
-    })
-    
-    const latestSession = useAppStore.getState().currentSession
-    // Revoke blob URL to prevent memory leak
-    const removed = latestSession?.pathologyImages.find(img => img.id === imageId)
-    if (removed?.preview) URL.revokeObjectURL(removed.preview)
-    useAppStore.getState().updateSession({
-      pathologyImages: latestSession?.pathologyImages.filter(img => img.id !== imageId) || [],
-    })
-  }, [currentSession])
-  
-  const deleteBiochemistryFile = useCallback(async (fileId: string) => {
-    if (!currentSession) throw new Error('No active session')
-    
-    await apiFetch(`/session/${currentSession.id}/biochemistry/file/${fileId}`, {
-      method: 'DELETE',
-    })
-    
-    const latestSession = useAppStore.getState().currentSession
-    useAppStore.getState().updateSession({
-      biochemistryFiles: latestSession?.biochemistryFiles?.filter(f => f.id !== fileId) || [],
-    })
-  }, [currentSession])
-  
-  const deleteBiochemistryResult = useCallback(async (resultId: string) => {
-    if (!currentSession) throw new Error('No active session')
-    
-    await apiFetch(`/session/${currentSession.id}/biochemistry/result/${resultId}`, {
-      method: 'DELETE',
-    })
-    
-    const latestSession = useAppStore.getState().currentSession
-    useAppStore.getState().updateSession({
-      biochemistryResults: latestSession?.biochemistryResults.filter(r => r.id !== resultId) || [],
-    })
-  }, [currentSession])
-  
-  const deleteSequencing = useCallback(async (group: 'control' | 'treatment') => {
-    if (!currentSession) throw new Error('No active session')
-    
-    await apiFetch(`/session/${currentSession.id}/sequencing/${group}`, {
-      method: 'DELETE',
-    })
-    
-    if (group === 'control') {
-      useAppStore.getState().updateSession({ controlSeqPath: undefined })
-    } else {
-      useAppStore.getState().updateSession({ treatmentSeqPath: undefined })
-    }
-  }, [currentSession])
-  
-  const deleteLoom = useCallback(async (group: 'control' | 'treatment') => {
-    if (!currentSession) throw new Error('No active session')
-    
-    await apiFetch(`/session/${currentSession.id}/loom/${group}`, {
-      method: 'DELETE',
-    })
-    
-    if (group === 'control') {
-      useAppStore.getState().updateSession({ controlLoomPath: undefined })
-    } else {
-      useAppStore.getState().updateSession({ treatmentLoomPath: undefined })
-    }
-  }, [currentSession])
-  
   return {
     currentSession,
     loading,
@@ -734,16 +652,13 @@ export function useSession() {
     listSessions,
     deleteSession,
     saveSession,
-    uploadPathology,
-    uploadSnRNASeq,
-    uploadLoom,
-    addBiochemistry,
-    uploadBiochemistryFile,
-    deletePathologyImage,
-    deleteBiochemistryFile,
-    deleteBiochemistryResult,
-    deleteSequencing,
-    deleteLoom,
+    addGroup,
+    updateGroup,
+    deleteGroup,
+    uploadData,
+    deleteDataFile,
+    addIndicator,
+    deleteIndicator,
     startAnalysis,
     pauseAnalysis,
     resumeAnalysis,

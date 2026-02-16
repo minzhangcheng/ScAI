@@ -15,7 +15,7 @@ import logging
 
 from .base import BaseAgent
 from ..models.schemas import (
-    AgentType, AnalysisState, MessageRole, BiochemistryResult, BiochemistryFile
+    AgentType, AnalysisState, MessageRole, BiochemistryIndicator, DataFile
 )
 from ..utils.llm_client import OpenAICompatibleClient
 
@@ -66,11 +66,11 @@ class BiochemistryAgent(BaseAgent):
         Step 3: Summarize results, provide conclusions and experiment suggestions
         """
 
-        files = state.biochemistry_files or []
+        bio_files = state.get_files_by_section("biochemistry")
 
         # Separate image files from data files
-        image_files = [f for f in files if f.file_type == 'image']
-        data_files = [f for f in files if f.file_type != 'image']
+        image_files = [f for f in bio_files if f.data_type == 'image']
+        data_files = [f for f in bio_files if f.data_type != 'image']
 
         # ====================================================================
         # Step 1: Process structured indicators and data files
@@ -102,7 +102,7 @@ class BiochemistryAgent(BaseAgent):
     async def _step1_process_indicators(
         self,
         state: AnalysisState,
-        data_files: List[BiochemistryFile],
+        data_files: List[DataFile],
         instruction: str,
     ) -> Optional[Dict[str, Any]]:
         """Step 1: Process structured indicators and data files.
@@ -144,7 +144,7 @@ class BiochemistryAgent(BaseAgent):
                     bio_file.extracted_data = {"error": str(e)}
 
         # Check if we have any indicators to analyze
-        results = state.biochemistry_results
+        results = state.biochemistry_indicators
         if not results:
             logger.info("[BiochemistryAgent] Step 1: No indicators to analyze, skipping")
             return None
@@ -204,7 +204,7 @@ Reply in JSON format:
 
     async def _step2_process_images(
         self,
-        image_files: List[BiochemistryFile],
+        image_files: List[DataFile],
         instruction: str,
     ) -> Optional[Dict[str, Any]]:
         """Step 2: Analyze images with full visual analysis.
@@ -279,7 +279,7 @@ Focus on:
         }
 
     async def _analyze_single_image(
-        self, bio_file: BiochemistryFile, instruction: str
+        self, bio_file: DataFile, instruction: str
     ) -> Optional[str]:
         """Analyze a single biochemistry image using vision model.
 
@@ -463,7 +463,7 @@ Requirements:
         interpretation = data.get("interpretation", "")
 
         # Count processed files
-        all_files = (state.biochemistry_files or [])
+        all_files = state.get_files_by_section("biochemistry")
         processed_count = len([f for f in all_files if f.extracted_data])
 
         return {
@@ -558,7 +558,7 @@ Reply in JSON format:
                 )
         return "\n".join(context_parts)
 
-    async def _extract_from_data_file(self, bio_file: BiochemistryFile) -> Dict[str, Any]:
+    async def _extract_from_data_file(self, bio_file: DataFile) -> Dict[str, Any]:
         """Extract biochemistry data from a data file (CSV, Excel, TXT)"""
 
         if not os.path.exists(bio_file.file_path):
@@ -628,13 +628,13 @@ Extract EVERY biochemistry-related numerical value. Ignore metadata like dates o
         value: float,
         unit: str,
         state: AnalysisState
-    ) -> BiochemistryResult:
-        """Add a single biochemistry result.
+    ) -> BiochemistryIndicator:
+        """Add a single biochemistry indicator.
 
         Note: Interpretation is NOT done here with hardcoded reference ranges.
         Instead, the LLM will interpret all results contextually in step 1.
         """
-        result = BiochemistryResult(
+        result = BiochemistryIndicator(
             indicator=indicator,
             value=value,
             unit=unit,
@@ -642,14 +642,14 @@ Extract EVERY biochemistry-related numerical value. Ignore metadata like dates o
             interpretation=None,
         )
 
-        state.biochemistry_results.append(result)
+        state.biochemistry_indicators.append(result)
         return result
 
     async def parse_results_from_text(
         self,
         text: str,
         state: AnalysisState
-    ) -> List[BiochemistryResult]:
+    ) -> List[BiochemistryIndicator]:
         """Parse biochemistry results from free-form text input"""
 
         prompt = f"""
@@ -720,7 +720,7 @@ Pathology findings:
 
 Biochemistry results:
 {json.dumps([{"indicator": r.indicator, "value": r.value, "interpretation": r.interpretation}
-             for r in state.biochemistry_results], ensure_ascii=False)}
+             for r in state.biochemistry_indicators], ensure_ascii=False)}
 
 Please analyze the consistency between pathology and biochemistry findings:
 1. Which findings corroborate each other

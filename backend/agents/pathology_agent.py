@@ -12,7 +12,7 @@ from .base import BaseAgent
 # Configure logger
 logger = logging.getLogger(__name__)
 from ..models.schemas import (
-    AgentType, AnalysisState, MessageRole, PathologyImage
+    AgentType, AnalysisState, MessageRole, DataFile
 )
 from ..utils.llm_client import OpenAICompatibleClient
 from ..utils.image_utils import (
@@ -59,7 +59,7 @@ class PathologyAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Process pathology analysis instruction"""
         # Check if there are images to analyze
-        images_to_analyze = kwargs.get("images", state.pathology_images)
+        images_to_analyze = kwargs.get("images", state.get_files_by_section("pathology"))
         
         logger.info(f"[PathologyAgent] Processing with {len(images_to_analyze) if images_to_analyze else 0} images")
         
@@ -116,16 +116,16 @@ class PathologyAgent(BaseAgent):
     
     async def _analyze_image(
         self,
-        image_info: PathologyImage,
+        image_info: DataFile,
         instruction: str
     ) -> Dict[str, Any]:
         """
         Analyze a single pathology image
-        
+
         Args:
-            image_info: PathologyImage object
+            image_info: DataFile object (section=pathology)
             instruction: Analysis instruction
-            
+
         Returns:
             Analysis results
         """
@@ -137,20 +137,20 @@ class PathologyAgent(BaseAgent):
         BATCH_SIZE = 5
         
         # Check if file exists
-        if not os.path.exists(image_info.original_path):
-            logger.error(f"[PathologyAgent] Image file not found: {image_info.original_path}")
+        if not os.path.exists(image_info.file_path):
+            logger.error(f"[PathologyAgent] Image file not found: {image_info.file_path}")
             return {
                 "image_id": image_info.id,
-                "error": f"Image file not found: {image_info.original_path}",
+                "error": f"Image file not found: {image_info.file_path}",
                 "findings": []
             }
         
         try:
-            logger.info(f"[PathologyAgent] Processing image: {image_info.original_path}")
+            logger.info(f"[PathologyAgent] Processing image: {image_info.file_path}")
             
             # Process image into tiles
             tiles = process_pathology_image(
-                image_info.original_path,
+                image_info.file_path,
                 tile_size=self.tile_size,
                 max_tiles=self.max_tiles
             )
@@ -165,14 +165,14 @@ class PathologyAgent(BaseAgent):
                 }
             
             # Also create overview
-            img = load_image(image_info.original_path)
+            img = load_image(image_info.file_path)
             overview = create_overview_image(img)
             
             logger.info(f"[PathologyAgent] Starting overview analysis...")
             
             # Analyze overview first
             overview_prompt = f"""
-This is an overview of a tissue section stained with {image_info.image_type}.
+This is an overview of a tissue section stained with {image_info.data_type}.
 
 Analysis instruction: {instruction}
 
@@ -219,7 +219,7 @@ Please reply in JSON format:
                 
                 # Create batch prompt
                 batch_prompt = f"""
-You are analyzing {len(batch_tiles)} regions (tiles {start_idx + 1} to {end_idx}) from a {image_info.image_type} stained tissue section.
+You are analyzing {len(batch_tiles)} regions (tiles {start_idx + 1} to {end_idx}) from a {image_info.data_type} stained tissue section.
 Total tiles in this section: {len(tiles_to_analyze)}
 
 For EACH tile (in order), identify pathological features based on the tissue type and staining:
@@ -307,7 +307,7 @@ Reply in JSON format:
             
             return {
                 "image_id": image_info.id,
-                "image_type": image_info.image_type,
+                "image_type": image_info.data_type,
                 "overview": overview_data,
                 "tile_count": len(tiles),
                 "findings": final_data.get("findings", []),
@@ -372,7 +372,7 @@ Please provide comprehensive analysis and reply in JSON format:
     
     async def targeted_analysis(
         self,
-        image_info: PathologyImage,
+        image_info: DataFile,
         specific_question: str
     ) -> Dict[str, Any]:
         """
@@ -385,8 +385,8 @@ Please provide comprehensive analysis and reply in JSON format:
             self._set_llm_context()
 
             # Validate file exists
-            if not os.path.exists(image_info.original_path):
-                logger.warning(f"[PathologyAgent] Image not found: {image_info.original_path}")
+            if not os.path.exists(image_info.file_path):
+                logger.warning(f"[PathologyAgent] Image not found: {image_info.file_path}")
                 return {
                     "question": specific_question,
                     "answer": "Image file not found for targeted analysis",
@@ -410,7 +410,7 @@ Please reply in structured format.
 
             # Process image
             tiles = process_pathology_image(
-                image_info.original_path,
+                image_info.file_path,
                 tile_size=self.tile_size,
                 max_tiles=10  # Fewer tiles for targeted analysis
             )
