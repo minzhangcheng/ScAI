@@ -479,6 +479,11 @@ class BioinformaticsAgent(BaseAgent):
         else:
             data_parts.append("⚠️ No sequencing data uploaded")
 
+        # Add explicit data constraint to prevent hallucinating non-existent groups
+        if state.treatment_groups:
+            group_names = ', '.join(g.name for g in state.treatment_groups)
+            data_parts.append(f"\n**CRITICAL DATA CONSTRAINT:** All analysis and figures MUST use only the actual experimental groups listed above. Do NOT fabricate data for groups that don't exist. If a figure requires group comparisons, use ONLY: {group_names}.")
+
         return "\n".join(data_parts)
     
     def _build_analysis_context(self) -> str:
@@ -616,6 +621,8 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
 4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
 5. report_findings - Report conclusions when analysis phase is complete
 6. generate_publication_figure - Generate publication-quality figures with PI review
+   IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
+   NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
 
 WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
@@ -1395,7 +1402,7 @@ plt.close()
 
                     # Generate revised code
                     revised_code = await self._revise_figure_code(
-                        current_code, feedback, suggestions, must_fix, figure_type
+                        current_code, feedback, suggestions, must_fix, figure_type, state, figure.png_base64
                     )
 
                     # Validate revised code before execution
@@ -1512,7 +1519,9 @@ plt.close()
         feedback: str,
         suggestions: List[str],
         must_fix: List[str],
-        figure_type: str
+        figure_type: str,
+        state: AnalysisState = None,
+        image_base64: str = None
     ) -> str:
         """
         Generate revised plotting code based on PI feedback.
@@ -1523,6 +1532,8 @@ plt.close()
             suggestions: List of improvement suggestions
             must_fix: List of critical issues that must be fixed
             figure_type: Type of figure
+            state: Analysis state with treatment group info
+            image_base64: Base64 encoded current figure image for visual review
 
         Returns:
             Revised Python plotting code
@@ -1530,15 +1541,27 @@ plt.close()
         suggestions_text = "\n".join(f"- {s}" for s in suggestions) if suggestions else "None"
         must_fix_text = "\n".join(f"- {m}" for m in must_fix) if must_fix else "None"
 
+        exp_design_constraint = ""
+        if state and state.treatment_groups:
+            group_names = ', '.join(g.name for g in state.treatment_groups)
+            exp_design_constraint = f"""
+**CRITICAL - Experimental Design Constraint:**
+The actual experimental groups are: {group_names}
+You must ONLY use data from these groups. Do NOT create or reference groups that don't exist.
+If the PI feedback asks you to add groups not in the experimental design, IGNORE that part of the feedback and only plot data for the actual groups.
+"""
+
+        figure_context = "**Current Figure:** An image of the current figure is attached. Review it carefully to understand what needs to be changed.\n\n" if image_base64 else ""
+
         prompt = f"""Please revise the following plotting code based on PI feedback.
 
-**Original Code:**
+{figure_context}**Original Code:**
 ```python
 {original_code}
 ```
 
 **Figure Type:** {figure_type}
-
+{exp_design_constraint}
 **PI Feedback:** {feedback}
 
 **Improvement Suggestions:**
@@ -1551,7 +1574,7 @@ plt.close()
 1. Fix all critical issues listed above
 2. Address as many suggestions as possible
 3. Maintain the same overall figure structure
-4. Keep using the same data variables (assume they exist)
+4. Keep using the same data variables (assume they exist), but REMOVE any fabricated/dummy data for groups not in the experimental design
 5. Return ONLY the revised Python code, no explanations
 
 **Common fixes for publication figures:**
@@ -1568,12 +1591,22 @@ Return only the Python code:"""
         self._set_llm_context()
         # Use slightly lower temperature for code revision (needs precision)
         revision_temp = min(self.config.temperature, 0.2)
-        response = await self.llm_client.chat(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=revision_temp,
-            max_tokens=32000
-        )
+        if image_base64:
+            # Use vision API so the agent can see the current figure
+            response = await self.llm_client.chat_with_vision(
+                model=self.model,
+                text_prompt=prompt,
+                images=[image_base64],
+                temperature=revision_temp,
+                max_tokens=32000
+            )
+        else:
+            response = await self.llm_client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=revision_temp,
+                max_tokens=32000
+            )
 
         response_text = response.content if response and response.content else None
         if not response_text:

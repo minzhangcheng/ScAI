@@ -1084,6 +1084,12 @@ You are reviewing a figure for publication in a high-impact scientific journal.
 Project: {state.name}
 Objective: {state.initial_instruction[:500] if state.initial_instruction else 'Biomedical research'}
 
+**Experimental Design (ACTUAL uploaded groups):**
+{state.build_experimental_design_summary()}
+Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatment_groups else 'No groups defined'}
+
+**CRITICAL CONSTRAINT:** The experiment contains ONLY the groups listed above. Do NOT suggest adding, referencing, or comparing groups that are not in the experimental design. If the figure shows groups not listed above, flag this as a critical data accuracy issue.
+
 **Figure Information:**
 - Name: {figure.name}
 - Type: {figure.figure_type}
@@ -1097,6 +1103,7 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
 3. **Aesthetics**: Is the color scheme appropriate? Is the layout clean?
 4. **Completeness**: Are all necessary elements present (legend, axis labels, scale bars, titles)?
 5. **Publication Quality**: Would this be acceptable in a high-impact journal (Nature, Cell, etc.)?
+6. **Data Fidelity**: Does the figure show ONLY the actual experimental groups listed above? Are there any fabricated or non-existent groups/conditions?
 
 **Respond in JSON format:**
 ```json
