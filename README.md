@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.8.0
+**Version**: 0.8.1
 
 ## Core Features
 
@@ -398,6 +398,13 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.8.1 (2026-02-20)
+
+- **Figure Data Fidelity**: Fixed publication figure generation hallucinating non-existent treatment groups. PI figure review and bioinformatics code revision now receive actual experimental design context (`build_experimental_design_summary()`), with explicit constraints to only reference uploaded groups
+- **Vision-Based Figure Revision**: Bioinformatics Agent can now see its own generated figure during revision via `chat_with_vision()` (previously "blind revision" using only PI text feedback and original code). PI feedback + current figure image are now both provided to the revision LLM
+- **Data Constraint Propagation**: Added `CRITICAL DATA CONSTRAINT` to `_build_data_context()`, `_revise_figure_code()` prompt, `generate_publication_figure` tool description, and PI `review_figure()` prompt — covering the full pipeline from initial code generation through review and revision
+- **Data Fidelity Review Criterion**: PI figure review now includes a 6th criterion ("Data Fidelity") checking that figures show only actual experimental groups
 
 ### v0.8.0 (2026-02-16)
 

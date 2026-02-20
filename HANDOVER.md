@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.8.0
-**Last Updated**: 2026-02-16
+**Version**: 0.8.1
+**Last Updated**: 2026-02-20
 
 ## Project Overview
 
@@ -242,8 +242,9 @@ initialize_round ◄────────────────────
 2. **Retry Mechanism**: `@with_retry(max_retries=3)` decorator with exponential backoff
 3. **Structured Error Tracking**: Errors captured in `AgentError` model with agent, type, message, details
 4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
-5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval (up to 3 revisions)
+5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval (up to 3 revisions). PI review includes experimental design context with a Data Fidelity criterion to catch fabricated groups. Revision uses `chat_with_vision()` so the bioinformatics agent can see its own figure alongside PI feedback.
 6. **Figure Step Budget**: Figure-only iterations (using `generate_publication_figure` tool) are excluded from the bioinformatics agent's step count. Safety cap of `MAX_FIGURE_ITERATIONS=5` prevents infinite figure generation loops — after exhaustion, agent refuses new figures and redirects to analysis. `max_tokens=32000` for figure revision code generation prevents truncation.
+17. **Figure Data Fidelity**: All figure generation and revision prompts include explicit experimental design constraints (`CRITICAL DATA CONSTRAINT`) with actual group names from `state.treatment_groups`. This prevents LLM hallucination of non-existent treatment groups. Constraint is injected in: `_build_data_context()`, `generate_publication_figure` tool description, `_revise_figure_code()` prompt, and PI `review_figure()` prompt.
 7. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
 8. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with configurable countdown (default 300s; -1=manual-only, 0=no-wait auto-continue, stored in `round_wait_seconds`). Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend has 10-minute safety timeout. User input or file uploads on the last round extends `max_rounds` by 1.
 9. **File Upload During Pause**: Users can upload pathology images while workflow is in `waiting_input` or `completed` state. Files are tracked in `pending_uploaded_files` and processed in the next round.
@@ -1082,8 +1083,8 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 | FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4158 lines |
 | Report generator (no-sandbox compilation) | `report_generator.py` | ~3196 lines |
 | Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1860 lines |
-| Bioinformatics Agent (autonomous + figure budget + pip install) | `bioinformatics_agent.py` | ~1592 lines |
-| PI Agent (coordinator + reviewer + agent activation) | `pi_agent.py` | ~1345 lines |
+| Bioinformatics Agent (autonomous + figure budget + pip install + vision revision) | `bioinformatics_agent.py` | ~1632 lines |
+| PI Agent (coordinator + reviewer + agent activation + data fidelity) | `pi_agent.py` | ~1359 lines |
 | Literature Agent (2 modes + annotation) | `literature_agent.py` | ~907 lines |
 | LLM client (OpenRouter + Google DR) | `llm_client.py` | ~872 lines |
 | Jupyter sandbox (+ auto PDF) | `sandbox.py` | ~793 lines |
@@ -1145,7 +1146,15 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 **Fix**: `integrated_report` message handler now uses functional update to merge figures, preserving `pngBase64` from existing data when the message's figure data is missing it.
 
-### 5. Stale Session 404 Loop (Fixed in v0.6.1)
+### 5. Figure Hallucination of Non-Existent Treatment Groups (Fixed in v0.8.1)
+
+**Symptom**: Publication figures (e.g., figure_8) show 4 genotype groups (WT, Ctr1 KO, ZnT1 KO, DKO) when only 2 groups (WT, DKO) were uploaded. Figures contain fabricated data.
+
+**Root Cause**: Three cascading failures: (1) Bioinformatics agent's LLM inferred extra groups from the biological context in `initial_instruction` (which mentioned Ctr1 and ZnT1 genes); (2) PI figure review only received `initial_instruction[:500]` without actual treatment group info, so it reinforced the hallucination by suggesting "add Ctr1 KO columns"; (3) `_revise_figure_code()` blindly executed PI feedback without experimental design context, and couldn't see the figure (text-only `chat()`).
+
+**Fix**: (1) Added `CRITICAL DATA CONSTRAINT` with actual group names to `_build_data_context()`, `_revise_figure_code()` prompt, and `generate_publication_figure` tool description; (2) PI `review_figure()` now includes `build_experimental_design_summary()` and Data Fidelity criterion; (3) `_revise_figure_code()` now uses `chat_with_vision()` to see the current figure image during revision.
+
+### 6. Stale Session 404 Loop (Fixed in v0.6.1)
 
 **Symptom**: After server restart or session cleanup, frontend enters infinite 404 + WebSocket reconnect loop.
 
@@ -1157,6 +1166,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.8.1 | 2026-02-20 | Figure data fidelity (experimental design constraints in figure review/revision pipeline), vision-based figure revision (`chat_with_vision` in `_revise_figure_code`), PI Data Fidelity review criterion |
 | 0.8.0 | 2026-02-16 | Unified data model (`DataFile` + `TreatmentGroup` + `BiochemistryIndicator` replace per-type models), multi-group multi-sample support, unified `/upload/data` endpoint, group CRUD, upload selectors in feedback dialog & chat, simplified pathology types (H&E + Other), DataPanel rewrite |
 | 0.7.5 | 2026-02-15 | Selective agent activation (PI decides which agents to activate from round 2+, `agents_for_next_round`), Docker pip install support for bioinformatics agent |
 | 0.7.4 | 2026-02-14 | Figure step budget (MAX_FIGURE_ITERATIONS=5), figure revision max_tokens fix, data download buttons, agent status display fix (generating_report), figure gallery preview + review status fix, MIME type correction |
@@ -1185,5 +1195,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-02-16*
-*Version: 0.8.0*
+*Document updated: 2026-02-20*
+*Version: 0.8.1*
