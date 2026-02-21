@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.8.1
-**Last Updated**: 2026-02-20
+**Version**: 0.8.2
+**Last Updated**: 2026-02-21
 
 ## Project Overview
 
@@ -1080,9 +1080,9 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4158 lines |
-| Report generator (no-sandbox compilation) | `report_generator.py` | ~3196 lines |
-| Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1860 lines |
+| FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4161 lines |
+| Report generator (no-sandbox compilation) | `report_generator.py` | ~3197 lines |
+| Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1865 lines |
 | Bioinformatics Agent (autonomous + figure budget + pip install + vision revision) | `bioinformatics_agent.py` | ~1632 lines |
 | PI Agent (coordinator + reviewer + agent activation + data fidelity) | `pi_agent.py` | ~1359 lines |
 | Literature Agent (2 modes + annotation) | `literature_agent.py` | ~907 lines |
@@ -1166,6 +1166,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.8.2 | 2026-02-21 | Default model update (PI/Pathology/Biochemistry → `gemini-3.1-pro-preview`), proxy fix (4 `OpenAICompatibleClient` instances missing explicit `proxy_url`) |
 | 0.8.1 | 2026-02-20 | Figure data fidelity (experimental design constraints in figure review/revision pipeline), vision-based figure revision (`chat_with_vision` in `_revise_figure_code`), PI Data Fidelity review criterion |
 | 0.8.0 | 2026-02-16 | Unified data model (`DataFile` + `TreatmentGroup` + `BiochemistryIndicator` replace per-type models), multi-group multi-sample support, unified `/upload/data` endpoint, group CRUD, upload selectors in feedback dialog & chat, simplified pathology types (H&E + Other), DataPanel rewrite |
 | 0.7.5 | 2026-02-15 | Selective agent activation (PI decides which agents to activate from round 2+, `agents_for_next_round`), Docker pip install support for bioinformatics agent |
@@ -1195,5 +1196,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-02-20*
-*Version: 0.8.1*
+*Document updated: 2026-02-21*
+*Version: 0.8.2*

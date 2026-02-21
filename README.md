@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.8.1
+**Version**: 0.8.2
 
 ## Core Features
 
@@ -370,7 +370,7 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 
 ### LLM
 
-- **Main Models**: Gemini 3 Pro Preview, Claude Sonnet 4.5 (via OpenRouter)
+- **Main Models**: Gemini 3.1 Pro Preview, Claude Sonnet 4.5 (via OpenRouter)
 - **Literature Research**: 2 modes with automatic fallback
   - Google Gemini Deep Research (via Interactions API, single call with workflow-level gap coverage)
   - PubMed + LLM synthesis (NCBI E-utilities search + LLM review)
@@ -398,6 +398,11 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.8.2 (2026-02-21)
+
+- **Default Model Update**: PI, Pathology, and Biochemistry agents upgraded from `google/gemini-3-pro-preview` to `google/gemini-3.1-pro-preview`
+- **Proxy Fix**: Fixed 4 `OpenAICompatibleClient` instances (report generation, chat figure generation, PI chat, workflow report) missing explicit `proxy_url` parameter — previously relied on fragile environment variable fallback
 
 ### v0.8.1 (2026-02-20)
 
