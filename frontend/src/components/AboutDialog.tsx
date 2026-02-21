@@ -1,0 +1,135 @@
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Info, X, Mail, Github, Building2, User } from 'lucide-react'
+import { useAppStore } from '../stores/appStore'
+
+export function AboutDialog() {
+  const [open, setOpen] = useState(false)
+  const { language } = useAppStore()
+  const zh = language === 'zh'
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+        title={zh ? '关于' : 'About'}
+      >
+        <Info className="w-4 h-4" />
+      </button>
+
+      {open && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === e.currentTarget) setOpen(false) }}
+        >
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-gradient-to-r from-violet-50 to-indigo-50">
+              <h2 className="text-lg font-semibold text-slate-900">
+                {zh ? '关于' : 'About'}
+              </h2>
+              <button
+                onClick={() => setOpen(false)}
+                className="p-1 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5 text-slate-500" />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="px-6 py-4 space-y-4 overflow-y-auto">
+              {/* Title */}
+              <div className="text-center">
+                <h3 className="text-2xl font-bold text-violet-700">InteSc</h3>
+                <p className="text-sm text-slate-500 mt-1">
+                  {zh
+                    ? '多智能体生物医学研究分析系统'
+                    : 'Multi-Agent Biomedical Research Analysis System'}
+                </p>
+                <div className="mt-2 inline-block px-3 py-1 bg-violet-100 text-violet-700 text-xs font-medium rounded-full">
+                  v0.8.3
+                </div>
+              </div>
+
+              <hr className="border-slate-200" />
+
+              {/* Author */}
+              <div className="flex items-start gap-3">
+                <User className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+                <div>
+                  <div className="text-sm font-medium text-slate-700">
+                    {zh ? '作者' : 'Author'}
+                  </div>
+                  <div className="text-sm text-slate-600">
+                    {zh ? '程敏章' : 'Minzhang Cheng'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Affiliation */}
+              <div className="flex items-start gap-3">
+                <Building2 className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+                <div>
+                  <div className="text-sm font-medium text-slate-700">
+                    {zh ? '单位' : 'Affiliation'}
+                  </div>
+                  <div className="text-sm text-slate-600">
+                    {zh
+                      ? '南昌大学 教育部类器官资源库'
+                      : 'MOE Organoid Resource Center, Nanchang University'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Contact */}
+              <div className="flex items-start gap-3">
+                <Mail className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+                <div>
+                  <div className="text-sm font-medium text-slate-700">
+                    {zh ? '联系方式' : 'Contact'}
+                  </div>
+                  <a
+                    href="mailto:mzcheng@ncu.edu.cn"
+                    className="text-sm text-violet-600 hover:text-violet-700 hover:underline"
+                  >
+                    mzcheng@ncu.edu.cn
+                  </a>
+                </div>
+              </div>
+
+              {/* Source Code */}
+              <div className="flex items-start gap-3">
+                <Github className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+                <div>
+                  <div className="text-sm font-medium text-slate-700">
+                    {zh ? '源代码' : 'Source Code'}
+                  </div>
+                  <a
+                    href="https://github.com/minzhangcheng/intesc"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-violet-600 hover:text-violet-700 hover:underline"
+                  >
+                    github.com/minzhangcheng/intesc
+                  </a>
+                </div>
+              </div>
+
+              <hr className="border-slate-200" />
+
+              {/* Footer info */}
+              <div className="text-center text-xs text-slate-400 space-y-1">
+                <p>
+                  {zh ? '更新日期：2026年2月21日' : 'Updated: February 21, 2026'}
+                </p>
+                <p>&copy; 2025-2026 Minzhang Cheng. All rights reserved.</p>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
+  )
+}

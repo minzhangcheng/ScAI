@@ -12,6 +12,7 @@ import { ReportPanel } from './components/ReportPanel'
 import { ChatPanel } from './components/ChatPanel'
 import { MessageStream } from './components/MessageStream'
 import { LanguageSelector } from './components/LanguageSelector'
+import { AboutDialog } from './components/AboutDialog'
 import {
   Beaker,
   FileText,
@@ -230,6 +231,9 @@ function App() {
               
               {/* Language Selector */}
               <LanguageSelector />
+
+              {/* About */}
+              <AboutDialog />
             </div>
           </header>
 
