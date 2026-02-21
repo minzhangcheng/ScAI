@@ -403,6 +403,7 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 
 - **Default Model Update**: PI, Pathology, and Biochemistry agents upgraded from `google/gemini-3-pro-preview` to `google/gemini-3.1-pro-preview`
 - **Proxy Fix**: Fixed 4 `OpenAICompatibleClient` instances (report generation, chat figure generation, PI chat, workflow report) missing explicit `proxy_url` parameter — previously relied on fragile environment variable fallback
+- **Manual Round Wait Fix**: Fixed `_wait_for_user_input` ignoring `round_wait_seconds` setting — previously hardcoded 600s timeout caused auto-proceed even in manual mode (`-1`). Now respects all modes: manual (wait indefinitely), no-wait (proceed immediately), countdown (frontend timer + 60s backend buffer)
 
 ### v0.8.1 (2026-02-20)
 
@@ -499,7 +500,7 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
   - Users can provide text guidance and upload additional data files targeted to specific agents
   - Timer auto-pauses when user starts typing; auto-continues on expiry
   - User input on the last round extends max_rounds by 1
-- **Workflow `wait_for_user_input` node**: Backend blocks between rounds via `asyncio.Event`, with 10-minute safety timeout
+- **Workflow `wait_for_user_input` node**: Backend blocks between rounds via `asyncio.Event`, respecting `round_wait_seconds` setting (-1=wait indefinitely, 0=no wait, >0=countdown+60s buffer)
 - **Cell type annotation improvements**: Strengthened bioinformatics agent prompt for mandatory cell type annotation with UMAP visualization
 - **Report generator fixes**: Now searches workspace directory for annotated data; supports both `adata_annotated.h5ad` and `annotated_adata.h5ad` filenames
 - **WebSocket reconnection fix**: Completed sessions now send full round_results and message_history on reconnect
