@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.8.3
+**Version**: 0.8.4
 **Last Updated**: 2026-02-21
 
 ## Project Overview
@@ -140,9 +140,10 @@ intesc/                         # Code directory
 │
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx             # Main application component (+ Chat tab)
+│   │   ├── App.tsx             # Main application component (+ Chat tab + About dialog)
 │   │   ├── components/         # React components
 │   │   │   ├── ChatPanel.tsx   # PI Agent free-form chat + delegation (~657 lines)
+│   │   │   ├── AboutDialog.tsx # About dialog (project info, author, contact)
 │   │   │   └── ...             # Other panels (Analysis, Data, Prompts, Results, Report)
 │   │   ├── stores/             # Zustand state (+ chatMessages, chatDelegation, generating_report status)
 │   │   ├── hooks/              # API Hooks
@@ -1110,7 +1111,8 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 | Round feedback dialog (configurable timer) | `RoundFeedbackDialog.tsx` | ~600 lines |
 | Zustand global state (+ delegation) | `appStore.ts` | ~509 lines |
 | Round results + publication outputs | `ResultsPanel.tsx` | ~359 lines |
-| Main application | `App.tsx` | ~309 lines |
+| Main application (+ About dialog) | `App.tsx` | ~313 lines |
+| About dialog (project info) | `AboutDialog.tsx` | ~135 lines |
 | API + literature configuration | `ConfigPanel.tsx` | ~250 lines |
 
 ## Known Issues
@@ -1165,6 +1167,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.8.4 | 2026-02-21 | About dialog (project info, author, affiliation, contact, GitHub link) |
 | 0.8.3 | 2026-02-21 | Manual round wait fix (`_wait_for_user_input` now respects `round_wait_seconds`: -1=indefinite, 0=immediate, >0=countdown+60s buffer; previously hardcoded 600s timeout) |
 | 0.8.2 | 2026-02-21 | Default model update (PI/Pathology/Biochemistry → `gemini-3.1-pro-preview`), proxy fix (4 `OpenAICompatibleClient` instances missing explicit `proxy_url`) |
 | 0.8.1 | 2026-02-20 | Figure data fidelity (experimental design constraints in figure review/revision pipeline), vision-based figure revision (`chat_with_vision` in `_revise_figure_code`), PI Data Fidelity review criterion |
@@ -1197,4 +1200,4 @@ For issues, please contact the project maintainers.
 ---
 
 *Document updated: 2026-02-21*
-*Version: 0.8.3*
+*Version: 0.8.4*

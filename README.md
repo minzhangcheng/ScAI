@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.8.3
+**Version**: 0.8.4
 
 ## Core Features
 
@@ -398,6 +398,10 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.8.4 (2026-02-21)
+
+- **About Dialog**: Added About page accessible from the header, showing project info, author, affiliation, contact, and GitHub link
 
 ### v0.8.3 (2026-02-21)
 
