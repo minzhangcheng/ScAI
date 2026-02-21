@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.8.2
+**Version**: 0.8.3
 **Last Updated**: 2026-02-21
 
 ## Project Overview
@@ -61,7 +61,7 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~4158 lines)
+│   ├── main.py                 # FastAPI entry point (~4161 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
@@ -74,7 +74,7 @@ intesc/                         # Code directory
 │   │                           # - Session export/import (tar.gz/zip/JSON, incl. .pkl)
 │   │                           # - File download (/api/download with path containment)
 │   │
-│   ├── workflow.py             # LangGraph workflow (~1860 lines)
+│   ├── workflow.py             # LangGraph workflow (~1877 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
@@ -215,8 +215,8 @@ initialize_round ◄────────────────────
   pi_synthesis                            │
       │                                   │
       ▼                                   │
-  wait_for_user_input  ◄── 2min timer     │
-      │                    (frontend)     │
+  wait_for_user_input  ◄── configurable   │
+      │                    (default 5min) │
   ┌───┴───┐                               │
   │       │                               │
 (continue) (stop)                         │
@@ -565,7 +565,6 @@ class LLMManager:
 | `/api/session/{id}/report/download-full` | POST | Download complete report |
 | `/api/session/{id}/literature-config` | POST | Save literature agent configuration (mode, keys, rounds) |
 | `/api/session/{id}/round-wait` | POST | Update round wait countdown seconds (-1=manual, 0=no wait, positive=countdown) |
-| `/api/session/{id}/round-wait` | GET | Get current round wait setting |
 | `/api/session/{id}/resume` | POST | Resume analysis (paused/completed/waiting_input/failed/generating_report) |
 | `/api/session/{id}/chat` | POST | Chat with PI Agent (supports file uploads with per-file agent targeting) |
 | `/api/session/{id}/chat` | GET | Get chat history for a session |
@@ -940,7 +939,7 @@ uvicorn stdout      # API logs
 |--------|---------|-------------|
 | `max_rounds` | 3 | Max analysis rounds |
 | `convergence_rounds` | 2 | Consecutive rounds without new findings |
-| `sandbox_timeout` | 1200 | Code execution timeout (seconds) |
+| `sandbox_timeout` | 300 | Code execution timeout (seconds) |
 | `image_tile_size` | 1024 | Pathology image tile size |
 | `image_overlap` | 64 | Tile overlap pixels |
 | `blank_threshold` | 0.95 | Threshold for detecting blank tiles |
@@ -1082,7 +1081,7 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 |---------|------|-----------------|
 | FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4161 lines |
 | Report generator (no-sandbox compilation) | `report_generator.py` | ~3197 lines |
-| Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1865 lines |
+| Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1877 lines |
 | Bioinformatics Agent (autonomous + figure budget + pip install + vision revision) | `bioinformatics_agent.py` | ~1632 lines |
 | PI Agent (coordinator + reviewer + agent activation + data fidelity) | `pi_agent.py` | ~1359 lines |
 | Literature Agent (2 modes + annotation) | `literature_agent.py` | ~907 lines |
@@ -1166,7 +1165,8 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
-| 0.8.2 | 2026-02-21 | Default model update (PI/Pathology/Biochemistry → `gemini-3.1-pro-preview`), proxy fix (4 `OpenAICompatibleClient` instances missing explicit `proxy_url`), manual round wait fix (`_wait_for_user_input` now respects `round_wait_seconds` instead of hardcoded 600s timeout) |
+| 0.8.3 | 2026-02-21 | Manual round wait fix (`_wait_for_user_input` now respects `round_wait_seconds`: -1=indefinite, 0=immediate, >0=countdown+60s buffer; previously hardcoded 600s timeout) |
+| 0.8.2 | 2026-02-21 | Default model update (PI/Pathology/Biochemistry → `gemini-3.1-pro-preview`), proxy fix (4 `OpenAICompatibleClient` instances missing explicit `proxy_url`) |
 | 0.8.1 | 2026-02-20 | Figure data fidelity (experimental design constraints in figure review/revision pipeline), vision-based figure revision (`chat_with_vision` in `_revise_figure_code`), PI Data Fidelity review criterion |
 | 0.8.0 | 2026-02-16 | Unified data model (`DataFile` + `TreatmentGroup` + `BiochemistryIndicator` replace per-type models), multi-group multi-sample support, unified `/upload/data` endpoint, group CRUD, upload selectors in feedback dialog & chat, simplified pathology types (H&E + Other), DataPanel rewrite |
 | 0.7.5 | 2026-02-15 | Selective agent activation (PI decides which agents to activate from round 2+, `agents_for_next_round`), Docker pip install support for bioinformatics agent |
@@ -1197,4 +1197,4 @@ For issues, please contact the project maintainers.
 ---
 
 *Document updated: 2026-02-21*
-*Version: 0.8.2*
+*Version: 0.8.3*

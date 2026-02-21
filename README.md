@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.8.2
+**Version**: 0.8.3
 
 ## Core Features
 
@@ -399,11 +399,14 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 
 ## Changelog
 
+### v0.8.3 (2026-02-21)
+
+- **Manual Round Wait Fix**: Fixed `_wait_for_user_input` ignoring `round_wait_seconds` setting — previously hardcoded 600s timeout caused auto-proceed even in manual mode (`-1`). Now respects all modes: manual (wait indefinitely), no-wait (proceed immediately), countdown (frontend timer + 60s backend buffer)
+
 ### v0.8.2 (2026-02-21)
 
 - **Default Model Update**: PI, Pathology, and Biochemistry agents upgraded from `google/gemini-3-pro-preview` to `google/gemini-3.1-pro-preview`
 - **Proxy Fix**: Fixed 4 `OpenAICompatibleClient` instances (report generation, chat figure generation, PI chat, workflow report) missing explicit `proxy_url` parameter — previously relied on fragile environment variable fallback
-- **Manual Round Wait Fix**: Fixed `_wait_for_user_input` ignoring `round_wait_seconds` setting — previously hardcoded 600s timeout caused auto-proceed even in manual mode (`-1`). Now respects all modes: manual (wait indefinitely), no-wait (proceed immediately), countdown (frontend timer + 60s backend buffer)
 
 ### v0.8.1 (2026-02-20)
 
