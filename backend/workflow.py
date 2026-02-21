@@ -1335,24 +1335,36 @@ Return ONLY the JSON array, nothing else."""
     async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
         """Block between rounds, waiting for user input or continue signal from frontend.
 
-        Frontend manages a 2-minute visual countdown timer. When timer expires,
-        user clicks skip, or user sends input, frontend calls the resume API
-        which signals this event to unblock.
-        Backend uses a 10-minute safety timeout to prevent infinite hangs.
+        Behavior depends on analysis_state.round_wait_seconds:
+          -1  = manual mode: wait indefinitely for user signal
+           0  = no-wait mode: proceed immediately without waiting
+          >0  = countdown mode: frontend shows countdown timer, backend uses
+                countdown + 60s buffer as safety timeout
         """
         analysis_state = state["analysis_state"]
 
         # Clear the event for this wait cycle
         self._continue_event.clear()
 
-        logger.info(f"[{self.session_id}] Waiting for user input (round {analysis_state.current_round})")
+        wait_seconds = analysis_state.round_wait_seconds  # -1=manual, 0=no wait, >0=countdown
 
-        # Wait for signal from frontend (via resume API) or safety timeout
-        try:
-            await asyncio.wait_for(self._continue_event.wait(), timeout=600)
+        if wait_seconds == 0:
+            # No-wait mode: proceed immediately
+            logger.info(f"[{self.session_id}] No-wait mode, proceeding immediately (round {analysis_state.current_round})")
+        elif wait_seconds == -1:
+            # Manual mode: wait indefinitely for user signal
+            logger.info(f"[{self.session_id}] Manual mode, waiting indefinitely for user input (round {analysis_state.current_round})")
+            await self._continue_event.wait()
             logger.info(f"[{self.session_id}] Continue signal received")
-        except asyncio.TimeoutError:
-            logger.info(f"[{self.session_id}] Wait timeout (10min safety), auto-proceeding")
+        else:
+            # Countdown mode: backend safety timeout = frontend countdown + 60s buffer
+            backend_timeout = wait_seconds + 60
+            logger.info(f"[{self.session_id}] Waiting for user input (round {analysis_state.current_round}, timeout={backend_timeout}s)")
+            try:
+                await asyncio.wait_for(self._continue_event.wait(), timeout=backend_timeout)
+                logger.info(f"[{self.session_id}] Continue signal received")
+            except asyncio.TimeoutError:
+                logger.info(f"[{self.session_id}] Wait timeout ({backend_timeout}s), auto-proceeding")
 
         # If user provided real input (text or files) on the last round, extend max_rounds to allow one more
         has_real_text = (
