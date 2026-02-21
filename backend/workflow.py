@@ -1582,7 +1582,8 @@ Return ONLY the JSON array, nothing else."""
             # Create LLM client
             llm_client = OpenAICompatibleClient(
                 api_key=self.config.api.api_key,
-                base_url=self.config.api.llm_base_url
+                base_url=self.config.api.llm_base_url,
+                proxy_url=self.config.api.proxy_url
             )
 
             # Get models from state or use defaults

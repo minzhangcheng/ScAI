@@ -957,10 +957,10 @@ uvicorn stdout      # API logs
 
 | Agent | Default Model |
 |-------|--------------|
-| PI | `google/gemini-3-pro-preview` |
-| Pathology | `google/gemini-3-pro-preview` |
+| PI | `google/gemini-3.1-pro-preview` |
+| Pathology | `google/gemini-3.1-pro-preview` |
 | Bioinformatics | `anthropic/claude-sonnet-4.5` |
-| Biochemistry | `google/gemini-3-pro-preview` |
+| Biochemistry | `google/gemini-3.1-pro-preview` |
 | Painter | `google/gemini-3-pro-image-preview` |
 | Literature | `google/gemini-3-flash-preview` (chat); Deep Research via mode config |
 

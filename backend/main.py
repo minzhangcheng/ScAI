@@ -2256,9 +2256,10 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     
     llm_client = OpenAICompatibleClient(
         api_key=config.api.api_key,
-        base_url=config.api.llm_base_url
+        base_url=config.api.llm_base_url,
+        proxy_url=config.api.proxy_url
     )
-    
+
     # Get models from state or use defaults
     pi_model = state.custom_models.get("pi", "google/gemini-2.5-pro-preview-05-06")
     bio_model = state.custom_models.get("bioinformatics", "anthropic/claude-opus-4.6")
@@ -3165,8 +3166,9 @@ async def _generate_figures_in_chat(
             llm_client = OpenAICompatibleClient(
                 api_key=config.api.api_key,
                 base_url=config.api.llm_base_url,
+                proxy_url=config.api.proxy_url,
             )
-            bio_model = state.custom_models.get("bioinformatics", "google/gemini-3-pro-preview")
+            bio_model = state.custom_models.get("bioinformatics", "google/gemini-3.1-pro-preview")
             code_resp = await llm_client.chat(
                 model=bio_model,
                 messages=[{"role": "user", "content": code_prompt}],
@@ -3996,7 +3998,8 @@ async def chat_with_pi(
     try:
         llm_client = OpenAICompatibleClient(
             api_key=config.api.api_key,
-            base_url=config.api.llm_base_url
+            base_url=config.api.llm_base_url,
+            proxy_url=config.api.proxy_url
         )
 
         if image_b64_list:

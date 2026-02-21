@@ -120,10 +120,10 @@ class APIConfig(BaseModel):
     
 class ModelConfig(BaseModel):
     """Model configuration for each agent"""
-    pi_model: str = "google/gemini-3-pro-preview"
-    pathology_model: str = "google/gemini-3-pro-preview"
+    pi_model: str = "google/gemini-3.1-pro-preview"
+    pathology_model: str = "google/gemini-3.1-pro-preview"
     bioinformatics_model: str = "anthropic/claude-sonnet-4.5"
-    biochemistry_model: str = "google/gemini-3-pro-preview"
+    biochemistry_model: str = "google/gemini-3.1-pro-preview"
     literature_model: str = "google/gemini-3-flash-preview"
     # Painter agent uses image generation model via OpenRouter
     painter_model: str = "google/gemini-3-pro-image-preview"

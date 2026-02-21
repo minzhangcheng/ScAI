@@ -147,10 +147,10 @@ export interface AgentTemperatures {
 
 // Default models
 export const DEFAULT_MODELS: AgentModels = {
-  pi: 'google/gemini-3-pro-preview',
-  pathology: 'google/gemini-3-pro-preview',
+  pi: 'google/gemini-3.1-pro-preview',
+  pathology: 'google/gemini-3.1-pro-preview',
   bioinformatics: 'anthropic/claude-sonnet-4.5',
-  biochemistry: 'google/gemini-3-pro-preview',
+  biochemistry: 'google/gemini-3.1-pro-preview',
   literature: 'google/gemini-3-flash-preview',
   painter: 'google/gemini-3-pro-image-preview'  // Image generation model via OpenRouter
 }
