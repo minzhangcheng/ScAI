@@ -2,6 +2,7 @@
 LLM client utilities using OpenAI SDK for OpenAI-compatible APIs
 Supports OpenRouter, OpenAI, and other compatible endpoints
 """
+import base64
 import httpx
 import asyncio
 import json
@@ -14,6 +15,29 @@ from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitEr
 from .llm_logger import get_llm_logger, LLMInteraction
 
 logger = logging.getLogger(__name__)
+
+
+def _detect_image_mime_type(img_b64: str) -> str:
+    """Detect image MIME type from base64-encoded data using magic bytes.
+
+    Checks the first few decoded bytes to identify JPEG, PNG, GIF, or WebP.
+    Falls back to 'image/png' if the format cannot be determined.
+    """
+    try:
+        # 12 base64 chars → 9 bytes, enough to cover all magic byte sequences
+        header = base64.b64decode(img_b64[:12] + "==")
+        if header[:3] == b'\xff\xd8\xff':
+            return "image/jpeg"
+        if header[:8] == b'\x89PNG\r\n\x1a\n':
+            return "image/png"
+        if header[:6] in (b'GIF87a', b'GIF89a'):
+            return "image/gif"
+        if header[:4] == b'RIFF' and len(header) >= 8:
+            return "image/webp"
+    except Exception:
+        pass
+    return "image/png"
+
 
 # Retry configuration
 MAX_RETRIES = 3
@@ -132,7 +156,8 @@ class LLMToolResponse:
     model: str
     usage: Dict[str, int]
     raw_response: Any
-    
+    raw_assistant_message: Optional[Dict[str, Any]] = None
+
     @property
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
@@ -483,7 +508,22 @@ class OpenAICompatibleClient:
             
             # Extract content — handles reasoning models, list content, etc.
             content = self._extract_content_from_message(message, response) if message else None
-            
+
+            # Preserve the full raw assistant message so callers can echo it back verbatim.
+            # This is required for providers like Gemini that attach extra fields (e.g.
+            # thought_signature) to tool calls and require them in subsequent requests.
+            raw_assistant_message = None
+            if message:
+                try:
+                    msg_dict = message.model_dump()
+                    raw_assistant_message = {
+                        "role": "assistant",
+                        "content": msg_dict.get("content"),
+                        "tool_calls": msg_dict.get("tool_calls"),
+                    }
+                except Exception:
+                    pass
+
             result = LLMToolResponse(
                 content=content,
                 tool_calls=tool_calls,
@@ -493,7 +533,8 @@ class OpenAICompatibleClient:
                     "completion_tokens": response.usage.completion_tokens if response and response.usage else 0,
                     "total_tokens": response.usage.total_tokens if response and response.usage else 0
                 },
-                raw_response=response
+                raw_response=response,
+                raw_assistant_message=raw_assistant_message
             )
             
             # Log response
@@ -574,13 +615,14 @@ class OpenAICompatibleClient:
         """
         # Build multimodal content
         content = []
-        
+
         # Add images first
         for img_b64 in images:
+            mime_type = _detect_image_mime_type(img_b64)
             content.append({
                 "type": "image_url",
                 "image_url": {
-                    "url": f"data:image/png;base64,{img_b64}"
+                    "url": f"data:{mime_type};base64,{img_b64}"
                 }
             })
         

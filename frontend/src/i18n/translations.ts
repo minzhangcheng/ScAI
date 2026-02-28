@@ -25,9 +25,14 @@ export const translations = {
     importSession: '导入会话',
     importing: '导入中...',
     exporting: '导出中...',
+    exportPackaging: '正在打包...',
+    exportPackagingDetail: '正在压缩文件，请稍候...',
+    exportDownloadStarted: '已经开始下载',
+    exportDownloadStartedDetail: '文件下载已开始，请检查浏览器下载管理器',
     importSuccess: '导入成功',
     importFailed: '导入失败',
     exportFailed: '导出失败',
+    confirm: '确定',
     apiSettings: 'API 设置',
     
     // Config Panel
@@ -378,9 +383,14 @@ export const translations = {
     importSession: 'Import Session',
     importing: 'Importing...',
     exporting: 'Exporting...',
+    exportPackaging: 'Packaging...',
+    exportPackagingDetail: 'Compressing files, please wait...',
+    exportDownloadStarted: 'Download Started',
+    exportDownloadStartedDetail: 'File download has started, please check your browser download manager',
     importSuccess: 'Import successful',
     importFailed: 'Import failed',
     exportFailed: 'Export failed',
+    confirm: 'Confirm',
     apiSettings: 'API Settings',
     
     // Config Panel

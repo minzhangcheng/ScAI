@@ -4,7 +4,9 @@ LangGraph workflow for multi-agent single-cell analysis
 import asyncio
 import logging
 import traceback
+import uuid
 from functools import wraps
+from pathlib import Path
 from typing import Callable, Dict, Any, List, Optional, TypedDict, Annotated
 from datetime import datetime
 import json
@@ -34,7 +36,7 @@ from .agents.base import AgentConfig
 from .utils.llm_client import LLMManager, OpenAICompatibleClient
 from .utils.sandbox import LocalJupyterSandbox
 from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR
-from .report_generator import DetailedReportGenerator
+from .report_generator import DetailedReportGenerator, compress_image_to_base64
 
 
 # Mapping from node names to result keys
@@ -1467,20 +1469,88 @@ Return ONLY the JSON array, nothing else."""
             integrated_report = await self.pi_agent.generate_integrated_report(analysis_state)
             analysis_state.integrated_report = integrated_report
 
-            # Send integrated report with figure info to frontend
-            figures_data = [
-                {
-                    "id": fig.id,
-                    "name": fig.name,
-                    "description": fig.description,
-                    "figure_type": fig.figure_type,
-                    "png_base64": fig.png_base64,
-                    "pdf_path": fig.pdf_path,
-                    "review_status": fig.review_status.value,
-                    "revision_count": fig.revision_count
-                }
-                for fig in analysis_state.publication_figures
-            ]
+            # --- Collect all workspace figures (figures/ subdir + workspace root) ---
+            workspace_dir = WORKSPACE_DIR / self.session_id
+            pub_figure_names = {fig.name for fig in analysis_state.publication_figures}
+            all_workspace_figs: List[Dict[str, Any]] = []
+            seen_stems: set = set()
+
+            def _infer_fig_type(stem: str) -> str:
+                s = stem.lower()
+                if "umap" in s: return "umap"
+                if "volcano" in s: return "volcano"
+                if "violin" in s: return "violin"
+                if "dotplot" in s or "dot_plot" in s: return "dotplot"
+                if "heatmap" in s: return "heatmap"
+                if "barplot" in s or "bar_plot" in s or "composition" in s or "proportion" in s: return "barplot"
+                return "other"
+
+            for scan_dir in [workspace_dir / "figures", workspace_dir]:
+                if not scan_dir.exists():
+                    continue
+                for png in sorted(scan_dir.glob("*.png"), key=lambda p: p.stat().st_mtime):
+                    if png.stem in seen_stems:
+                        continue
+                    seen_stems.add(png.stem)
+                    pdf = png.with_suffix(".pdf")
+                    all_workspace_figs.append({
+                        "name": png.stem,
+                        "type": _infer_fig_type(png.stem),
+                        "path": str(png),
+                        "pdf_path": str(pdf) if pdf.exists() else None,
+                    })
+
+            # Build full figure list for AI selection (workspace + existing pub figures)
+            all_figs_for_ai = [{"name": f["name"], "type": f["type"]} for f in all_workspace_figs]
+            for fig in analysis_state.publication_figures:
+                if fig.name not in seen_stems:
+                    all_figs_for_ai.append({"name": fig.name, "type": fig.figure_type})
+
+            # Ask AI to curate the brief report figure set
+            selected_names = set(
+                await self.pi_agent.select_brief_figures(analysis_state, all_figs_for_ai)
+            )
+            # Fallback: if AI returned nothing, show all publication figures
+            if not selected_names:
+                selected_names = pub_figure_names
+
+            # Build figures_data: publication figures first (already have pngBase64),
+            # then AI-selected workspace figures not covered by publication figures
+            figures_data: List[Dict[str, Any]] = []
+            for fig in analysis_state.publication_figures:
+                if fig.name in selected_names:
+                    figures_data.append({
+                        "id": fig.id,
+                        "name": fig.name,
+                        "description": fig.description,
+                        "figure_type": fig.figure_type,
+                        "png_base64": fig.png_base64,
+                        "pdf_path": fig.pdf_path,
+                        "review_status": fig.review_status.value,
+                        "revision_count": fig.revision_count
+                    })
+
+            for wf in all_workspace_figs:
+                if wf["name"] in selected_names and wf["name"] not in pub_figure_names:
+                    try:
+                        b64 = compress_image_to_base64(wf["path"], max_width=800)
+                    except Exception:
+                        b64 = None
+                    figures_data.append({
+                        "id": str(uuid.uuid4()),
+                        "name": wf["name"],
+                        "description": "",
+                        "figure_type": wf["type"],
+                        "png_base64": b64,
+                        "pdf_path": wf["pdf_path"],
+                        "review_status": "approved",
+                        "revision_count": 0
+                    })
+
+            logger.info(
+                f"[{self.session_id}] Brief figures: {len(figures_data)} selected "
+                f"({len(pub_figure_names)} pub + {len(all_workspace_figs)} workspace scanned)"
+            )
 
             tables_data = [
                 {
@@ -1499,13 +1569,13 @@ Return ONLY the JSON array, nothing else."""
                     "report": integrated_report,
                     "figures": figures_data,
                     "tables": tables_data,
-                    "total_figures": len(analysis_state.publication_figures),
-                    "approved_figures": sum(1 for f in analysis_state.publication_figures if f.review_status == FigureReviewStatus.APPROVED)
+                    "total_figures": len(figures_data),
+                    "approved_figures": sum(1 for f in figures_data if f.get("review_status") == "approved")
                 },
                 AgentType.PI
             )
 
-            logger.info(f"[{self.session_id}] Integrated report generated with {len(analysis_state.publication_figures)} figures")
+            logger.info(f"[{self.session_id}] Integrated report generated with {len(figures_data)} brief figures")
 
         except Exception as e:
             logger.error(f"[{self.session_id}] Failed to generate integrated report: {e}")

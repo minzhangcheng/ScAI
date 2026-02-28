@@ -1278,6 +1278,68 @@ Generate a comprehensive research report in Markdown format suitable for publica
         logger.error(f"[PI] Failed to generate integrated report after {max_retries} attempts")
         return f"# {state.name}\n\n## Summary\n\n{state.final_summary or 'Analysis completed. Please see round results for details.'}"
 
+    async def select_brief_figures(
+        self,
+        state: AnalysisState,
+        all_figures: List[Dict[str, str]]
+    ) -> List[str]:
+        """
+        Select figure names to display in the Brief Report (Result page).
+        Uses AI judgment based on figure names/types and analysis context.
+
+        Args:
+            state: Analysis state (for research context)
+            all_figures: All available figures from workspace, each with "name" and "type"
+
+        Returns:
+            List of figure names that should appear in the brief report
+        """
+        if not all_figures:
+            return []
+
+        figures_list = "\n".join(
+            f"- {f['name']} (type: {f['type']})"
+            for f in all_figures
+        )
+
+        prompt = f"""You are reviewing figures generated during a bioinformatics analysis.
+
+Research objective: {state.initial_instruction}
+
+All available figures:
+{figures_list}
+
+Select which figures should appear in the Brief Results display (shown to the researcher immediately after analysis).
+Include figures that are:
+- Key results: cell type UMAP with annotations, differential expression volcano plots, cell composition comparisons, key marker dotplots/violins
+- Essential visualizations that directly answer the research question
+
+Exclude figures that are:
+- QC / technical diagnostics (qc_violin, pca_variance, hvg_plot, and similar)
+- Intermediate/exploratory plots superseded by a final version (e.g. exclude umap_initial if umap_cell_types exists)
+- Redundant older versions (prefer _v2 or _final over earlier versions of the same figure)
+
+Return ONLY a JSON array of the selected figure names, with no other text.
+Example: ["umap_cell_types", "cell_type_proportions", "volcano_hepatocytes_dko_vs_wt"]
+"""
+
+        try:
+            response = await self.llm_client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=512
+            )
+            text = (response.content or "").strip()
+            match = re.search(r'\[.*?\]', text, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except Exception as e:
+            logger.warning(f"[PI] select_brief_figures failed: {e}")
+
+        # Fallback: include all figures
+        return [f["name"] for f in all_figures]
+
     # ============================================
     # Graphic Abstract Prompt Generation
     # ============================================

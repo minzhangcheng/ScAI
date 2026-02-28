@@ -794,6 +794,25 @@ Before running sc.tl.pca() or any dimensionality reduction:
             # Track whether this iteration only contains figure generation (excluded from step count)
             figure_only_iteration = True
 
+            # Add assistant message ONCE before processing tool calls.
+            # Using raw_assistant_message preserves provider-specific fields such as
+            # Gemini's thought_signature, which must be echoed back in subsequent requests.
+            if response.raw_assistant_message:
+                messages.append(response.raw_assistant_message)
+            else:
+                messages.append({
+                    "role": "assistant",
+                    "content": response.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}
+                        }
+                        for tc in response.tool_calls
+                    ]
+                })
+
             for tool_call in response.tool_calls:
                 tool_name = tool_call.name
                 args = tool_call.arguments
@@ -810,15 +829,6 @@ Before running sc.tl.pca() or any dimensionality reduction:
                         error_msg = f"Code validation failed: {security_error}"
                         logger.warning(f"[Bioinformatics] {error_msg}")
                         await self._notify("error", error_msg)
-                        messages.append({
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [{
-                                "id": tool_call.id,
-                                "type": "function",
-                                "function": {"name": tool_name, "arguments": json.dumps(args)}
-                            }]
-                        })
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -905,20 +915,11 @@ plt.close('all')
                         tool_result += f"Generated {len(result.figures)} figure(s).\n"
                     
                     messages.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [{
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {"name": tool_name, "arguments": json.dumps(args)}
-                        }]
-                    })
-                    messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": tool_result
                     })
-                    
+
                 elif tool_name == "consult_pi":
                     figure_only_iteration = False
                     question = args.get("question", "")
@@ -940,20 +941,11 @@ plt.close('all')
                         pi_response = "PI guidance not available. Proceed with standard practices."
                     
                     messages.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [{
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {"name": tool_name, "arguments": json.dumps(args)}
-                        }]
-                    })
-                    messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": f"PI Response: {pi_response}"
                     })
-                    
+
                 elif tool_name == "search_literature":
                     figure_only_iteration = False
                     topic = args.get("topic", "")
@@ -967,15 +959,6 @@ plt.close('all')
                     else:
                         lit_result = "Literature search not available."
                     
-                    messages.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [{
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {"name": tool_name, "arguments": json.dumps(args)}
-                        }]
-                    })
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -1046,15 +1029,6 @@ plt.close('all')
                     )[:2000])
 
                     messages.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [{
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {"name": tool_name, "arguments": json.dumps(args)}
-                        }]
-                    })
-                    messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": tool_result[:3000]
@@ -1074,15 +1048,6 @@ plt.close('all')
                         "suggestions": suggestions
                     }))
 
-                    messages.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [{
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {"name": tool_name, "arguments": json.dumps(args)}
-                        }]
-                    })
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -1131,15 +1096,6 @@ plt.close('all')
                             review_callback=review_callback
                         )
 
-                    messages.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [{
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {"name": tool_name, "arguments": json.dumps(args)}
-                        }]
-                    })
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,

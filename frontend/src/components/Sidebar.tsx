@@ -41,7 +41,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   const [sessionName, setSessionName] = useState(DEFAULT_PROJECT_NAME)
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
-  const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number } | null>(null)
+  const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number; closable?: boolean } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Auto-reload session from API on page refresh to restore full data (images etc.)
@@ -139,65 +139,36 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
     }
   }
 
-  const handleExport = async () => {
+  const handleExport = () => {
     if (!currentSession || exporting) return
+
     setExporting(true)
-    setProgressInfo({ action: language === 'zh' ? '导出' : 'Export', detail: language === 'zh' ? '正在打包文件...' : 'Packing files...' })
-    try {
-      const response = await fetch(`/api/session/${currentSession.id}/export`, { method: 'POST' })
-      if (!response.ok) throw new Error('Export failed')
 
-      // Stream download with progress
-      const contentLength = response.headers.get('Content-Length')
-      const total = contentLength ? parseInt(contentLength) : 0
+    // 阶段1：显示"正在打包..."
+    setProgressInfo({
+      action: t('exportPackaging'),
+      detail: t('exportPackagingDetail'),
+      closable: false  // 不可关闭
+    })
 
-      if (total && response.body) {
-        setProgressInfo({ action: language === 'zh' ? '导出' : 'Export', detail: language === 'zh' ? '正在下载...' : 'Downloading...', percent: 0 })
-        const reader = response.body.getReader()
-        const chunks: BlobPart[] = []
-        let received = 0
+    // 触发下载（浏览器原生处理，不占内存）
+    const link = document.createElement('a')
+    link.href = `/api/session/${currentSession.id}/export`
+    link.download = ''
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
 
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          chunks.push(value)
-          received += value.length
-          setProgressInfo({ action: language === 'zh' ? '导出' : 'Export', detail: `${(received / 1024 / 1024).toFixed(1)} MB`, percent: Math.round((received / total) * 100) })
-        }
-
-        const blob = new Blob(chunks)
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        const disposition = response.headers.get('Content-Disposition')
-        const match = disposition?.match(/filename=(.+)/)
-        a.download = match ? match[1] : `${currentSession.id}.tar.gz`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-      } else {
-        // Fallback: no Content-Length
-        setProgressInfo({ action: language === 'zh' ? '导出' : 'Export', detail: language === 'zh' ? '正在下载...' : 'Downloading...' })
-        const blob = await response.blob()
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        const disposition = response.headers.get('Content-Disposition')
-        const match = disposition?.match(/filename=(.+)/)
-        a.download = match ? match[1] : `${currentSession.id}.tar.gz`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-      }
-    } catch (e) {
-      console.error('Export failed:', e)
-      alert(t('exportFailed'))
-    } finally {
+    // 延时3秒后，假定下载已开始
+    setTimeout(() => {
+      // 阶段2：显示"已经开始下载"，可关闭
+      setProgressInfo({
+        action: t('exportDownloadStarted'),
+        detail: t('exportDownloadStartedDetail'),
+        closable: true  // 可关闭
+      })
       setExporting(false)
-      setProgressInfo(null)
-    }
+    }, 3000)  // 3秒延时
   }
 
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -262,12 +233,24 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       {/* Export/Import Progress Modal */}
       {progressInfo && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-xl p-6 w-72 text-center space-y-4">
-            <Loader2 className="w-8 h-8 animate-spin text-violet-600 mx-auto" />
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-80 text-center space-y-4">
+            {/* 加载动画 - 仅在不可关闭时显示 */}
+            {!progressInfo.closable && (
+              <Loader2 className="w-8 h-8 animate-spin text-violet-600 mx-auto" />
+            )}
+
+            {/* 成功图标 - 可关闭时显示 */}
+            {progressInfo.closable && (
+              <Download className="w-8 h-8 text-green-600 mx-auto" />
+            )}
+
+            {/* 文本信息 */}
             <div>
               <p className="text-sm font-semibold text-slate-800">{progressInfo.action}</p>
               <p className="text-xs text-slate-500 mt-1">{progressInfo.detail}</p>
             </div>
+
+            {/* 进度条（如需要） */}
             {progressInfo.percent != null && (
               <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
                 <div
@@ -275,6 +258,16 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                   style={{ width: `${progressInfo.percent}%` }}
                 />
               </div>
+            )}
+
+            {/* 确定/关闭按钮 - 仅在可关闭时显示 */}
+            {progressInfo.closable && (
+              <button
+                onClick={() => setProgressInfo(null)}
+                className="w-full px-4 py-2 bg-violet-600 text-white text-sm rounded-lg hover:bg-violet-700 transition-colors font-medium"
+              >
+                {t('confirm')}
+              </button>
             )}
           </div>
         </div>

@@ -1475,7 +1475,7 @@ async def request_human_input(session_id: str):
     )
 
 
-@app.post("/api/session/{session_id}/export")
+@app.api_route("/api/session/{session_id}/export", methods=["GET", "HEAD"])
 async def export_state(session_id: str):
     """Export complete session as tar.gz including all uploads, workspace, reports, and state files.
 
@@ -3371,19 +3371,40 @@ def _collect_session_figures(
     session_id: str,
     since_time: Optional[float] = None
 ) -> List[Dict[str, str]]:
-    """Collect figures from workspace, optionally filtering by creation time."""
+    """Collect figures from workspace, optionally filtering by creation time.
+
+    Scans both the figures/ subdirectory (generate_publication_figure output)
+    and the workspace root (execute_code explicit savefig output, e.g. UMAP plots).
+    """
     figures: List[Dict[str, str]] = []
-    fig_dir = WORKSPACE_DIR / session_id / "figures"
-    if not fig_dir.exists():
-        return figures
-    for png in sorted(fig_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
+    seen_stems: set = set()
+
+    def _add_png(png: Path) -> None:
         if since_time and png.stat().st_mtime < since_time:
-            continue
+            return
+        if png.stem in seen_stems:
+            return
         entry: Dict[str, str] = {"name": png.stem, "path": str(png)}
         pdf_path = png.with_suffix(".pdf")
         if pdf_path.exists():
             entry["pdfPath"] = str(pdf_path)
         figures.append(entry)
+        seen_stems.add(png.stem)
+
+    # 1. figures/ subdirectory (highest priority — publication figures)
+    fig_dir = WORKSPACE_DIR / session_id / "figures"
+    if fig_dir.exists():
+        for png in sorted(fig_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
+            _add_png(png)
+
+    # 2. Workspace root — picks up UMAP and other plots saved via explicit plt.savefig()
+    #    when LLM code calls plt.close() before the auto-save wrapper can capture them.
+    root_dir = WORKSPACE_DIR / session_id
+    if root_dir.exists():
+        for png in sorted(root_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
+            _add_png(png)
+
+    figures.sort(key=lambda e: Path(e["path"]).stat().st_mtime, reverse=True)
     return figures[:30]
 
 
