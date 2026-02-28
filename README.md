@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.8.4
+**Version**: 0.8.5
 
 ## Core Features
 
@@ -398,6 +398,15 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.8.5 (2026-02-28)
+
+- **Tool Message History Fix**: Bioinformatics Agent now appends one assistant message before processing all tool calls, instead of each handler branch appending its own copy. Preserves Gemini's `thought_signature` via `raw_assistant_message` field for correct multi-turn conversations
+- **AI-Curated Brief Figures**: New `PI.select_brief_figures()` method uses AI to curate which figures appear in the Results tab brief report — excludes QC/diagnostic plots and intermediate versions, keeps key results that directly answer the research question
+- **Workspace Figure Collection**: `_collect_session_figures()` now scans both `figures/` subdirectory and workspace root, capturing UMAP and other plots saved via explicit `plt.savefig()` that previously only appeared in the detailed report
+- **Brief Report Figure Expansion**: The integrated report phase now includes AI-selected workspace figures (not just publication figures) in the Results display, with automatic image compression and base64 encoding
+- **Image MIME Type Detection**: LLM client now detects actual image format (JPEG/PNG/GIF/WebP) from base64 magic bytes instead of always sending `image/png`, fixing vision API errors for JPEG pathology images
+- **Export UX**: Session export now uses browser-native GET-based download instead of streaming POST, eliminating memory buffering for large archives. UI shows packaging state → download-started confirmation with dismiss button
 
 ### v0.8.4 (2026-02-21)
 

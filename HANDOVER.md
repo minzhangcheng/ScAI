@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.8.4
-**Last Updated**: 2026-02-21
+**Version**: 0.8.5
+**Last Updated**: 2026-02-28
 
 ## Project Overview
 
@@ -244,7 +244,9 @@ initialize_round ◄────────────────────
 3. **Structured Error Tracking**: Errors captured in `AgentError` model with agent, type, message, details
 4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
 5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval (up to 3 revisions). PI review includes experimental design context with a Data Fidelity criterion to catch fabricated groups. Revision uses `chat_with_vision()` so the bioinformatics agent can see its own figure alongside PI feedback.
+18. **AI-Curated Brief Figures**: After all analysis rounds complete, PI Agent's `select_brief_figures()` curates the figure set shown in the Results tab — filters out QC/diagnostic plots (e.g. qc_violin, pca_variance, hvg_plot) and superseded intermediate versions, keeping only key result figures. Falls back to all publication figures if AI selection returns empty. Workspace figures (workspace root + figures/) are scanned and compressed (`compress_image_to_base64`) for inclusion alongside existing publication figures.
 6. **Figure Step Budget**: Figure-only iterations (using `generate_publication_figure` tool) are excluded from the bioinformatics agent's step count. Safety cap of `MAX_FIGURE_ITERATIONS=5` prevents infinite figure generation loops — after exhaustion, agent refuses new figures and redirects to analysis. `max_tokens=32000` for figure revision code generation prevents truncation.
+19. **Tool Message History Consistency**: Bioinformatics Agent appends exactly one assistant message per LLM response (using `raw_assistant_message` if available) before iterating over tool calls. Eliminates duplicate or missing assistant messages that previously caused API errors with Gemini's `thought_signature` requirement.
 17. **Figure Data Fidelity**: All figure generation and revision prompts include explicit experimental design constraints (`CRITICAL DATA CONSTRAINT`) with actual group names from `state.treatment_groups`. This prevents LLM hallucination of non-existent treatment groups. Constraint is injected in: `_build_data_context()`, `generate_publication_figure` tool description, `_revise_figure_code()` prompt, and PI `review_figure()` prompt.
 7. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
 8. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with configurable countdown (default 300s; -1=manual-only, 0=no-wait auto-continue, stored in `round_wait_seconds`). Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend respects `round_wait_seconds`: manual mode waits indefinitely, no-wait proceeds immediately, countdown mode uses frontend timer + 60s buffer as backend safety timeout. User input or file uploads on the last round extends `max_rounds` by 1.
@@ -364,11 +366,11 @@ When a user's chat request requires specialized analysis beyond PI's direct know
 - `_execute_chat_agent()`: Executes a single agent with full callback wiring
 - `_run_chat_delegation()`: Background task orchestrating delegation flow
 - `_build_synthesis_prompt()`: Builds PI synthesis prompt from agent results
-- `_collect_session_figures()`: Collects figures from workspace (optionally filtered by creation time)
+- `_collect_session_figures()`: Collects figures from workspace (both `figures/` subdir and workspace root, deduped by stem, optionally filtered by creation time)
 
 ### 1.5 Session Export/Import (main.py)
 
-**Export** (`POST /api/session/{session_id}/export`):
+**Export** (`GET /api/session/{session_id}/export`):
 - Creates tar.gz archive on disk (temp file, not in memory) containing:
   - `manifest.json` with session_id, version, data_base_dir
   - `sessions/{id}.json` — complete state
@@ -378,6 +380,7 @@ When a user's chat request requires specialized analysis beyond PI's direct know
   - `reports/{id}/` — generated reports
 - Returns `FileResponse` with background cleanup of temp file
 - Safe filename generation from session name
+- Endpoint accepts both `GET` and `HEAD` (registered via `api_route`) to support browser-native navigation-based download (no client-side memory buffering)
 
 **Import** (`POST /api/session/import`):
 - Supports tar.gz (streamed to disk first), zip, and plain JSON formats
@@ -541,6 +544,8 @@ class LLMManager:
 
 - `_model_supports_temperature()`: Module-level function that skips temperature for reasoning models (`o1`/`o3`/`o4` series); these models use `max_completion_tokens` instead of `max_tokens`
 - `_extract_content_from_message()`: Robust content extraction handling multiple formats — string content, list content (multimodal), None content with model_dump fallback, reasoning model responses (`reasoning`/`reasoning_content` fields), refusal detection, and debug logging for empty content with non-zero completion tokens
+- `_detect_image_mime_type()`: Module-level helper that inspects the first 9 bytes of base64-encoded image data to identify JPEG/PNG/GIF/WebP, falling back to `image/png`. Used by `chat_with_vision()` to send correct `Content-Type` in multimodal requests
+- `LLMToolResponse.raw_assistant_message`: Stores the serialized assistant message (via `model_dump()`) so callers can echo it back verbatim. Required for providers such as Gemini that attach extra fields (e.g. `thought_signature`) to tool-call responses and must receive them unmodified in subsequent requests
 - `retry_with_backoff()`: Max 3 retries with exponential backoff (2x delay), rate limit handling
 - Per-request `timeout` override: Deep research models pass `timeout=660.0` without changing client default (120s)
 
@@ -570,7 +575,7 @@ class LLMManager:
 | `/api/session/{id}/chat` | POST | Chat with PI Agent (supports file uploads with per-file agent targeting) |
 | `/api/session/{id}/chat` | GET | Get chat history for a session |
 | `/api/session/{id}/chat/cancel` | POST | Cancel active chat delegation task |
-| `/api/session/{id}/export` | POST | Export complete session as tar.gz archive |
+| `/api/session/{id}/export` | GET/HEAD | Export complete session as tar.gz archive (browser-native download) |
 | `/api/session/import` | POST | Import session from tar.gz/zip/JSON archive |
 | `/api/config` | GET/POST | Get/save configuration |
 | `/api/download` | GET | Download file by path (with path containment security check) |
@@ -1080,13 +1085,13 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4161 lines |
+| FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4182 lines |
 | Report generator (no-sandbox compilation) | `report_generator.py` | ~3197 lines |
-| Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1877 lines |
-| Bioinformatics Agent (autonomous + figure budget + pip install + vision revision) | `bioinformatics_agent.py` | ~1632 lines |
-| PI Agent (coordinator + reviewer + agent activation + data fidelity) | `pi_agent.py` | ~1359 lines |
+| Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1947 lines |
+| Bioinformatics Agent (autonomous + figure budget + pip install + vision revision) | `bioinformatics_agent.py` | ~1588 lines |
+| PI Agent (coordinator + reviewer + agent activation + data fidelity + brief figure curation) | `pi_agent.py` | ~1421 lines |
 | Literature Agent (2 modes + annotation) | `literature_agent.py` | ~907 lines |
-| LLM client (OpenRouter + Google DR) | `llm_client.py` | ~872 lines |
+| LLM client (OpenRouter + Google DR + MIME detection) | `llm_client.py` | ~914 lines |
 | Jupyter sandbox (+ auto PDF) | `sandbox.py` | ~793 lines |
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
 | Pathology Agent (batch size 5 + dynamic timeout) | `pathology_agent.py` | ~453 lines |
@@ -1105,7 +1110,7 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 | Real-time message streaming + delegation | `MessageStream.tsx` | ~846 lines |
 | Report generation & download | `ReportPanel.tsx` | ~789 lines |
 | Analysis control + agent status | `AnalysisPanel.tsx` | ~751 lines |
-| Session mgmt + export/import | `Sidebar.tsx` | ~624 lines |
+| Session mgmt + export/import | `Sidebar.tsx` | ~617 lines |
 | PI Agent chat + delegation | `ChatPanel.tsx` | ~657 lines |
 | Agent prompt + literature config | `PromptsPanel.tsx` | ~509 lines |
 | Round feedback dialog (configurable timer) | `RoundFeedbackDialog.tsx` | ~600 lines |
@@ -1167,6 +1172,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.8.5 | 2026-02-28 | Tool message history fix (single raw_assistant_message per response, Gemini thought_signature), AI-curated brief figures (`select_brief_figures`), workspace figure collection (root + figures/ dirs), image MIME type detection, export GET endpoint + browser-native download UX |
 | 0.8.4 | 2026-02-21 | About dialog (project info, author, affiliation, contact, GitHub link) |
 | 0.8.3 | 2026-02-21 | Manual round wait fix (`_wait_for_user_input` now respects `round_wait_seconds`: -1=indefinite, 0=immediate, >0=countdown+60s buffer; previously hardcoded 600s timeout) |
 | 0.8.2 | 2026-02-21 | Default model update (PI/Pathology/Biochemistry → `gemini-3.1-pro-preview`), proxy fix (4 `OpenAICompatibleClient` instances missing explicit `proxy_url`) |
@@ -1199,5 +1205,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-02-21*
-*Version: 0.8.4*
+*Document updated: 2026-02-28*
+*Version: 0.8.5*
