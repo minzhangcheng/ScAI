@@ -3,6 +3,7 @@ import { useAppStore } from './stores/appStore'
 import { useConfig, useWebSocket } from './hooks/useApi'
 import { useTranslation } from './i18n/translations'
 import { ConfigPanel } from './components/ConfigPanel'
+import { DisclaimerDialog, hasAcceptedDisclaimer } from './components/DisclaimerDialog'
 import { Sidebar } from './components/Sidebar'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { DataPanel } from './components/DataPanel'
@@ -34,6 +35,7 @@ function App() {
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
   const [configSkipped, setConfigSkipped] = useState(false)
+  const [showDisclaimer, setShowDisclaimer] = useState(!hasAcceptedDisclaimer())
   const { t } = useTranslation(language)
 
   // Resizable panel state
@@ -121,6 +123,10 @@ function App() {
       reconnectAttemptRef.current = 0
     }
   }, [currentSession?.id, currentSession?.status, connected, wsConnected, connect, chatDelegationActive])
+
+  if (showDisclaimer) {
+    return <DisclaimerDialog onAccept={() => setShowDisclaimer(false)} />
+  }
 
   if (configured === null) {
     return (
@@ -304,6 +310,13 @@ function App() {
               </button>
             ))}
           </nav>
+
+          {/* Footer */}
+          <footer className="shrink-0 border-t border-slate-100 bg-white/80 px-4 py-1.5 text-center">
+            <p className="text-[11px] text-slate-400 select-none">
+              InteSc · Multi-Agent Biomedical Research Analysis System · © 2025–2026 Minzhang Cheng. All rights reserved.
+            </p>
+          </footer>
         </div>
       </div>
     </div>

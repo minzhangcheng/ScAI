@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useSession } from '../hooks/useApi'
+import { useSession, apiFetch } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import {
@@ -212,9 +212,29 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
         xhr.send(formData)
       })
 
-      if (data.session_id) {
+      let sessionId: string | undefined = data.session_id
+
+      // tar.gz async import: poll until extraction completes
+      const importId: string | undefined = data.data?.import_id
+      if (importId) {
+        setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在解压归档...' : 'Extracting archive...' })
+        while (true) {
+          await new Promise(r => setTimeout(r, 2000))
+          const status = await apiFetch<any>(`/session/import/${importId}`)
+          if (status.status === 'completed') {
+            sessionId = status.session_id
+            break
+          }
+          if (status.status === 'failed') {
+            throw new Error(status.error || 'Extraction failed')
+          }
+        }
+      }
+
+      if (sessionId) {
+        setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在加载会话...' : 'Loading session...' })
         clearMessages()
-        await loadSession(data.session_id)
+        await loadSession(sessionId)
       }
     } catch (e: any) {
       console.error('Import failed:', e)

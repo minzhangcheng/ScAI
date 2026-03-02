@@ -113,6 +113,9 @@ MAX_MESSAGE_BUFFER_SIZE = 100  # Keep last N messages per session
 _message_buffers: Dict[str, List[Dict[str, Any]]] = {}  # session_id -> list of messages
 _message_buffer_lock = asyncio.Lock()
 
+# Background import jobs: import_id -> {"status": "pending"|"completed"|"failed", ...}
+_import_jobs: Dict[str, dict] = {}
+
 # Log the data directory location (directories are created in config.py)
 logger.info(f"Data directory: {DATA_BASE_DIR.resolve()}")
 
@@ -1561,21 +1564,33 @@ async def export_state(session_id: str):
 
 
 @app.post("/api/session/import")
-async def import_state(file: UploadFile = File(...)):
+async def import_state(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     """Import session from tar.gz/zip/json archive, restoring all files to their directories.
 
-    For tar.gz: streams upload to temp file first to avoid memory issues with large archives.
+    For tar.gz: streams upload to temp file, then extracts in a background task and returns
+    an import_id immediately to avoid proxy timeouts on large archives.
+    For zip/json: processed inline (small files).
     """
     filename = file.filename or ""
 
     if filename.endswith(('.tar.gz', '.tgz')):
-        # ---- tar.gz import: stream to disk first, then extract ----
+        # ---- tar.gz: save to disk, then extract in background to avoid proxy timeouts ----
         tmp_path = UPLOAD_TEMP_DIR / f"import_{uuid.uuid4().hex}.tar.gz"
         try:
             await stream_save_file(file, tmp_path)
-            state = await asyncio.to_thread(_import_tar_gz, str(tmp_path))
-        finally:
+        except Exception as e:
             tmp_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
+
+        import_job_id = str(uuid.uuid4())
+        _import_jobs[import_job_id] = {"status": "pending"}
+        background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id)
+
+        return APIResponse(
+            success=True,
+            message="File uploaded, extraction in progress",
+            data={"import_id": import_job_id, "status": "pending"}
+        )
 
     elif filename.endswith('.zip'):
         # ---- Legacy zip import (typically small) ----
@@ -1588,7 +1603,7 @@ async def import_state(file: UploadFile = File(...)):
         state_data = json.loads(content.decode('utf-8'))
         state = AnalysisState(**state_data)
 
-    # Validate imported session ID
+    # Validate imported session ID (zip/json path)
     if not state.id or '/' in state.id or '\\' in state.id or '..' in state.id:
         raise HTTPException(status_code=400, detail="Invalid session ID in imported data")
 
@@ -1602,6 +1617,35 @@ async def import_state(file: UploadFile = File(...)):
         session_id=state.id,
         data={"name": state.name}
     )
+
+
+async def _process_import_job(tmp_path_str: str, import_job_id: str):
+    """Background task: extract tar.gz archive and load session."""
+    try:
+        state = await asyncio.to_thread(_import_tar_gz, tmp_path_str)
+
+        if not state.id or '/' in state.id or '\\' in state.id or '..' in state.id:
+            _import_jobs[import_job_id] = {"status": "failed", "error": "Invalid session ID in imported data"}
+            return
+
+        await asyncio.to_thread(save_session_to_disk, state.id, state)
+        sessions[state.id] = state
+        _import_jobs[import_job_id] = {"status": "completed", "session_id": state.id, "name": state.name}
+    except HTTPException as e:
+        _import_jobs[import_job_id] = {"status": "failed", "error": e.detail}
+    except Exception as e:
+        _import_jobs[import_job_id] = {"status": "failed", "error": str(e)}
+    finally:
+        Path(tmp_path_str).unlink(missing_ok=True)
+
+
+@app.get("/api/session/import/{import_id}")
+async def get_import_status(import_id: str):
+    """Poll the status of a background tar.gz import job."""
+    if import_id not in _import_jobs:
+        raise HTTPException(status_code=404, detail="Import job not found")
+    job = _import_jobs[import_id]
+    return {"import_id": import_id, **job}
 
 
 def _import_tar_gz(file_path: str) -> AnalysisState:

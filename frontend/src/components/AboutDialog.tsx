@@ -16,6 +16,7 @@ export function AboutDialog() {
         title={zh ? '关于' : 'About'}
       >
         <Info className="w-4 h-4" />
+        <span>{zh ? '关于' : 'About'}</span>
       </button>
 
       {open && createPortal(
