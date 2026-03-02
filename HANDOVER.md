@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.8.5
-**Last Updated**: 2026-02-28
+**Version**: 0.8.7
+**Last Updated**: 2026-03-02
 
 ## Project Overview
 
@@ -383,7 +383,8 @@ When a user's chat request requires specialized analysis beyond PI's direct know
 - Endpoint accepts both `GET` and `HEAD` (registered via `api_route`) to support browser-native navigation-based download (no client-side memory buffering)
 
 **Import** (`POST /api/session/import`):
-- Supports tar.gz (streamed to disk first), zip, and plain JSON formats
+- Supports tar.gz (async background extraction), zip, and plain JSON formats
+- **Async tar.gz import**: Upload is streamed to disk, backend returns `{"import_id", "status": "pending"}` immediately via `BackgroundTasks`. Frontend polls `GET /api/session/import/{import_id}` every 2s until completed/failed. Avoids nginx `proxy_read_timeout` on large archives
 - Path remapping: replaces archived `data_base_dir` with current installation's `DATA_BASE_DIR`
 - Session ID validation (no path traversal)
 - Extracts files (including .pkl for sandbox restore) to correct directories, loads state into memory
@@ -576,7 +577,8 @@ class LLMManager:
 | `/api/session/{id}/chat` | GET | Get chat history for a session |
 | `/api/session/{id}/chat/cancel` | POST | Cancel active chat delegation task |
 | `/api/session/{id}/export` | GET/HEAD | Export complete session as tar.gz archive (browser-native download) |
-| `/api/session/import` | POST | Import session from tar.gz/zip/JSON archive |
+| `/api/session/import` | POST | Import session from tar.gz/zip/JSON archive (tar.gz returns import_id for async polling) |
+| `/api/session/import/{import_id}` | GET | Poll async import job status (pending/completed/failed) |
 | `/api/config` | GET/POST | Get/save configuration |
 | `/api/download` | GET | Download file by path (with path containment security check) |
 | `/api/file` | GET | Get file content |
@@ -1172,6 +1174,8 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.8.7 | 2026-03-02 | Data page scroll fix (`overflow: hidden` on html/body), footer i18n (Chinese/English), About page version/date update |
+| 0.8.6 | 2026-03-02 | Async session import (background tar.gz extraction + polling endpoint, avoids proxy timeout), first-visit disclaimer dialog (AI reliability warning, localStorage), About button text label, footer copyright |
 | 0.8.5 | 2026-02-28 | Tool message history fix (single raw_assistant_message per response, Gemini thought_signature), AI-curated brief figures (`select_brief_figures`), workspace figure collection (root + figures/ dirs), image MIME type detection, export GET endpoint + browser-native download UX |
 | 0.8.4 | 2026-02-21 | About dialog (project info, author, affiliation, contact, GitHub link) |
 | 0.8.3 | 2026-02-21 | Manual round wait fix (`_wait_for_user_input` now respects `round_wait_seconds`: -1=indefinite, 0=immediate, >0=countdown+60s buffer; previously hardcoded 600s timeout) |
@@ -1205,5 +1209,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-02-28*
-*Version: 0.8.5*
+*Document updated: 2026-03-02*
+*Version: 0.8.7*

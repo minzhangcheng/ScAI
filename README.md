@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.8.5
+**Version**: 0.8.7
 
 ## Core Features
 
@@ -398,6 +398,19 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.8.7 (2026-03-02)
+
+- **Data Page Scroll Fix**: Added `overflow: hidden` on `html, body` to prevent page-level scrolling when Data panel content overflows — standard fix for full-screen SPA
+- **Footer i18n**: Footer copyright text now supports Chinese/English switching
+- **About Page Update**: Updated version number and date
+
+### v0.8.6 (2026-03-02)
+
+- **Async Session Import**: Large tar.gz imports no longer block the HTTP response (avoiding nginx proxy timeouts). Backend returns `import_id` immediately after upload, extracts in background; frontend polls `GET /api/session/import/{import_id}` for status
+- **First-Visit Disclaimer Dialog**: Shows an AI reliability warning on first visit (stored in localStorage), requiring user acknowledgment before entering the system
+- **About Button Text**: Added "About"/"关于" text label next to the info icon
+- **Footer Copyright**: Added persistent footer with project name and copyright notice
 
 ### v0.8.5 (2026-02-28)
 
