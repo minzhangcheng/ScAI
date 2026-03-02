@@ -16,6 +16,10 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+html, body {
+  overflow: hidden;
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 8px;

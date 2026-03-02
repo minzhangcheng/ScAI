@@ -314,7 +314,9 @@ function App() {
           {/* Footer */}
           <footer className="shrink-0 border-t border-slate-100 bg-white/80 px-4 py-1.5 text-center">
             <p className="text-[11px] text-slate-400 select-none">
-              InteSc · Multi-Agent Biomedical Research Analysis System · © 2025–2026 Minzhang Cheng. All rights reserved.
+              {language === 'zh'
+                ? 'InteSc · 多智能体生物医学研究分析系统 · © 2025–2026 程敏章 版权所有'
+                : 'InteSc · Multi-Agent Biomedical Research Analysis System · © 2025–2026 Minzhang Cheng. All rights reserved.'}
             </p>
           </footer>
         </div>
