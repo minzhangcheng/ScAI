@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.8.7
-**Last Updated**: 2026-03-02
+**Version**: 0.8.9
+**Last Updated**: 2026-03-03
 
 ## Project Overview
 
@@ -384,7 +384,8 @@ When a user's chat request requires specialized analysis beyond PI's direct know
 
 **Import** (`POST /api/session/import`):
 - Supports tar.gz (async background extraction), zip, and plain JSON formats
-- **Async tar.gz import**: Upload is streamed to disk, backend returns `{"import_id", "status": "pending"}` immediately via `BackgroundTasks`. Frontend polls `GET /api/session/import/{import_id}` every 2s until completed/failed. Avoids nginx `proxy_read_timeout` on large archives
+- **Async tar.gz import**: Upload is streamed to disk, backend returns `{"import_id", "status": "pending"}` immediately via `BackgroundTasks`. Frontend polls `GET /api/session/import/{import_id}` every 3s until completed/failed. Avoids nginx `proxy_read_timeout` on large archives
+- **Proxy timeout resilience**: Frontend pre-generates `import_id` (via `crypto.randomUUID()` with fallback) and sends it as a form field. Backend registers the import job before saving the upload file, so the polling endpoint is available immediately. If the proxy times out before the HTTP response arrives, the frontend detects that upload bytes were fully sent (`uploadFinished` flag) and falls through to polling instead of throwing an error. Polling includes retry logic (up to 5 retries per poll, tolerates transient 404s during initial registration) and a 30-minute overall timeout
 - Path remapping: replaces archived `data_base_dir` with current installation's `DATA_BASE_DIR`
 - Session ID validation (no path traversal)
 - Extracts files (including .pkl for sandbox restore) to correct directories, loads state into memory
@@ -1174,6 +1175,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.8.9 | 2026-03-03 | Import proxy timeout resilience (pre-generated `import_id`, early job registration, upload-finished detection, polling retry with 404 tolerance), import UX (success/failure icons, confirmation dialog), branding update ("Integrated & Intelligent Single Cell Analysis") |
 | 0.8.7 | 2026-03-02 | Data page scroll fix (`overflow: hidden` on html/body), footer i18n (Chinese/English), About page version/date update |
 | 0.8.6 | 2026-03-02 | Async session import (background tar.gz extraction + polling endpoint, avoids proxy timeout), first-visit disclaimer dialog (AI reliability warning, localStorage), About button text label, footer copyright |
 | 0.8.5 | 2026-02-28 | Tool message history fix (single raw_assistant_message per response, Gemini thought_signature), AI-curated brief figures (`select_brief_figures`), workspace figure collection (root + figures/ dirs), image MIME type detection, export GET endpoint + browser-native download UX |
@@ -1209,5 +1211,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-02*
-*Version: 0.8.7*
+*Document updated: 2026-03-03*
+*Version: 0.8.9*
