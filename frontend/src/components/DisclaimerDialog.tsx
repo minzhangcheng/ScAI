@@ -32,8 +32,8 @@ export function DisclaimerDialog({ onAccept }: DisclaimerDialogProps) {
               <h1 className="text-lg font-bold text-white">InteSc</h1>
               <p className="text-sm text-violet-200">
                 {zh
-                  ? 'AI 驱动的单细胞测序整合分析平台'
-                  : 'AI-Powered Integrated Single-Cell Sequencing Analysis'}
+                  ? '整合与智能单细胞分析'
+                  : 'Integrated & Intelligent Single Cell Analysis'}
               </p>
             </div>
           </div>

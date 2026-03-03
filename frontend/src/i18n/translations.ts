@@ -6,8 +6,8 @@ export const translations = {
   zh: {
     // App
     appName: 'InteSc',
-    appSubtitle: '智能单细胞测序整合分析',
-    appFullName: 'InteSc - 智能单细胞测序整合分析',
+    appSubtitle: '整合与智能单细胞分析',
+    appFullName: 'InteSc - 整合与智能单细胞分析',
     
     // Tabs
     tabAnalysis: '分析',

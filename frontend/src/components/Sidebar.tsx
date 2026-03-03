@@ -14,7 +14,9 @@ import {
   Repeat,
   Download,
   Upload,
-  Loader2
+  Loader2,
+  CheckCircle,
+  AlertCircle
 } from 'lucide-react'
 
 interface SidebarProps {
@@ -41,7 +43,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   const [sessionName, setSessionName] = useState(DEFAULT_PROJECT_NAME)
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
-  const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number; closable?: boolean } | null>(null)
+  const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number; closable?: boolean; success?: boolean } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Auto-reload session from API on page refresh to restore full data (images etc.)
@@ -165,7 +167,8 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       setProgressInfo({
         action: t('exportDownloadStarted'),
         detail: t('exportDownloadStartedDetail'),
-        closable: true  // 可关闭
+        closable: true,
+        success: true
       })
       setExporting(false)
     }, 3000)  // 3秒延时
@@ -179,70 +182,133 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
     setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? `正在上传 (${sizeMB} MB)...` : `Uploading (${sizeMB} MB)...`, percent: 0 })
 
     try {
-      // Use XMLHttpRequest for upload progress tracking
-      const data: any = await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', '/api/session/import')
+      // Pre-generate import_id so we can poll even if proxy times out before response arrives
+      // crypto.randomUUID() requires secure context (HTTPS or localhost); fallback for HTTP
+      const preImportId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
+      let uploadFinished = false
 
-        xhr.upload.onprogress = (ev) => {
-          if (ev.lengthComputable) {
-            const pct = Math.round((ev.loaded / ev.total) * 100)
-            setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? `正在上传... ${pct}%` : `Uploading... ${pct}%`, percent: pct })
-          }
-        }
+      // Phase 1: Upload with progress tracking
+      let data: any = null
+      try {
+        data = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+          xhr.open('POST', '/api/session/import')
 
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在解压和加载...' : 'Extracting and loading...' })
-            try { resolve(JSON.parse(xhr.responseText)) } catch { resolve({}) }
-          } else {
-            try {
-              const err = JSON.parse(xhr.responseText)
-              reject(new Error(err.detail || 'Import failed'))
-            } catch {
-              reject(new Error('Import failed'))
+          xhr.upload.onprogress = (ev) => {
+            if (ev.lengthComputable) {
+              const pct = Math.round((ev.loaded / ev.total) * 100)
+              if (pct >= 100) uploadFinished = true
+              setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? `正在上传... ${pct}%` : `Uploading... ${pct}%`, percent: pct })
             }
           }
-        }
 
-        xhr.onerror = () => reject(new Error('Network error'))
+          xhr.onload = () => {
+            uploadFinished = true
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try { resolve(JSON.parse(xhr.responseText)) } catch { resolve({}) }
+            } else {
+              try {
+                const err = JSON.parse(xhr.responseText)
+                reject(new Error(err.detail || 'Import failed'))
+              } catch {
+                reject(new Error('Import failed'))
+              }
+            }
+          }
 
-        const formData = new FormData()
-        formData.append('file', file)
-        xhr.send(formData)
-      })
+          xhr.onerror = () => reject(new Error('Network error'))
 
-      let sessionId: string | undefined = data.session_id
+          const formData = new FormData()
+          formData.append('file', file)
+          formData.append('import_id', preImportId)
+          xhr.send(formData)
+        })
+      } catch (uploadErr) {
+        // If upload data was fully sent but response was lost (proxy timeout),
+        // continue to polling — the backend is still processing
+        if (!uploadFinished) throw uploadErr
+        // uploadFinished=true means all bytes were sent; fall through to poll
+      }
 
-      // tar.gz async import: poll until extraction completes
-      const importId: string | undefined = data.data?.import_id
-      if (importId) {
-        setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在解压归档...' : 'Extracting archive...' })
+      let sessionId: string | undefined = data?.session_id
+
+      // Phase 2: Poll extraction status (tar.gz async path)
+      // Use import_id from response if available, otherwise the pre-generated one
+      const pollId: string = data?.data?.import_id || preImportId
+      const isTarGz = file.name.endsWith('.tar.gz') || file.name.endsWith('.tgz')
+
+      if (isTarGz || !data) {
+        // For tar.gz or if response was lost: poll for status
+        setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在解压导入，请稍候...' : 'Extracting and importing, please wait...' })
+        const MAX_POLL_MS = 30 * 60 * 1000  // 30 minutes timeout for very large files
+        const POLL_INTERVAL = 3000
+        const MAX_RETRIES = 5
+        const startTime = Date.now()
+
         while (true) {
-          await new Promise(r => setTimeout(r, 2000))
-          const status = await apiFetch<any>(`/session/import/${importId}`)
+          if (Date.now() - startTime > MAX_POLL_MS) {
+            throw new Error(language === 'zh' ? '导入超时，请刷新页面检查是否已成功' : 'Import timed out. Please refresh to check if it succeeded.')
+          }
+          await new Promise(r => setTimeout(r, POLL_INTERVAL))
+
+          // Poll with retry: tolerate transient network errors and initial 404
+          let status: any = null
+          for (let retry = 0; retry < MAX_RETRIES; retry++) {
+            try {
+              status = await apiFetch<any>(`/session/import/${pollId}`)
+              break
+            } catch (pollErr: any) {
+              // Tolerate 404 during early polls (job may not be registered yet)
+              const is404 = pollErr.message?.includes('not found')
+              if (retry < MAX_RETRIES - 1 && (is404 || Date.now() - startTime < 60000)) {
+                await new Promise(r => setTimeout(r, 3000))
+                continue
+              }
+              if (retry === MAX_RETRIES - 1) throw pollErr
+              await new Promise(r => setTimeout(r, 3000))
+            }
+          }
+
+          if (!status) continue  // all retries hit 404, loop around
+
           if (status.status === 'completed') {
             sessionId = status.session_id
             break
           }
           if (status.status === 'failed') {
-            throw new Error(status.error || 'Extraction failed')
+            throw new Error(status.error || (language === 'zh' ? '解压失败' : 'Extraction failed'))
           }
+          // "uploading" or "pending" → keep polling
         }
       }
 
+      // Phase 3: Load session
       if (sessionId) {
         setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在加载会话...' : 'Loading session...' })
         clearMessages()
         await loadSession(sessionId)
       }
+
+      // Phase 4: Show success
+      setImporting(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+      setProgressInfo({
+        action: t('importSuccess'),
+        detail: language === 'zh' ? '会话已成功导入' : 'Session imported successfully',
+        closable: true,
+        success: true
+      })
     } catch (e: any) {
       console.error('Import failed:', e)
-      alert(`${t('importFailed')}: ${e.message || ''}`)
-    } finally {
       setImporting(false)
-      setProgressInfo(null)
       if (fileInputRef.current) fileInputRef.current.value = ''
+      setProgressInfo({
+        action: t('importFailed'),
+        detail: e.message || '',
+        closable: true
+      })
     }
   }
 
@@ -254,14 +320,19 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       {progressInfo && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-xl p-6 w-80 text-center space-y-4">
-            {/* 加载动画 - 仅在不可关闭时显示 */}
+            {/* 加载动画 - 进行中时显示 */}
             {!progressInfo.closable && (
               <Loader2 className="w-8 h-8 animate-spin text-violet-600 mx-auto" />
             )}
 
-            {/* 成功图标 - 可关闭时显示 */}
-            {progressInfo.closable && (
-              <Download className="w-8 h-8 text-green-600 mx-auto" />
+            {/* 成功图标 */}
+            {progressInfo.closable && progressInfo.success && (
+              <CheckCircle className="w-8 h-8 text-green-600 mx-auto" />
+            )}
+
+            {/* 失败/完成图标（导出完成或导入失败） */}
+            {progressInfo.closable && !progressInfo.success && (
+              <AlertCircle className="w-8 h-8 text-red-500 mx-auto" />
             )}
 
             {/* 文本信息 */}

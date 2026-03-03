@@ -1564,25 +1564,31 @@ async def export_state(session_id: str):
 
 
 @app.post("/api/session/import")
-async def import_state(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def import_state(background_tasks: BackgroundTasks, file: UploadFile = File(...), import_id: Optional[str] = Form(None)):
     """Import session from tar.gz/zip/json archive, restoring all files to their directories.
 
     For tar.gz: streams upload to temp file, then extracts in a background task and returns
     an import_id immediately to avoid proxy timeouts on large archives.
+    The frontend can pre-generate import_id so that even if a proxy timeout prevents the
+    response from reaching the client, it can still poll for status.
     For zip/json: processed inline (small files).
     """
     filename = file.filename or ""
 
     if filename.endswith(('.tar.gz', '.tgz')):
         # ---- tar.gz: save to disk, then extract in background to avoid proxy timeouts ----
+        # Register import job BEFORE saving file so frontend can poll even if proxy times out
+        import_job_id = import_id or str(uuid.uuid4())
+        _import_jobs[import_job_id] = {"status": "uploading"}
+
         tmp_path = UPLOAD_TEMP_DIR / f"import_{uuid.uuid4().hex}.tar.gz"
         try:
             await stream_save_file(file, tmp_path)
         except Exception as e:
+            _import_jobs[import_job_id] = {"status": "failed", "error": f"Upload failed: {str(e)}"}
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
 
-        import_job_id = str(uuid.uuid4())
         _import_jobs[import_job_id] = {"status": "pending"}
         background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id)
 

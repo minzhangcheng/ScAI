@@ -45,8 +45,8 @@ export function AboutDialog() {
                 <h3 className="text-2xl font-bold text-violet-700">InteSc</h3>
                 <p className="text-sm text-slate-500 mt-1">
                   {zh
-                    ? '多智能体生物医学研究分析系统'
-                    : 'Multi-Agent Biomedical Research Analysis System'}
+                    ? '整合与智能单细胞分析'
+                    : 'Integrated & Intelligent Single Cell Analysis'}
                 </p>
                 <div className="mt-2 inline-block px-3 py-1 bg-violet-100 text-violet-700 text-xs font-medium rounded-full">
                   v0.8.7
