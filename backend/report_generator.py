@@ -777,6 +777,9 @@ class DetailedReportGenerator:
         self.code_history: List[CodeExecution] = []
         self.cluster_annotations: Dict[str, Dict[str, Any]] = {}  # cluster_id -> {cell_type, n_cells}
 
+        # Figure images cache for vision API (populated by _prepare_figure_images)
+        self.figure_images_cache: Dict[str, str] = {}  # filename -> raw base64
+
     async def _report_progress(self, progress: float, step: str, status: str = "generating"):
         """Report progress to callback"""
         if self.progress_callback:
@@ -786,12 +789,13 @@ class DetailedReportGenerator:
                 "status": status
             })
 
-    async def _pi_chat(self, prompt: str, temperature: float = 0.3) -> str:
+    async def _pi_chat(self, prompt: str, temperature: float = 0.3, max_tokens: int = 4096) -> str:
         """Chat with PI Agent"""
         response = await self.llm_client.chat(
             model=self.pi_model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=temperature
+            temperature=temperature,
+            max_tokens=max_tokens
         )
         return response.content if response else ""
 
@@ -1009,18 +1013,28 @@ Be specific and actionable. Include:
         # Extract cluster annotations from state data (no sandbox needed)
         self._extract_cluster_annotations_from_state(state)
 
-        # Step 4: PI plans report structure based on analysis record
-        await self._report_progress(20, "PI Agent规划报告结构..." if zh else "PI Agent planning report structure...")
-        report_plan = await self._plan_report_from_analysis(
+        # Step 3.5: PI reviews actual analysis code, figures, and tables
+        await self._report_progress(16, "PI Agent审阅分析代码和图表..." if zh else "PI Agent reviewing analysis code and figures...")
+        analysis_summary = await self._pi_review_analysis(
             state, analysis_record, findings, existing_figures, existing_tables, language
         )
+        logger.info(f"Analysis review complete: methodology={bool(analysis_summary.get('methodology_overview'))}, "
+                     f"workflow={bool(analysis_summary.get('workflow_summary'))}, "
+                     f"results={bool(analysis_summary.get('key_results'))}")
 
-        # Step 5: Generate each section using existing figures + PI narrative (no code execution)
+        # Step 4: PI plans report structure based on analysis record + analysis summary
+        await self._report_progress(30, "PI Agent规划报告结构..." if zh else "PI Agent planning report structure...")
+        report_plan = await self._plan_report_from_analysis(
+            state, analysis_record, findings, existing_figures, existing_tables, language,
+            analysis_summary=analysis_summary
+        )
+
+        # Step 5: Generate each section using existing figures + PI narrative (with vision + analysis context)
         sections = []
         total_sections = len(report_plan.get("sections", []))
 
         for i, section_plan in enumerate(report_plan.get("sections", [])):
-            progress = 25 + (i / max(total_sections, 1)) * 55
+            progress = 35 + (i / max(total_sections, 1)) * 45
             section_title = section_plan.get("title", f"Section {i+1}")
             await self._report_progress(
                 progress,
@@ -1031,16 +1045,17 @@ Be specific and actionable. Include:
                 state,
                 section_plan,
                 findings,
-                language
+                language,
+                analysis_summary=analysis_summary
             )
             sections.append(section)
 
         # Step 6: PI writes abstract and conclusions
         await self._report_progress(85, "撰写摘要..." if zh else "Writing abstract...")
-        abstract = await self._generate_abstract(state, sections, findings, language)
+        abstract = await self._generate_abstract(state, sections, findings, language, analysis_summary=analysis_summary)
 
         await self._report_progress(92, "撰写结论..." if zh else "Writing conclusions...")
-        conclusions = await self._generate_conclusions(state, sections, findings, language)
+        conclusions = await self._generate_conclusions(state, sections, findings, language, analysis_summary=analysis_summary)
 
         # Save graphic abstract image to figures dir if available
         graphic_abstract_path = None
@@ -1442,6 +1457,988 @@ print("CLUSTER_ANNOTATIONS_JSON:" + _json.dumps(_mapping, ensure_ascii=False))
             findings["cluster_annotations"] = "Not available"
 
         return findings
+
+    # ======================================================================
+    # Analysis Review: PI reads code, views figures, reads tables
+    # ======================================================================
+
+    # Phase classification constants
+    _PHASE_NAMES = {
+        "qc": "Quality Control & Filtering",
+        "normalization": "Normalization & Feature Selection",
+        "integration": "Batch Correction & Integration",
+        "dimensionality_reduction": "Dimensionality Reduction",
+        "clustering": "Cell Clustering",
+        "annotation": "Cell Type Annotation",
+        "differential_expression": "Differential Expression Analysis",
+        "pathway": "Pathway & Functional Analysis",
+        "trajectory": "Trajectory & RNA Velocity Analysis",
+        "communication": "Cell-Cell Communication Analysis",
+        "visualization": "Visualization",
+        "other": "Additional Analysis",
+    }
+    _PHASE_ORDER = list(_PHASE_NAMES.keys())
+    _CATEGORY_KEYWORDS = {
+        "qc": ["n_genes_by_counts", "pct_counts_mt", "filter_cells", "filter_genes",
+                "mito_genes", "quality_control", "doublet", "scrublet"],
+        "normalization": ["normalize_total", "log1p", "highly_variable_genes",
+                          "sc.pp.scale", "regress_out"],
+        "integration": ["harmony", "scanorama", "bbknn", "harmony_integrate",
+                        "ingest", "sc.external.pp"],
+        "dimensionality_reduction": ["sc.tl.pca", "sc.tl.umap", "sc.tl.tsne",
+                                     "sc.pp.pca", "n_comps"],
+        "clustering": ["sc.tl.leiden", "sc.tl.louvain", "sc.pp.neighbors",
+                       "resolution=", "n_neighbors="],
+        "annotation": ["cell_type", "annotate", "marker_genes",
+                       "sc.tl.rank_genes_groups"],
+        "differential_expression": ["rank_genes_groups", "wilcoxon", "t-test",
+                                    "volcano", "de_results", "deg_", "logfoldchange"],
+        "pathway": ["enrichr", "gsea", "pathway", "go_", "kegg", "gseapy",
+                    "decoupler", "gene_set"],
+        "trajectory": ["scvelo", "dpt", "pseudotime", "paga", "velocity",
+                       "cellrank", "diffusion_map"],
+        "communication": ["liana", "cellchat", "ligand", "receptor",
+                          "squidpy", "omnipath", "cell_communication"],
+    }
+
+    @staticmethod
+    def _empty_analysis_summary() -> Dict[str, Any]:
+        """Return an empty analysis summary with the expected schema."""
+        return {
+            "analysis_approach": "",
+            "methodology_overview": "",
+            "workflow_summary": "",
+            "key_results": "",
+            "figure_descriptions": {},
+            "parameters_used": {},
+        }
+
+    def _read_notebook(self, state: AnalysisState) -> List[Dict[str, Any]]:
+        """
+        Read the analysis notebook (.ipynb) directly and extract all cells with outputs.
+
+        Returns a chronological list of cell dicts:
+        [
+            {
+                "cell_index": int,
+                "code": str,
+                "text_output": str,        # Combined stream + execute_result text
+                "has_inline_figure": bool,  # True if display_data has image/png
+                "saved_figures": [str],     # Filenames from savefig() calls
+                "execution_count": int,
+            }
+        ]
+
+        Falls back to state.code_history if the .ipynb file is not found.
+        """
+        import re as _re
+
+        notebook_path = STATE_DIR / f"{state.id}.ipynb"
+
+        cells = []
+
+        if notebook_path.exists():
+            try:
+                import nbformat
+                with open(notebook_path, 'r', encoding='utf-8') as f:
+                    nb = nbformat.read(f, as_version=4)
+
+                for i, cell in enumerate(nb.cells):
+                    if cell.cell_type != "code":
+                        continue
+
+                    code = cell.source or ""
+
+                    # Filter out trivial cells
+                    if len(code.strip()) < 20:
+                        continue
+
+                    # Filter out pure import/comment cells
+                    lines = [l for l in code.strip().split("\n") if l.strip()]
+                    import_pattern = _re.compile(r'^(\s*$|#.*|import\s|from\s.*\simport\s)')
+                    if lines and all(import_pattern.match(l) for l in lines):
+                        continue
+
+                    # Extract text outputs
+                    text_parts = []
+                    has_inline_figure = False
+                    for out in cell.outputs:
+                        if out.output_type == "stream":
+                            text_parts.append(out.text)
+                        elif out.output_type == "execute_result":
+                            data = dict(out.data) if hasattr(out.data, '__iter__') else {}
+                            if "text/plain" in data:
+                                text_parts.append(data["text/plain"])
+                        elif out.output_type == "display_data":
+                            data = dict(out.data) if hasattr(out.data, '__iter__') else {}
+                            if "image/png" in data:
+                                has_inline_figure = True
+                            if "text/plain" in data:
+                                text_parts.append(data["text/plain"])
+
+                    text_output = "\n".join(text_parts).strip()
+
+                    # Extract saved figure filenames from code
+                    saved_figures = []
+                    for match in _re.findall(r'["\']([^"\']*\.png)["\']', code):
+                        fname = os.path.basename(match)
+                        if fname:
+                            saved_figures.append(fname)
+
+                    cells.append({
+                        "cell_index": i,
+                        "code": code,
+                        "text_output": text_output,
+                        "has_inline_figure": has_inline_figure,
+                        "saved_figures": saved_figures,
+                        "execution_count": cell.execution_count or i,
+                    })
+
+                logger.info(f"Read notebook directly: {len(cells)} code cells from {notebook_path}")
+                return cells
+
+            except Exception as e:
+                logger.warning(f"Failed to read notebook {notebook_path}: {e}, falling back to code_history")
+
+        # Fallback: build from state.code_history
+        logger.info("Notebook not found, falling back to state.code_history")
+        for i, cell in enumerate(state.code_history):
+            code = cell.code or ""
+            if len(code.strip()) < 20:
+                continue
+
+            lines = [l for l in code.strip().split("\n") if l.strip()]
+            import_pattern = _re.compile(r'^(\s*$|#.*|import\s|from\s.*\simport\s)')
+            if lines and all(import_pattern.match(l) for l in lines):
+                continue
+
+            text_output = cell.output or ""
+
+            saved_figures = []
+            for match in _re.findall(r'["\']([^"\']*\.png)["\']', code):
+                fname = os.path.basename(match)
+                if fname:
+                    saved_figures.append(fname)
+
+            cells.append({
+                "cell_index": i,
+                "code": code,
+                "text_output": text_output,
+                "has_inline_figure": bool(cell.figures),
+                "saved_figures": saved_figures,
+                "execution_count": i,
+            })
+
+        logger.info(f"Built {len(cells)} cells from code_history fallback")
+        return cells
+
+    def _build_notebook_digest(self, cells: List[Dict[str, Any]], max_chars: int = 25000) -> str:
+        """
+        Build a compact but informative chronological digest from notebook cells.
+
+        For each cell:
+        - Shows the code (intelligently truncated for very long cells)
+        - Shows text output highlights (focuses on quantitative results)
+        - Notes saved figures and inline figure displays
+        - Capped at max_chars total
+        """
+        import re as _re
+
+        digest_parts = []
+        total_chars = 0
+
+        for cell in cells:
+            idx = cell["cell_index"]
+            code = cell["code"]
+            text_output = cell["text_output"]
+            saved_figures = cell["saved_figures"]
+            has_inline_figure = cell["has_inline_figure"]
+
+            # Cell header
+            cell_text = f"\n## Cell {idx + 1}\n"
+
+            # Code: truncate very long cells but keep key lines
+            if len(code) > 2000:
+                code = self._truncate_code_smartly(code, max_len=2000)
+            cell_text += f"```python\n{code}\n```\n"
+
+            # Text output: extract highlights
+            if text_output:
+                output_highlight = self._extract_output_highlights(text_output, max_len=800)
+                if output_highlight:
+                    cell_text += f"Output:\n{output_highlight}\n"
+
+            # Figure annotations
+            if saved_figures:
+                cell_text += f"→ Saved figures: {', '.join(saved_figures)}\n"
+            if has_inline_figure:
+                cell_text += "→ [Figure displayed inline]\n"
+
+            # Check total length
+            if total_chars + len(cell_text) > max_chars and digest_parts:
+                remaining = max_chars - total_chars
+                if remaining > 200:
+                    cell_text = cell_text[:remaining] + "\n... (remaining cells omitted)\n"
+                    digest_parts.append(cell_text)
+                break
+
+            digest_parts.append(cell_text)
+            total_chars += len(cell_text)
+
+        return "\n".join(digest_parts)
+
+    def _truncate_code_smartly(self, code: str, max_len: int = 2000) -> str:
+        """
+        Truncate long code cells while keeping the most informative lines:
+        comments, function calls, key assignments, save commands.
+        """
+        import re as _re
+
+        lines = code.split("\n")
+        key_lines = []
+        other_lines = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            is_key = False
+            # Comments describe intent
+            if stripped.startswith("#"):
+                is_key = True
+            # Scanpy / analysis function calls
+            elif _re.search(r'sc\.(tl|pp|pl|external)\.\w+', stripped):
+                is_key = True
+            # Key function calls
+            elif any(kw in stripped.lower() for kw in [
+                'savefig', 'save_figure', 'to_csv', 'read_h5ad', 'write',
+                'rank_genes_groups', 'enrichr', 'gsea', 'harmony',
+                'scvelo', 'cellrank', 'liana', 'decoupler'
+            ]):
+                is_key = True
+            # Variable assignments with analysis keywords
+            elif _re.search(r'\b(adata|cell_type|cluster|marker|deg_|enrichment)\b', stripped) and '=' in stripped:
+                is_key = True
+            # Print/display statements
+            elif stripped.startswith(('print(', 'display(')):
+                is_key = True
+
+            if is_key:
+                key_lines.append(line)
+            else:
+                other_lines.append(line)
+
+        # If key lines fit, use them + as many other lines as possible
+        result = "\n".join(key_lines)
+        if len(result) < max_len and other_lines:
+            remaining = max_len - len(result) - 50
+            other_text = "\n".join(other_lines)
+            if len(other_text) <= remaining:
+                result = code  # Original fits with key lines
+            else:
+                result += f"\n# ... ({len(other_lines)} auxiliary lines omitted)\n"
+
+        return result[:max_len]
+
+    def _extract_output_highlights(self, output: str, max_len: int = 800) -> str:
+        """
+        Extract key quantitative results and important information from code output.
+        Prioritizes lines with numbers, statistics, cell counts, gene counts, etc.
+        """
+        import re as _re
+
+        if not output:
+            return ""
+
+        highlight_lines = []
+        other_lines = []
+
+        for line in output.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            is_highlight = False
+            # Lines with biological/analysis quantities
+            if _re.search(r'\d+[\.\d]*\s*(cells?|genes?|clusters?|samples?|observations?|variables?|batches?)', stripped, _re.IGNORECASE):
+                is_highlight = True
+            # Lines with percentages or p-values
+            elif _re.search(r'(\d+\.?\d*\s*%|p[\s_-]?val|fdr|adjusted)', stripped, _re.IGNORECASE):
+                is_highlight = True
+            # Lines with filtering/processing results
+            elif _re.search(r'(filtered|remaining|total|identified|found|significant|removed|retained|normalized)', stripped, _re.IGNORECASE):
+                is_highlight = True
+            # Matrix dimensions (e.g., "25000 x 3000")
+            elif _re.search(r'\d+\s*[x×]\s*\d+', stripped):
+                is_highlight = True
+            # AnnData repr
+            elif _re.search(r'AnnData\s+object', stripped):
+                is_highlight = True
+
+            if is_highlight:
+                highlight_lines.append(stripped)
+            else:
+                other_lines.append(stripped)
+
+        if highlight_lines:
+            result = "\n".join(highlight_lines[:15])
+            return result[:max_len]
+
+        # Fallback: return first few lines of output
+        return output[:max_len]
+
+    def _load_image_for_vision(self, image_path: str, max_width: int = 600, quality: int = 70) -> Optional[str]:
+        """
+        Load and compress an image to raw base64 for chat_with_vision.
+        Returns raw base64 string (no data: URI prefix), or None on error.
+        """
+        try:
+            with Image.open(image_path) as img:
+                # Convert to RGB if necessary
+                if img.mode in ('RGBA', 'P'):
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    if img.mode == 'P':
+                        img = img.convert('RGBA')
+                    channels = img.split()
+                    if len(channels) >= 4:
+                        background.paste(img, mask=channels[3])
+                    else:
+                        background.paste(img)
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+
+                # Resize if too large
+                width, height = img.size
+                if width > max_width:
+                    ratio = max_width / width
+                    new_size = (max_width, int(height * ratio))
+                    try:
+                        resample_method = Image.Resampling.LANCZOS
+                    except AttributeError:
+                        resample_method = Image.LANCZOS
+                    img = img.resize(new_size, resample_method)
+
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=quality, optimize=True)
+                buffer.seek(0)
+                return base64.b64encode(buffer.getvalue()).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Error loading image for vision: {image_path}: {e}")
+            return None
+
+    def _extract_analysis_code(self, state: AnalysisState) -> List[Dict[str, Any]]:
+        """
+        Extract, classify, and group code cells from code_history into analysis phases.
+
+        Filters out trivial cells (pure imports, failures, tiny code).
+        Classifies remaining cells by analysis category.
+        Groups into phases in canonical analysis order.
+
+        Returns list of phase dicts:
+        [
+            {
+                "phase_name": "Quality Control & Filtering",
+                "phase_id": "qc",
+                "cells": [{"cell_index", "code", "output", "error", "saved_figures", "category"}],
+            }
+        ]
+        """
+        import re as _re
+
+        PHASE_NAMES = self._PHASE_NAMES
+        PHASE_ORDER = self._PHASE_ORDER
+        CATEGORY_KEYWORDS = self._CATEGORY_KEYWORDS
+
+        # Import-only pattern
+        IMPORT_PATTERN = _re.compile(r'^(\s*$|#.*|import\s|from\s.*\simport\s)')
+
+        classified_cells = []
+        for i, cell in enumerate(state.code_history):
+            code = cell.code or ""
+            output = cell.output or ""
+            error = cell.error or ""
+
+            # Filter out trivial cells
+            if len(code.strip()) < 20:
+                continue
+            if error and not output and not cell.figures:
+                continue
+            # Check if purely imports/comments/blank
+            lines = [l for l in code.strip().split("\n") if l.strip()]
+            if lines and all(IMPORT_PATTERN.match(l) for l in lines):
+                continue
+
+            # Classify by category
+            code_lower = code.lower()
+            category = "other"
+            for cat, keywords in CATEGORY_KEYWORDS.items():
+                if any(kw in code_lower for kw in keywords):
+                    category = cat
+                    break
+
+            # If it only has plotting commands and nothing else matched, classify as visualization
+            if category == "other" and any(kw in code_lower for kw in ["sc.pl.", "plt.", "savefig", "save_figure"]):
+                category = "visualization"
+
+            # Extract saved figure filenames
+            saved_figures = []
+            for match in _re.findall(r'["\']([^"\']*\.png)["\']', code):
+                fname = os.path.basename(match)
+                if fname:
+                    saved_figures.append(fname)
+
+            classified_cells.append({
+                "cell_index": i,
+                "code": code,
+                "output": output,
+                "error": error,
+                "figures_base64": cell.figures or [],
+                "saved_figures": saved_figures,
+                "category": category,
+            })
+
+        # Group into phases by category, maintaining canonical order
+        phase_buckets: Dict[str, List[Dict]] = {}
+        for cell in classified_cells:
+            cat = cell["category"]
+            if cat not in phase_buckets:
+                phase_buckets[cat] = []
+            phase_buckets[cat].append(cell)
+
+        # Build phases in canonical order
+        phases = []
+        for phase_id in PHASE_ORDER:
+            if phase_id not in phase_buckets:
+                continue
+            cells = phase_buckets[phase_id]
+            # Merge tiny phases (1 cell, < 10 lines) into nearest neighbor
+            total_lines = sum(len(c["code"].split("\n")) for c in cells)
+            if len(cells) == 1 and total_lines < 10 and phases:
+                # Merge into previous phase
+                phases[-1]["cells"].extend(cells)
+                continue
+
+            phases.append({
+                "phase_name": PHASE_NAMES.get(phase_id, phase_id),
+                "phase_id": phase_id,
+                "cells": cells,
+            })
+
+        return phases
+
+    def _prepare_figure_images(
+        self,
+        existing_figures: List[Dict[str, Any]],
+        max_figures: int = 20
+    ) -> Dict[str, str]:
+        """
+        Load and compress figure images into raw base64 for vision API.
+        Prioritizes by figure type importance.
+        Stores results in self.figure_images_cache for downstream reuse.
+        """
+        # Priority order for figure types
+        type_priority = {
+            "annotation": 0, "umap": 1, "clustering": 2, "heatmap": 3,
+            "volcano": 4, "dotplot": 5, "marker_genes": 6, "violin": 7,
+            "bar_chart": 8, "feature_plot": 9, "pathway": 10,
+            "trajectory": 11, "velocity": 12, "scatter": 13,
+            "qc": 14, "overview": 15, "unknown": 16
+        }
+
+        # Sort by priority
+        sorted_figures = sorted(
+            existing_figures,
+            key=lambda f: type_priority.get(f.get("inferred_type", "unknown"), 99)
+        )
+
+        # Load up to max_figures
+        cache: Dict[str, str] = {}
+        for fig in sorted_figures[:max_figures]:
+            png_path = fig.get("png_path", "")
+            filename = fig.get("filename", "")
+            if not png_path or not filename:
+                continue
+            if not os.path.exists(png_path):
+                continue
+
+            img_b64 = self._load_image_for_vision(png_path)
+            if img_b64:
+                cache[filename] = img_b64
+
+        self.figure_images_cache = cache
+        logger.info(f"Loaded {len(cache)} figure images for vision API")
+        return cache
+
+    def _prepare_table_summaries(
+        self,
+        existing_tables: List[Dict[str, Any]],
+        max_rows: int = 30,
+        max_tables: int = 10
+    ) -> Dict[str, str]:
+        """
+        Read CSV tables and produce text summaries for PI context.
+        Returns dict mapping filename -> formatted text summary.
+        """
+        summaries: Dict[str, str] = {}
+
+        for tbl in existing_tables[:max_tables]:
+            csv_path = tbl.get("csv_path", "")
+            filename = tbl.get("filename", "")
+            if not csv_path or not os.path.exists(csv_path):
+                continue
+
+            try:
+                is_de = tbl.get("inferred_type") == "differential_expression" or filename.startswith("de_")
+                # Read full file for DE tables (need sig gene counts); limit rows for others
+                df = pd.read_csv(csv_path) if is_de else pd.read_csv(csv_path, nrows=max_rows)
+                parts = [
+                    f"Table: {filename}",
+                    f"Shape: {df.shape[0]}{'+'  if not is_de and df.shape[0] == max_rows else ''} rows x {df.shape[1]} columns",
+                    f"Columns: {', '.join(df.columns.tolist()[:20])}",
+                ]
+
+                # For DE tables, count significant genes
+                if is_de:
+                    fc_col = next((c for c in df.columns if "log" in c.lower() and "fold" in c.lower()), None)
+                    pval_col = next((c for c in df.columns if "padj" in c.lower() or "p_val_adj" in c.lower() or "fdr" in c.lower()), None)
+                    if fc_col and pval_col:
+                        try:
+                            sig = df[(df[fc_col].abs() > 1) & (df[pval_col] < 0.05)]
+                            parts.append(f"Significant genes (|logFC|>1, padj<0.05): {len(sig)}")
+                            up = sig[sig[fc_col] > 0]
+                            down = sig[sig[fc_col] < 0]
+                            parts.append(f"  Upregulated: {len(up)}, Downregulated: {len(down)}")
+                        except Exception:
+                            pass
+
+                # Add data preview
+                preview = df.head(max_rows).to_string(max_colwidth=40)
+                parts.append(f"\nData preview (first {min(max_rows, len(df))} rows):\n{preview}")
+
+                # Basic stats for numeric columns
+                numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                if numeric_cols:
+                    stats = df[numeric_cols[:8]].describe().to_string()
+                    parts.append(f"\nNumeric column statistics:\n{stats}")
+
+                summary = "\n".join(parts)
+                # Cap at ~2000 chars
+                if len(summary) > 2000:
+                    summary = summary[:2000] + "\n... (truncated)"
+                summaries[filename] = summary
+            except Exception as e:
+                logger.warning(f"Failed to read table {filename}: {e}")
+
+        logger.info(f"Prepared {len(summaries)} table summaries")
+        return summaries
+
+    async def _pi_review_phase(
+        self,
+        phase: Dict[str, Any],
+        figure_images: Dict[str, str],
+        table_summaries: Dict[str, str],
+        state: AnalysisState,
+        language: str
+    ) -> str:
+        """
+        PI reviews one analysis phase with actual code, figures, and table data.
+        Uses vision API when figures are available for this phase.
+
+        Returns structured text summary of methodology, workflow, and results for this phase.
+        """
+        zh = language == "zh"
+        phase_name = phase["phase_name"]
+        phase_id = phase["phase_id"]
+        cells = phase["cells"]
+
+        # Build code text from cells
+        code_parts = []
+        output_parts = []
+        phase_saved_figures = set()
+
+        for j, cell in enumerate(cells):
+            code = cell["code"]
+            output = cell.get("output", "")
+            code_parts.append(f"# --- Cell {j+1} ---\n{code}")
+            if output:
+                output_parts.append(f"[Cell {j+1} output]: {output[:500]}")
+            for fname in cell.get("saved_figures", []):
+                phase_saved_figures.add(fname)
+
+        code_text = "\n\n".join(code_parts)
+        output_text = "\n".join(output_parts) if output_parts else "(No output)"
+
+        # Truncate code if too long — keep first 3 and last 2 cells in full, summarize middle
+        if len(code_text) > 8000 and len(cells) > 5:
+            first_cells = cells[:3]
+            last_cells = cells[-2:]
+            middle_count = len(cells) - 5
+            first_code = "\n\n".join(f"# --- Cell {j+1} ---\n{c['code']}" for j, c in enumerate(first_cells))
+            last_code = "\n\n".join(f"# --- Cell {len(cells)-1+j} ---\n{c['code']}" for j, c in enumerate(last_cells))
+            code_text = f"{first_code}\n\n# [... {middle_count} intermediate cells omitted for brevity ...]\n\n{last_code}"
+
+        if len(output_text) > 3000:
+            output_text = output_text[:3000] + "\n... (truncated)"
+
+        # Match figures to this phase
+        phase_images = []
+        # 1. Match by saved filenames in cells
+        for fname in phase_saved_figures:
+            if fname in figure_images:
+                phase_images.append(figure_images[fname])
+        # 2. Fallback: match by inferred type
+        if not phase_images:
+            type_to_phase = {
+                "qc": ["qc"], "normalization": [], "integration": [],
+                "dimensionality_reduction": ["umap", "scatter"],
+                "clustering": ["umap", "clustering"], "annotation": ["annotation", "umap"],
+                "differential_expression": ["volcano", "heatmap"],
+                "pathway": ["pathway"], "trajectory": ["trajectory", "velocity"],
+                "communication": [], "visualization": [],
+            }
+            matching_types = type_to_phase.get(phase_id, [])
+            for fname, img_b64 in figure_images.items():
+                fig_type = self._infer_figure_type(fname)
+                if fig_type in matching_types and len(phase_images) < 5:
+                    phase_images.append(img_b64)
+
+        # Cap at 5 images per phase
+        phase_images = phase_images[:5]
+
+        # Build table context for this phase
+        table_context = ""
+        if table_summaries:
+            relevant_tables = []
+            for tbl_name, tbl_summary in table_summaries.items():
+                tbl_lower = tbl_name.lower()
+                # Simple relevance matching
+                if phase_id == "differential_expression" and ("de_" in tbl_lower or "deg" in tbl_lower or "marker" in tbl_lower):
+                    relevant_tables.append(tbl_summary)
+                elif phase_id == "pathway" and ("pathway" in tbl_lower or "enrich" in tbl_lower or "gsea" in tbl_lower):
+                    relevant_tables.append(tbl_summary)
+                elif phase_id == "annotation" and ("marker" in tbl_lower or "cluster" in tbl_lower):
+                    relevant_tables.append(tbl_summary)
+            if relevant_tables:
+                table_context = "\n\n## Relevant Table Data\n" + "\n\n".join(relevant_tables[:3])
+
+        # Build prompt
+        figure_note = f"\n[{len(phase_images)} figure(s) attached for visual inspection]" if phase_images else "\n[No figures attached for this phase]"
+        if phase_saved_figures:
+            figure_note += f"\nFigure filenames: {', '.join(sorted(phase_saved_figures))}"
+
+        lang_instruction = "用中文撰写，200-400字。具体描述使用的方法、参数和定量结果。" if zh else "Write 200-400 words. Be specific about parameters and quantitative results."
+
+        prompt = f"""You are a Principal Investigator reviewing your bioinformatics team's single-cell RNA sequencing analysis.
+Read the analysis code below carefully and examine the accompanying figures.
+
+## Analysis Phase: {phase_name}
+
+## Python Code Executed:
+```python
+{code_text}
+```
+
+## Code Output:
+{output_text}
+
+## Figures Generated in This Phase:
+{figure_note}
+{table_context}
+
+## Task:
+Provide a detailed technical summary of this analysis phase covering:
+1. **Methods**: What specific algorithms, parameters, and tools were used? (e.g., "Leiden clustering with resolution=0.8", "Harmony integration across batches")
+2. **Workflow**: What was the step-by-step process in this phase?
+3. **Results**: Based on the code output and figures, what were the key results? (e.g., "Identified 15 clusters", "Filtered from 25,000 to 18,500 cells")
+4. **Figure descriptions**: For each figure you can see, describe what it actually shows visually.
+
+{lang_instruction}
+"""
+
+        # Use vision API if we have images, otherwise text-only
+        try:
+            if phase_images:
+                response = await self.llm_client.chat_with_vision(
+                    model=self.pi_model,
+                    text_prompt=prompt,
+                    images=phase_images,
+                    temperature=0.3,
+                    max_tokens=4096,
+                    request_timeout=120.0
+                )
+                return response.content if response and response.content else ""
+            else:
+                return await self._pi_chat(prompt, temperature=0.3)
+        except Exception as e:
+            logger.warning(f"PI review failed for phase '{phase_name}': {e}, falling back to text-only")
+            try:
+                return await self._pi_chat(prompt, temperature=0.3)
+            except Exception as e2:
+                logger.error(f"PI text-only review also failed for phase '{phase_name}': {e2}")
+                return ""
+
+    async def _pi_synthesize_review(
+        self,
+        phase_reviews: List[Dict[str, Any]],
+        state: AnalysisState,
+        language: str
+    ) -> Dict[str, Any]:
+        """
+        PI synthesizes all phase reviews into a comprehensive analysis summary.
+
+        Returns dict with methodology_overview, workflow_summary, key_results,
+        figure_descriptions, and parameters_used.
+        """
+        zh = language == "zh"
+
+        # Format phase reviews
+        reviews_text = ""
+        for pr in phase_reviews:
+            reviews_text += f"\n### {pr['phase_name']}\n{pr['summary']}\n"
+
+        lang_instruction = "用中文撰写所有内容" if zh else "Write all content in English"
+
+        prompt = f"""You are a Principal Investigator writing a comprehensive summary of your team's
+bioinformatics analysis. Below are detailed reviews of each analysis phase.
+
+## Research Project
+Title: {state.name}
+Objective: {state.initial_instruction}
+
+## Phase-by-Phase Reviews:
+{reviews_text}
+
+## Task:
+Synthesize these phase reviews into a comprehensive analysis summary.
+{lang_instruction}
+
+Return a JSON object with this structure:
+{{
+    "methodology_overview": "200-300 word overview of ALL methods, parameters, and tools used across the entire analysis pipeline, from raw data processing to final results",
+    "workflow_summary": "Step-by-step workflow as a numbered list, from raw data to final results. Include specific methods and parameters at each step.",
+    "key_results": "All key quantitative results discovered: cell counts before/after filtering, number of clusters, cell types identified, significant genes found, key pathways, etc.",
+    "figure_descriptions": {{"filename.png": "Description of what this figure shows based on visual inspection"}},
+    "parameters_used": {{"parameter_name": "value and brief rationale"}}
+}}
+
+IMPORTANT:
+- Be specific about methods (e.g., "Leiden at resolution 0.8" not just "clustering")
+- Include ALL quantitative results from the analysis
+- The figure_descriptions should only include figures you actually observed in the reviews
+- The parameters_used should list key analysis parameters (resolution, n_neighbors, thresholds, etc.)
+"""
+
+        try:
+            response = await self._pi_chat(prompt, temperature=0.3)
+        except Exception as e:
+            logger.error(f"PI synthesis LLM call failed: {e}")
+            all_reviews = "\n\n".join(pr["summary"] for pr in phase_reviews if pr["summary"])
+            fallback = self._empty_analysis_summary()
+            fallback["methodology_overview"] = all_reviews[:2000] if all_reviews else ""
+            return fallback
+
+        try:
+            result = _safe_parse_json(response)
+            if result and "methodology_overview" in result:
+                logger.info("PI synthesis successful")
+                return result
+        except Exception as e:
+            logger.error(f"Failed to parse PI synthesis: {e}")
+
+        # Fallback: construct basic summary from raw review texts
+        logger.warning("PI synthesis JSON parsing failed, constructing fallback summary")
+        all_reviews = "\n\n".join(pr["summary"] for pr in phase_reviews if pr["summary"])
+        fallback = self._empty_analysis_summary()
+        fallback["methodology_overview"] = all_reviews[:2000] if all_reviews else ""
+        return fallback
+
+    async def _pi_comprehensive_review(
+        self,
+        code_digest: str,
+        figure_images: Dict[str, str],
+        table_summaries: Dict[str, str],
+        state: AnalysisState,
+        language: str
+    ) -> Dict[str, Any]:
+        """
+        PI Agent performs a single comprehensive review of the entire analysis.
+
+        Reads the complete code digest, views all figures via vision API, and reads
+        table data. Writes a from-scratch summary covering analysis approach,
+        workflow, and results.
+
+        Returns analysis_summary dict compatible with downstream report generation.
+        """
+        zh = language == "zh"
+
+        # Build table context
+        table_text = ""
+        if table_summaries:
+            table_parts = list(table_summaries.values())[:10]
+            table_text = "\n\n".join(table_parts)
+
+        # Build figure filename list for the prompt
+        figure_filenames = list(figure_images.keys())
+        figures_list = "\n".join(f"  {i+1}. {fname}" for i, fname in enumerate(figure_filenames))
+
+        # Collect all images for vision API
+        all_images = list(figure_images.values())
+
+        lang_instruction = (
+            "用中文撰写所有内容。analysis_approach 300-500字，analysis_results 300-500字。"
+            if zh else
+            "Write all content in English. analysis_approach 300-500 words, analysis_results 300-500 words."
+        )
+
+        prompt = f"""You are a Principal Investigator. Your bioinformatics team has completed a single-cell RNA sequencing analysis. Below is the complete analysis notebook (all code and outputs in chronological order), along with all result figures and table data.
+
+Your task: Read through the analysis code carefully from beginning to end, examine every attached figure, and review the table data. Then write a comprehensive summary FROM SCRATCH that demonstrates your deep understanding of the entire analysis.
+
+## Research Project
+Title: {state.name}
+Objective: {state.initial_instruction}
+
+## Complete Analysis Notebook (Code + Outputs)
+{code_digest}
+
+## Table Data Summaries
+{table_text if table_text else "(No tables available)"}
+
+## Result Figures ({len(figure_filenames)} figures attached for visual inspection)
+{figures_list if figures_list else "(No figures available)"}
+
+## Task
+{lang_instruction}
+
+Return a JSON object with this exact structure:
+{{
+    "analysis_approach": "Overall analysis strategy and scientific rationale (分析思路). Explain: What was the overall analysis strategy? How was the analysis pipeline designed? What scientific questions guided the analysis? How did findings from earlier steps inform later analysis decisions? What was the rationale behind key methodological choices?",
+
+    "analysis_workflow": "Complete step-by-step analysis pipeline (分析流程). Write as a numbered list from raw data processing to final results. Include specific methods, tools, parameters, and software used at each step. Example: '1. Data loading: Read 10x Genomics data with sc.read_10x_h5(), loaded N cells × M genes...'",
+
+    "analysis_results": "All key quantitative findings (分析结果). Include: cell counts before/after filtering, number of clusters identified, cell types annotated, number of significant DEGs found, key pathways enriched, and any other quantitative results. Be specific with numbers.",
+
+    "figure_descriptions": {{
+        "filename.png": "Description of what this figure actually shows visually and its scientific significance (50-100 words per figure)"
+    }},
+
+    "parameters_used": {{
+        "parameter_name": "value and brief rationale"
+    }}
+}}
+
+IMPORTANT:
+- Read the code carefully to understand the COMPLETE analysis pipeline
+- For analysis_approach, explain the THINKING behind the analysis — not just what was done, but WHY
+- For analysis_workflow, be specific about methods and parameters (e.g., "Leiden clustering at resolution=0.8" not just "clustering")
+- For analysis_results, include ALL quantitative results you can find in the code outputs
+- For figure_descriptions, describe what you actually SEE in each attached figure
+- For parameters_used, list key analysis parameters from the code (resolution, n_neighbors, thresholds, etc.)
+"""
+
+        try:
+            if all_images:
+                response_obj = await self.llm_client.chat_with_vision(
+                    model=self.pi_model,
+                    text_prompt=prompt,
+                    images=all_images[:20],
+                    temperature=0.3,
+                    max_tokens=8192,
+                    request_timeout=180.0
+                )
+                response = response_obj.content if response_obj and response_obj.content else ""
+            else:
+                response = await self._pi_chat(prompt, temperature=0.3, max_tokens=8192)
+        except Exception as e:
+            logger.error(f"PI comprehensive review failed: {e}")
+            # Fallback to text-only
+            try:
+                response = await self._pi_chat(prompt, temperature=0.3, max_tokens=8192)
+            except Exception as e2:
+                logger.error(f"PI text-only comprehensive review also failed: {e2}")
+                return self._empty_analysis_summary()
+
+        # Parse JSON response
+        try:
+            result = _safe_parse_json(response)
+            if result:
+                analysis_approach = result.get("analysis_approach", "")
+                analysis_workflow = result.get("analysis_workflow", "")
+                analysis_results = result.get("analysis_results", "")
+                figure_descriptions = result.get("figure_descriptions", {})
+                parameters_used = result.get("parameters_used", {})
+
+                # Map to backward-compatible schema
+                return {
+                    "analysis_approach": analysis_approach,
+                    "methodology_overview": f"{analysis_approach}\n\n{analysis_workflow}",
+                    "workflow_summary": analysis_workflow,
+                    "key_results": analysis_results,
+                    "figure_descriptions": figure_descriptions if isinstance(figure_descriptions, dict) else {},
+                    "parameters_used": parameters_used if isinstance(parameters_used, dict) else {},
+                }
+        except Exception as e:
+            logger.error(f"Failed to parse PI comprehensive review response: {e}")
+
+        # Fallback: use raw response as methodology_overview
+        fallback = self._empty_analysis_summary()
+        fallback["methodology_overview"] = response[:3000] if response else ""
+        return fallback
+
+    async def _pi_review_analysis(
+        self,
+        state: AnalysisState,
+        analysis_record: Dict[str, Any],
+        findings: Dict[str, Any],
+        existing_figures: List[Dict[str, Any]],
+        existing_tables: List[Dict[str, Any]],
+        language: str
+    ) -> Dict[str, Any]:
+        """
+        PI Agent performs comprehensive review of the bioinformatics analysis.
+        Reads the analysis notebook (.ipynb) directly, views figures via vision API,
+        and reads table data. Produces a from-scratch summary of analysis approach,
+        workflow, and results in a single comprehensive review call.
+
+        Returns analysis_summary dict for downstream report generation.
+        """
+        zh = language == "zh"
+
+        # Step 1: Read notebook directly
+        await self._report_progress(17, "读取分析Notebook..." if zh else "Reading analysis notebook...")
+        notebook_cells = self._read_notebook(state)
+
+        if not notebook_cells:
+            logger.warning("No notebook cells found, returning empty analysis summary")
+            return self._empty_analysis_summary()
+
+        logger.info(f"Read {len(notebook_cells)} code cells from notebook")
+
+        # Step 2: Build chronological code digest
+        await self._report_progress(19, "构建代码摘要..." if zh else "Building code digest...")
+        code_digest = self._build_notebook_digest(notebook_cells)
+        logger.info(f"Built code digest: {len(code_digest)} chars")
+
+        # Step 3: Load figure images for vision API
+        await self._report_progress(21, "加载图片..." if zh else "Loading figure images...")
+        figure_images = self._prepare_figure_images(existing_figures)
+
+        # Step 4: Load table summaries
+        table_summaries = self._prepare_table_summaries(existing_tables)
+
+        # Step 5: Single comprehensive PI review
+        await self._report_progress(23, "PI Agent从头审阅分析全流程..." if zh else "PI Agent reviewing complete analysis from scratch...")
+        analysis_summary = await self._pi_comprehensive_review(
+            code_digest, figure_images, table_summaries, state, language
+        )
+
+        logger.info(f"Comprehensive analysis review complete: "
+                     f"approach={bool(analysis_summary.get('analysis_approach'))}, "
+                     f"workflow={bool(analysis_summary.get('workflow_summary'))}, "
+                     f"results={bool(analysis_summary.get('key_results'))}")
+        return analysis_summary
 
     def _build_analysis_record(self, state: AnalysisState) -> Dict[str, Any]:
         """
@@ -1927,20 +2924,29 @@ Return JSON with this EXACT structure:
         findings: Dict[str, Any],
         existing_figures: List[Dict[str, Any]],
         existing_tables: List[Dict[str, Any]],
-        language: str
+        language: str,
+        analysis_summary: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         PI Agent plans the report structure based on the complete analysis record.
-        Uses analysis flow, existing figures, tables, and round findings to create
-        a comprehensive report that walks through the analysis chronologically.
+        Uses analysis flow, existing figures, tables, round findings, and analysis_summary
+        (from code/figure review) to create a comprehensive report.
         """
         zh = language == "zh"
+        analysis_summary = analysis_summary or {}
 
-        # Format figures list
-        figures_list = "\n".join([
-            f"  {i+1}. {fig['filename']} (type: {fig['inferred_type']})"
-            for i, fig in enumerate(existing_figures)
-        ]) if existing_figures else "No existing figures found."
+        # Format figures list with visual descriptions from analysis review
+        fig_descriptions = analysis_summary.get("figure_descriptions", {})
+        figures_list_parts = []
+        for i, fig in enumerate(existing_figures):
+            fname = fig['filename']
+            ftype = fig['inferred_type']
+            desc = fig_descriptions.get(fname, "")
+            line = f"  {i+1}. {fname} (type: {ftype})"
+            if desc:
+                line += f" — {desc[:150]}"
+            figures_list_parts.append(line)
+        figures_list = "\n".join(figures_list_parts) if figures_list_parts else "No existing figures found."
 
         # Format tables list
         tables_list = "\n".join([
@@ -1959,33 +2965,62 @@ Return JSON with this EXACT structure:
                 )
             pub_figs_text = "\n".join(pub_figs_lines)
 
-        # Format round summaries
-        rounds_text = ""
-        for rs in analysis_record.get("round_summaries", []):
-            rounds_text += f"\n### Round {rs['round_number']}\n"
-            rounds_text += f"**PI Summary**: {rs['pi_summary'][:500]}\n"
-            if rs['bioinformatics_findings']:
-                rounds_text += f"**Bioinformatics findings**:\n"
-                for f in rs['bioinformatics_findings'][:5]:
-                    rounds_text += f"  - {f[:200]}\n"
-            if rs['pathology_findings']:
-                rounds_text += f"**Pathology findings**:\n"
-                for f in rs['pathology_findings'][:3]:
-                    rounds_text += f"  - {f[:200]}\n"
-            if rs['biochemistry_findings']:
-                rounds_text += f"**Biochemistry findings**:\n"
-                for f in rs['biochemistry_findings'][:3]:
-                    rounds_text += f"  - {f[:200]}\n"
-            if rs['literature_findings']:
-                rounds_text += f"**Literature findings**:\n"
-                for f in rs['literature_findings'][:3]:
-                    rounds_text += f"  - {f[:200]}\n"
+        # Use analysis summary for methodology and workflow (if available),
+        # otherwise fall back to round summaries and analysis steps
+        methodology_text = analysis_summary.get("methodology_overview", "")
+        workflow_text = analysis_summary.get("workflow_summary", "")
+        key_results_text = analysis_summary.get("key_results", "")
 
-        # Format analysis steps (code cells that produced figures)
-        steps_text = ""
-        for step in analysis_record.get("analysis_steps", [])[:30]:
-            figs_str = ", ".join(step['saved_figures']) if step['saved_figures'] else "(display only)"
-            steps_text += f"  - [{step['timestamp'][:16]}] {step['description']} → figures: {figs_str}\n"
+        if methodology_text or workflow_text:
+            analysis_context = f"""## Analysis Methodology (from code review)
+{methodology_text}
+
+## Analysis Workflow
+{workflow_text}
+
+## Key Quantitative Results
+{key_results_text}
+"""
+        else:
+            # Fallback to round summaries and analysis steps
+            rounds_text = ""
+            for rs in analysis_record.get("round_summaries", []):
+                rounds_text += f"\n### Round {rs['round_number']}\n"
+                rounds_text += f"**PI Summary**: {rs['pi_summary'][:500]}\n"
+                if rs['bioinformatics_findings']:
+                    rounds_text += f"**Bioinformatics findings**:\n"
+                    for f in rs['bioinformatics_findings'][:5]:
+                        rounds_text += f"  - {f[:200]}\n"
+                if rs['pathology_findings']:
+                    rounds_text += f"**Pathology findings**:\n"
+                    for f in rs['pathology_findings'][:3]:
+                        rounds_text += f"  - {f[:200]}\n"
+                if rs['biochemistry_findings']:
+                    rounds_text += f"**Biochemistry findings**:\n"
+                    for f in rs['biochemistry_findings'][:3]:
+                        rounds_text += f"  - {f[:200]}\n"
+                if rs['literature_findings']:
+                    rounds_text += f"**Literature findings**:\n"
+                    for f in rs['literature_findings'][:3]:
+                        rounds_text += f"  - {f[:200]}\n"
+
+            steps_text = ""
+            for step in analysis_record.get("analysis_steps", [])[:30]:
+                figs_str = ", ".join(step['saved_figures']) if step['saved_figures'] else "(display only)"
+                steps_text += f"  - [{step['timestamp'][:16]}] {step['description']} → figures: {figs_str}\n"
+
+            analysis_context = f"""## Analysis Flow ({analysis_record['total_rounds']} rounds, {analysis_record['total_code_cells']} code cells)
+{rounds_text}
+
+## Key Analysis Steps (code cells that generated figures)
+{steps_text}
+"""
+
+        # Parameters used
+        params_text = ""
+        params = analysis_summary.get("parameters_used", {})
+        if params:
+            params_text = "## Key Analysis Parameters\n" + "\n".join(f"- {k}: {v}" for k, v in params.items())
 
         prompt = f"""You are a Principal Investigator writing a comprehensive scientific research report.
 
@@ -1994,17 +3029,16 @@ You must organize the report to walk through the COMPLETE ANALYSIS FLOW chronolo
 - Present the analysis process step by step
 - Show ALL figures and tables that were generated during analysis
 - Provide scientific interpretation for EACH figure and table
+- Reference specific methods, parameters, and quantitative results in your narratives
 - Do NOT request any new analysis or figure generation — use only existing results
 
 ## Research Project
 Title: {state.name}
 Objective: {state.initial_instruction}
 
-## Analysis Flow ({analysis_record['total_rounds']} rounds, {analysis_record['total_code_cells']} code cells)
-{rounds_text}
+{analysis_context}
 
-## Key Analysis Steps (code cells that generated figures)
-{steps_text}
+{params_text}
 
 ## Publication-Quality Figures (PI-reviewed)
 {pub_figs_text or "None"}
@@ -2021,56 +3055,43 @@ Objective: {state.initial_instruction}
 ## Task
 {"用中文撰写所有内容（标题、描述、解读、叙述）" if zh else "Write all content in English"}
 
-Create a report plan that walks through the complete analysis process. Return JSON:
+Create a report plan. The plan ONLY needs to define section structure and assign figures/tables to sections.
+Do NOT write captions, interpretations, or narratives — those will be generated later.
+
+Return a COMPACT JSON (keep it short to avoid truncation):
 {{
     "title": "Report title",
     "sections": [
         {{
             "id": "unique_id",
             "title": "Section Title",
-            "description": "What this section covers",
-            "analysis_type": "general" or "specific",
-            "existing_figures": [
-                {{
-                    "filename": "exact_filename.png",
-                    "caption": "Detailed caption (50-100 words)",
-                    "interpretation": "Scientific interpretation (100-200 words)",
-                    "importance": "high/medium/low"
-                }}
-            ],
-            "existing_tables": [
-                {{
-                    "filename": "exact_filename.csv",
-                    "caption": "What this table contains",
-                    "interpretation": "How to interpret the data"
-                }}
-            ],
-            "narrative": "Section narrative (200-400 words)"
+            "description": "Brief description of what this section covers (1 sentence)",
+            "analysis_type": "general",
+            "existing_figures": [{{"filename": "exact_filename.png"}}],
+            "existing_tables": [{{"filename": "exact_filename.csv"}}]
         }}
     ]
 }}
 
-## Section Organization Requirements
+## Section Organization — FOLLOW THE ANALYSIS WORKFLOW ORDER
 
-1. **Data Quality Control**: QC violin plots, scatter plots, filtering metrics
-2. **Cell Clustering & Visualization**: UMAP embeddings, leiden clustering, cell type annotations
-3. **Cell Composition Analysis**: Cell type proportions, composition bar charts
-4. **Marker Gene Analysis**: Dotplots, heatmaps of cluster markers
-5. **Differential Expression Analysis**: Volcano plots, DE gene lists/tables
-6. **Pathway & Functional Analysis**: Pathway enrichment, heatmaps
-7. **Trajectory / Velocity Analysis** (if applicable): Pseudotime, RNA velocity plots
-8. **Key Biological Findings**: Disease-specific findings, stress markers, specific gene patterns
+You MUST organize sections to match the CHRONOLOGICAL ORDER of the analysis workflow above.
+Each major analysis step should have its own dedicated section.
+Do NOT reorganize into fixed categories — the report should tell the story of how the analysis progressed.
 
-### IMPORTANT:
-- Include ALL {len(existing_figures)} figures — assign every figure to a section
-- Include ALL {len(existing_tables)} tables — assign every table to a section
-- Use EXACT filenames from the lists above
-- If a figure doesn't fit standard sections, create an appropriate section for it
-- Write detailed captions and interpretations using the analysis findings as context
-- The narrative should reference figures and tables by filename
+For example, if the workflow was:
+  1. QC → 2. Clustering → 3. Epithelial Sub-clustering → 4. DEG → 5. GSEA → 6. CCC → 7. Metabolic Analysis
+Then create sections in this EXACT order.
+
+### CRITICAL RULES:
+- Include ALL {len(existing_figures)} figures — assign every figure to a section by EXACT filename
+- Include ALL {len(existing_tables)} tables — assign every table to a section by EXACT filename
+- Each major analysis step gets its OWN section (sub-clustering, CCC, metabolic analysis, etc.)
+- Do NOT merge unrelated analyses into a single section
+- Keep descriptions brief (1 sentence) — detailed narratives will be written separately
 """
 
-        response = await self._pi_chat(prompt, temperature=0.4)
+        response = await self._pi_chat(prompt, temperature=0.4, max_tokens=16384)
 
         try:
             plan = _safe_parse_json(response)
@@ -2088,10 +3109,16 @@ Create a report plan that walks through the complete analysis process. Return JS
                 plan["_existing_figures"] = existing_figures
                 plan["_existing_tables"] = existing_tables
                 return plan
+            else:
+                logger.warning(
+                    f"Plan JSON parsing returned {'empty plan' if plan else 'None'}. "
+                    f"Response length: {len(response)} chars, starts with: {response[:200]!r}"
+                )
         except Exception as e:
             logger.error(f"Failed to parse analysis-based report plan: {e}")
 
         # Fallback to auto-assignment based on figure types
+        logger.warning("Using fallback plan (auto-assignment by figure type)")
         return self._create_fallback_plan_with_existing_figures(state, existing_figures, zh)
 
     async def _generate_section_from_existing_figures(
@@ -2099,13 +3126,16 @@ Create a report plan that walks through the complete analysis process. Return JS
         state: AnalysisState,
         section_plan: Dict[str, Any],
         findings: Dict[str, Any],
-        language: str
+        language: str,
+        analysis_summary: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Generate a report section using EXISTING figures and tables from the analysis phase.
         PI Agent writes the narrative, captions, and scientific interpretations.
+        When figure images are available in cache, uses vision API for accurate descriptions.
         """
         zh = language == "zh"
+        analysis_summary = analysis_summary or {}
         section_id = section_plan.get("id", str(uuid.uuid4())[:8])
         section_title = section_plan.get("title", "Section")
         section_description = section_plan.get("description", "")
@@ -2116,11 +3146,18 @@ Create a report plan that walks through the complete analysis process. Return JS
 
         logger.info(f"Generating section '{section_title}' with {len(existing_figures)} figures, {len(existing_tables)} tables")
 
-        # Build figure info for PI Agent
-        figures_info = "\n".join([
-            f"  - {fig.get('filename', 'unknown')}: {fig.get('caption', fig.get('interpretation', 'No caption provided'))}"
-            for fig in existing_figures
-        ]) if existing_figures else "No figures in this section."
+        # Build figure info for PI Agent — include visual descriptions from analysis review
+        fig_descriptions = analysis_summary.get("figure_descriptions", {})
+        figures_info_parts = []
+        for fig in existing_figures:
+            fname = fig.get('filename', 'unknown')
+            caption = fig.get('caption', fig.get('interpretation', 'No caption provided'))
+            visual_desc = fig_descriptions.get(fname, "")
+            line = f"  - {fname}: {caption}"
+            if visual_desc:
+                line += f"\n    Visual description: {visual_desc[:200]}"
+            figures_info_parts.append(line)
+        figures_info = "\n".join(figures_info_parts) if figures_info_parts else "No figures in this section."
 
         # Build table info for PI Agent
         tables_info = "\n".join([
@@ -2152,6 +3189,31 @@ Create a report plan that walks through the complete analysis process. Return JS
         if existing_tables:
             tables_requirement = f"\n6. Each table must have a caption and interpretation"
 
+        # Include methodology context from analysis review
+        methodology_context = ""
+        methodology_overview = analysis_summary.get("methodology_overview", "")
+        key_results = analysis_summary.get("key_results", "")
+        params_used = analysis_summary.get("parameters_used", {})
+        if methodology_overview or key_results:
+            methodology_context = f"""
+## Analysis Methodology (from code review)
+{methodology_overview[:1000] if methodology_overview else ""}
+
+## Key Quantitative Results
+{key_results[:1000] if key_results else ""}
+"""
+            if params_used:
+                methodology_context += "\n## Key Parameters Used\n"
+                methodology_context += "\n".join(f"- {k}: {v}" for k, v in list(params_used.items())[:15])
+
+        # Note about attached images
+        section_images = []
+        for fig in existing_figures:
+            fname = fig.get("filename", "")
+            if fname and fname in self.figure_images_cache:
+                section_images.append(self.figure_images_cache[fname])
+        image_note = f"\n[{len(section_images)} figure image(s) attached — describe what you actually see in each figure]" if section_images else ""
+
         prompt = f"""You are a Principal Investigator writing a section for a scientific research report.
 
 ## Section Information
@@ -2161,10 +3223,12 @@ Analysis Type: {analysis_type}
 
 ## Figures in This Section
 {figures_info}
+{image_note}
 {tables_section}
 ## Research Context
 Project: {state.name}
 Objective: {state.initial_instruction}
+{methodology_context}
 
 ## Key Findings
 {json.dumps(findings.get('bioinformatics', [])[:15], ensure_ascii=False, indent=2)}
@@ -2184,7 +3248,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
     "narrative": "A detailed scientific narrative (300-500 words) that:
         - Introduces the purpose of this analysis step
         - References each figure by filename (e.g., 'As shown in umap_cell_types.png...')
-        - Explains the methodology used
+        - Explains the methodology used with specific methods and parameters
         - Presents the key observations with quantitative details
         - Discusses the biological significance
         - Connects findings to the research hypothesis",
@@ -2192,7 +3256,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
     "figures": [
         {{
             "filename": "exact_filename.png",
-            "caption": "Detailed figure caption (50-100 words)",
+            "caption": "Detailed figure caption (50-100 words) — describe what the figure actually shows",
             "interpretation": "Scientific interpretation (100-200 words)"
         }}
     ]{tables_json_template}
@@ -2201,12 +3265,32 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 ## Important Requirements:
 1. Write as a rigorous scientific paper section
 2. Include quantitative details where available (cell counts, percentages, p-values)
-3. Reference specific clusters, genes, or conditions discussed in the findings
-4. Each figure must have BOTH a detailed caption AND an interpretation
+3. Reference specific methods and parameters (e.g., "Leiden clustering at resolution 0.8")
+4. Each figure must have BOTH a detailed caption AND an interpretation — describe what you see in the figures
 5. The narrative should flow logically and reference all figures in the section{tables_requirement}
 """
 
-        response = await self._pi_chat(prompt, temperature=0.3)
+        # Use vision API if we have figure images, otherwise text-only
+        try:
+            if section_images:
+                response_obj = await self.llm_client.chat_with_vision(
+                    model=self.pi_model,
+                    text_prompt=prompt,
+                    images=section_images[:6],
+                    temperature=0.3,
+                    max_tokens=4096,
+                    request_timeout=120.0
+                )
+                response = response_obj.content if response_obj and response_obj.content else ""
+            else:
+                response = await self._pi_chat(prompt, temperature=0.3)
+        except Exception as e:
+            logger.warning(f"Vision API failed for section '{section_title}', falling back to text-only: {e}")
+            try:
+                response = await self._pi_chat(prompt, temperature=0.3)
+            except Exception as e2:
+                logger.error(f"Text-only fallback also failed for section '{section_title}': {e2}")
+                response = ""
 
         # Parse the response
         try:
@@ -2806,15 +3890,30 @@ Example format:
         state: AnalysisState,
         sections: List[Dict],
         findings: Dict[str, Any],
-        language: str
+        language: str,
+        analysis_summary: Optional[Dict[str, Any]] = None
     ) -> str:
         """PI Agent generates the report abstract"""
         zh = language == "zh"
+        analysis_summary = analysis_summary or {}
 
         section_summaries = "\n".join([
             f"- {s['title']}: {len(s.get('figures', []))} figures, {len(s.get('tables', []))} tables"
             for s in sections
         ])
+
+        # Include methodology from analysis review
+        methodology = analysis_summary.get("methodology_overview", "")
+        key_results = analysis_summary.get("key_results", "")
+        methodology_section = ""
+        if methodology or key_results:
+            methodology_section = f"""
+## Analysis Methodology
+{methodology[:1000] if methodology else ""}
+
+## Key Quantitative Results
+{key_results[:1000] if key_results else ""}
+"""
 
         prompt = f"""Write an abstract for this research report.
 
@@ -2824,6 +3923,7 @@ Objective: {state.initial_instruction}
 
 ## Report Sections:
 {section_summaries}
+{methodology_section}
 
 ## Key Findings:
 {json.dumps(findings['bioinformatics'][:15], ensure_ascii=False)}
@@ -2831,7 +3931,7 @@ Objective: {state.initial_instruction}
 ## Final Summary:
 {findings['summary'][:1500] if findings['summary'] else 'Not available'}
 
-{"用中文撰写摘要，200-300字，包括背景、方法、主要发现和结论" if zh else "Write abstract in English, 150-250 words, including background, methods, main findings and conclusions"}
+{"用中文撰写摘要，200-300字，包括背景、方法（具体的分析方法和参数）、主要发现和结论" if zh else "Write abstract in English, 150-250 words, including background, methods (specific analysis methods and parameters), main findings and conclusions"}
 """
 
         return await self._pi_chat(prompt, temperature=0.3)
@@ -2841,10 +3941,21 @@ Objective: {state.initial_instruction}
         state: AnalysisState,
         sections: List[Dict],
         findings: Dict[str, Any],
-        language: str
+        language: str,
+        analysis_summary: Optional[Dict[str, Any]] = None
     ) -> str:
         """PI Agent generates the final conclusions"""
         zh = language == "zh"
+        analysis_summary = analysis_summary or {}
+
+        # Include key results from analysis review
+        key_results = analysis_summary.get("key_results", "")
+        results_section = ""
+        if key_results:
+            results_section = f"""
+## Key Quantitative Results (from analysis review)
+{key_results[:1500]}
+"""
 
         prompt = f"""Write the final conclusions for this research report.
 
@@ -2858,11 +3969,12 @@ Objective: {state.initial_instruction}
 Bioinformatics: {json.dumps(findings['bioinformatics'][:10], ensure_ascii=False)}
 Pathology: {json.dumps(findings['pathology'][:5], ensure_ascii=False)}
 Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
+{results_section}
 
 ## Final Summary from Analysis:
 {findings['summary'][:2000] if findings['summary'] else 'Not available'}
 
-{"用中文撰写结论，包括：1)主要发现总结 2)生物学意义 3)研究局限性 4)未来方向。300-500字" if zh else "Write conclusions in English including: 1) Summary of main findings 2) Biological significance 3) Limitations 4) Future directions. 250-400 words"}
+{"用中文撰写结论，包括：1)主要发现总结（引用具体数据）2)生物学意义 3)研究局限性 4)未来方向。300-500字" if zh else "Write conclusions in English including: 1) Summary of main findings (cite specific numbers) 2) Biological significance 3) Limitations 4) Future directions. 250-400 words"}
 """
 
         return await self._pi_chat(prompt, temperature=0.3)

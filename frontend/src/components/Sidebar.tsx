@@ -141,7 +141,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
     }
   }
 
-  const handleExport = () => {
+  const handleExport = async () => {
     if (!currentSession || exporting) return
 
     setExporting(true)
@@ -153,25 +153,43 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       closable: false  // 不可关闭
     })
 
-    // 触发下载（浏览器原生处理，不占内存）
-    const link = document.createElement('a')
-    link.href = `/api/session/${currentSession.id}/export`
-    link.download = ''
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    try {
+      // 等待服务器完成打包
+      const response = await fetch(`/api/session/${currentSession.id}/export`)
+      if (!response.ok) throw new Error(`Export failed: ${response.status}`)
 
-    // 延时3秒后，假定下载已开始
-    setTimeout(() => {
-      // 阶段2：显示"已经开始下载"，可关闭
+      // 从Content-Disposition提取文件名
+      const disposition = response.headers.get('Content-Disposition')
+      const filenameMatch = disposition?.match(/filename="?(.+?)"?$/)
+      const filename = filenameMatch?.[1] || `${currentSession.id}_export.tar.gz`
+
+      // 下载blob
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+
+      // 阶段2：下载确实已完成
       setProgressInfo({
         action: t('exportDownloadStarted'),
         detail: t('exportDownloadStartedDetail'),
         closable: true,
         success: true
       })
+    } catch (err) {
+      setProgressInfo({
+        action: language === 'zh' ? '导出失败' : 'Export Failed',
+        detail: String(err),
+        closable: true
+      })
+    } finally {
       setExporting(false)
-    }, 3000)  // 3秒延时
+    }
   }
 
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {

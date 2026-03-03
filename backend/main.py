@@ -2315,14 +2315,16 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     bio_model = state.custom_models.get("bioinformatics", "anthropic/claude-opus-4.6")
     
     try:
+        workspace_dir = str(WORKSPACE_DIR / session_id)
         generator = DetailedReportGenerator(
             llm_client=llm_client,
             pi_model=pi_model,
             bio_model=bio_model,
             output_dir=output_dir,
+            workspace_dir=workspace_dir,
             progress_callback=progress_callback
         )
-        
+
         # Generate report (sandbox is created internally)
         report = await generator.generate_report(state)
         detailed_reports[session_id] = report
