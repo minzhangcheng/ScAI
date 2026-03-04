@@ -2,7 +2,7 @@
 
 **InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system based on LangGraph for comprehensive analysis of biomedical research data. The system integrates pathology section analysis, high-throughput sequencing data, biochemical indicators, and literature research, completing comprehensive phenotype analysis through multi-round iterative collaboration.
 
-**Version**: 0.8.9
+**Version**: 0.9.0
 
 ## Core Features
 
@@ -398,6 +398,21 @@ intesc_dep/                     # Dependencies directory (sibling to code direct
 9. State version conflicts are detected automatically to ensure data consistency
 
 ## Changelog
+
+### v0.9.0 (2026-03-04)
+
+- **PI Analysis Review Before Report**: Report generation now includes a PI review pre-step — PI reads the actual Jupyter notebook, views figures via vision API, and reads table summaries before writing. Produces a grounded methodology/results summary used throughout the report narrative
+- **Report Appendix**: HTML reports now include an amber-styled appendix section with project information, agent configuration (model + temperature per agent), uploaded data summary (treatment groups, files, biochemistry indicators), analysis round table, and user inputs between rounds
+- **Graphic Abstract Revision Loop**: Graphic abstracts now go through a 3-phase process — initial generation, up to 2 PI review+revision rounds (Painter revises with accumulated feedback history), and PI selects the best candidate from all versions using vision comparison
+- **Cumulative Figure Revision History**: Publication figures now track all rounds of PI feedback in `revision_history`. The code reviser sees all previous rounds to avoid re-introducing previously fixed issues
+- **In-Place Session Editing**: Session name and instruction can be edited directly in the sidebar via a pencil icon, saved on blur via `PUT /api/session/{id}/info`
+- **Two-Phase Export**: Export now uses a prepare+download flow — server builds the archive first (showing file size), then streams the download. Replaces the old single-step export
+- **Upload Queue with Per-File Progress**: Multiple files can be queued for upload with individual progress bars. The drop zone stays active during uploads. Failed uploads show error tooltips
+- **"Other" Sequencing Type**: Supports bulk RNA-seq and custom sequencing formats with no file extension restriction
+- **Sample Count Safety Guard**: Backend rejects reducing a group's sample count below the highest sample number that already has data; UI shows the error and reverts the field
+- **Workspace Figure Downloads**: Figures generated in the Jupyter workspace (not just publication figures) can now be downloaded as PDF/PNG via the API
+- **Figure Gallery API Fallback**: After page refresh, figures without cached base64 data are loaded from the API automatically
+- **Deep Research Cost Warning**: Both ConfigPanel and PromptsPanel show an amber warning about Deep Research time (~60 min) and cost (~$2-5/task) with a link to Google docs
 
 ### v0.8.9 (2026-03-03)
 

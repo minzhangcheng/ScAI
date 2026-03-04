@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.8.9
-**Last Updated**: 2026-03-03
+**Version**: 0.9.0
+**Last Updated**: 2026-03-04
 
 ## Project Overview
 
@@ -61,7 +61,7 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~4161 lines)
+│   ├── main.py                 # FastAPI entry point (~4423 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
@@ -72,9 +72,11 @@ intesc/                         # Code directory
 │   │                           # - PI Agent chat (figure display + generation)
 │   │                           # - Chat delegation (PI delegates to agents)
 │   │                           # - Session export/import (tar.gz/zip/JSON, incl. .pkl)
+│   │                           # - Two-phase export (prepare + download)
+│   │                           # - In-place session info editing (name + instruction)
 │   │                           # - File download (/api/download with path containment)
 │   │
-│   ├── workflow.py             # LangGraph workflow (~1877 lines)
+│   ├── workflow.py             # LangGraph workflow (~2058 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
@@ -87,15 +89,18 @@ intesc/                         # Code directory
 │   │                           # - Deep Research topic merging + gap coverage fallback
 │   │                           # - Report-only resume via generate_report()
 │   │                           # - Selective agent activation (skip_nodes from agents_for_next_round)
+│   │                           # - Graphic abstract revision loop (PI review + Painter revision + best selection)
 │   │
-│   ├── report_generator.py     # Report generator (~3196 lines)
+│   ├── report_generator.py     # Report generator (~4683 lines)
 │   │                           # - No-sandbox report compilation (v0.7.3 rewrite)
+│   │                           # - PI analysis review pre-step (reads notebook, views figures via vision API)
 │   │                           # - Builds analysis record from code_history
 │   │                           # - Scans workspace for existing figures/tables
 │   │                           # - PI plans narrative around existing assets
 │   │                           # - Cluster annotation table extraction
+│   │                           # - Report appendix (project info, agent config, data summary, round history)
 │   │
-│   ├── regenerate_report_html.py # Report HTML regeneration utility
+│   ├── regenerate_report_html.py # Report HTML regeneration utility (~1087 lines, appendix support)
 │   │
 │   ├── config.py               # Configuration management (~292 lines)
 │   │                           # - APIConfig: LLM keys + proxy (google_api_key moved to literature_config)
@@ -108,15 +113,15 @@ intesc/                         # Code directory
 │   │
 │   ├── agents/
 │   │   ├── base.py             # Agent base class
-│   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer)
-│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install)
+│   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer + graphic abstract reviewer)
+│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install, cumulative revision history)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2)
 │   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~907 lines)
-│   │   └── painter_agent.py    # Painter Agent (graphic abstract)
+│   │   └── painter_agent.py    # Painter Agent (graphic abstract + revision support)
 │   │
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models (~481 lines)
+│   │   └── schemas.py          # Pydantic data models (~486 lines)
 │   │                           # - AnalysisState: Core state with version control + treatment_groups + data_files + biochemistry_indicators
 │   │                           # - TreatmentGroup: Experimental group definition (name, sample_count)
 │   │                           # - DataFile: Universal file record (section: pathology/sequencing/biochemistry, group_id, sample_number)
@@ -243,7 +248,7 @@ initialize_round ◄────────────────────
 2. **Retry Mechanism**: `@with_retry(max_retries=3)` decorator with exponential backoff
 3. **Structured Error Tracking**: Errors captured in `AgentError` model with agent, type, message, details
 4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
-5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval (up to 3 revisions). PI review includes experimental design context with a Data Fidelity criterion to catch fabricated groups. Revision uses `chat_with_vision()` so the bioinformatics agent can see its own figure alongside PI feedback.
+5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval (up to 3 revisions). PI review includes experimental design context with a Data Fidelity criterion to catch fabricated groups. Revision uses `chat_with_vision()` so the bioinformatics agent can see its own figure alongside PI feedback. Full cumulative revision history is tracked in `PublicationFigure.revision_history` and passed to the code reviser to prevent re-introducing fixed issues.
 18. **AI-Curated Brief Figures**: After all analysis rounds complete, PI Agent's `select_brief_figures()` curates the figure set shown in the Results tab — filters out QC/diagnostic plots (e.g. qc_violin, pca_variance, hvg_plot) and superseded intermediate versions, keeping only key result figures. Falls back to all publication figures if AI selection returns empty. Workspace figures (workspace root + figures/) are scanned and compressed (`compress_image_to_base64`) for inclusion alongside existing publication figures.
 6. **Figure Step Budget**: Figure-only iterations (using `generate_publication_figure` tool) are excluded from the bioinformatics agent's step count. Safety cap of `MAX_FIGURE_ITERATIONS=5` prevents infinite figure generation loops — after exhaustion, agent refuses new figures and redirects to analysis. `max_tokens=32000` for figure revision code generation prevents truncation.
 19. **Tool Message History Consistency**: Bioinformatics Agent appends exactly one assistant message per LLM response (using `raw_assistant_message` if available) before iterating over tool calls. Eliminates duplicate or missing assistant messages that previously caused API errors with Gemini's `thought_signature` requirement.
@@ -258,6 +263,7 @@ initialize_round ◄────────────────────
 14. **GENERATING_REPORT Status**: New `TaskStatus.GENERATING_REPORT` marks sessions in report generation phase, enabling detection of interrupted report generation on resume.
 15. **Selective Agent Activation**: From round 2 onwards, PI Agent decides which agents to activate via `RoundResult.agents_for_next_round`. Bioinformatics Agent always runs. `_pi_planning()` builds `skip_nodes` from the previous round's `agents_for_next_round`, and `@with_retry` skips deactivated nodes with WebSocket notification. Each round's `skip_nodes` is rebuilt fresh (not accumulated), so previously skipped agents can be re-activated.
 16. **Docker Pip Install**: Bioinformatics Agent's `_validate_code()` allows `subprocess` calls when all usages are pip/pip3 install commands (safe in Docker environments). System prompt includes package installation guidelines.
+20. **Graphic Abstract Revision Loop**: The graphic abstract generation now uses a 3-phase revision process: (1) initial generation by Painter Agent; (2) up to 2 rounds of PI review via vision API (`review_graphic_abstract()`) + Painter revision with accumulated feedback history (`revise_graphic_abstract()`); (3) PI selects the best candidate from all versions using side-by-side vision comparison (`select_best_graphic_abstract()`). Metadata stored on `GraphicAbstract`: `revision_count`, `revision_history`, `all_candidates`, `selected_index`.
 
 **WebSocket Message Types:**
 
@@ -370,17 +376,17 @@ When a user's chat request requires specialized analysis beyond PI's direct know
 
 ### 1.5 Session Export/Import (main.py)
 
-**Export** (`GET /api/session/{session_id}/export`):
-- Creates tar.gz archive on disk (temp file, not in memory) containing:
-  - `manifest.json` with session_id, version, data_base_dir
-  - `sessions/{id}.json` — complete state
-  - `states/{id}*` — Jupyter notebooks and .pkl files (sandbox state for full restore)
-  - `uploads/{id}/` — all uploaded files
-  - `workspace/{id}/` — Jupyter working directory
-  - `reports/{id}/` — generated reports
-- Returns `FileResponse` with background cleanup of temp file
-- Safe filename generation from session name
-- Endpoint accepts both `GET` and `HEAD` (registered via `api_route`) to support browser-native navigation-based download (no client-side memory buffering)
+**Export** (Two-phase flow, since v0.9.0):
+- **Phase 1: Prepare** (`POST /api/session/{session_id}/export/prepare`):
+  - Builds tar.gz archive server-side containing: `manifest.json`, `sessions/{id}.json`, `states/{id}*` (.ipynb + .pkl), `uploads/{id}/`, `workspace/{id}/`, `reports/{id}/`
+  - Stores archive path in in-memory `_prepared_exports` dict
+  - Returns `{"status": "ready", "size_bytes": N, "filename": "...tar.gz"}`
+  - Filename derived from sanitized session name + session ID prefix
+- **Phase 2: Download** (`GET /api/session/{session_id}/export/download`):
+  - Pops prepared export, streams pre-built tar.gz via `FileResponse`
+  - Deletes archive from disk after sending (via `BackgroundTask`)
+- Frontend shows file size confirmation before initiating download
+- **Legacy endpoint** (`GET /api/session/{session_id}/export`): Still available for backward compatibility
 
 **Import** (`POST /api/session/import`):
 - Supports tar.gz (async background extraction), zip, and plain JSON formats
@@ -451,7 +457,7 @@ class LocalJupyterSandbox:
 - **Auto PDF generation**: Monkey-patches `Figure.savefig` to automatically generate companion high-res PDFs (300 DPI) alongside every PNG saved. Uses vectorized Type 42 fonts for editable PDFs
 - **Code history extraction**: `get_code_history()` returns executed cells from the notebook, used by bioinformatics agent to populate code_history on session restore
 
-### 4. Report Generator (report_generator.py, ~3196 lines)
+### 4. Report Generator (report_generator.py, ~4683 lines)
 
 **9 Chapters + Cluster Annotation Table:**
 
@@ -467,9 +473,9 @@ class LocalJupyterSandbox:
 | Trajectory | PAGA graph, trajectory analysis |
 | Targeted | Research objective-related analysis |
 
-**Generation Flow (v0.7.3 — No Sandbox):**
+**Generation Flow (v0.9.0 — No Sandbox, PI Analysis Review):**
 
-Since v0.7.3, the report generator no longer uses Jupyter sandbox for code re-execution. Instead, it compiles the report entirely from existing analysis artifacts:
+Since v0.7.3, the report generator compiles reports from existing analysis artifacts without re-executing code. Since v0.9.0, a PI analysis review pre-step grounds the report in actual notebook content:
 
 ```python
 class DetailedReportGenerator:
@@ -484,21 +490,46 @@ class DetailedReportGenerator:
         # 3. Extract findings from round results
         findings = self._extract_findings(state)
 
-        # 4. PI plans report structure from analysis record
+        # 3.5 PI reviews analysis (reads notebook, views figures via vision API)
+        analysis_summary = await self._pi_review_analysis(state, ...)
+
+        # 4. PI plans report structure from analysis record + analysis_summary
         report_plan = await self._plan_report_from_analysis(...)
 
         # 5. Generate each section using existing figures + PI narrative
         for section_plan in report_plan["sections"]:
             section = await self._generate_section_from_existing_figures(...)
 
-        # 6. Generate abstract and conclusions
+        # 6. Generate abstract and conclusions (using analysis_summary)
         abstract = await self._generate_abstract(...)
         conclusions = await self._generate_conclusions(...)
+
+        # 7. Build appendix (no LLM — pure data extraction)
+        appendix_html = self._build_appendix_html(state, report, language)
 ```
 
-**Key methods (v0.7.3):**
+**PI Analysis Review (v0.9.0 — Step 3.5):**
+- `_read_notebook()`: Reads `.ipynb` file directly via `nbformat`, extracting code, text output, inline figures, and saved figure filenames from every cell. Falls back to `state.code_history` if .ipynb not found
+- `_build_notebook_digest()`: Builds compact chronological digest of notebook cells, intelligently truncating long cells via `_truncate_code_smartly()` (retains comments, scanpy calls, savefig/write calls, key assignments)
+- `_extract_output_highlights()`: Extracts quantitative highlights from cell outputs (cell counts, gene counts, clusters, p-values, filtering results, AnnData dimensions)
+- `_prepare_figure_images()`: Loads up to 20 figures for vision API, prioritized by type (annotation > umap > clustering > heatmap > volcano)
+- `_prepare_table_summaries()`: Reads CSV tables with shape, columns, data previews; for DE tables: counts significant genes (|logFC|>1, padj<0.05)
+- `_pi_comprehensive_review()`: Single comprehensive PI review of the entire analysis — reads full code digest and all figures together, returns structured JSON (methodology_overview, workflow_summary, key_results, figure_descriptions, parameters_used)
+- `_extract_analysis_code()`: Classifies code cells into canonical phases (qc, normalization, integration, clustering, annotation, differential_expression, pathway, trajectory, communication, visualization)
+
+**Report Appendix (v0.9.0):**
+- `_build_appendix_html()`: Generates HTML appendix with no LLM calls, containing:
+  1. Project Information (name, description, creation time, report generation time)
+  2. Agent Configuration (model + temperature for all 6 agents)
+  3. Uploaded Data (treatment groups, data files, biochemistry indicator count)
+  4. Analysis Rounds (timestamp, per-agent finding counts)
+  5. User Inputs Between Rounds (messages with round tags, timestamps, attached files)
+- Raw appendix data also saved to `report.json` as `"appendix"` key for regeneration
+- `regenerate_report_html.py` includes `_build_appendix_from_report()` to rebuild appendix from stored data
+
+**Key methods:**
 - `_build_analysis_record()`: Parses `code_history` to find cells that saved figures, connects code → figures → round findings
-- `_plan_report_from_analysis()`: PI plans report structure based on analysis record and available figures
+- `_plan_report_from_analysis()`: PI plans report structure based on analysis record, available figures, and `analysis_summary`
 - `_generate_section_from_existing_figures()`: Writes narrative around existing figures (no code execution)
 - `_scan_existing_figures()` / `_scan_existing_tables()`: Scans workspace + reports directories for PNG/PDF/CSV files
 
@@ -560,6 +591,7 @@ class LLMManager:
 | `/api/sessions` | GET | Get all session list |
 | `/api/session` | POST | Create new session |
 | `/api/session/{id}` | GET | Get session status |
+| `/api/session/{id}/info` | PUT | Update session name and/or instruction |
 | `/api/session/{id}/load` | GET | Load complete session data |
 | `/api/session/{id}/delete` | DELETE | Delete session |
 | `/api/session/{id}/upload/data` | POST | Unified data file upload (section + data_type + group_id + sample_number) |
@@ -577,7 +609,9 @@ class LLMManager:
 | `/api/session/{id}/chat` | POST | Chat with PI Agent (supports file uploads with per-file agent targeting) |
 | `/api/session/{id}/chat` | GET | Get chat history for a session |
 | `/api/session/{id}/chat/cancel` | POST | Cancel active chat delegation task |
-| `/api/session/{id}/export` | GET/HEAD | Export complete session as tar.gz archive (browser-native download) |
+| `/api/session/{id}/export` | GET/HEAD | Export complete session as tar.gz archive (legacy, browser-native download) |
+| `/api/session/{id}/export/prepare` | POST | Build export archive server-side, returns size and filename |
+| `/api/session/{id}/export/download` | GET | Download prepared export archive (streaming) |
 | `/api/session/import` | POST | Import session from tar.gz/zip/JSON archive (tar.gz returns import_id for async polling) |
 | `/api/session/import/{import_id}` | GET | Poll async import job status (pending/completed/failed) |
 | `/api/config` | GET/POST | Get/save configuration |
@@ -816,7 +850,11 @@ class RoundResult(BaseModel):
 class GraphicAbstract(BaseModel):
     id: str
     prompt: str           # Generation prompt
-    image_base64: str     # Base64 encoded image
+    image_base64: str     # Base64 encoded image (PI-selected best candidate)
+    revision_count: int = 0            # Number of revision rounds performed
+    revision_history: List[Dict[str, Any]] = []  # PI feedback per revision round
+    all_candidates: List[str] = []     # All candidate images (base64)
+    selected_index: int = 0            # Index of PI-selected best candidate
     created_at: datetime
 ```
 
@@ -1088,19 +1126,19 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| FastAPI server, session mgmt, chat, delegation & export/import | `main.py` | ~4182 lines |
-| Report generator (no-sandbox compilation) | `report_generator.py` | ~3197 lines |
-| Workflow graph, orchestration, DR optimization & selective activation | `workflow.py` | ~1947 lines |
-| Bioinformatics Agent (autonomous + figure budget + pip install + vision revision) | `bioinformatics_agent.py` | ~1588 lines |
-| PI Agent (coordinator + reviewer + agent activation + data fidelity + brief figure curation) | `pi_agent.py` | ~1421 lines |
+| FastAPI server, session mgmt, chat, delegation, export/import & session editing | `main.py` | ~4423 lines |
+| Report generator (no-sandbox, PI analysis review, appendix) | `report_generator.py` | ~4683 lines |
+| Workflow graph, orchestration, DR optimization, selective activation & GA revision loop | `workflow.py` | ~2058 lines |
+| Bioinformatics Agent (autonomous + figure budget + pip install + vision revision + cumulative history) | `bioinformatics_agent.py` | ~1628 lines |
+| PI Agent (coordinator + reviewer + GA reviewer + agent activation + data fidelity + brief figure curation) | `pi_agent.py` | ~1642 lines |
 | Literature Agent (2 modes + annotation) | `literature_agent.py` | ~907 lines |
 | LLM client (OpenRouter + Google DR + MIME detection) | `llm_client.py` | ~914 lines |
 | Jupyter sandbox (+ auto PDF) | `sandbox.py` | ~793 lines |
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
 | Pathology Agent (batch size 5 + dynamic timeout) | `pathology_agent.py` | ~453 lines |
 | Chunked upload manager | `upload.py` | ~398 lines |
-| Data models & schemas | `schemas.py` | ~481 lines |
-| Painter Agent (graphic abstract) | `painter_agent.py` | ~326 lines |
+| Data models & schemas | `schemas.py` | ~486 lines |
+| Painter Agent (graphic abstract + revision) | `painter_agent.py` | ~440 lines |
 | Configuration & prompts | `config.py` | ~292 lines |
 | Agent base class | `base.py` | ~246 lines |
 
@@ -1108,20 +1146,20 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| API hooks + WebSocket | `useApi.ts` | ~1166 lines |
-| Data upload + download interface | `DataPanel.tsx` | ~980 lines |
+| API hooks + WebSocket + session editing | `useApi.ts` | ~1184 lines |
+| Data upload (queue + per-file progress) + download interface | `DataPanel.tsx` | ~1070 lines |
 | Real-time message streaming + delegation | `MessageStream.tsx` | ~846 lines |
 | Report generation & download | `ReportPanel.tsx` | ~789 lines |
 | Analysis control + agent status | `AnalysisPanel.tsx` | ~751 lines |
-| Session mgmt + export/import | `Sidebar.tsx` | ~617 lines |
+| Session mgmt + export/import + session editing | `Sidebar.tsx` | ~778 lines |
 | PI Agent chat + delegation | `ChatPanel.tsx` | ~657 lines |
-| Agent prompt + literature config | `PromptsPanel.tsx` | ~509 lines |
+| Agent prompt + literature config | `PromptsPanel.tsx` | ~521 lines |
 | Round feedback dialog (configurable timer) | `RoundFeedbackDialog.tsx` | ~600 lines |
 | Zustand global state (+ delegation) | `appStore.ts` | ~509 lines |
 | Round results + publication outputs | `ResultsPanel.tsx` | ~359 lines |
 | Main application (+ About dialog) | `App.tsx` | ~313 lines |
 | About dialog (project info) | `AboutDialog.tsx` | ~135 lines |
-| API + literature configuration | `ConfigPanel.tsx` | ~250 lines |
+| API + literature configuration + DR warning | `ConfigPanel.tsx` | ~261 lines |
 
 ## Known Issues
 
@@ -1175,6 +1213,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.9.0 | 2026-03-04 | PI analysis review before report (reads notebook + views figures via vision API), report appendix (project info, agent config, data summary, round history, user inputs), graphic abstract revision loop (PI review + Painter revision + best selection), cumulative figure revision history, in-place session editing (name + instruction via sidebar), two-phase export (prepare + download with size preview), upload queue with per-file progress, "Other" sequencing type (bulk RNA-seq support), sample count safety guard, workspace figure downloads (PDF/PNG), figure gallery API fallback on reload, Deep Research cost warning |
 | 0.8.9 | 2026-03-03 | Import proxy timeout resilience (pre-generated `import_id`, early job registration, upload-finished detection, polling retry with 404 tolerance), import UX (success/failure icons, confirmation dialog), branding update ("Integrated & Intelligent Single Cell Analysis") |
 | 0.8.7 | 2026-03-02 | Data page scroll fix (`overflow: hidden` on html/body), footer i18n (Chinese/English), About page version/date update |
 | 0.8.6 | 2026-03-02 | Async session import (background tar.gz extraction + polling endpoint, avoids proxy timeout), first-visit disclaimer dialog (AI reliability warning, localStorage), About button text label, footer copyright |
@@ -1211,5 +1250,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-03*
-*Version: 0.8.9*
+*Document updated: 2026-03-04*
+*Version: 0.9.0*
