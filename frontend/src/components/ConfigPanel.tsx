@@ -181,6 +181,17 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
                 {language === 'zh' ? '获取 Key' : 'Get Key'}
               </a>
             </p>
+            <div className="flex items-start gap-2 mt-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+              <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+              <p className="text-xs text-amber-700">
+                {language === 'zh'
+                  ? 'Deep Research 每次检索耗时较长（数分钟至最多60分钟），费用约 $2-5/次。'
+                  : 'Deep Research takes minutes to complete (up to 60 min) and costs ~$2-5 per task.'}{' '}
+                <a href="https://ai.google.dev/gemini-api/docs/deep-research" target="_blank" rel="noopener noreferrer" className="text-amber-800 underline hover:text-amber-900">
+                  {language === 'zh' ? '参考 Google 文档' : 'See Google docs'}
+                </a>
+              </p>
+            </div>
           </div>
 
           {/* Proxy Server */}

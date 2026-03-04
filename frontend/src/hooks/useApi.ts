@@ -296,6 +296,23 @@ export function useSession() {
     if (!currentSession) return
     await apiFetch(`/session/${currentSession.id}/save`, { method: 'POST' })
   }, [currentSession])
+
+  const updateSessionInfo = useCallback(async (updates: { name?: string; instruction?: string }) => {
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+    const body: any = {}
+    if (updates.name !== undefined) body.name = updates.name
+    if (updates.instruction !== undefined) body.instruction = updates.instruction
+    const response = await apiFetch<any>(`/session/${session.id}/info`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    })
+    useAppStore.getState().updateSession({
+      name: response.data.name,
+      instruction: response.data.instruction,
+    })
+    return response
+  }, [])
   
   // Ensure session exists on server (handles server restart)
   const ensureSession = useCallback(async () => {
@@ -652,6 +669,7 @@ export function useSession() {
     listSessions,
     deleteSession,
     saveSession,
+    updateSessionInfo,
     addGroup,
     updateGroup,
     deleteGroup,

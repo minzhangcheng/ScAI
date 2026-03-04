@@ -13,7 +13,7 @@ from .base import BaseAgent
 logger = logging.getLogger(__name__)
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, RoundResult,
-    PublicationFigure, FigureReviewStatus
+    PublicationFigure, FigureReviewStatus, GraphicAbstract
 )
 from ..utils.llm_client import OpenAICompatibleClient
 
@@ -1053,6 +1053,19 @@ Reply in the same language as the research objective.
     # Publication Figure Review
     # ============================================
 
+    def _build_revision_history_text(self, figure: PublicationFigure) -> str:
+        """Build a text summary of all revision history for the PI review prompt."""
+        if figure.revision_history:
+            lines = []
+            for entry in figure.revision_history:
+                round_num = entry.get('round', '?')
+                hist_feedback = entry.get('feedback', '')
+                lines.append(f"  Round {round_num}: {hist_feedback}")
+            return "- Previous revision feedback:\n" + "\n".join(lines)
+        elif figure.pi_feedback:
+            return f"- Previous feedback: {figure.pi_feedback}"
+        return ""
+
     async def review_figure(
         self,
         state: AnalysisState,
@@ -1095,7 +1108,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 - Type: {figure.figure_type}
 - Description: {figure.description}
 - Revision count: {figure.revision_count}
-{f'- Previous feedback: {figure.pi_feedback}' if figure.pi_feedback else ''}
+{self._build_revision_history_text(figure)}
 
 **Review Criteria:**
 1. **Scientific Accuracy**: Does the figure accurately represent the data?
@@ -1172,6 +1185,214 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
             "suggestions": ["Ensure figure meets publication standards"],
             "must_fix": []
         }
+
+    # ============================================
+    # Graphic Abstract Review & Selection
+    # ============================================
+
+    def _build_ga_revision_history_text(self, revision_history: List[Dict[str, Any]]) -> str:
+        """Build a text summary of graphic abstract revision history for prompts."""
+        if not revision_history:
+            return ""
+        lines = []
+        for entry in revision_history:
+            round_num = entry.get('round', '?')
+            hist_feedback = entry.get('feedback', '')
+            lines.append(f"  Round {round_num}: {hist_feedback}")
+        return "- Previous revision feedback:\n" + "\n".join(lines)
+
+    async def review_graphic_abstract(
+        self,
+        state: AnalysisState,
+        image_base64: str,
+        revision_history: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Review a graphic abstract for publication quality using vision API.
+
+        Args:
+            state: Current analysis state
+            image_base64: Base64 encoded graphic abstract image
+            revision_history: All previous rounds' feedback
+
+        Returns:
+            Dict with feedback, suggestions, must_fix, quality_score
+        """
+        logger.info(f"[{self.session_id}][PI] Reviewing graphic abstract (round {len(revision_history) + 1})")
+
+        revision_text = self._build_ga_revision_history_text(revision_history)
+
+        prompt = f"""## Graphic Abstract Review
+
+You are reviewing a graphic abstract for a biomedical research publication.
+
+**Research Context:**
+Project: {state.name}
+Objective: {state.initial_instruction[:500] if state.initial_instruction else 'Biomedical research'}
+
+**Final Summary:**
+{state.final_summary[:1000] if state.final_summary else 'Not available'}
+
+**Review Round:** {len(revision_history) + 1}
+{revision_text}
+
+**Review Criteria:**
+1. **Scientific Accuracy**: Does the graphic abstract correctly represent the key findings?
+2. **Visual Communication**: Does it tell the research story at a glance?
+3. **Layout & Flow**: Is there a clear visual flow (left-to-right or top-to-bottom)?
+4. **Labeling**: Are key elements labeled clearly and legibly?
+5. **Color Scheme**: Are colors professional and publication-appropriate?
+6. **Completeness**: Are the main findings, cell types, pathways, and conclusions represented?
+7. **Publication Quality**: Would this be acceptable for a high-impact journal?
+
+**Respond in JSON format:**
+```json
+{{
+    "quality_score": 1-10,
+    "feedback": "Detailed assessment of the graphic abstract. Describe what works well and what needs improvement.",
+    "strengths": ["strength 1", "strength 2"],
+    "issues": ["specific issue 1", "specific issue 2"],
+    "suggestions": ["Describe the visual change needed, e.g., 'Add arrows showing the pathway from treatment to outcome' or 'Use distinct colors for different cell types'"],
+    "must_fix": ["Critical visual issue that MUST be addressed, e.g., 'The key finding about X pathway is not represented at all'"]
+}}
+```
+
+**Review instructions:**
+- Your feedback will be used by an image generation model to revise the graphic abstract. Describe visual changes clearly.
+- BAD: "The figure is not informative enough"
+- GOOD: "The graphic abstract should include a visual representation of the TGF-beta signaling pathway connecting fibroblasts to immune cells"
+- BAD: "Colors need improvement"
+- GOOD: "Use distinct colors for tumor cells (red/pink) vs immune cells (blue/green) to improve visual differentiation"
+{"- Since this is round " + str(len(revision_history) + 1) + ", focus on whether previous issues were addressed. Be more lenient on minor aesthetic issues." if revision_history else ""}
+"""
+
+        try:
+            response = await self.llm_client.chat_with_vision(
+                model=self.model,
+                text_prompt=prompt,
+                images=[image_base64],
+                temperature=0.3
+            )
+            response_text = response.content if response and response.content else ""
+        except Exception as e:
+            logger.warning(f"[PI] Vision API failed for graphic abstract review: {e}")
+            # Cannot meaningfully review without seeing the image
+            return {
+                "quality_score": 6,
+                "feedback": "Unable to review image visually. General improvement: ensure clear visual hierarchy and complete representation of key findings.",
+                "strengths": [],
+                "issues": [],
+                "suggestions": ["Ensure all key findings are visually represented", "Use clear labels and professional colors"],
+                "must_fix": []
+            }
+
+        data = self._safe_parse_json(response_text, default={})
+
+        if data and "feedback" in data:
+            result = {
+                "quality_score": int(data.get("quality_score", 5)),
+                "feedback": data.get("feedback", ""),
+                "strengths": data.get("strengths", []),
+                "issues": data.get("issues", []),
+                "suggestions": data.get("suggestions", []),
+                "must_fix": data.get("must_fix", [])
+            }
+            logger.info(f"[PI] Graphic abstract review: score={result['quality_score']}")
+            return result
+
+        return {
+            "quality_score": 5,
+            "feedback": "Unable to parse review. Consider improving visual clarity and scientific completeness.",
+            "strengths": [],
+            "issues": [],
+            "suggestions": ["Improve visual hierarchy and labeling"],
+            "must_fix": []
+        }
+
+    async def select_best_graphic_abstract(
+        self,
+        state: AnalysisState,
+        candidates: List[str],
+        revision_history: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Select the best graphic abstract from all candidates using vision API.
+
+        Args:
+            state: Current analysis state
+            candidates: List of base64 encoded candidate images
+            revision_history: All rounds' feedback history
+
+        Returns:
+            Index of the best candidate (0-based)
+        """
+        logger.info(f"[{self.session_id}][PI] Selecting best graphic abstract from {len(candidates)} candidates")
+
+        revision_text = self._build_ga_revision_history_text(revision_history)
+
+        prompt = f"""## Select Best Graphic Abstract
+
+You are reviewing {len(candidates)} versions of a graphic abstract for publication.
+
+**Research Context:**
+Project: {state.name}
+Objective: {state.initial_instruction[:500] if state.initial_instruction else 'Biomedical research'}
+
+**Final Summary:**
+{state.final_summary[:800] if state.final_summary else 'Not available'}
+
+**Revision History:**
+{revision_text if revision_text else 'No previous feedback'}
+
+**Images provided (in order):**
+{chr(10).join(f'- Image {i+1}: {"Original" if i == 0 else f"Revision {i}"}' for i in range(len(candidates)))}
+
+**Task:**
+Compare ALL {len(candidates)} images and select the ONE that is best suited for journal publication.
+
+Consider:
+1. Scientific accuracy and completeness of key findings
+2. Visual communication clarity
+3. Layout, flow, and visual hierarchy
+4. Labeling and readability
+5. Professional appearance and color scheme
+6. Overall impact and storytelling
+
+**Respond in JSON format:**
+```json
+{{
+    "selected_index": <0-based index of the best image>,
+    "reason": "Brief explanation of why this version is the best"
+}}
+```
+"""
+
+        try:
+            response = await self.llm_client.chat_with_vision(
+                model=self.model,
+                text_prompt=prompt,
+                images=candidates,
+                temperature=0.2
+            )
+            response_text = response.content if response and response.content else ""
+        except Exception as e:
+            logger.warning(f"[PI] Vision API failed for graphic abstract selection: {e}")
+            # Default to last candidate (most revised)
+            return len(candidates) - 1
+
+        data = self._safe_parse_json(response_text, default={})
+
+        if data and "selected_index" in data:
+            idx = int(data["selected_index"])
+            if 0 <= idx < len(candidates):
+                reason = data.get("reason", "No reason provided")
+                logger.info(f"[PI] Selected graphic abstract {idx + 1}/{len(candidates)}: {reason}")
+                return idx
+            else:
+                logger.warning(f"[PI] Invalid selected_index {idx}, defaulting to last")
+
+        # Default to last candidate
+        return len(candidates) - 1
 
     # ============================================
     # Integrated Report Generation

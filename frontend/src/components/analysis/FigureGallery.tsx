@@ -142,8 +142,23 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
                   alt={figure.name}
                   className="w-full h-full object-contain"
                 />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center text-slate-400">
+              ) : currentSession?.id ? (
+                <img
+                  src={`${API_BASE}/session/${currentSession.id}/figure/${figure.id}/png`}
+                  alt={figure.name}
+                  className="w-full h-full object-contain"
+                  onError={(e) => {
+                    const target = e.currentTarget
+                    target.style.display = 'none'
+                    if (target.nextElementSibling) {
+                      ;(target.nextElementSibling as HTMLElement).style.display = 'flex'
+                    }
+                  }}
+                />
+              ) : null}
+              {/* Placeholder shown on API load error */}
+              {!figure.pngBase64 && (
+                <div className="w-full h-full items-center justify-center text-slate-400" style={{ display: 'none' }}>
                   <FileImage className="w-12 h-12" />
                 </div>
               )}
@@ -243,8 +258,23 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
                   alt={selectedFigure.name}
                   className="max-w-full h-auto mx-auto"
                 />
-              ) : (
-                <div className="flex items-center justify-center h-64 text-slate-400">
+              ) : currentSession?.id ? (
+                <img
+                  src={`${API_BASE}/session/${currentSession.id}/figure/${selectedFigure.id}/png`}
+                  alt={selectedFigure.name}
+                  className="max-w-full h-auto mx-auto"
+                  onError={(e) => {
+                    const target = e.currentTarget
+                    target.style.display = 'none'
+                    if (target.nextElementSibling) {
+                      ;(target.nextElementSibling as HTMLElement).style.display = 'flex'
+                    }
+                  }}
+                />
+              ) : null}
+              {/* Placeholder shown on API load error */}
+              {!selectedFigure.pngBase64 && (
+                <div className="items-center justify-center h-64 text-slate-400" style={{ display: 'none' }}>
                   <FileImage className="w-16 h-16" />
                 </div>
               )}

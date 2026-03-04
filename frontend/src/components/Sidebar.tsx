@@ -16,7 +16,8 @@ import {
   Upload,
   Loader2,
   CheckCircle,
-  AlertCircle
+  AlertCircle,
+  Pencil
 } from 'lucide-react'
 
 interface SidebarProps {
@@ -26,7 +27,7 @@ interface SidebarProps {
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   const { currentSession, setCurrentSession, clearMessages, language, maxRounds, setMaxRounds, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback } = useAppStore()
-  const { createSession, loadSession, listSessions, deleteSession } = useSession()
+  const { createSession, loadSession, listSessions, deleteSession, updateSessionInfo } = useSession()
   const { t } = useTranslation(language)
   const [showNewSession, setShowNewSession] = useState(false)
   const [showSessionBrowser, setShowSessionBrowser] = useState(false)
@@ -41,9 +42,10 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   
   const [instruction, setInstruction] = useState(DEFAULT_PROJECT_DESCRIPTION)
   const [sessionName, setSessionName] = useState(DEFAULT_PROJECT_NAME)
+  const [editingSession, setEditingSession] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
-  const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number; closable?: boolean; success?: boolean } | null>(null)
+  const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number; closable?: boolean; success?: boolean; onConfirm?: () => void } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Auto-reload session from API on page refresh to restore full data (images etc.)
@@ -146,40 +148,45 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
     setExporting(true)
 
-    // 阶段1：显示"正在打包..."
+    // Phase 1: 服务端打包，显示 spinner
     setProgressInfo({
       action: t('exportPackaging'),
       detail: t('exportPackagingDetail'),
-      closable: false  // 不可关闭
+      closable: false
     })
 
     try {
-      // 等待服务器完成打包
-      const response = await fetch(`/api/session/${currentSession.id}/export`)
-      if (!response.ok) throw new Error(`Export failed: ${response.status}`)
+      // 等待服务端完成打包（不下载文件，只等元数据）
+      const res = await fetch(`/api/session/${currentSession.id}/export/prepare`, { method: 'POST' })
+      if (!res.ok) throw new Error(`Export prepare failed: ${res.status}`)
+      const meta = await res.json() as { status: string; size_bytes: number; filename: string }
 
-      // 从Content-Disposition提取文件名
-      const disposition = response.headers.get('Content-Disposition')
-      const filenameMatch = disposition?.match(/filename="?(.+?)"?$/)
-      const filename = filenameMatch?.[1] || `${currentSession.id}_export.tar.gz`
+      const sizeMB = (meta.size_bytes / 1024 / 1024).toFixed(1)
 
-      // 下载blob
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-
-      // 阶段2：下载确实已完成
+      // Phase 2: 打包完成，显示确认按钮，用户点击后开始流式下载
       setProgressInfo({
-        action: t('exportDownloadStarted'),
-        detail: t('exportDownloadStartedDetail'),
+        action: language === 'zh' ? '打包完成' : 'Packaging Complete',
+        detail: language === 'zh'
+          ? `文件大小: ${sizeMB} MB，点击确认开始下载`
+          : `File size: ${sizeMB} MB. Click confirm to start download.`,
         closable: true,
-        success: true
+        success: true,
+        onConfirm: () => {
+          // Phase 3: 触发浏览器流式下载（边下边存，不占内存）
+          const link = document.createElement('a')
+          link.href = `/api/session/${currentSession.id}/export/download`
+          link.download = meta.filename
+          document.body.appendChild(link)
+          link.click()
+          document.body.removeChild(link)
+
+          setProgressInfo({
+            action: t('exportDownloadStarted'),
+            detail: t('exportDownloadStartedDetail'),
+            closable: true,
+            success: true
+          })
+        }
       })
     } catch (err) {
       setProgressInfo({
@@ -372,7 +379,13 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
             {/* 确定/关闭按钮 - 仅在可关闭时显示 */}
             {progressInfo.closable && (
               <button
-                onClick={() => setProgressInfo(null)}
+                onClick={() => {
+                  if (progressInfo.onConfirm) {
+                    progressInfo.onConfirm()
+                  } else {
+                    setProgressInfo(null)
+                  }
+                }}
                 className="w-full px-4 py-2 bg-violet-600 text-white text-sm rounded-lg hover:bg-violet-700 transition-colors font-medium"
               >
                 {t('confirm')}
@@ -635,30 +648,69 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       {currentSession && (
         <div className="px-3 pb-3">
           <div className="p-3 bg-violet-50 border border-violet-200 rounded-xl">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium text-violet-900">
-                {currentSession.name}
-              </span>
-              <div className="flex items-center gap-1">
+            {editingSession ? (
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  defaultValue={currentSession.name}
+                  onBlur={(e) => {
+                    const val = e.target.value.trim()
+                    if (val && val !== currentSession.name) updateSessionInfo({ name: val })
+                  }}
+                  className="w-full px-2 py-1 border border-violet-300 rounded text-sm font-medium bg-white"
+                  autoFocus
+                />
+                <textarea
+                  defaultValue={currentSession.instruction}
+                  onBlur={(e) => {
+                    const val = e.target.value.trim()
+                    if (val !== currentSession.instruction) updateSessionInfo({ instruction: val })
+                  }}
+                  className="w-full px-2 py-1 border border-violet-300 rounded text-xs bg-white resize-y"
+                  rows={8}
+                />
                 <button
-                  onClick={handleRefreshSession}
-                  className="p-1 hover:bg-violet-100 rounded"
-                  title={language === 'zh' ? '刷新状态' : 'Refresh status'}
+                  onClick={() => setEditingSession(false)}
+                  className="text-xs text-indigo-600 hover:underline"
                 >
-                  <RefreshCw className="w-3.5 h-3.5 text-violet-500" />
-                </button>
-                <button
-                  onClick={handleClearSession}
-                  className="p-1 hover:bg-red-100 rounded"
-                  title={language === 'zh' ? '清除项目' : 'Clear project'}
-                >
-                  <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                  {language === 'zh' ? '完成' : 'Done'}
                 </button>
               </div>
-            </div>
-            <p className="text-xs text-violet-600 mt-1 line-clamp-2">
-              {currentSession.instruction}
-            </p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-violet-900">
+                    {currentSession.name}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setEditingSession(true)}
+                      className="p-1 hover:bg-violet-100 rounded"
+                      title={language === 'zh' ? '编辑' : 'Edit'}
+                    >
+                      <Pencil className="w-3.5 h-3.5 text-violet-500" />
+                    </button>
+                    <button
+                      onClick={handleRefreshSession}
+                      className="p-1 hover:bg-violet-100 rounded"
+                      title={language === 'zh' ? '刷新状态' : 'Refresh status'}
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 text-violet-500" />
+                    </button>
+                    <button
+                      onClick={handleClearSession}
+                      className="p-1 hover:bg-red-100 rounded"
+                      title={language === 'zh' ? '清除项目' : 'Clear project'}
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                    </button>
+                  </div>
+                </div>
+                <p className="text-xs text-violet-600 mt-1 line-clamp-2">
+                  {currentSession.instruction}
+                </p>
+              </>
+            )}
             <div className="flex items-center gap-2 mt-2">
               <span className={`text-xs px-2 py-0.5 rounded-full ${
                 currentSession.status === 'completed' && !reportGenerated

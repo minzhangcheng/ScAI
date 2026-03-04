@@ -1590,7 +1590,7 @@ Return ONLY the JSON array, nothing else."""
         }
 
     async def _generate_graphic_abstract(self, state: WorkflowState) -> WorkflowState:
-        """Generate graphic abstract using Painter Agent"""
+        """Generate graphic abstract with revision loop (max 2 revisions, PI selects best)"""
         analysis_state = state["analysis_state"]
 
         logger.info(f"[{self.session_id}] Generating graphic abstract")
@@ -1601,14 +1601,16 @@ Return ONLY the JSON array, nothing else."""
             summary_prompt = await self.pi_agent.generate_graphic_abstract_prompt(analysis_state)
             logger.info(f"[{self.session_id}] Generated graphic abstract prompt")
 
-            # Step 2: Painter Agent generates the graphic abstract
+            # Step 2: Painter generates initial graphic abstract
             graphic = await self.painter_agent.generate_graphic_abstract(
                 analysis_state,
                 summary_prompt
             )
 
-            analysis_state.graphic_abstract = graphic
+            candidates = [graphic.image_base64]
+            revision_history = []
 
+            # Send initial image to frontend
             await self._send_message(
                 "graphic_abstract",
                 {
@@ -1618,8 +1620,117 @@ Return ONLY the JSON array, nothing else."""
                 },
                 AgentType.PAINTER
             )
+            logger.info(f"[{self.session_id}] Initial graphic abstract generated (candidate 1/3)")
 
-            logger.info(f"[{self.session_id}] Graphic abstract generated successfully")
+            # Step 3: Revision loop - up to 2 revisions
+            for revision_round in range(2):
+                # PI reviews the latest image (sees image + all previous feedback)
+                await self._send_message(
+                    "status",
+                    f"PI reviewing graphic abstract (round {revision_round + 1}/2)...",
+                    AgentType.PI
+                )
+
+                review = await self.pi_agent.review_graphic_abstract(
+                    analysis_state,
+                    candidates[-1],
+                    revision_history
+                )
+
+                # Record feedback
+                revision_history.append({
+                    "round": revision_round + 1,
+                    "feedback": review.get("feedback", ""),
+                    "suggestions": review.get("suggestions", []),
+                    "must_fix": review.get("must_fix", []),
+                    "quality_score": review.get("quality_score")
+                })
+
+                logger.info(
+                    f"[{self.session_id}] PI review round {revision_round + 1}: "
+                    f"score={review.get('quality_score', 'N/A')}"
+                )
+
+                # Painter revises (sees current image + all feedback)
+                try:
+                    await self._send_message(
+                        "status",
+                        f"Revising graphic abstract (revision {revision_round + 1}/2)...",
+                        AgentType.PAINTER
+                    )
+
+                    new_image = await self.painter_agent.revise_graphic_abstract(
+                        analysis_state,
+                        candidates[-1],
+                        graphic.prompt,
+                        review.get("feedback", ""),
+                        review.get("suggestions", []),
+                        review.get("must_fix", []),
+                        revision_history
+                    )
+                    candidates.append(new_image)
+
+                    # Send revised image to frontend
+                    await self._send_message(
+                        "graphic_abstract",
+                        {
+                            "image_base64": new_image,
+                            "prompt": graphic.prompt,
+                            "created_at": graphic.created_at.isoformat()
+                        },
+                        AgentType.PAINTER
+                    )
+                    logger.info(
+                        f"[{self.session_id}] Graphic abstract revision {revision_round + 1} "
+                        f"successful (candidate {len(candidates)}/3)"
+                    )
+
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.session_id}] Graphic abstract revision "
+                        f"{revision_round + 1} failed: {e}"
+                    )
+                    break  # Stop revisions, PI will pick from available candidates
+
+            # Step 4: PI selects the best from all candidates
+            if len(candidates) > 1:
+                await self._send_message(
+                    "status",
+                    f"PI selecting best graphic abstract from {len(candidates)} candidates...",
+                    AgentType.PI
+                )
+                selected_idx = await self.pi_agent.select_best_graphic_abstract(
+                    analysis_state,
+                    candidates,
+                    revision_history
+                )
+            else:
+                selected_idx = 0
+
+            # Update graphic abstract with selected image and metadata
+            graphic.image_base64 = candidates[selected_idx]
+            graphic.revision_count = len(candidates) - 1
+            graphic.revision_history = revision_history
+            graphic.all_candidates = candidates
+            graphic.selected_index = selected_idx
+            analysis_state.graphic_abstract = graphic
+
+            # Send final selected image to frontend
+            await self._send_message(
+                "graphic_abstract",
+                {
+                    "image_base64": candidates[selected_idx],
+                    "prompt": graphic.prompt,
+                    "created_at": graphic.created_at.isoformat()
+                },
+                AgentType.PAINTER
+            )
+
+            logger.info(
+                f"[{self.session_id}] Graphic abstract completed: "
+                f"selected candidate {selected_idx + 1}/{len(candidates)}, "
+                f"{len(candidates) - 1} revisions"
+            )
 
         except Exception as e:
             logger.error(f"[{self.session_id}] Failed to generate graphic abstract: {e}")

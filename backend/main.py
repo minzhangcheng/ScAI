@@ -357,6 +357,11 @@ class BiochemistryInput(BaseModel):
     sample_number: Optional[int] = None
 
 
+class SessionUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    instruction: Optional[str] = None
+
+
 class GroupCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     description: str = ""
@@ -825,6 +830,26 @@ async def create_group(session_id: str, request: GroupCreateRequest):
     )
 
 
+@app.put("/api/session/{session_id}/info")
+async def update_session_info(session_id: str, request: SessionUpdateRequest):
+    """Update session name and/or instruction"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if request.name is not None:
+        state.name = request.name
+    if request.instruction is not None:
+        state.initial_instruction = request.instruction
+
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    return APIResponse(
+        success=True,
+        message="Session info updated",
+        data={"name": state.name, "instruction": state.initial_instruction}
+    )
+
+
 @app.put("/api/session/{session_id}/groups/{group_id}")
 async def update_group(session_id: str, group_id: str, request: GroupUpdateRequest):
     """Update a treatment group"""
@@ -841,6 +866,21 @@ async def update_group(session_id: str, group_id: str, request: GroupUpdateReque
     if request.description is not None:
         group.description = request.description
     if request.sample_count is not None:
+        # Prevent reducing sample count below highest sample number with data
+        if request.sample_count < group.sample_count:
+            sample_numbers_in_use = (
+                [f.sample_number for f in state.data_files
+                 if f.group_id == group_id and f.sample_number is not None] +
+                [i.sample_number for i in state.biochemistry_indicators
+                 if i.group_id == group_id and i.sample_number is not None]
+            )
+            if sample_numbers_in_use:
+                max_sample_in_use = max(sample_numbers_in_use)
+                if request.sample_count < max_sample_in_use:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot reduce sample count below {max_sample_in_use}: data exists for sample {max_sample_in_use}"
+                    )
         group.sample_count = request.sample_count
 
     await asyncio.to_thread(save_session_to_disk, session_id, state)
@@ -1560,6 +1600,121 @@ async def export_state(session_id: str):
         media_type="application/gzip",
         filename=filename,
         background=BackgroundTask(os.unlink, tmp_path)
+    )
+
+
+# --- Export: two-phase (prepare + download) for large files ---
+
+# In-memory store for prepared export file paths: session_id -> {"path": str, "filename": str, "size": int}
+_prepared_exports: Dict[str, Dict[str, Any]] = {}
+
+
+@app.post("/api/session/{session_id}/export/prepare")
+async def export_prepare(session_id: str):
+    """Phase 1: Build the tar.gz archive on disk and return metadata.
+
+    The frontend calls this first (showing a spinner), then triggers
+    the streaming download via GET /export/download once ready.
+    """
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Save latest state to disk first
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+
+    # Build tar to a stable temp file
+    export_dir = REPORTS_DIR / session_id
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = "".join(c if c.isalnum() or c in '-_ ' else '' for c in state.name).strip().replace(' ', '_')
+    if not safe_name:
+        safe_name = "session"
+    filename = f"{safe_name}_{session_id[:8]}.tar.gz"
+    tar_path = export_dir / filename
+
+    def _build_tar():
+        with tarfile.open(str(tar_path), mode='w:gz') as tf:
+            def _add_bytes(arcname: str, data: bytes):
+                info = tarfile.TarInfo(name=arcname)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+
+            manifest = json.dumps({
+                "session_id": session_id,
+                "version": "1.0",
+                "data_base_dir": str(DATA_BASE_DIR)
+            }, indent=2).encode("utf-8")
+            _add_bytes(f"{session_id}/manifest.json", manifest)
+
+            session_file = SESSION_DIR / f"{session_id}.json"
+            if session_file.exists():
+                tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
+
+            for state_file in STATE_DIR.glob(f"{session_id}*"):
+                if state_file.is_file():
+                    tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
+
+            upload_dir = UPLOAD_DIR / session_id
+            if upload_dir.exists():
+                for file_path in upload_dir.rglob("*"):
+                    if file_path.is_file():
+                        rel = file_path.relative_to(DATA_BASE_DIR)
+                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+
+            workspace_dir = WORKSPACE_DIR / session_id
+            if workspace_dir.exists():
+                for file_path in workspace_dir.rglob("*"):
+                    if file_path.is_file():
+                        rel = file_path.relative_to(DATA_BASE_DIR)
+                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+
+            reports_dir = REPORTS_DIR / session_id
+            if reports_dir.exists():
+                for file_path in reports_dir.rglob("*"):
+                    if file_path.is_file():
+                        # Skip the export tar itself
+                        if file_path.name == filename:
+                            continue
+                        rel = file_path.relative_to(DATA_BASE_DIR)
+                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+
+    await asyncio.to_thread(_build_tar)
+
+    size_bytes = tar_path.stat().st_size
+
+    # Store reference for the download endpoint
+    _prepared_exports[session_id] = {
+        "path": str(tar_path),
+        "filename": filename,
+        "size": size_bytes,
+    }
+
+    return {
+        "status": "ready",
+        "size_bytes": size_bytes,
+        "filename": filename,
+    }
+
+
+@app.get("/api/session/{session_id}/export/download")
+async def export_download(session_id: str):
+    """Phase 2: Stream the pre-built tar.gz to the browser.
+
+    The file is deleted after the response is fully sent.
+    """
+    validate_session_id(session_id)
+
+    info = _prepared_exports.pop(session_id, None)
+    if not info or not os.path.exists(info["path"]):
+        raise HTTPException(status_code=404, detail="Export not prepared. Call POST /export/prepare first.")
+
+    return FileResponse(
+        info["path"],
+        media_type="application/gzip",
+        filename=info["filename"],
+        background=BackgroundTask(os.unlink, info["path"])
     )
 
 
@@ -2763,6 +2918,21 @@ async def get_publication_tables(session_id: str):
     }
 
 
+def _find_workspace_figure(state: AnalysisState, session_id: str, figure_id: str) -> Optional[Dict[str, Any]]:
+    """Search integrated_report message for a workspace figure by ID.
+
+    Returns a dict with 'name' and optional 'pdf_path' if found, else None.
+    """
+    for msg in state.realtime_messages:
+        msg_type = msg.type if hasattr(msg, 'type') else (msg.get('type') if isinstance(msg, dict) else None)
+        msg_content = msg.content if hasattr(msg, 'content') else (msg.get('content') if isinstance(msg, dict) else None)
+        if msg_type == 'integrated_report' and isinstance(msg_content, dict):
+            for fig_data in msg_content.get('figures', []):
+                if isinstance(fig_data, dict) and fig_data.get('id') == figure_id:
+                    return fig_data
+    return None
+
+
 @app.get("/api/session/{session_id}/figure/{figure_id}/pdf")
 async def download_publication_figure_pdf(session_id: str, figure_id: str):
     """Download a specific publication figure as PDF"""
@@ -2771,13 +2941,25 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     figure = next((f for f in state.publication_figures if f.id == figure_id), None)
-    if figure is None:
-        raise HTTPException(status_code=404, detail="Figure not found")
 
-    if not figure.pdf_path:
-        raise HTTPException(status_code=404, detail="PDF not available for this figure")
+    if figure is not None:
+        if not figure.pdf_path:
+            raise HTTPException(status_code=404, detail="PDF not available for this figure")
+        pdf_path = Path(figure.pdf_path)
+        fig_name = figure.name
+    else:
+        # Fallback: search workspace figures from integrated_report message
+        fig_data = _find_workspace_figure(state, session_id, figure_id)
+        if fig_data is None:
+            raise HTTPException(status_code=404, detail="Figure not found")
+        fig_name = fig_data.get('name', '')
+        # Try explicit pdf_path first, then derive from workspace directory
+        explicit_pdf = fig_data.get('pdf_path', '')
+        if explicit_pdf and Path(explicit_pdf).exists():
+            pdf_path = Path(explicit_pdf)
+        else:
+            pdf_path = WORKSPACE_DIR / session_id / "figures" / f"{fig_name}.pdf"
 
-    pdf_path = Path(figure.pdf_path)
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="PDF file not found on disk")
 
@@ -2790,7 +2972,7 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str):
     return FileResponse(
         pdf_path,
         media_type="application/pdf",
-        filename=f"{figure.name}.pdf"
+        filename=f"{fig_name}.pdf"
     )
 
 
@@ -2802,13 +2984,20 @@ async def download_publication_figure_png(session_id: str, figure_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     figure = next((f for f in state.publication_figures if f.id == figure_id), None)
-    if figure is None:
-        raise HTTPException(status_code=404, detail="Figure not found")
 
-    if not figure.png_path:
-        raise HTTPException(status_code=404, detail="PNG not available for this figure")
+    if figure is not None:
+        if not figure.png_path:
+            raise HTTPException(status_code=404, detail="PNG not available for this figure")
+        png_path = Path(figure.png_path)
+        fig_name = figure.name
+    else:
+        # Fallback: search workspace figures from integrated_report message
+        fig_data = _find_workspace_figure(state, session_id, figure_id)
+        if fig_data is None:
+            raise HTTPException(status_code=404, detail="Figure not found")
+        fig_name = fig_data.get('name', '')
+        png_path = WORKSPACE_DIR / session_id / "figures" / f"{fig_name}.png"
 
-    png_path = Path(figure.png_path)
     if not png_path.exists():
         raise HTTPException(status_code=404, detail="PNG file not found on disk")
 
@@ -2821,7 +3010,7 @@ async def download_publication_figure_png(session_id: str, figure_id: str):
     return FileResponse(
         png_path,
         media_type="image/png",
-        filename=f"{figure.name}.png"
+        filename=f"{fig_name}.png"
     )
 
 

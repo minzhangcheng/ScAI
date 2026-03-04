@@ -468,6 +468,96 @@ HTML_TEMPLATE = """
             margin: 20px 0;
         }}
 
+        .appendix {{
+            background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+            border-left: 4px solid #f59e0b;
+            padding: 20px 24px;
+            margin-top: 30px;
+            border-radius: 0 8px 8px 0;
+        }}
+
+        .appendix h2 {{
+            color: #b45309;
+            margin-bottom: 16px;
+        }}
+
+        .appendix h3 {{
+            color: #92400e;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-size: 1.05rem;
+            border-bottom: 1px solid #fbbf24;
+            padding-bottom: 6px;
+        }}
+
+        .appendix table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            margin: 10px 0 16px 0;
+            background: white;
+            border-radius: 6px;
+            overflow: hidden;
+        }}
+
+        .appendix th {{
+            background: #fef3c7;
+            padding: 8px 12px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #fbbf24;
+            color: #92400e;
+        }}
+
+        .appendix td {{
+            padding: 8px 12px;
+            border-bottom: 1px solid #fde68a;
+        }}
+
+        .appendix .human-input-item {{
+            background: white;
+            border-radius: 6px;
+            padding: 12px 16px;
+            margin: 8px 0;
+            border: 1px solid #fde68a;
+        }}
+
+        .appendix .human-input-item .round-tag {{
+            display: inline-block;
+            background: #fbbf24;
+            color: #78350f;
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            margin-right: 8px;
+        }}
+
+        .appendix .human-input-item .timestamp {{
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }}
+
+        .appendix .human-input-item .message {{
+            margin-top: 6px;
+            white-space: pre-wrap;
+        }}
+
+        .appendix .human-input-item .files {{
+            margin-top: 6px;
+            font-size: 0.85rem;
+            color: #b45309;
+        }}
+
+        .appendix ul {{
+            margin: 6px 0 12px 20px;
+            font-size: 0.9rem;
+        }}
+
+        .appendix li {{
+            margin-bottom: 4px;
+        }}
+
         @media print {{
             body {{
                 background: white;
@@ -518,11 +608,183 @@ HTML_TEMPLATE = """
                 <h2>{conclusions_title}</h2>
                 <p>{conclusions}</p>
             </div>
+
+            <!-- Appendix: Analysis Settings & Records -->
+            {appendix_html}
         </div>
     </div>
 </body>
 </html>
 """
+
+
+def _build_appendix_from_report(report: dict, language: str) -> str:
+    """Build appendix HTML from the appendix data stored in report.json."""
+    appendix = report.get("appendix")
+    if not appendix:
+        return ""
+
+    zh = language == "zh"
+    esc = html_module.escape
+
+    appendix_title = "附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"
+
+    # 1. Project Information
+    proj_title = "项目信息" if zh else "Project Information"
+    lbl_name = "项目名称" if zh else "Project Name"
+    lbl_desc = "项目描述" if zh else "Project Description"
+    lbl_created = "创建时间" if zh else "Created At"
+    lbl_report_time = "报告生成时间" if zh else "Report Generated At"
+
+    project_html = f"""
+    <h3>{proj_title}</h3>
+    <table>
+        <tbody>
+            <tr><td><strong>{lbl_name}</strong></td><td>{esc(appendix.get('project_name', '-'))}</td></tr>
+            <tr><td><strong>{lbl_desc}</strong></td><td>{esc((appendix.get('project_description') or '-')[:500])}</td></tr>
+            <tr><td><strong>{lbl_created}</strong></td><td>{esc(appendix.get('created_at', '-'))}</td></tr>
+            <tr><td><strong>{lbl_report_time}</strong></td><td>{esc(report.get('generated_at', '-'))}</td></tr>
+        </tbody>
+    </table>
+    """
+
+    # 2. Agent Configuration
+    agent_title = "Agent 配置" if zh else "Agent Configuration"
+    agent_rows = ""
+    models = appendix.get("agent_models", {})
+    temps = appendix.get("agent_temperatures", {})
+    for key in ["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter"]:
+        model = models.get(key, "-")
+        temp = temps.get(key, "-")
+        agent_rows += f"<tr><td>{esc(key.title())}</td><td>{esc(str(model))}</td><td>{temp}</td></tr>\n"
+
+    agent_html = f"""
+    <h3>{agent_title}</h3>
+    <table>
+        <thead><tr><th>Agent</th><th>{'模型' if zh else 'Model'}</th><th>Temperature</th></tr></thead>
+        <tbody>{agent_rows}</tbody>
+    </table>
+    """
+
+    # 3. Uploaded Data
+    data_title = "上传数据" if zh else "Uploaded Data"
+    groups_html = ""
+    groups = appendix.get("treatment_groups", [])
+    if groups:
+        lbl_group = "实验分组" if zh else "Treatment Groups"
+        group_rows = ""
+        for g in groups:
+            group_rows += f"<tr><td>{esc(g.get('name', '-'))}</td><td>{esc(g.get('description', '-'))}</td><td>{g.get('sample_count', 0)}</td></tr>\n"
+        groups_html = f"""
+        <p><strong>{lbl_group}</strong></p>
+        <table>
+            <thead><tr><th>{'组名' if zh else 'Group'}</th><th>{'描述' if zh else 'Description'}</th><th>{'样本数' if zh else 'Samples'}</th></tr></thead>
+            <tbody>{group_rows}</tbody>
+        </table>
+        """
+
+    files_html = ""
+    files = appendix.get("data_files", [])
+    if files:
+        lbl_files = "数据文件" if zh else "Data Files"
+        file_rows = ""
+        for f in files:
+            file_rows += (
+                f"<tr><td>{esc(f.get('filename', '-'))}</td><td>{esc(f.get('section', '-'))}</td>"
+                f"<td>{esc(f.get('data_type', '-'))}</td><td>{esc(f.get('group') or '-')}</td></tr>\n"
+            )
+        files_html = f"""
+        <p><strong>{lbl_files}</strong></p>
+        <table>
+            <thead><tr><th>{'文件名' if zh else 'Filename'}</th><th>{'类别' if zh else 'Section'}</th><th>{'类型' if zh else 'Type'}</th><th>{'分组' if zh else 'Group'}</th></tr></thead>
+            <tbody>{file_rows}</tbody>
+        </table>
+        """
+
+    biochem_count = appendix.get("biochemistry_indicators_count", 0)
+    biochem_html = ""
+    if biochem_count:
+        lbl_biochem = "生化指标" if zh else "Biochemistry Indicators"
+        lbl_count = f"共 {biochem_count} 项手动录入指标" if zh else f"{biochem_count} manually entered indicator(s)"
+        biochem_html = f"<p><strong>{lbl_biochem}:</strong> {lbl_count}</p>"
+
+    data_html = f"<h3>{data_title}</h3>{groups_html}{files_html}{biochem_html}"
+
+    # 4. Analysis Rounds
+    rounds_title = "分析轮次" if zh else "Analysis Rounds"
+    round_results = appendix.get("round_results", [])
+    if round_results:
+        max_rounds = appendix.get("max_rounds", "?")
+        lbl_total = (
+            f"共 {len(round_results)} 轮分析（最大 {max_rounds} 轮）" if zh
+            else f"Total: {len(round_results)} round(s) (max {max_rounds})"
+        )
+        round_rows = ""
+        for r in round_results:
+            round_rows += (
+                f"<tr><td>{r.get('round_number', '?')}</td><td>{esc(str(r.get('timestamp', '')))}</td>"
+                f"<td>{r.get('pathology_findings_count', 0)}</td>"
+                f"<td>{r.get('bioinformatics_findings_count', 0)}</td>"
+                f"<td>{r.get('biochemistry_findings_count', 0)}</td>"
+                f"<td>{r.get('literature_findings_count', 0)}</td></tr>\n"
+            )
+        rounds_html = f"""
+        <h3>{rounds_title}</h3>
+        <p>{lbl_total}</p>
+        <table>
+            <thead><tr>
+                <th>{'轮次' if zh else 'Round'}</th><th>{'时间' if zh else 'Time'}</th>
+                <th>{'病理' if zh else 'Pathology'}</th><th>{'生信' if zh else 'Bioinformatics'}</th>
+                <th>{'生化' if zh else 'Biochemistry'}</th><th>{'文献' if zh else 'Literature'}</th>
+            </tr></thead>
+            <tbody>{round_rows}</tbody>
+        </table>
+        """
+    else:
+        lbl_no_rounds = "无分析轮次记录" if zh else "No analysis round records"
+        rounds_html = f"<h3>{rounds_title}</h3><p>{lbl_no_rounds}</p>"
+
+    # 5. User Inputs Between Rounds
+    human_title = "轮次间用户输入记录" if zh else "User Inputs Between Rounds"
+    human_msgs = appendix.get("human_messages", [])
+    if human_msgs:
+        items = ""
+        for hm in human_msgs:
+            msg = hm.get("message", "")
+            files_list = hm.get("files", [])
+            ts = hm.get("timestamp", "")
+            rn = hm.get("round_number", "?")
+            round_label = f"第 {rn} 轮" if zh else f"Round {rn}"
+
+            files_info = ""
+            if files_list:
+                file_names = ", ".join(esc(str(f)) for f in files_list)
+                files_label = "附件" if zh else "Attached files"
+                files_info = f'<div class="files">{files_label}: {file_names}</div>'
+
+            items += f"""
+            <div class="human-input-item">
+                <span class="round-tag">{esc(round_label)}</span>
+                <span class="timestamp">{esc(str(ts))}</span>
+                <div class="message">{esc(msg)}</div>
+                {files_info}
+            </div>
+            """
+        human_html = f"<h3>{human_title}</h3>{items}"
+    else:
+        lbl_no_input = "无用户输入记录" if zh else "No user inputs recorded"
+        human_html = f"<h3>{human_title}</h3><p>{lbl_no_input}</p>"
+
+    return f"""
+    <div class="appendix" id="appendix">
+        <h2>{appendix_title}</h2>
+        {project_html}
+        {agent_html}
+        {data_html}
+        {rounds_html}
+        {human_html}
+    </div>
+    """
 
 
 def generate_html_report(report_dir: Path, language: str = "en") -> Path:
@@ -777,8 +1039,17 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     def _safe_format_value(v: str) -> str:
         return v.replace("{", "{{").replace("}", "}}")
 
-    # Build full HTML
+    # Build appendix HTML from report.json data if available
     zh = language == "zh"
+    appendix_html = _build_appendix_from_report(report, language) if report.get("appendix") else ""
+    if appendix_html:
+        appendix_toc_label = "附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"
+        toc_items.append(
+            f'<li><a href="#appendix">{appendix_toc_label}</a>'
+            f'<span class="section-type specific">{"附录" if zh else "Appendix"}</span></li>'
+        )
+
+    # Build full HTML
     html_content = HTML_TEMPLATE.format(
         language=language,
         title=_safe_format_value(report.get("title", "分析报告" if zh else "Analysis Report")),
@@ -789,7 +1060,8 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         abstract=_safe_format_value(abstract_html),
         sections_html=_safe_format_value("\n".join(sections_html)),
         conclusions_title="结论" if zh else "Conclusions",
-        conclusions=_safe_format_value(conclusions_html)
+        conclusions=_safe_format_value(conclusions_html),
+        appendix_html=_safe_format_value(appendix_html)
     )
 
     # Save HTML file

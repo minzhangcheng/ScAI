@@ -595,6 +595,96 @@ HTML_TEMPLATE = """
             color: #b45309;
         }}
 
+        .appendix {{
+            background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+            border-left: 4px solid #f59e0b;
+            padding: 20px 24px;
+            margin-top: 30px;
+            border-radius: 0 8px 8px 0;
+        }}
+
+        .appendix h2 {{
+            color: #b45309;
+            margin-bottom: 16px;
+        }}
+
+        .appendix h3 {{
+            color: #92400e;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-size: 1.05rem;
+            border-bottom: 1px solid #fbbf24;
+            padding-bottom: 6px;
+        }}
+
+        .appendix table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            margin: 10px 0 16px 0;
+            background: white;
+            border-radius: 6px;
+            overflow: hidden;
+        }}
+
+        .appendix th {{
+            background: #fef3c7;
+            padding: 8px 12px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #fbbf24;
+            color: #92400e;
+        }}
+
+        .appendix td {{
+            padding: 8px 12px;
+            border-bottom: 1px solid #fde68a;
+        }}
+
+        .appendix .human-input-item {{
+            background: white;
+            border-radius: 6px;
+            padding: 12px 16px;
+            margin: 8px 0;
+            border: 1px solid #fde68a;
+        }}
+
+        .appendix .human-input-item .round-tag {{
+            display: inline-block;
+            background: #fbbf24;
+            color: #78350f;
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            margin-right: 8px;
+        }}
+
+        .appendix .human-input-item .timestamp {{
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }}
+
+        .appendix .human-input-item .message {{
+            margin-top: 6px;
+            white-space: pre-wrap;
+        }}
+
+        .appendix .human-input-item .files {{
+            margin-top: 6px;
+            font-size: 0.85rem;
+            color: #b45309;
+        }}
+
+        .appendix ul {{
+            margin: 6px 0 12px 20px;
+            font-size: 0.9rem;
+        }}
+
+        .appendix li {{
+            margin-bottom: 4px;
+        }}
+
         @media print {{
             body {{
                 background: white;
@@ -645,6 +735,9 @@ HTML_TEMPLATE = """
                 <h2>{conclusions_title}</h2>
                 <p>{conclusions}</p>
             </div>
+
+            <!-- Appendix: Analysis Settings & Records -->
+            {appendix_html}
         </div>
     </div>
 </body>
@@ -1070,6 +1163,50 @@ Be specific and actionable. Include:
             except Exception as e:
                 logger.error(f"Failed to save graphic abstract: {e}")
 
+        # Build appendix data for report.json (so regenerate can use it)
+        appendix_data = {
+            "project_name": state.name,
+            "project_description": state.initial_instruction,
+            "created_at": state.created_at.isoformat() if hasattr(state.created_at, 'isoformat') else str(state.created_at),
+            "agent_models": {k: v for k, v in state.custom_models.items()} if state.custom_models else {},
+            "agent_temperatures": {k: v for k, v in state.custom_temperatures.items()} if state.custom_temperatures else {},
+            "treatment_groups": [
+                {"name": g.name, "description": g.description, "sample_count": g.sample_count}
+                for g in state.treatment_groups
+            ],
+            "data_files": [
+                {
+                    "filename": f.filename,
+                    "section": f.section,
+                    "data_type": f.data_type,
+                    "group": (state.get_group_by_id(f.group_id).name if state.get_group_by_id(f.group_id) else None),
+                }
+                for f in state.data_files
+            ],
+            "biochemistry_indicators_count": len(state.biochemistry_indicators),
+            "max_rounds": state.max_rounds,
+            "round_results": [
+                {
+                    "round_number": r.round_number,
+                    "timestamp": r.timestamp.isoformat() if hasattr(r.timestamp, 'isoformat') else str(r.timestamp),
+                    "pathology_findings_count": len(r.pathology_findings),
+                    "bioinformatics_findings_count": len(r.bioinformatics_findings),
+                    "biochemistry_findings_count": len(r.biochemistry_findings),
+                    "literature_findings_count": len(r.literature_findings),
+                }
+                for r in state.round_results
+            ],
+            "human_messages": [
+                {
+                    "message": hm.get("message", ""),
+                    "files": [f.get("filename", f.get("name", "file")) for f in hm.get("files", [])],
+                    "timestamp": hm.get("timestamp", ""),
+                    "round_number": hm.get("round_number", "?"),
+                }
+                for hm in state.human_messages
+            ],
+        }
+
         report = {
             "id": report_id,
             "session_id": state.id,
@@ -1083,7 +1220,8 @@ Be specific and actionable. Include:
             "generated_at": datetime.now().isoformat(),
             "status": "completed",
             "progress": 100,
-            "current_step": "完成" if zh else "Complete"
+            "current_step": "完成" if zh else "Complete",
+            "appendix": appendix_data
         }
 
         # Sanitize NaN/Infinity values before saving (pandas data can contain these)
@@ -1105,7 +1243,7 @@ Be specific and actionable. Include:
 
         # Generate HTML report
         await self._report_progress(95, "生成HTML报告..." if zh else "Generating HTML report...")
-        html_path = await self._generate_html_report(report, language)
+        html_path = await self._generate_html_report(report, language, state=state)
         report["html_path"] = str(html_path)
 
         await self._report_progress(100, "完成" if zh else "Complete", "completed")
@@ -3979,10 +4117,235 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
         return await self._pi_chat(prompt, temperature=0.3)
 
+    def _build_appendix_html(
+        self,
+        state: AnalysisState,
+        report: Dict[str, Any],
+        language: str,
+    ) -> str:
+        """
+        Build the Appendix HTML section containing analysis settings and records.
+        Pure data extraction — no LLM calls.
+        """
+        from .config import ModelConfig, AgentTemperatures
+
+        zh = language == "zh"
+        esc = html_module.escape
+        default_models = ModelConfig()
+        default_temps = AgentTemperatures()
+
+        appendix_title = "附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"
+
+        # ── 1. Project Information ──────────────────────────────────
+        proj_title = "项目信息" if zh else "Project Information"
+        lbl_name = "项目名称" if zh else "Project Name"
+        lbl_desc = "项目描述" if zh else "Project Description"
+        lbl_created = "创建时间" if zh else "Created At"
+        lbl_report_time = "报告生成时间" if zh else "Report Generated At"
+
+        created_str = state.created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(state.created_at, 'strftime') else str(state.created_at)
+        report_time = report.get("generated_at", "")
+
+        project_html = f"""
+        <h3>{proj_title}</h3>
+        <table>
+            <tbody>
+                <tr><td><strong>{lbl_name}</strong></td><td>{esc(state.name)}</td></tr>
+                <tr><td><strong>{lbl_desc}</strong></td><td>{esc(state.initial_instruction[:500]) if state.initial_instruction else '-'}</td></tr>
+                <tr><td><strong>{lbl_created}</strong></td><td>{esc(created_str)}</td></tr>
+                <tr><td><strong>{lbl_report_time}</strong></td><td>{esc(report_time)}</td></tr>
+            </tbody>
+        </table>
+        """
+
+        # ── 2. Agent Configuration ──────────────────────────────────
+        agent_title = "Agent 配置" if zh else "Agent Configuration"
+        lbl_agent = "Agent"
+        lbl_model = "模型" if zh else "Model"
+        lbl_temp = "Temperature"
+
+        agent_keys = [
+            ("PI", "pi", "pi_model"),
+            ("Pathology", "pathology", "pathology_model"),
+            ("Bioinformatics", "bioinformatics", "bioinformatics_model"),
+            ("Biochemistry", "biochemistry", "biochemistry_model"),
+            ("Literature", "literature", "literature_model"),
+            ("Painter", "painter", "painter_model"),
+        ]
+
+        agent_rows = ""
+        for display_name, key, model_attr in agent_keys:
+            model = state.custom_models.get(key, getattr(default_models, model_attr, "-"))
+            temp = state.custom_temperatures.get(key, getattr(default_temps, key, "-"))
+            agent_rows += f"<tr><td>{esc(display_name)}</td><td>{esc(str(model))}</td><td>{temp}</td></tr>\n"
+
+        agent_html = f"""
+        <h3>{agent_title}</h3>
+        <table>
+            <thead><tr><th>{lbl_agent}</th><th>{lbl_model}</th><th>{lbl_temp}</th></tr></thead>
+            <tbody>{agent_rows}</tbody>
+        </table>
+        """
+
+        # ── 3. Uploaded Data ────────────────────────────────────────
+        data_title = "上传数据" if zh else "Uploaded Data"
+
+        # Treatment groups
+        groups_html = ""
+        if state.treatment_groups:
+            lbl_group = "实验分组" if zh else "Treatment Groups"
+            lbl_gname = "组名" if zh else "Group"
+            lbl_gdesc = "描述" if zh else "Description"
+            lbl_samples = "样本数" if zh else "Samples"
+
+            group_rows = ""
+            for g in sorted(state.treatment_groups, key=lambda x: x.order):
+                group_rows += f"<tr><td>{esc(g.name)}</td><td>{esc(g.description or '-')}</td><td>{g.sample_count}</td></tr>\n"
+            groups_html = f"""
+            <p><strong>{lbl_group}</strong></p>
+            <table>
+                <thead><tr><th>{lbl_gname}</th><th>{lbl_gdesc}</th><th>{lbl_samples}</th></tr></thead>
+                <tbody>{group_rows}</tbody>
+            </table>
+            """
+
+        # Data files
+        files_html = ""
+        if state.data_files:
+            lbl_files = "数据文件" if zh else "Data Files"
+            lbl_filename = "文件名" if zh else "Filename"
+            lbl_section = "类别" if zh else "Section"
+            lbl_type = "类型" if zh else "Type"
+            lbl_fgroup = "分组" if zh else "Group"
+
+            file_rows = ""
+            for f in state.data_files:
+                group = state.get_group_by_id(f.group_id)
+                group_name = group.name if group else ("-" if not f.group_id else f.group_id)
+                file_rows += (
+                    f"<tr><td>{esc(f.filename)}</td><td>{esc(f.section)}</td>"
+                    f"<td>{esc(f.data_type)}</td><td>{esc(group_name)}</td></tr>\n"
+                )
+            files_html = f"""
+            <p><strong>{lbl_files}</strong></p>
+            <table>
+                <thead><tr><th>{lbl_filename}</th><th>{lbl_section}</th><th>{lbl_type}</th><th>{lbl_fgroup}</th></tr></thead>
+                <tbody>{file_rows}</tbody>
+            </table>
+            """
+
+        # Biochemistry indicators
+        biochem_html = ""
+        if state.biochemistry_indicators:
+            count = len(state.biochemistry_indicators)
+            lbl_biochem = "生化指标" if zh else "Biochemistry Indicators"
+            lbl_count = f"共 {count} 项手动录入指标" if zh else f"{count} manually entered indicator(s)"
+            biochem_html = f"<p><strong>{lbl_biochem}:</strong> {lbl_count}</p>"
+
+        data_html = f"""
+        <h3>{data_title}</h3>
+        {groups_html}
+        {files_html}
+        {biochem_html}
+        """
+
+        # ── 4. Analysis Rounds ──────────────────────────────────────
+        rounds_title = "分析轮次" if zh else "Analysis Rounds"
+
+        rounds_html = ""
+        if state.round_results:
+            lbl_round = "轮次" if zh else "Round"
+            lbl_time = "时间" if zh else "Time"
+            lbl_patho = "病理" if zh else "Pathology"
+            lbl_bio = "生信" if zh else "Bioinformatics"
+            lbl_chem = "生化" if zh else "Biochemistry"
+            lbl_lit = "文献" if zh else "Literature"
+            lbl_total_rounds = (
+                f"共 {len(state.round_results)} 轮分析（最大 {state.max_rounds} 轮）"
+                if zh else
+                f"Total: {len(state.round_results)} round(s) (max {state.max_rounds})"
+            )
+
+            round_rows = ""
+            for r in state.round_results:
+                ts = r.timestamp.strftime("%Y-%m-%d %H:%M") if hasattr(r.timestamp, 'strftime') else str(r.timestamp)
+                round_rows += (
+                    f"<tr><td>{r.round_number}</td><td>{ts}</td>"
+                    f"<td>{len(r.pathology_findings)}</td>"
+                    f"<td>{len(r.bioinformatics_findings)}</td>"
+                    f"<td>{len(r.biochemistry_findings)}</td>"
+                    f"<td>{len(r.literature_findings)}</td></tr>\n"
+                )
+
+            rounds_html = f"""
+            <h3>{rounds_title}</h3>
+            <p>{lbl_total_rounds}</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>{lbl_round}</th><th>{lbl_time}</th>
+                        <th>{lbl_patho}</th><th>{lbl_bio}</th><th>{lbl_chem}</th><th>{lbl_lit}</th>
+                    </tr>
+                </thead>
+                <tbody>{round_rows}</tbody>
+            </table>
+            """
+        else:
+            lbl_no_rounds = "无分析轮次记录" if zh else "No analysis round records"
+            rounds_html = f"<h3>{rounds_title}</h3><p>{lbl_no_rounds}</p>"
+
+        # ── 5. User Inputs Between Rounds ───────────────────────────
+        human_title = "轮次间用户输入记录" if zh else "User Inputs Between Rounds"
+
+        human_html = ""
+        if state.human_messages:
+            items = ""
+            for hm in state.human_messages:
+                msg = hm.get("message", "")
+                files = hm.get("files", [])
+                ts = hm.get("timestamp", "")
+                rn = hm.get("round_number", "?")
+                round_label = f"Round {rn}" if not zh else f"第 {rn} 轮"
+                ts_str = ts if isinstance(ts, str) else (ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, 'strftime') else str(ts))
+
+                files_info = ""
+                if files:
+                    file_names = ", ".join(
+                        esc(f.get("filename", f.get("name", "file"))) for f in files
+                    )
+                    files_label = "附件" if zh else "Attached files"
+                    files_info = f'<div class="files">{files_label}: {file_names}</div>'
+
+                items += f"""
+                <div class="human-input-item">
+                    <span class="round-tag">{esc(round_label)}</span>
+                    <span class="timestamp">{esc(ts_str)}</span>
+                    <div class="message">{esc(msg)}</div>
+                    {files_info}
+                </div>
+                """
+            human_html = f"<h3>{human_title}</h3>{items}"
+        else:
+            lbl_no_input = "无用户输入记录" if zh else "No user inputs recorded"
+            human_html = f"<h3>{human_title}</h3><p>{lbl_no_input}</p>"
+
+        # ── Assemble ────────────────────────────────────────────────
+        return f"""
+        <div class="appendix" id="appendix">
+            <h2>{appendix_title}</h2>
+            {project_html}
+            {agent_html}
+            {data_html}
+            {rounds_html}
+            {human_html}
+        </div>
+        """
+
     async def _generate_html_report(
         self,
         report: Dict[str, Any],
-        language: str
+        language: str,
+        state: Optional[AnalysisState] = None
     ) -> Path:
         """
         Generate HTML report with embedded images and download links.
@@ -4279,6 +4642,16 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 </div>
             </div>'''
 
+        # Build appendix HTML (analysis settings & records)
+        appendix_html = ""
+        if state is not None:
+            appendix_html = self._build_appendix_html(state, report, language)
+            appendix_toc_label = "附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"
+            toc_items.append(
+                f'<li><a href="#appendix">{appendix_toc_label}</a>'
+                f'<span class="section-type specific">{"附录" if zh else "Appendix"}</span></li>'
+            )
+
         # Escape curly braces in content to prevent str.format() crash on LLM output
         def _safe_format_value(v: str) -> str:
             return v.replace("{", "{{").replace("}", "}}")
@@ -4296,7 +4669,8 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             cluster_annotations_html=_safe_format_value(ca_html),
             sections_html=_safe_format_value("\n".join(sections_html)),
             conclusions_title="结论" if zh else "Conclusions",
-            conclusions=_safe_format_value(conclusions_html)
+            conclusions=_safe_format_value(conclusions_html),
+            appendix_html=_safe_format_value(appendix_html)
         )
 
         # Save HTML file

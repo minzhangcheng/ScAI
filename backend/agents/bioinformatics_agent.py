@@ -1328,6 +1328,7 @@ plt.close()
         if review_callback:
             revision_count = 0
             current_code = code
+            revision_history = []  # Accumulate all rounds of PI feedback
 
             while revision_count <= 3:
                 logger.info(f"[Bioinformatics] Submitting figure for PI review (attempt {revision_count + 1})")
@@ -1337,6 +1338,7 @@ plt.close()
 
                 if review.get('approved', False):
                     figure.review_status = FigureReviewStatus.APPROVED
+                    figure.revision_history = revision_history
                     state.publication_figures.append(figure)
                     logger.info(f"[Bioinformatics] Figure {figure_name} approved by PI")
                     await self._notify("status", f"Figure {figure_name} approved by PI")
@@ -1347,7 +1349,17 @@ plt.close()
                 suggestions = review.get('suggestions', [])
                 must_fix = review.get('must_fix', [])
 
+                # Record this round's feedback in cumulative history
+                revision_history.append({
+                    "round": revision_count + 1,
+                    "feedback": feedback,
+                    "suggestions": suggestions,
+                    "must_fix": must_fix,
+                    "quality_score": review.get('quality_score', None)
+                })
+
                 figure.pi_feedback = feedback
+                figure.revision_history = revision_history
                 revision_count += 1
                 figure.revision_count = revision_count
 
@@ -1356,9 +1368,10 @@ plt.close()
                     await self._notify("status", f"Revising figure based on PI feedback...")
                     logger.info(f"[Bioinformatics] Revising figure {figure_name}: {feedback}")
 
-                    # Generate revised code
+                    # Generate revised code with full revision history
                     revised_code = await self._revise_figure_code(
-                        current_code, feedback, suggestions, must_fix, figure_type, state, figure.png_base64
+                        current_code, feedback, suggestions, must_fix, figure_type, state, figure.png_base64,
+                        revision_history=revision_history
                     )
 
                     # Validate revised code before execution
@@ -1477,7 +1490,8 @@ plt.close()
         must_fix: List[str],
         figure_type: str,
         state: AnalysisState = None,
-        image_base64: str = None
+        image_base64: str = None,
+        revision_history: List[Dict[str, Any]] = None
     ) -> str:
         """
         Generate revised plotting code based on PI feedback.
@@ -1490,6 +1504,7 @@ plt.close()
             figure_type: Type of figure
             state: Analysis state with treatment group info
             image_base64: Base64 encoded current figure image for visual review
+            revision_history: Accumulated feedback from all revision rounds (text only)
 
         Returns:
             Revised Python plotting code
@@ -1509,6 +1524,30 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
 
         figure_context = "**Current Figure:** An image of the current figure is attached. Review it carefully to understand what needs to be changed.\n\n" if image_base64 else ""
 
+        # Build revision history section (show previous rounds, exclude current which is shown below)
+        history_section = ""
+        if revision_history and len(revision_history) > 1:
+            past_rounds = revision_history[:-1]
+            history_parts = []
+            for entry in past_rounds:
+                round_num = entry.get('round', '?')
+                hist_feedback = entry.get('feedback', '')
+                hist_suggestions = entry.get('suggestions', [])
+                hist_must_fix = entry.get('must_fix', [])
+                round_text = f"### Round {round_num}\n"
+                round_text += f"- Feedback: {hist_feedback}\n"
+                if hist_suggestions:
+                    round_text += f"- Suggestions: {'; '.join(str(s) for s in hist_suggestions)}\n"
+                if hist_must_fix:
+                    round_text += f"- Must Fix: {'; '.join(str(m) for m in hist_must_fix)}\n"
+                history_parts.append(round_text)
+            history_section = (
+                "**Previous Revision History (earlier rounds - text only):**\n"
+                "The following feedback was given in prior rounds. Ensure these issues have been addressed "
+                "and do NOT reintroduce previously fixed problems.\n\n"
+                + "\n".join(history_parts) + "\n"
+            )
+
         prompt = f"""Please revise the following plotting code based on PI feedback.
 
 {figure_context}**Original Code:**
@@ -1518,20 +1557,21 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
 
 **Figure Type:** {figure_type}
 {exp_design_constraint}
-**PI Feedback:** {feedback}
+{history_section}**PI Feedback (Current Round):** {feedback}
 
-**Improvement Suggestions:**
+**Improvement Suggestions (Current Round):**
 {suggestions_text}
 
-**Critical Issues (MUST FIX):**
+**Critical Issues (MUST FIX - Current Round):**
 {must_fix_text}
 
 **Requirements:**
 1. Fix all critical issues listed above
 2. Address as many suggestions as possible
-3. Maintain the same overall figure structure
-4. Keep using the same data variables (assume they exist), but REMOVE any fabricated/dummy data for groups not in the experimental design
-5. Return ONLY the revised Python code, no explanations
+3. If there is revision history above, verify that previously reported issues are still fixed
+4. Maintain the same overall figure structure
+5. Keep using the same data variables (assume they exist), but REMOVE any fabricated/dummy data for groups not in the experimental design
+6. Return ONLY the revised Python code, no explanations
 
 **Common fixes for publication figures:**
 - Add/improve axis labels and titles

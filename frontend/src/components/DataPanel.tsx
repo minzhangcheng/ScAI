@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { useAppStore, TreatmentGroup, DataFile as DataFileType, BiochemistryIndicator } from '../stores/appStore'
 import { useSession } from '../hooks/useApi'
@@ -17,11 +17,12 @@ import {
   Grid3X3,
   Microscope,
   Dna,
+  Pencil,
 } from 'lucide-react'
 
 // --- Data type options ---
 const PATHOLOGY_TYPES = ['H&E', 'Other']
-const SEQUENCING_TYPES = ['scRNA-seq', 'Loom']
+const SEQUENCING_TYPES = ['scRNA-seq', 'Loom', 'Other']
 const BIOCHEMISTRY_TYPES = ['image', 'file']
 
 // Allowed extensions per section + data type (used for manual validation instead of
@@ -30,6 +31,7 @@ const BIOCHEMISTRY_TYPES = ['image', 'file']
 function getAllowedExtensions(section: string, dataType: string): string[] {
   if (section === 'pathology') return ['.png', '.jpg', '.jpeg', '.tiff', '.tif']
   if (section === 'sequencing') {
+    if (dataType === 'Other') return []
     if (dataType === 'Loom') return ['.loom']
     return ['.h5ad', '.h5']
   }
@@ -141,9 +143,16 @@ function GroupManager({
                     defaultValue={group.sampleCount}
                     min={1}
                     max={100}
-                    onBlur={(e) => {
+                    onBlur={async (e) => {
                       const val = parseInt(e.target.value) || 1
-                      if (val !== group.sampleCount) onUpdate(group.id, { sampleCount: val })
+                      if (val !== group.sampleCount) {
+                        try {
+                          await onUpdate(group.id, { sampleCount: val })
+                        } catch (err: any) {
+                          alert(err.message || (language === 'zh' ? '更新失败' : 'Update failed'))
+                          e.target.value = String(group.sampleCount)
+                        }
+                      }
                     }}
                     className="w-16 px-2 py-1 border border-slate-300 rounded text-xs"
                   />
@@ -158,19 +167,24 @@ function GroupManager({
             ) : (
               <>
                 <div className="flex items-center justify-between mb-1">
-                  <h4
-                    className="font-semibold text-sm text-slate-900 cursor-pointer hover:text-indigo-600"
-                    onClick={() => setEditingId(group.id)}
-                    title={language === 'zh' ? '点击编辑' : 'Click to edit'}
-                  >
+                  <h4 className="font-semibold text-sm text-slate-900">
                     {group.name}
                   </h4>
-                  <button
-                    onClick={() => handleDelete(group.id)}
-                    className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setEditingId(group.id)}
+                      className="p-1 text-slate-400 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors"
+                      title={language === 'zh' ? '编辑' : 'Edit'}
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(group.id)}
+                      className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
                 {group.description && (
                   <p className="text-xs text-slate-500 mb-2 line-clamp-2">{group.description}</p>
@@ -244,6 +258,22 @@ function GroupManager({
 }
 
 // ============================================================
+// Upload queue types
+// ============================================================
+interface UploadItem {
+  id: number
+  file: File
+  status: 'pending' | 'uploading' | 'done' | 'error'
+  progress: number
+  groupId?: string
+  sampleNumber?: number
+  dataType: string
+  errorMsg?: string
+}
+
+let uploadItemCounter = 0
+
+// ============================================================
 // DataSection Component (reusable for pathology/sequencing/biochemistry)
 // ============================================================
 function DataSection({
@@ -281,16 +311,16 @@ function DataSection({
   const [selectedSample, setSelectedSample] = useState<string>('_none')
   const [selectedType, setSelectedType] = useState(typeOptions[0])
   const [customType, setCustomType] = useState('')
-  const [uploading, setUploading] = useState(false)
-  const [progress, setProgress] = useState(0)
   const [collapsed, setCollapsed] = useState(false)
 
-  const activeIntervalsRef = useRef<Set<ReturnType<typeof setInterval>>>(new Set())
-  useEffect(() => {
-    return () => {
-      activeIntervalsRef.current.forEach(i => clearInterval(i))
-    }
-  }, [])
+  // Upload queue: ref is the source of truth, renderTick triggers re-renders
+  const queueRef = useRef<UploadItem[]>([])
+  const [, setRenderTick] = useState(0)
+  const syncRender = useCallback(() => setRenderTick(t => t + 1), [])
+
+  const processingRef = useRef(false)
+  const onUploadRef = useRef(onUpload)
+  onUploadRef.current = onUpload
 
   const selectedGroupObj = groups.find(g => g.id === selectedGroup)
   const maxSamples = selectedGroupObj?.sampleCount || 0
@@ -300,9 +330,54 @@ function DataSection({
 
   const sectionFiles = dataFiles.filter(f => f.section === section)
 
+  const visibleQueue = queueRef.current.filter(u => u.status !== 'done')
+
+  // Queue processor: picks the next pending item and uploads it
+  const processQueue = useCallback(async () => {
+    if (processingRef.current) return
+    processingRef.current = true
+
+    while (true) {
+      const nextItem = queueRef.current.find(u => u.status === 'pending')
+      if (!nextItem) break
+
+      // Mark as uploading
+      nextItem.status = 'uploading'
+      nextItem.progress = 0
+      syncRender()
+
+      // Simulate progress
+      const interval = setInterval(() => {
+        nextItem.progress = Math.min(nextItem.progress + 10, 90)
+        syncRender()
+      }, 200)
+
+      try {
+        await onUploadRef.current(nextItem.file, section, nextItem.dataType, nextItem.groupId, nextItem.sampleNumber)
+        clearInterval(interval)
+        nextItem.status = 'done'
+        nextItem.progress = 100
+        syncRender()
+        // Remove done item after a short delay
+        const doneId = nextItem.id
+        setTimeout(() => {
+          queueRef.current = queueRef.current.filter(u => u.id !== doneId)
+          syncRender()
+        }, 800)
+      } catch (e) {
+        clearInterval(interval)
+        nextItem.status = 'error'
+        nextItem.errorMsg = e instanceof Error ? e.message : String(e)
+        syncRender()
+      }
+    }
+
+    processingRef.current = false
+  }, [section, syncRender])
+
   // Manual extension validation (avoids react-dropzone silent rejection of
   // scientific file formats like .h5/.h5ad/.loom whose MIME types browsers don't recognize)
-  const onDrop = useCallback(async (files: File[]) => {
+  const onDrop = useCallback((files: File[]) => {
     if (files.length === 0) return
 
     const allowedExts = getAllowedExtensions(section, selectedType)
@@ -322,41 +397,34 @@ function DataSection({
     }
     if (validFiles.length === 0) return
 
-    setUploading(true)
-    setProgress(0)
-
     const groupId = isNoGroup ? undefined : selectedGroup
     const sampleNum = isNoGroup || selectedSample === '_none' ? undefined : parseInt(selectedSample)
 
-    try {
-      for (let i = 0; i < validFiles.length; i++) {
-        const interval = setInterval(() => {
-          setProgress(prev => Math.min(prev + 10, 90))
-        }, 200)
-        activeIntervalsRef.current.add(interval)
+    const newItems: UploadItem[] = validFiles.map(file => ({
+      id: ++uploadItemCounter,
+      file,
+      status: 'pending' as const,
+      progress: 0,
+      groupId,
+      sampleNumber: sampleNum,
+      dataType: actualType,
+    }))
 
-        await onUpload(validFiles[i], section, actualType, groupId, sampleNum)
+    queueRef.current = [...queueRef.current, ...newItems]
+    syncRender()
 
-        clearInterval(interval)
-        activeIntervalsRef.current.delete(interval)
-        setProgress(((i + 1) / validFiles.length) * 100)
-      }
-    } catch (e) {
-      console.error('Upload failed:', e)
-      const msg = e instanceof Error ? e.message : String(e)
-      alert(language === 'zh' ? `上传失败: ${msg}` : `Upload failed: ${msg}`)
-    } finally {
-      activeIntervalsRef.current.forEach(i => clearInterval(i))
-      activeIntervalsRef.current.clear()
-      setUploading(false)
-      setProgress(0)
+    // Start processing if not already running
+    if (!processingRef.current) {
+      processQueue()
     }
-  }, [section, selectedType, actualType, selectedGroup, selectedSample, isNoGroup, onUpload, language])
+  }, [section, selectedType, actualType, selectedGroup, selectedSample, isNoGroup, language, syncRender, processQueue])
+
+  const allowedExts = getAllowedExtensions(section, selectedType)
+  const acceptAttr = allowedExts.length > 0 ? allowedExts.join(',') : undefined
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     multiple: multipleFiles,
-    disabled: uploading,
   })
 
   const getGroupName = (groupId?: string) => {
@@ -448,7 +516,11 @@ function DataSection({
                   type="text"
                   value={customType}
                   onChange={(e) => setCustomType(e.target.value)}
-                  placeholder={language === 'zh' ? '如 Sirius Red' : 'e.g. Sirius Red'}
+                  placeholder={
+                    section === 'sequencing'
+                      ? (language === 'zh' ? '如 bulk RNA-Seq' : 'e.g. bulk RNA-Seq')
+                      : (language === 'zh' ? '如 Sirius Red' : 'e.g. Sirius Red')
+                  }
                   className="w-full px-2 py-1.5 border border-slate-300 rounded-lg text-sm"
                 />
               </div>
@@ -459,37 +531,55 @@ function DataSection({
           <div
             {...getRootProps()}
             className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-all ${
-              uploading
-                ? 'border-slate-300 bg-slate-50 cursor-not-allowed'
-                : isDragActive
-                  ? 'border-indigo-500 bg-indigo-50'
-                  : 'border-slate-300 hover:border-indigo-400 hover:bg-slate-50'
+              isDragActive
+                ? 'border-indigo-500 bg-indigo-50'
+                : 'border-slate-300 hover:border-indigo-400 hover:bg-slate-50'
             }`}
           >
-            <input {...getInputProps()} />
+            <input {...getInputProps()} accept={acceptAttr} />
             <Upload className="w-7 h-7 text-slate-400 mx-auto mb-1.5" />
             <p className="text-slate-600 font-medium text-sm">
-              {uploading
-                ? (language === 'zh' ? '上传中...' : 'Uploading...')
-                : isDragActive
-                  ? (language === 'zh' ? '释放以上传' : 'Release to upload')
-                  : t('dragOrClick')}
+              {isDragActive
+                ? (language === 'zh' ? '释放以上传' : 'Release to upload')
+                : t('dragOrClick')}
             </p>
+            {allowedExts.length > 0 && (
+              <p className="text-xs text-slate-400 mt-1">
+                {language === 'zh' ? '支持格式: ' : 'Supported: '}{allowedExts.join(', ')}
+              </p>
+            )}
           </div>
 
-          {/* Upload Progress */}
-          {uploading && (
-            <div>
-              <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
-                <span>{language === 'zh' ? '上传进度' : 'Progress'}</span>
-                <span>{Math.round(progress)}%</span>
-              </div>
-              <div className="w-full bg-slate-200 rounded-full h-1.5">
-                <div
-                  className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
+          {/* Upload Queue */}
+          {visibleQueue.length > 0 && (
+            <div className="space-y-2">
+              {visibleQueue.map(item => (
+                <div key={item.id} className="flex items-center gap-3 px-3 py-2 bg-slate-50 rounded-lg">
+                  <File className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                  <span className="text-sm text-slate-700 truncate flex-1 min-w-0">{item.file.name}</span>
+                  {item.status === 'uploading' && (
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <div className="w-24 bg-slate-200 rounded-full h-1.5">
+                        <div
+                          className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
+                          style={{ width: `${item.progress}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-indigo-600 font-medium w-8">{Math.round(item.progress)}%</span>
+                    </div>
+                  )}
+                  {item.status === 'pending' && (
+                    <span className="text-xs px-2 py-0.5 bg-slate-200 text-slate-500 rounded-full flex-shrink-0">
+                      {language === 'zh' ? '等待中' : 'Pending'}
+                    </span>
+                  )}
+                  {item.status === 'error' && (
+                    <span className="text-xs px-2 py-0.5 bg-red-100 text-red-600 rounded-full flex-shrink-0" title={item.errorMsg}>
+                      {language === 'zh' ? '失败' : 'Failed'}
+                    </span>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
