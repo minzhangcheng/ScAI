@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.10.0
+**Version**: 0.10.1
 **Last Updated**: 2026-03-07
 
 ## Project Overview
@@ -1215,6 +1215,8 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.10.1 | 2026-03-07 | Literature fallback model (quick search uses PI model), deep research max_tokens fix (None instead of 262144), deep research model passthrough in chat mode, upload cancellation (abort in-progress + remove pending) |
+| 0.10.0 | 2026-03-07 | Deep Research mode (OpenRouter: o4-mini-deep-research, sonar-deep-research), 3 literature modes (deep_research/gemini/pubmed_llm), fallback chain, LLM-based query generation, model upgrades (claude-sonnet-4.6), cross-agent context, bug fixes |
 | 0.9.1 | 2026-03-07 | Cross-agent context passing (biochemistry + literature receive current round findings), PubMed query degradation (`_validate_and_degrade_query`), LLM-driven research context (`_build_research_context` replaces hardcoded `_build_research_query`), skip_nodes reset bug fix, skipped node result clarity, race condition fix (`_continue_event.clear()` moved to `_pi_synthesis`), PI synthesis error awareness, literature findings in round summary, fallback task assignment, human guidance source fix, max_tokens unified to 32768, bioinformatics text_response_count reset + `completed_with_fallback` status, JSON parse failure logging |
 | 0.9.0 | 2026-03-04 | PI analysis review before report (reads notebook + views figures via vision API), report appendix (project info, agent config, data summary, round history, user inputs), graphic abstract revision loop (PI review + Painter revision + best selection), cumulative figure revision history, in-place session editing (name + instruction via sidebar), two-phase export (prepare + download with size preview), upload queue with per-file progress, "Other" sequencing type (bulk RNA-seq support), sample count safety guard, workspace figure downloads (PDF/PNG), figure gallery API fallback on reload, Deep Research cost warning |
 | 0.8.9 | 2026-03-03 | Import proxy timeout resilience (pre-generated `import_id`, early job registration, upload-finished detection, polling retry with 404 tolerance), import UX (success/failure icons, confirmation dialog), branding update ("Integrated & Intelligent Single Cell Analysis") |
@@ -1249,6 +1251,22 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ### Detailed Changelog
 
+#### v0.10.1 (2026-03-07)
+
+- **Literature Fallback Model**: Added `fallback_model` parameter to `LiteratureAgent`. Quick search fallback now uses the PI model instead of the literature agent's own deep research model, reducing costs
+- **Deep Research max_tokens Fix**: Changed deep research call from `max_tokens=262144` to `max_tokens=None`; `OpenAICompatibleClient.chat()` `max_tokens` parameter is now `Optional[int]`, omitting the parameter when `None`
+- **Deep Research Model Passthrough**: `deep_research_model` is now passed from `lit_config` when initializing literature agent in chat mode
+- **Upload Cancellation**: Added cancel button (X icon) for upload queue items in `DataPanel.tsx`. Supports aborting in-progress uploads via `AbortController` and removing pending items from queue. `uploadData` in `useApi.ts` now accepts optional `AbortSignal`
+
+#### v0.10.0 (2026-03-07)
+
+- **Deep Research Mode (OpenRouter)**: Added `deep_research` literature mode that calls deep research models (e.g., `openai/o4-mini-deep-research`, `perplexity/sonar-deep-research`) via standard OpenRouter chat API. Single long-running call with 30-min timeout and 256K max tokens. Three modes now coexist: `deep_research` (default), `gemini_deep_research`, `pubmed_llm`
+- **Fallback Chain**: `deep_research` → `pubmed_llm` → `quick_search`; timeout propagation to `retry_with_backoff` with `max_retries=0` for requests > 300s
+- **LLM-Based Query Generation**: Removed hardcoded `_NON_GENE_WORDS` blacklist and regex-based species/tissue/gene extraction. Query generation now delegates entity identification entirely to the LLM
+- **Model Upgrades**: Bioinformatics agent default model upgraded from `anthropic/claude-sonnet-4.5` to `anthropic/claude-sonnet-4.6`
+- **Cross-Agent Context**: Deep research prompt now includes `current_round_findings` from pathology/bioinformatics agents in the same round
+- **Bug Fixes**: Fixed useEffect overriding user's manual literature mode selection; fixed skip_nodes returning stale previous-round results; fixed fallback task assignment not activating all agents; added `Literal` type validation for literature mode field
+
 #### v0.9.1 (2026-03-07)
 
 - **Cross-Agent Context Passing**: Biochemistry Agent now receives current round's pathology and bioinformatics findings (not just previous round), enabling real-time cross-referencing. Literature Agent receives current round findings from all other agents for better-informed PubMed query generation
@@ -1266,15 +1284,6 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 - **Max Tokens Unification**: Unified `max_tokens` default from 4096 to 32768 across all LLM calls (AgentConfig, OpenAICompatibleClient.chat/chat_with_tools/chat_stream/chat_with_vision, LLMInteraction, report_generator._pi_chat, main.py chat endpoints)
 - **Bioinformatics Agent Improvements**: Reset `text_response_count` after substantive tool calls to prevent false "stuck in text loop" detection; new `completed_with_fallback` status distinguishes normal completion from fallback extraction; checkpoint cleared on `completed_with_fallback`
 - **JSON Parse Failure Logging**: Biochemistry and Pathology agents now log warnings when `_safe_parse_json` returns `raw_response` key, improving debuggability
-
-#### v0.10.0 (2026-03-07)
-
-- **Deep Research Mode (OpenRouter)**: Added `deep_research` literature mode that calls deep research models (e.g., `openai/o4-mini-deep-research`, `perplexity/sonar-deep-research`) via standard OpenRouter chat API. Single long-running call with 30-min timeout and 256K max tokens. Three modes now coexist: `deep_research` (default), `gemini_deep_research`, `pubmed_llm`
-- **Fallback Chain**: `deep_research` → `pubmed_llm` → `quick_search`; timeout propagation to `retry_with_backoff` with `max_retries=0` for requests > 300s
-- **LLM-Based Query Generation**: Removed hardcoded `_NON_GENE_WORDS` blacklist and regex-based species/tissue/gene extraction. Query generation now delegates entity identification entirely to the LLM
-- **Model Upgrades**: Bioinformatics agent default model upgraded from `anthropic/claude-sonnet-4.5` to `anthropic/claude-sonnet-4.6`
-- **Cross-Agent Context**: Deep research prompt now includes `current_round_findings` from pathology/bioinformatics agents in the same round
-- **Bug Fixes**: Fixed useEffect overriding user's manual literature mode selection; fixed skip_nodes returning stale previous-round results; fixed fallback task assignment not activating all agents; added `Literal` type validation for literature mode field
 
 #### v0.9.0 (2026-03-04)
 

@@ -322,7 +322,7 @@ class OpenAICompatibleClient:
         model: str,
         messages: List[Dict[str, Any]],
         temperature: float = 0.7,
-        max_tokens: int = 32768,
+        max_tokens: Optional[int] = 32768,
         stream: bool = False,
         timeout: Optional[float] = None
     ) -> LLMResponse:
@@ -363,9 +363,11 @@ class OpenAICompatibleClient:
             # o-series reasoning models use max_completion_tokens, not max_tokens
             if _model_supports_temperature(model):
                 params["temperature"] = temperature
-                params["max_tokens"] = max_tokens
+                if max_tokens is not None:
+                    params["max_tokens"] = max_tokens
             else:
-                params["max_completion_tokens"] = max_tokens
+                if max_tokens is not None:
+                    params["max_completion_tokens"] = max_tokens
             if timeout is not None:
                 params["timeout"] = timeout
             return await self.client.chat.completions.create(**params)

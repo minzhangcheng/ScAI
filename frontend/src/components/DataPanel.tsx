@@ -18,6 +18,7 @@ import {
   Microscope,
   Dna,
   Pencil,
+  X,
 } from 'lucide-react'
 
 // --- Data type options ---
@@ -269,6 +270,7 @@ interface UploadItem {
   sampleNumber?: number
   dataType: string
   errorMsg?: string
+  abortController?: AbortController
 }
 
 let uploadItemCounter = 0
@@ -301,7 +303,7 @@ function DataSection({
   dataFiles: DataFileType[]
   typeOptions: string[]
   multipleFiles: boolean
-  onUpload: (file: File, section: 'pathology' | 'sequencing' | 'biochemistry', dataType: string, groupId?: string, sampleNumber?: number) => Promise<any>
+  onUpload: (file: File, section: 'pathology' | 'sequencing' | 'biochemistry', dataType: string, groupId?: string, sampleNumber?: number, description?: string, signal?: AbortSignal) => Promise<any>
   onDelete: (fileId: string) => Promise<void>
   language: string
   t: (key: any, params?: any) => string
@@ -341,6 +343,10 @@ function DataSection({
       const nextItem = queueRef.current.find(u => u.status === 'pending')
       if (!nextItem) break
 
+      // Create AbortController for cancellation support
+      const controller = new AbortController()
+      nextItem.abortController = controller
+
       // Mark as uploading
       nextItem.status = 'uploading'
       nextItem.progress = 0
@@ -353,7 +359,7 @@ function DataSection({
       }, 200)
 
       try {
-        await onUploadRef.current(nextItem.file, section, nextItem.dataType, nextItem.groupId, nextItem.sampleNumber)
+        await onUploadRef.current(nextItem.file, section, nextItem.dataType, nextItem.groupId, nextItem.sampleNumber, undefined, controller.signal)
         clearInterval(interval)
         nextItem.status = 'done'
         nextItem.progress = 100
@@ -366,6 +372,12 @@ function DataSection({
         }, 800)
       } catch (e) {
         clearInterval(interval)
+        if (controller.signal.aborted) {
+          // User cancelled — remove from queue and continue to next
+          queueRef.current = queueRef.current.filter(u => u.id !== nextItem.id)
+          syncRender()
+          continue
+        }
         nextItem.status = 'error'
         nextItem.errorMsg = e instanceof Error ? e.message : String(e)
         syncRender()
@@ -577,6 +589,22 @@ function DataSection({
                     <span className="text-xs px-2 py-0.5 bg-red-100 text-red-600 rounded-full flex-shrink-0" title={item.errorMsg}>
                       {language === 'zh' ? '失败' : 'Failed'}
                     </span>
+                  )}
+                  {item.status !== 'done' && (
+                    <button
+                      onClick={() => {
+                        if (item.status === 'uploading' && item.abortController) {
+                          item.abortController.abort()
+                        } else {
+                          queueRef.current = queueRef.current.filter(u => u.id !== item.id)
+                          syncRender()
+                        }
+                      }}
+                      className="p-0.5 text-slate-400 hover:text-red-500 transition-colors flex-shrink-0"
+                      title={language === 'zh' ? '取消' : 'Cancel'}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                   )}
                 </div>
               ))}

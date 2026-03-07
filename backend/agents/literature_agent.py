@@ -55,6 +55,7 @@ class LiteratureAgent(BaseAgent):
         pubmed_email: str = "",
         max_search_rounds: int = 5,
         proxy_url: Optional[str] = None,
+        fallback_model: str = "",
     ):
         from .base import AgentConfig
         super().__init__(
@@ -72,6 +73,7 @@ class LiteratureAgent(BaseAgent):
         self.pubmed_email = pubmed_email
         self.max_search_rounds = max(1, min(20, max_search_rounds))
         self.proxy_url = proxy_url
+        self.fallback_model = fallback_model
 
         # Create GoogleDeepResearchClient only when needed (Gemini mode)
         self._deep_research: Optional[GoogleDeepResearchClient] = None
@@ -248,7 +250,7 @@ Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. ht
             model=self.deep_research_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            max_tokens=262144,
+            max_tokens=None,
             timeout=1800.0,
         )
 
@@ -801,7 +803,16 @@ Please include:
 Note: If you are not certain about specific citation information, please clearly state that this is a summary based on general knowledge.
 """
 
-        response = await self.chat(prompt, temperature=0.3)
+        if self.fallback_model:
+            logger.info(f"[Literature] Quick search using fallback model: {self.fallback_model}")
+            resp = await self.llm_client.chat(
+                model=self.fallback_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
+            response = resp.content or ""
+        else:
+            response = await self.chat(prompt, temperature=0.3)
 
         report = LiteratureReport(
             topic=topic,

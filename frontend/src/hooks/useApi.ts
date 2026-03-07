@@ -408,7 +408,8 @@ export function useSession() {
     dataType: string,
     groupId?: string,
     sampleNumber?: number,
-    description?: string
+    description?: string,
+    signal?: AbortSignal
   ) => {
     const session = useAppStore.getState().currentSession
     if (!session) throw new Error('No active session')
@@ -424,7 +425,7 @@ export function useSession() {
 
     const response = await fetch(
       `${API_BASE}/session/${session.id}/upload/data`,
-      { method: 'POST', body: formData }
+      { method: 'POST', body: formData, signal }
     )
     if (!response.ok) {
       const err = await response.json().catch(() => ({ detail: 'Upload failed' }))

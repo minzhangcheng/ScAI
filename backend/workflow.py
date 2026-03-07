@@ -282,6 +282,7 @@ class SingleCellAnalysisWorkflow:
             pubmed_email=literature_config.get('pubmed_email', ''),
             max_search_rounds=literature_config.get('max_search_rounds', 5),
             proxy_url=self.config.api.proxy_url,
+            fallback_model=pi_model,
         )
 
         # Initialize Painter Agent for graphic abstract generation (uses OpenRouter like other agents)

@@ -3687,6 +3687,7 @@ async def _execute_chat_agent(
         lit_model = state.custom_models.get("literature", config.models.literature_model)
         lit_prompt = state.custom_prompts.get("literature", config.prompts.literature_prompt)
         lit_config = state.literature_config or {}
+        pi_model = state.custom_models.get("pi", config.models.pi_model)
 
         from .agents.literature_agent import LiteratureAgent
         literature_agent = LiteratureAgent(
@@ -3695,10 +3696,12 @@ async def _execute_chat_agent(
             system_prompt=lit_prompt,
             config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
             literature_mode=lit_config.get("mode", "deep_research"),
+            deep_research_model=lit_config.get("deep_research_model", ""),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
             max_search_rounds=lit_config.get("max_search_rounds", 5),
             proxy_url=config.api.proxy_url if config.api else None,
+            fallback_model=pi_model,
         )
 
         async def lit_callback(topic: str) -> str:
@@ -3787,6 +3790,7 @@ async def _execute_chat_agent(
     elif agent_name == "literature":
         from .agents.literature_agent import LiteratureAgent
         lit_config = state.literature_config or {}
+        pi_model = state.custom_models.get("pi", config.models.pi_model)
 
         lit_agent = LiteratureAgent(
             llm_client=llm_client,
@@ -3794,10 +3798,12 @@ async def _execute_chat_agent(
             system_prompt=state.custom_prompts.get("literature", config.prompts.literature_prompt),
             config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
             literature_mode=lit_config.get("mode", "deep_research"),
+            deep_research_model=lit_config.get("deep_research_model", ""),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
             max_search_rounds=lit_config.get("max_search_rounds", 5),
             proxy_url=config.api.proxy_url if config.api else None,
+            fallback_model=pi_model,
         )
         result = await lit_agent.process(state, instruction)
         return result

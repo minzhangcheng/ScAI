@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by six specialized AI agents that collaborate like a research team.
 
-**Version**: 0.10.0
+**Version**: 0.10.1
 
 ## Core Features
 
@@ -305,6 +305,12 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.10.1 (2026-03-07)
+
+- Literature agent quick search now uses PI model as fallback, avoiding expensive deep research model costs
+- Fixed deep research mode max_tokens handling for better API compatibility
+- Added cancel button for upload queue items (abort in-progress or remove pending uploads)
 
 ### v0.10.0 (2026-03-07)
 
