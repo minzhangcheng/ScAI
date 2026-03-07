@@ -187,7 +187,7 @@ class PainterAgent(BaseAgent):
                     {"role": "user", "content": user_content}
                 ],
                 temperature=self.config.temperature,
-                max_tokens=4096,
+                max_tokens=32768,
                 extra_body={
                     "modalities": ["image", "text"]
                 }
@@ -398,7 +398,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
                     {"role": "user", "content": prompt}
                 ],
                 temperature=self.config.temperature,
-                max_tokens=4096,
+                max_tokens=32768,
                 extra_body={
                     "modalities": ["image", "text"]
                 }

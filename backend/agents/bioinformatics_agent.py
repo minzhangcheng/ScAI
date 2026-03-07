@@ -766,7 +766,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
                     messages=messages,
                     tools=TOOLS,
                     temperature=self.config.temperature,  # Use configured temperature
-                    max_tokens=4096
+                    max_tokens=32768
                 )
             except Exception as e:
                 await self._notify("error", f"LLM call failed: {str(e)}")
@@ -1102,6 +1102,10 @@ plt.close('all')
                         "content": tool_result
                     })
 
+            # Reset text-only counter when a substantive tool call was made
+            if not figure_only_iteration and response.has_tool_calls:
+                text_response_count = 0
+
             # Figure-only iterations don't count toward analysis step budget (with safety cap)
             if figure_only_iteration and response.has_tool_calls:
                 figure_iteration_count += 1
@@ -1122,14 +1126,14 @@ plt.close('all')
                     last_assistant_content = msg["content"]
                     break
             if last_assistant_content:
-                all_findings.append(last_assistant_content[:3000])
-                status = "completed"
-                logger.info("[Bioinformatics] Extracted findings from last text response")
+                all_findings.append(f"[Fallback extraction] {last_assistant_content[:3000]}")
+                status = "completed_with_fallback"
+                logger.info("[Bioinformatics] Extracted findings from last text response (fallback)")
 
         logger.info(f"[Bioinformatics] Analysis {status}: {step_count} steps executed, {len(all_findings)} findings, {len(all_figures)} figures")
 
         # Clear checkpoint only on successful completion (preserve for resume on max_steps_reached)
-        if completed or status == "completed":
+        if completed or status in ("completed", "completed_with_fallback"):
             checkpoint_mgr.clear()
 
         return {
@@ -1594,14 +1598,14 @@ Return only the Python code:"""
                 text_prompt=prompt,
                 images=[image_base64],
                 temperature=revision_temp,
-                max_tokens=32000
+                max_tokens=32768
             )
         else:
             response = await self.llm_client.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=revision_temp,
-                max_tokens=32000
+                max_tokens=32768
             )
 
         response_text = response.content if response and response.content else None

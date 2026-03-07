@@ -450,4 +450,8 @@ Please reply in structured format.
             return {"raw_response": "", "error": "Empty response from LLM"}
 
         result = self._safe_parse_json(response, default={"raw_response": response})
+        if "raw_response" in result:
+            logger.warning(
+                f"[PathologyAgent] JSON parse failed, raw response: {response[:200]}..."
+            )
         return result

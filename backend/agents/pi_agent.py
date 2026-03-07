@@ -111,7 +111,10 @@ You need to develop the first round analysis plan for the team. Please assign sp
 1. Pathology analysis: What types of sections need to be analyzed? What should be the focus?
 2. Bioinformatics analysis: Basic single-cell sequencing analysis workflow, cell types and pathways to focus on
 3. Biochemistry analysis: What indicators need attention?
-4. Literature research: What topics need to be researched?
+4. Literature research: What specific topics should be searched in PubMed?
+   - Each topic should be a focused research question (e.g., "Role of TGF-beta signaling in liver fibrosis progression")
+   - Avoid overly broad topics (e.g., "liver disease") or overly specific gene lists
+   - Include 2-4 topics covering different aspects (mechanism, phenotype, therapeutic relevance)
 
 Reply in JSON format as follows:
 {{
@@ -547,6 +550,12 @@ IMPORTANT: When generating next_* tasks:
 - Only propose NEW directions, deeper investigations, or follow-up analyses
 - If a previous round already completed standard processing (QC, clustering, cell annotation), do NOT re-assign these
 - Focus next_* on specific hypotheses, pathway analyses, or validation tasks based on current findings
+
+IMPORTANT for next_literature topics:
+- Each topic should be a specific, searchable research question (e.g., "Role of macrophage polarization in NASH liver fibrosis")
+- Include biological context (disease name, tissue, species) in each topic
+- Focus on filling knowledge GAPS identified in this round's literature findings
+- Avoid overly broad topics or raw gene lists
 
 IMPORTANT: agents_for_next_round controls which agents are ACTIVATED in the next round:
 - "bioinformatics" MUST ALWAYS be included (it is the core analysis agent)

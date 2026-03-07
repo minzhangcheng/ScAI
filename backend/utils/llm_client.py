@@ -322,7 +322,7 @@ class OpenAICompatibleClient:
         model: str,
         messages: List[Dict[str, Any]],
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 32768,
         stream: bool = False,
         timeout: Optional[float] = None
     ) -> LLMResponse:
@@ -425,7 +425,7 @@ class OpenAICompatibleClient:
         tools: List[Dict[str, Any]],
         tool_choice: Union[str, Dict[str, Any]] = "auto",
         temperature: float = 0.7,
-        max_tokens: int = 4096
+        max_tokens: int = 32768
     ) -> LLMToolResponse:
         """
         Send chat request with function/tool calling support and automatic retry on timeout
@@ -564,7 +564,7 @@ class OpenAICompatibleClient:
         model: str,
         messages: List[Dict[str, Any]],
         temperature: float = 0.7,
-        max_tokens: int = 4096
+        max_tokens: int = 32768
     ) -> AsyncGenerator[str, None]:
         """
         Stream chat response from OpenAI-compatible API
@@ -597,7 +597,7 @@ class OpenAICompatibleClient:
         text_prompt: str,
         images: List[str],  # Base64 encoded images
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 32768,
         request_timeout: Optional[float] = None
     ) -> LLMResponse:
         """

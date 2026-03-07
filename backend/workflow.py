@@ -72,7 +72,9 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                         f"{node_name} skipped this round (not needed)",
                         None
                     )
-                return state
+                # Clear stale failed_node and set result to skipped (avoid using stale previous round result)
+                result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
+                return {**state, "failed_node": None, result_key: {"findings": [], "status": "skipped"}}
 
             last_error = None
             for attempt in range(max_retries + 1):
@@ -748,6 +750,8 @@ Be specific and actionable in your response."""
             "node_retry_count": {},
             "node_errors": {},
             "failed_node": None,
+            # Reset skip_nodes so stale values from previous round do not carry over
+            "skip_nodes": [],
             # Reset continuation flags for new round
             "should_continue": True,
             "human_stop_requested": False,
@@ -776,6 +780,7 @@ Be specific and actionable in your response."""
             return {
                 **state,
                 "pi_instructions": adjusted_instructions,
+                "skip_nodes": [],
                 "human_guidance_processed": True
             }
         
@@ -808,8 +813,33 @@ Be specific and actionable in your response."""
                 elif step.startswith("[Literature]"):
                     instructions["literature_topics"].append(step[12:].strip())
 
+            # Fallback: if prefix matching extracted no tasks at all, use PI summary
+            fallback_all_agents = False
+            if not any([
+                instructions["pathology_tasks"],
+                instructions["bioinformatics_tasks"],
+                instructions["biochemistry_tasks"],
+                instructions["literature_topics"]
+            ]) and last_round and last_round.pi_summary:
+                fallback_context = last_round.pi_summary[:500]
+                fallback = f"Continue analysis based on previous round findings. Context: {fallback_context}"
+                instructions["bioinformatics_tasks"] = [fallback]
+                instructions["pathology_tasks"] = [fallback]
+                instructions["biochemistry_tasks"] = [fallback]
+                instructions["literature_topics"] = [f"Literature search related to: {fallback_context[:200]}"]
+                # When fallback assigns tasks to all agents, activate them all
+                # to avoid the mismatch where tasks are assigned but agents are skipped
+                fallback_all_agents = True
+                logger.warning(
+                    f"[{self.session_id}] No prefixed tasks found in next_steps, "
+                    f"using PI summary as fallback (activating all agents)"
+                )
+
             # Build skip_nodes from PI's agent activation decision
-            agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
+            if fallback_all_agents:
+                agents_to_activate = {"bioinformatics", "pathology", "biochemistry", "literature"}
+            else:
+                agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
             agents_to_activate.add("bioinformatics")  # Always activate bioinformatics
 
             skip_nodes = []
@@ -836,15 +866,11 @@ Be specific and actionable in your response."""
             AgentType.PI
         )
 
-        result = {
+        return {
             **state,
             "pi_instructions": instructions,
+            "skip_nodes": skip_nodes,
         }
-        # Only set skip_nodes for round 2+ (round 1 runs all agents)
-        if analysis_state.current_round > 1:
-            result["skip_nodes"] = skip_nodes
-
-        return result
     
     @with_retry("pathology_analysis")
     async def _pathology_analysis(self, state: WorkflowState) -> WorkflowState:
@@ -873,6 +899,7 @@ Be specific and actionable in your response."""
             )
             return {
                 **state,
+                "analysis_state": analysis_state,
                 "pathology_result": {"findings": [], "status": "no_data"}
             }
         
@@ -942,14 +969,14 @@ Be specific and actionable in your response."""
             )
             return {
                 **state,
+                "analysis_state": analysis_state,
                 "bioinformatics_result": {"findings": [], "status": "waiting_data"}
             }
         
-        # Check for pending human input and incorporate it
-        # Note: human input is consumed and cleared in _initialize_round, not here
+        # Incorporate human guidance from workflow state (set by _initialize_round)
         human_guidance = ""
-        if analysis_state.pending_human_input:
-            human_guidance = f"\n\nHuman researcher guidance: {analysis_state.pending_human_input}"
+        if state.get("human_guidance"):
+            human_guidance = f"\n\nHuman researcher guidance: {state['human_guidance']}"
         
         # Step 1: PI provides analysis goals
         await self._send_message("status", "PI is defining analysis goals...", AgentType.PI)
@@ -1069,9 +1096,16 @@ Report key findings when you complete each major analysis phase."""
         if previous_context:
             task_instruction += previous_context
 
+        # Pass current round's findings so biochemistry can cross-reference
+        current_round_context = {
+            "pathology_findings": state.get("pathology_result", {}).get("findings", []) if state.get("pathology_result") else [],
+            "bioinformatics_findings": state.get("bioinformatics_result", {}).get("findings", []) if state.get("bioinformatics_result") else [],
+        }
+
         result = await self.biochemistry_agent.process(
             analysis_state,
-            task_instruction
+            task_instruction,
+            current_round_context=current_round_context
         )
         
         await self._send_message(
@@ -1113,10 +1147,23 @@ Report key findings when you complete each major analysis phase."""
             bio_findings = state.get("bioinformatics_result", {}).get("findings", []) if state.get("bioinformatics_result") else []
 
             if path_findings or bio_findings:
-                # Use findings as search topics (context from actual analysis)
-                topics = [f"single cell sequencing {' '.join((path_findings + bio_findings)[:3])}"]
+                # Use truncated findings as search keywords (full findings are too long for search queries)
+                short_findings = [
+                    (f[:80] if isinstance(f, str) else str(f)[:80])
+                    for f in (path_findings + bio_findings)[:3]
+                ]
+                topics = [f"single cell sequencing {' '.join(short_findings)}"]
 
         await self._send_message("status", "Literature research in progress...", AgentType.LITERATURE)
+
+        # Collect current round findings from other agents for literature context
+        current_round_findings: List[str] = []
+        for result_key in ("pathology_result", "bioinformatics_result", "biochemistry_result"):
+            result = state.get(result_key)
+            if result and result.get("findings"):
+                for f in result["findings"][:3]:
+                    short = f[:100] if isinstance(f, str) else str(f)[:100]
+                    current_round_findings.append(short)
 
         # Enrich topics with previous findings for round 2+
         previous_lit_context = self._build_previous_findings_context(analysis_state, "literature")
@@ -1139,7 +1186,8 @@ Report key findings when you complete each major analysis phase."""
 
             logger.info(f"[{self.session_id}] Deep Research mode: merging {len(limited_topics)} topics into one query")
             dr_result = await self.literature_agent.process(
-                analysis_state, merged_topic, use_deep_research=True
+                analysis_state, merged_topic, use_deep_research=True,
+                current_round_findings=current_round_findings
             )
             results = [dr_result]
 
@@ -1154,7 +1202,8 @@ Report key findings when you complete each major analysis phase."""
                         if previous_lit_context:
                             enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
                         gap_result = await self.literature_agent.process(
-                            analysis_state, enriched, use_deep_research=False
+                            analysis_state, enriched, use_deep_research=False,
+                            current_round_findings=current_round_findings
                         )
                         results.append(gap_result)
         else:
@@ -1167,7 +1216,8 @@ Report key findings when you complete each major analysis phase."""
                 result = await self.literature_agent.process(
                     analysis_state,
                     enriched_topic,
-                    use_deep_research=True
+                    use_deep_research=True,
+                    current_round_findings=current_round_findings
                 )
                 results.append(result)
 
@@ -1245,18 +1295,38 @@ Return ONLY the JSON array, nothing else."""
 
         await self._send_message("status", "PI is synthesizing analysis results...", AgentType.PI)
         
-        # Extract findings from each agent
-        path_findings = state.get("pathology_result", {}).get("findings", []) if state.get("pathology_result") else []
-        bio_findings = state.get("bioinformatics_result", {}).get("findings", []) if state.get("bioinformatics_result") else []
-        chem_findings = state.get("biochemistry_result", {}).get("findings", []) if state.get("biochemistry_result") else []
-        lit_findings = state.get("literature_result", {}).get("findings", []) if state.get("literature_result") else []
-        
+        # Extract findings from each agent, including error/status info for PI awareness
+        agent_results = {}
+        for agent_name, result_key in [
+            ("pathology", "pathology_result"),
+            ("bioinformatics", "bioinformatics_result"),
+            ("biochemistry", "biochemistry_result"),
+            ("literature", "literature_result"),
+        ]:
+            result = state.get(result_key, {}) or {}
+            findings = result.get("findings", [])
+            error = result.get("error")
+            status = result.get("status")
+
+            # Build result string with error/status context so PI knows what happened
+            if error:
+                agent_results[agent_name] = json.dumps(
+                    {"error": error, "findings": findings}, ensure_ascii=False
+                )
+                logger.warning(f"[{self.session_id}] {agent_name} had error during this round: {error}")
+            elif status in ("skipped", "no_data", "waiting_data"):
+                agent_results[agent_name] = json.dumps(
+                    {"status": status, "findings": findings}, ensure_ascii=False
+                )
+            else:
+                agent_results[agent_name] = json.dumps(findings, ensure_ascii=False)
+
         round_result = await self.pi_agent.synthesize_round(
             analysis_state,
-            pathology_result=json.dumps(path_findings, ensure_ascii=False),
-            bioinformatics_result=json.dumps(bio_findings, ensure_ascii=False),
-            biochemistry_result=json.dumps(chem_findings, ensure_ascii=False),
-            literature_result=json.dumps(lit_findings, ensure_ascii=False)
+            pathology_result=agent_results["pathology"],
+            bioinformatics_result=agent_results["bioinformatics"],
+            biochemistry_result=agent_results["biochemistry"],
+            literature_result=agent_results["literature"],
         )
 
         logger.info(f"[{self.session_id}] Round {round_result.round_number} synthesis complete: new_findings={round_result.new_findings}, {len(round_result.next_steps)} next steps")
@@ -1291,7 +1361,8 @@ Return ONLY the JSON array, nothing else."""
             "findings": [
                 *round_result.pathology_findings,
                 *round_result.bioinformatics_findings,
-                *round_result.biochemistry_findings
+                *round_result.biochemistry_findings,
+                *round_result.literature_findings,
             ],
             "data_requests": data_requests,
             "status": "waiting_input"
@@ -1315,6 +1386,10 @@ Return ONLY the JSON array, nothing else."""
             AgentType.PI
         )
         
+        # Clear continue event BEFORE announcing waiting status to prevent race
+        # condition where frontend signals between status message and event.wait()
+        self._continue_event.clear()
+
         # Set status to waiting for user input
         analysis_state.status = TaskStatus.WAITING_INPUT
 
@@ -1345,8 +1420,8 @@ Return ONLY the JSON array, nothing else."""
         """
         analysis_state = state["analysis_state"]
 
-        # Clear the event for this wait cycle
-        self._continue_event.clear()
+        # Note: _continue_event is cleared in _pi_synthesis before the waiting
+        # status is announced, to prevent a race condition with signal_continue().
 
         wait_seconds = analysis_state.round_wait_seconds  # -1=manual, 0=no wait, >0=countdown
 

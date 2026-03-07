@@ -35,7 +35,7 @@ class LLMInteraction:
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Any] = None
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int = 32768
     
     # Response
     response_content: Optional[str] = None
@@ -168,7 +168,7 @@ class LLMLogger:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         temperature: float = 0.7,
-        max_tokens: int = 4096
+        max_tokens: int = 32768
     ) -> LLMInteraction:
         """
         Create an interaction record for a request.

@@ -882,7 +882,7 @@ class DetailedReportGenerator:
                 "status": status
             })
 
-    async def _pi_chat(self, prompt: str, temperature: float = 0.3, max_tokens: int = 4096) -> str:
+    async def _pi_chat(self, prompt: str, temperature: float = 0.3, max_tokens: int = 32768) -> str:
         """Chat with PI Agent"""
         response = await self.llm_client.chat(
             model=self.pi_model,
@@ -903,7 +903,7 @@ class DetailedReportGenerator:
             messages=messages,
             tools=REPORT_TOOLS,
             temperature=temperature,
-            max_tokens=4096
+            max_tokens=32768
         )
 
     async def _pi_review_section(
@@ -2303,7 +2303,7 @@ Provide a detailed technical summary of this analysis phase covering:
                     text_prompt=prompt,
                     images=phase_images,
                     temperature=0.3,
-                    max_tokens=4096,
+                    max_tokens=32768,
                     request_timeout=120.0
                 )
                 return response.content if response and response.content else ""
@@ -3229,7 +3229,7 @@ Then create sections in this EXACT order.
 - Keep descriptions brief (1 sentence) — detailed narratives will be written separately
 """
 
-        response = await self._pi_chat(prompt, temperature=0.4, max_tokens=16384)
+        response = await self._pi_chat(prompt, temperature=0.4, max_tokens=32768)
 
         try:
             plan = _safe_parse_json(response)
@@ -3416,7 +3416,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
                     text_prompt=prompt,
                     images=section_images[:6],
                     temperature=0.3,
-                    max_tokens=4096,
+                    max_tokens=32768,
                     request_timeout=120.0
                 )
                 response = response_obj.content if response_obj and response_obj.content else ""

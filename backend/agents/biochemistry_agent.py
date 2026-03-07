@@ -89,8 +89,10 @@ class BiochemistryAgent(BaseAgent):
         # ====================================================================
         # Step 3: Summarize and provide conclusions + experiment suggestions
         # ====================================================================
+        current_round_context = kwargs.get("current_round_context")
         final_result = await self._step3_summarize(
-            step1_result, step2_result, instruction, state
+            step1_result, step2_result, instruction, state,
+            current_round_context=current_round_context
         )
 
         return final_result
@@ -336,7 +338,7 @@ If you see tables, extract all rows and columns.
                     text_prompt=prompt,
                     images=[image_data],
                     temperature=0.2,
-                    max_tokens=4096,
+                    max_tokens=32768,
                 )
 
                 content = response.content if response else ""
@@ -380,6 +382,7 @@ If you see tables, extract all rows and columns.
         step2_result: Optional[Dict[str, Any]],
         instruction: str,
         state: AnalysisState,
+        current_round_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Step 3: Summarize results from steps 1 & 2, provide conclusions
         and experiment suggestions.
@@ -392,8 +395,8 @@ If you see tables, extract all rows and columns.
         has_indicators = step1_result is not None
         has_images = step2_result is not None
 
-        # Get cross-agent context
-        other_context = self._get_other_agent_context(state)
+        # Get cross-agent context (prefer current round data over previous round)
+        other_context = self._get_other_agent_context(state, current_round_context)
 
         # ----- Case 1: Neither step produced results -----
         if not has_indicators and not has_images:
@@ -543,19 +546,47 @@ Reply in JSON format:
     # Helper methods
     # ------------------------------------------------------------------
 
-    def _get_other_agent_context(self, state: AnalysisState) -> str:
-        """Gather context from other agents' results."""
+    def _get_other_agent_context(
+        self,
+        state: AnalysisState,
+        current_round_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Gather context from other agents' results.
+
+        Prefers current round findings (passed from workflow) over previous
+        round results stored in state.round_results.
+        """
         context_parts = []
+        has_path_context = False
+        has_bio_context = False
+
+        # Prefer current round context when available
+        if current_round_context:
+            path_findings = current_round_context.get("pathology_findings", [])
+            bio_findings = current_round_context.get("bioinformatics_findings", [])
+            if path_findings:
+                context_parts.append(
+                    f"Pathology findings (current round): {', '.join(path_findings)}"
+                )
+                has_path_context = True
+            if bio_findings:
+                context_parts.append(
+                    f"Bioinformatics findings (current round): {', '.join(bio_findings)}"
+                )
+                has_bio_context = True
+
+        # Supplement missing fields from previous round (not just when context_parts is empty)
         if state.round_results:
             last_round = state.round_results[-1]
-            if last_round.pathology_findings:
+            if not has_path_context and last_round.pathology_findings:
                 context_parts.append(
-                    f"Pathology findings: {', '.join(last_round.pathology_findings)}"
+                    f"Pathology findings (previous round): {', '.join(last_round.pathology_findings)}"
                 )
-            if last_round.bioinformatics_findings:
+            if not has_bio_context and last_round.bioinformatics_findings:
                 context_parts.append(
-                    f"Bioinformatics findings: {', '.join(last_round.bioinformatics_findings)}"
+                    f"Bioinformatics findings (previous round): {', '.join(last_round.bioinformatics_findings)}"
                 )
+
         return "\n".join(context_parts)
 
     async def _extract_from_data_file(self, bio_file: DataFile) -> Dict[str, Any]:
@@ -746,4 +777,9 @@ Reply in JSON format.
 
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
         """Parse JSON from response using safe balanced bracket matching from base class"""
-        return self._safe_parse_json(response)
+        data = self._safe_parse_json(response)
+        if "raw_response" in data:
+            logger.warning(
+                f"[BiochemistryAgent] JSON parse failed, raw response: {response[:200]}..."
+            )
+        return data

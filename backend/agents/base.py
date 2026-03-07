@@ -21,7 +21,7 @@ from ..utils.llm_client import OpenAICompatibleClient, LLMResponse
 class AgentConfig:
     """Runtime configuration for an agent - allows centralized temperature management"""
     temperature: float = 0.5
-    max_tokens: int = 4096
+    max_tokens: int = 32768
 
     @classmethod
     def from_temperatures(cls, agent_type: str, temperatures: Dict[str, float]) -> 'AgentConfig':

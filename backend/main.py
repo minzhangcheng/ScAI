@@ -3414,7 +3414,7 @@ async def _generate_figures_in_chat(
                 model=bio_model,
                 messages=[{"role": "user", "content": code_prompt}],
                 temperature=0.1,
-                max_tokens=4096,
+                max_tokens=32768,
             )
 
             code_text = code_resp.content or ""
@@ -3936,7 +3936,7 @@ async def _run_chat_delegation(
             model=pi_model,
             messages=[{"role": "user", "content": synthesis_prompt}],
             temperature=pi_temp,
-            max_tokens=4096,
+            max_tokens=32768,
         )
         final_content = pi_response.content or "Analysis completed but synthesis failed."
 
@@ -4276,14 +4276,14 @@ async def chat_with_pi(
                 text_prompt=full_prompt,
                 images=image_b64_list,
                 temperature=pi_temp,
-                max_tokens=4096
+                max_tokens=32768
             )
         else:
             response = await llm_client.chat(
                 model=pi_model,
                 messages=chat_messages_list,
                 temperature=pi_temp,
-                max_tokens=4096
+                max_tokens=32768
             )
 
         assistant_content = response.content if response.content else "I'm sorry, I couldn't generate a response. Please try again."

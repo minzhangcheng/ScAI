@@ -11,7 +11,7 @@ Fallback chain: Gemini DR → PubMed + LLM → quick search (LLM knowledge only)
 When in DR mode, gap coverage is handled at the workflow level by falling back
 to PubMed+LLM for insufficiently covered topics.
 """
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Tuple
 import json
 import re
 import asyncio
@@ -87,6 +87,7 @@ class LiteratureAgent(BaseAgent):
         """Process literature research instruction"""
         topic = kwargs.get("topic", instruction)
         use_deep_research = kwargs.get("use_deep_research", True)
+        current_round_findings = kwargs.get("current_round_findings", None)
 
         logger.info(
             f"[Literature] Processing topic: {topic[:100]}... "
@@ -94,7 +95,7 @@ class LiteratureAgent(BaseAgent):
         )
 
         if use_deep_research:
-            return await self._do_research(topic, state)
+            return await self._do_research(topic, state, current_round_findings=current_round_findings)
         else:
             return await self._quick_search(topic, state)
 
@@ -106,7 +107,8 @@ class LiteratureAgent(BaseAgent):
         self,
         topic: str,
         state: Optional[AnalysisState] = None,
-        pubmed_max_results: Optional[int] = None
+        pubmed_max_results: Optional[int] = None,
+        current_round_findings: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Route to configured research mode with fallback chain.
@@ -117,6 +119,7 @@ class LiteratureAgent(BaseAgent):
             topic: Research topic
             state: Optional analysis state for context
             pubmed_max_results: Override max articles per PubMed search round (default 20)
+            current_round_findings: Findings from current round's other agents
         """
         mode = self.literature_mode
 
@@ -124,7 +127,10 @@ class LiteratureAgent(BaseAgent):
             if mode == "gemini_deep_research":
                 return await self._multi_round_gemini(topic, state)
             elif mode == "pubmed_llm":
-                return await self._multi_round_pubmed(topic, state, pubmed_max_results=pubmed_max_results)
+                return await self._multi_round_pubmed(
+                    topic, state, pubmed_max_results=pubmed_max_results,
+                    current_round_findings=current_round_findings
+                )
             else:
                 logger.warning(f"[Literature] Unknown mode: {mode}, using quick search")
                 return await self._quick_search(topic, state)
@@ -135,7 +141,10 @@ class LiteratureAgent(BaseAgent):
             if mode == "gemini_deep_research":
                 logger.info("[Literature] Falling back to PubMed + LLM mode")
                 try:
-                    return await self._multi_round_pubmed(topic, state, pubmed_max_results=pubmed_max_results)
+                    return await self._multi_round_pubmed(
+                        topic, state, pubmed_max_results=pubmed_max_results,
+                        current_round_findings=current_round_findings
+                    )
                 except Exception as e2:
                     logger.warning(f"[Literature] PubMed fallback also failed: {e2}")
 
@@ -183,11 +192,71 @@ class LiteratureAgent(BaseAgent):
     # Mode 2: PubMed + LLM (multi-round)
     # ===================================================================
 
+    async def _validate_and_degrade_query(
+        self,
+        query: str,
+        topic: str,
+        max_results: int = 20
+    ) -> Tuple[str, List[Dict[str, str]]]:
+        """Try the query; if PubMed returns 0 results, progressively simplify.
+
+        Degradation strategy:
+        1. Original LLM-generated query
+        2. Strip field tags and MeSH qualifiers, keep core terms
+        3. Simple keyword search from topic + species + tissue
+
+        Returns (final_query, articles) tuple.
+        """
+        attempt = 0
+        max_attempts = 3
+        while attempt < max_attempts:
+            try:
+                articles = await self._pubmed_search(query, max_results=max_results)
+                if articles:
+                    if attempt > 0:
+                        logger.info(f"[Literature] Query succeeded after {attempt} degradation(s): {query[:80]}")
+                    return query, articles
+            except Exception as e:
+                logger.warning(f"[Literature] PubMed search error (attempt {attempt + 1}): {e}")
+
+            # Degrade the query
+            if attempt == 0:
+                # Strategy 1: Strip field tags and quotes
+                degraded = re.sub(r'\[(?:MeSH|Title/Abstract|Title|Author|Journal)\]', '', query)
+                degraded = re.sub(r'"([^"]*)"', r'\1', degraded)
+                degraded = degraded.strip()
+                if degraded and degraded != query:
+                    query = degraded
+                    logger.info(f"[Literature] Degrading query (strip tags): {query[:80]}")
+                    await asyncio.sleep(0.4)
+                    attempt += 1
+                    continue
+                # Strategy 1 had no effect — skip to Strategy 2 immediately
+                attempt = 1
+
+            # Strategy 2: Fall back to simple keyword search from topic
+            topic_words = topic.split()[:5]
+            query = " ".join(topic_words) if topic_words else topic
+            logger.info(f"[Literature] Degrading query (simple keywords): {query[:80]}")
+            await asyncio.sleep(0.4)
+            # Final search attempt with simplified query, then exit
+            try:
+                articles = await self._pubmed_search(query, max_results=max_results)
+                if articles:
+                    logger.info(f"[Literature] Query succeeded with simple keywords: {query[:80]}")
+                    return query, articles
+            except Exception as e:
+                logger.warning(f"[Literature] PubMed search error (simple keywords): {e}")
+            break
+
+        return query, []
+
     async def _multi_round_pubmed(
         self,
         topic: str,
         state: Optional[AnalysisState] = None,
-        pubmed_max_results: Optional[int] = None
+        pubmed_max_results: Optional[int] = None,
+        current_round_findings: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """Multi-round PubMed search with LLM-guided query refinement."""
         all_articles: List[Dict[str, str]] = []
@@ -195,7 +264,7 @@ class LiteratureAgent(BaseAgent):
         search_history: List[Dict[str, Any]] = []
 
         # Generate initial PubMed query from the topic
-        query = await self._generate_pubmed_query(topic, state)
+        query = await self._generate_pubmed_query(topic, state, current_round_findings)
 
         for round_num in range(1, self.max_search_rounds + 1):
             logger.info(
@@ -203,9 +272,15 @@ class LiteratureAgent(BaseAgent):
                 f"{query[:100]}"
             )
 
-            # Search PubMed
+            # Search PubMed (first round uses validation + degradation)
             try:
-                articles = await self._pubmed_search(query, max_results=pubmed_max_results or 20)
+                if round_num == 1:
+                    query, articles = await self._validate_and_degrade_query(
+                        query, topic,
+                        max_results=pubmed_max_results or 20
+                    )
+                else:
+                    articles = await self._pubmed_search(query, max_results=pubmed_max_results or 20)
             except Exception as e:
                 logger.warning(f"[Literature] PubMed search failed in round {round_num}: {e}")
                 if round_num == 1 and not all_articles:
@@ -368,21 +443,45 @@ class LiteratureAgent(BaseAgent):
     async def _generate_pubmed_query(
         self,
         topic: str,
-        state: Optional[AnalysisState] = None
+        state: Optional[AnalysisState] = None,
+        current_round_findings: Optional[List[str]] = None
     ) -> str:
-        """Use LLM to convert a research topic into an optimized PubMed search query."""
-        context = self._build_research_query(topic, state)
+        """Use LLM to convert a research topic into an optimized PubMed search query.
+
+        Passes raw experimental context to the LLM and lets it identify species,
+        tissue, gene names, and disease models rather than using hardcoded regex.
+        """
+        ctx = self._build_research_context(topic, state, current_round_findings)
+
+        # Build optional context sections
+        extra_sections = []
+        if ctx["treatment_groups"]:
+            extra_sections.append(f"Treatment groups: {', '.join(ctx['treatment_groups'])}")
+        if ctx["biochemistry_indicators"]:
+            extra_sections.append(f"Biochemistry indicators: {', '.join(ctx['biochemistry_indicators'][:8])}")
+        if ctx["previous_findings"]:
+            extra_sections.append(f"Previous analysis findings:\n{ctx['previous_findings'][:500]}")
+        if ctx["current_round_findings"]:
+            extra_sections.append(f"Current round findings:\n{ctx['current_round_findings'][:300]}")
+        extra_block = "\n\n".join(extra_sections)
 
         prompt = f"""Convert the following research topic into an optimized PubMed search query.
 
-Research topic: {context}
+Research topic: {topic}
+
+Experimental background:
+{ctx["initial_instruction"][:500] if ctx["initial_instruction"] else "Not available."}
+
+{extra_block}
 
 Rules for PubMed query:
 1. Use MeSH terms where appropriate (e.g., "Mice, Knockout"[MeSH])
 2. Use Boolean operators (AND, OR, NOT)
-3. Keep the query focused but not overly restrictive
-4. Include relevant gene names, species, and techniques
-5. Use field tags like [Title/Abstract], [MeSH] when helpful
+3. Keep the query focused but not overly restrictive — aim for 20-200 results
+4. Identify species, tissue/organ, and disease model from the background and include as filters
+5. If specific gene names appear in the findings, pick the 2-3 most relevant ones
+6. Use field tags like [Title/Abstract], [MeSH] when helpful
+7. Prefer broader terms over highly specific ones to avoid zero-result queries
 
 Return ONLY the PubMed query string, nothing else."""
 
@@ -435,9 +534,16 @@ Respond in JSON format:
         search_history: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """LLM evaluates PubMed results and suggests refined queries."""
+        # Include truncated abstracts for better relevance judgment
         articles_summary = "\n".join(
-            f"- [{a.get('year', 'N/A')}] {a['title']}"
-            for a in articles[:20]
+            f"- [{a.get('year', 'N/A')}] {a['title']}\n  Abstract: {a.get('abstract', 'N/A')[:200]}"
+            for a in articles[:15]
+        )
+
+        # List all previous queries explicitly to prevent duplication
+        previous_queries = "\n".join(
+            f"  Round {h['round']}: {h['query']}"
+            for h in search_history
         )
 
         prompt = f"""Evaluate whether the following PubMed search results are sufficient for a
@@ -445,20 +551,29 @@ comprehensive literature review on the topic:
 
 Topic: {topic}
 
-Search history: {json.dumps(search_history, ensure_ascii=False)}
+Previous queries (DO NOT repeat these):
+{previous_queries}
 
-Articles found ({len(articles)} total, first 20):
+Articles found ({len(articles)} total, showing first 15 with abstracts):
 {articles_summary}
+
+Evaluation criteria:
+- Are there articles directly relevant to the topic?
+- Are key aspects covered (mechanism, phenotype, therapeutic implications)?
+- Are there at least 5 highly relevant articles?
 
 Respond in JSON format:
 {{
     "sufficient": true or false,
     "reasoning": "why sufficient or not",
-    "refined_query": "a NEW PubMed search query to find missing aspects (not the same as previous)",
+    "refined_query": "a NEW PubMed search query targeting missing aspects (MUST differ from all previous queries)",
     "missing_aspects": ["aspects not yet covered"]
 }}
 
-IMPORTANT: The refined_query must be a valid PubMed search query using AND/OR operators."""
+IMPORTANT:
+- The refined_query MUST be a valid PubMed search query using AND/OR operators
+- The refined_query MUST NOT duplicate any previous query listed above
+- If the articles are mostly irrelevant, try a simpler, broader query"""
 
         response = await self.chat(prompt, temperature=0.3)
         result = self._safe_parse_json(response)
@@ -609,26 +724,64 @@ Note: If you are not certain about specific citation information, please clearly
     # Shared helpers
     # ===================================================================
 
+    def _build_research_context(
+        self,
+        topic: str,
+        state: Optional[AnalysisState] = None,
+        current_round_findings: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Collect raw research context from AnalysisState for LLM-based query generation.
+
+        Instead of using regex/hardcoded lists to extract species, tissue, genes, etc.,
+        this method collects raw text material and lets the downstream LLM identify
+        relevant biological entities when generating PubMed queries.
+        """
+        context: Dict[str, Any] = {
+            "topic": topic,
+            "initial_instruction": "",
+            "biochemistry_indicators": [],
+            "treatment_groups": [],
+            "previous_findings": "",
+            "current_round_findings": "",
+        }
+
+        if not state:
+            return context
+
+        context["initial_instruction"] = state.initial_instruction or ""
+
+        if state.treatment_groups:
+            context["treatment_groups"] = [g.name for g in state.treatment_groups]
+
+        if state.biochemistry_indicators:
+            unique_indicators = list(set(bi.indicator for bi in state.biochemistry_indicators))
+            context["biochemistry_indicators"] = unique_indicators[:10]
+
+        # Collect truncated findings from previous rounds (let LLM identify genes/pathways)
+        finding_parts = []
+        for rr in state.round_results:
+            for f in rr.bioinformatics_findings[:3]:
+                finding_parts.append(f[:150])
+            for f in rr.pathology_findings[:2]:
+                finding_parts.append(f[:150])
+        if finding_parts:
+            context["previous_findings"] = "; ".join(finding_parts)
+
+        if current_round_findings:
+            context["current_round_findings"] = "; ".join(current_round_findings[:5])
+
+        return context
+
     def _build_research_query(
         self,
         topic: str,
         state: Optional[AnalysisState] = None
     ) -> str:
-        """Build an optimized research query based on topic and context."""
-        context_parts = [topic]
-
-        initial_instruction = state.initial_instruction if state else ""
-        if initial_instruction:
-            if "knockout" in initial_instruction.lower() or re.search(r'\bKO\b', initial_instruction):
-                context_parts.append("knockout mouse model phenotype")
-
-        if "single cell" in topic.lower() or "scRNA" in topic.lower() or "snRNA" in topic.lower():
-            context_parts.append("single cell RNA sequencing marker genes")
-
-        if "pathway" in topic.lower():
-            context_parts.append("signaling pathway mechanism")
-
-        return " ".join(context_parts)
+        """Build a plain-text research query string (backward compatible)."""
+        parts = [topic]
+        if state and state.initial_instruction:
+            parts.append(state.initial_instruction[:200])
+        return " ".join(parts)
 
     async def _extract_findings(self, report: str) -> List[str]:
         """Extract key findings from a literature report."""
