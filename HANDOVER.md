@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.9.0
-**Last Updated**: 2026-03-04
+**Version**: 0.9.1
+**Last Updated**: 2026-03-07
 
 ## Project Overview
 
@@ -76,7 +76,7 @@ intesc/                         # Code directory
 │   │                           # - In-place session info editing (name + instruction)
 │   │                           # - File download (/api/download with path containment)
 │   │
-│   ├── workflow.py             # LangGraph workflow (~2058 lines)
+│   ├── workflow.py             # LangGraph workflow (~2133 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
@@ -116,8 +116,8 @@ intesc/                         # Code directory
 │   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer + graphic abstract reviewer)
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install, cumulative revision history)
 │   │   ├── pathology_agent.py  # Pathology Agent
-│   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2)
-│   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~907 lines)
+│   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2, ~785 lines)
+│   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~1060 lines)
 │   │   └── painter_agent.py    # Painter Agent (graphic abstract + revision support)
 │   │
 │   ├── models/
@@ -303,7 +303,7 @@ Since v0.5.1, the biochemistry agent uses a 3-step analysis pipeline:
 
 This approach is more robust against vision API inconsistencies (see Known Issues).
 
-### 1.2 Literature Agent (2 Research Modes + Cluster Annotation, ~907 lines)
+### 1.2 Literature Agent (2 Research Modes + Cluster Annotation, ~1060 lines)
 
 The Literature Agent supports 2 research modes with automatic fallback:
 
@@ -323,6 +323,8 @@ The Literature Agent supports 2 research modes with automatic fallback:
 **Key methods:**
 - `_multi_round_gemini()`: Single Google Interactions API call (start + poll, 5s interval)
 - `_multi_round_pubmed()`: E-Search → E-Fetch → XML parsing → LLM synthesis
+- `_validate_and_degrade_query()`: Progressive query simplification (strip field tags → simple keywords) when PubMed returns zero results
+- `_build_research_context()`: Collects raw experimental context (treatment groups, biochemistry indicators, previous/current round findings) for LLM-based query generation, replacing hardcoded `_build_research_query()`
 - `_evaluate_search_results()` / `_evaluate_pubmed_results()`: LLM judges sufficiency
 - `annotate_clusters()`: Two-phase cluster annotation — single literature search + LLM matching for all clusters at once. Called by bioinformatics agent via `annotate_clusters_callback`
 
@@ -1128,13 +1130,13 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 |---------|------|-----------------|
 | FastAPI server, session mgmt, chat, delegation, export/import & session editing | `main.py` | ~4423 lines |
 | Report generator (no-sandbox, PI analysis review, appendix) | `report_generator.py` | ~4683 lines |
-| Workflow graph, orchestration, DR optimization, selective activation & GA revision loop | `workflow.py` | ~2058 lines |
+| Workflow graph, orchestration, DR optimization, selective activation & GA revision loop | `workflow.py` | ~2133 lines |
 | Bioinformatics Agent (autonomous + figure budget + pip install + vision revision + cumulative history) | `bioinformatics_agent.py` | ~1628 lines |
 | PI Agent (coordinator + reviewer + GA reviewer + agent activation + data fidelity + brief figure curation) | `pi_agent.py` | ~1642 lines |
-| Literature Agent (2 modes + annotation) | `literature_agent.py` | ~907 lines |
+| Literature Agent (2 modes + annotation) | `literature_agent.py` | ~1060 lines |
 | LLM client (OpenRouter + Google DR + MIME detection) | `llm_client.py` | ~914 lines |
 | Jupyter sandbox (+ auto PDF) | `sandbox.py` | ~793 lines |
-| Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~749 lines |
+| Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~785 lines |
 | Pathology Agent (batch size 5 + dynamic timeout) | `pathology_agent.py` | ~453 lines |
 | Chunked upload manager | `upload.py` | ~398 lines |
 | Data models & schemas | `schemas.py` | ~486 lines |
@@ -1213,6 +1215,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.9.1 | 2026-03-07 | Cross-agent context passing (biochemistry + literature receive current round findings), PubMed query degradation (`_validate_and_degrade_query`), LLM-driven research context (`_build_research_context` replaces hardcoded `_build_research_query`), skip_nodes reset bug fix, skipped node result clarity, race condition fix (`_continue_event.clear()` moved to `_pi_synthesis`), PI synthesis error awareness, literature findings in round summary, fallback task assignment, human guidance source fix, max_tokens unified to 32768, bioinformatics text_response_count reset + `completed_with_fallback` status, JSON parse failure logging |
 | 0.9.0 | 2026-03-04 | PI analysis review before report (reads notebook + views figures via vision API), report appendix (project info, agent config, data summary, round history, user inputs), graphic abstract revision loop (PI review + Painter revision + best selection), cumulative figure revision history, in-place session editing (name + instruction via sidebar), two-phase export (prepare + download with size preview), upload queue with per-file progress, "Other" sequencing type (bulk RNA-seq support), sample count safety guard, workspace figure downloads (PDF/PNG), figure gallery API fallback on reload, Deep Research cost warning |
 | 0.8.9 | 2026-03-03 | Import proxy timeout resilience (pre-generated `import_id`, early job registration, upload-finished detection, polling retry with 404 tolerance), import UX (success/failure icons, confirmation dialog), branding update ("Integrated & Intelligent Single Cell Analysis") |
 | 0.8.7 | 2026-03-02 | Data page scroll fix (`overflow: hidden` on html/body), footer i18n (Chinese/English), About page version/date update |
@@ -1244,11 +1247,205 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.2.x | 2026-01 | Report features development |
 | 0.1.x | 2026-01 | Initial functional version |
 
+### Detailed Changelog
+
+#### v0.9.1 (2026-03-07)
+
+- **Cross-Agent Context Passing**: Biochemistry Agent now receives current round's pathology and bioinformatics findings (not just previous round), enabling real-time cross-referencing. Literature Agent receives current round findings from all other agents for better-informed PubMed query generation
+- **PubMed Search Query Degradation**: New `_validate_and_degrade_query()` method progressively simplifies PubMed queries that return zero results (strip field tags → simple keywords), reducing empty search failures
+- **LLM-Driven Research Context**: Replaced hardcoded keyword matching (`_build_research_query`) with `_build_research_context()` that passes raw experimental context to LLM for entity extraction, producing more relevant PubMed queries
+- **PubMed Query Refinement Improvements**: Search evaluation now includes truncated abstracts for better relevance judgment, explicitly lists previous queries to prevent duplication, and provides clearer evaluation criteria
+- **PI Prompt Optimization**: Literature search topic guidance in PI Agent prompts now requests focused, searchable research questions with biological context instead of broad topics or raw gene lists
+- **Skip Nodes Bug Fix**: Fixed stale `skip_nodes` carrying over between rounds when user provides adjusted instructions — agents that should run could be incorrectly skipped in round 2+. Added `skip_nodes: []` reset in both `_initialize_round` and `_pi_planning` early return
+- **Skipped Node Result Clarity**: `@with_retry` decorator now returns explicit `{"findings": [], "status": "skipped"}` for skipped nodes instead of passing through stale previous-round results
+- **Race Condition Fix**: Moved `_continue_event.clear()` from `_wait_for_user_input` to `_pi_synthesis`, preventing a race where frontend signals between status announcement and event wait
+- **PI Synthesis Error Awareness**: PI synthesis now receives error/status context from each agent (skipped, no_data, error) instead of just empty findings, enabling better-informed round summaries
+- **Literature Findings in Round Summary**: Round summary `findings` array now correctly includes `*round_result.literature_findings` (previously omitted)
+- **Fallback Task Assignment**: When PI's `next_steps` contain no prefixed tasks (e.g., `[Bioinformatics] ...`), system falls back to PI summary as context for all agents, preventing empty-instruction rounds. Sets `fallback_all_agents = True` to activate all agents
+- **Human Guidance Source Fix**: Bioinformatics Agent now reads human guidance from `state["human_guidance"]` (set by `_initialize_round`) instead of `analysis_state.pending_human_input` which may already be cleared
+- **Max Tokens Unification**: Unified `max_tokens` default from 4096 to 32768 across all LLM calls (AgentConfig, OpenAICompatibleClient.chat/chat_with_tools/chat_stream/chat_with_vision, LLMInteraction, report_generator._pi_chat, main.py chat endpoints)
+- **Bioinformatics Agent Improvements**: Reset `text_response_count` after substantive tool calls to prevent false "stuck in text loop" detection; new `completed_with_fallback` status distinguishes normal completion from fallback extraction; checkpoint cleared on `completed_with_fallback`
+- **JSON Parse Failure Logging**: Biochemistry and Pathology agents now log warnings when `_safe_parse_json` returns `raw_response` key, improving debuggability
+
+#### v0.9.0 (2026-03-04)
+
+- **PI Analysis Review Before Report**: Report generation now includes a PI review pre-step — PI reads the actual Jupyter notebook, views figures via vision API, and reads table summaries before writing. Produces a grounded methodology/results summary used throughout the report narrative
+- **Report Appendix**: HTML reports now include an amber-styled appendix section with project information, agent configuration (model + temperature per agent), uploaded data summary (treatment groups, files, biochemistry indicators), analysis round table, and user inputs between rounds
+- **Graphic Abstract Revision Loop**: Graphic abstracts now go through a 3-phase process — initial generation, up to 2 PI review+revision rounds (Painter revises with accumulated feedback history), and PI selects the best candidate from all versions using vision comparison
+- **Cumulative Figure Revision History**: Publication figures now track all rounds of PI feedback in `revision_history`. The code reviser sees all previous rounds to avoid re-introducing previously fixed issues
+- **In-Place Session Editing**: Session name and instruction can be edited directly in the sidebar via a pencil icon, saved on blur via `PUT /api/session/{id}/info`
+- **Two-Phase Export**: Export now uses a prepare+download flow — server builds the archive first (showing file size), then streams the download. Replaces the old single-step export
+- **Upload Queue with Per-File Progress**: Multiple files can be queued for upload with individual progress bars. The drop zone stays active during uploads. Failed uploads show error tooltips
+- **"Other" Sequencing Type**: Supports bulk RNA-seq and custom sequencing formats with no file extension restriction
+- **Sample Count Safety Guard**: Backend rejects reducing a group's sample count below the highest sample number that already has data; UI shows the error and reverts the field
+- **Workspace Figure Downloads**: Figures generated in the Jupyter workspace (not just publication figures) can now be downloaded as PDF/PNG via the API
+- **Figure Gallery API Fallback**: After page refresh, figures without cached base64 data are loaded from the API automatically
+- **Deep Research Cost Warning**: Both ConfigPanel and PromptsPanel show an amber warning about Deep Research time (~60 min) and cost (~$2-5/task) with a link to Google docs
+
+#### v0.8.9 (2026-03-03)
+
+- **Import Proxy Timeout Resilience**: Frontend pre-generates `import_id` before upload and sends it with the request, so even if a reverse proxy (nginx) timeout prevents the HTTP response from reaching the client, it can still poll for extraction status. Backend registers the import job before saving the file, ensuring the polling endpoint is available immediately
+- **Import UX Improvements**: Success/failure states with proper icons (CheckCircle for success, AlertCircle for errors). Polling includes retry logic that tolerates transient network errors and early 404s. 30-minute timeout for very large archives. Success confirmation dialog replaces silent dismissal
+- **Branding Update**: App subtitle updated to "Integrated & Intelligent Single Cell Analysis" / "整合与智能单细胞分析" across footer, About dialog, Disclaimer dialog, and i18n translations
+
+#### v0.8.7 (2026-03-02)
+
+- **Data Page Scroll Fix**: Added `overflow: hidden` on `html, body` to prevent page-level scrolling when Data panel content overflows — standard fix for full-screen SPA
+- **Footer i18n**: Footer copyright text now supports Chinese/English switching
+- **About Page Update**: Updated version number and date
+
+#### v0.8.6 (2026-03-02)
+
+- **Async Session Import**: Large tar.gz imports no longer block the HTTP response (avoiding nginx proxy timeouts). Backend returns `import_id` immediately after upload, extracts in background; frontend polls `GET /api/session/import/{import_id}` for status
+- **First-Visit Disclaimer Dialog**: Shows an AI reliability warning on first visit (stored in localStorage), requiring user acknowledgment before entering the system
+- **About Button Text**: Added "About"/"关于" text label next to the info icon
+- **Footer Copyright**: Added persistent footer with project name and copyright notice
+
+#### v0.8.5 (2026-02-28)
+
+- **Tool Message History Fix**: Bioinformatics Agent now appends one assistant message before processing all tool calls, instead of each handler branch appending its own copy. Preserves Gemini's `thought_signature` via `raw_assistant_message` field for correct multi-turn conversations
+- **AI-Curated Brief Figures**: New `PI.select_brief_figures()` method uses AI to curate which figures appear in the Results tab brief report — excludes QC/diagnostic plots and intermediate versions, keeps key results that directly answer the research question
+- **Workspace Figure Collection**: `_collect_session_figures()` now scans both `figures/` subdirectory and workspace root, capturing UMAP and other plots saved via explicit `plt.savefig()` that previously only appeared in the detailed report
+- **Brief Report Figure Expansion**: The integrated report phase now includes AI-selected workspace figures (not just publication figures) in the Results display, with automatic image compression and base64 encoding
+- **Image MIME Type Detection**: LLM client now detects actual image format (JPEG/PNG/GIF/WebP) from base64 magic bytes instead of always sending `image/png`, fixing vision API errors for JPEG pathology images
+- **Export UX**: Session export now uses browser-native GET-based download instead of streaming POST, eliminating memory buffering for large archives. UI shows packaging state → download-started confirmation with dismiss button
+
+#### v0.8.4 (2026-02-21)
+
+- **About Dialog**: Added About page accessible from the header, showing project info, author, affiliation, contact, and GitHub link
+
+#### v0.8.3 (2026-02-21)
+
+- **Manual Round Wait Fix**: Fixed `_wait_for_user_input` ignoring `round_wait_seconds` setting — previously hardcoded 600s timeout caused auto-proceed even in manual mode (`-1`). Now respects all modes: manual (wait indefinitely), no-wait (proceed immediately), countdown (frontend timer + 60s backend buffer)
+
+#### v0.8.2 (2026-02-21)
+
+- **Default Model Update**: PI, Pathology, and Biochemistry agents upgraded from `google/gemini-3-pro-preview` to `google/gemini-3.1-pro-preview`
+- **Proxy Fix**: Fixed 4 `OpenAICompatibleClient` instances (report generation, chat figure generation, PI chat, workflow report) missing explicit `proxy_url` parameter — previously relied on fragile environment variable fallback
+
+#### v0.8.1 (2026-02-20)
+
+- **Figure Data Fidelity**: Fixed publication figure generation hallucinating non-existent treatment groups. PI figure review and bioinformatics code revision now receive actual experimental design context (`build_experimental_design_summary()`), with explicit constraints to only reference uploaded groups
+- **Vision-Based Figure Revision**: Bioinformatics Agent can now see its own generated figure during revision via `chat_with_vision()` (previously "blind revision" using only PI text feedback and original code). PI feedback + current figure image are now both provided to the revision LLM
+- **Data Constraint Propagation**: Added `CRITICAL DATA CONSTRAINT` to `_build_data_context()`, `_revise_figure_code()` prompt, `generate_publication_figure` tool description, and PI `review_figure()` prompt — covering the full pipeline from initial code generation through review and revision
+- **Data Fidelity Review Criterion**: PI figure review now includes a 6th criterion ("Data Fidelity") checking that figures show only actual experimental groups
+
+#### v0.8.0 (2026-02-16)
+
+- **Unified Data Model**: Replaced per-type data models (`PathologyImage`, `BiochemistryResult`/`BiochemistryFile`, `control_seq_path`/`treatment_seq_path`) with unified `DataFile` (section: pathology/sequencing/biochemistry), `TreatmentGroup`, and `BiochemistryIndicator` models
+- **Treatment Groups & Multi-Sample Support**: Users can define experimental groups (e.g., Control, Treatment, NASH Model) with configurable sample counts. All uploaded data is assigned to a group and sample number, enabling structured multi-group comparisons. `build_experimental_design_summary()` generates text descriptions for agent prompts
+- **Unified Upload Endpoint**: Replaced separate `/upload/pathology`, `/upload/snrna_seq`, `/upload/biochemistry` endpoints with single `/upload/data` endpoint. New group CRUD endpoints (`/groups`)
+- **Upload Selectors in Feedback & Chat**: Round Feedback Dialog and Chat Panel file uploads now include treatment group, sample number, and data type selectors (matching DataPanel's existing pattern)
+- **Simplified Pathology Types**: Pathology staining type options simplified to H&E and Other (with custom stain name input for Other)
+- **DataPanel Rewrite**: Complete rewrite of DataPanel for group-centric data organization with inline editing, collapsible sections, and per-file download
+
+#### v0.7.5 (2026-02-15)
+
+- **Selective Agent Activation**: From round 2 onwards, PI Agent autonomously decides which agents (Pathology, Biochemistry, Literature) to activate based on analysis needs. Bioinformatics Agent always runs. Skipped agents receive WebSocket notification. Uses existing `skip_nodes` mechanism in `@with_retry` decorator. New `agents_for_next_round` field in `RoundResult`
+- **Docker Pip Install Support**: Bioinformatics Agent can now install pip packages via subprocess in Docker environments. `_validate_code()` adds special exception for pip/pip3 install commands. System prompt includes package installation guidelines
+
+#### v0.7.4 (2026-02-14)
+
+- **Figure Step Budget**: Figure generation (`generate_publication_figure`) no longer counts toward bioinformatics agent's step budget. A safety cap of 5 figure-only iterations prevents infinite loops — after exhaustion, agent refuses new figure generation and redirects to remaining analysis steps
+- **Figure Revision Fix**: Increased `max_tokens` for figure revision code generation from 2048 to 32000, preventing code truncation (SyntaxError) when revising complex publication figures
+- **Data Download**: All uploaded data (pathology images, sequencing files, loom files, biochemistry files) can now be downloaded from the Data panel via individual download buttons
+- **Agent Status Display Fix**: Fixed bug where completed analysis agents showed spinning icons during report generation. `getAgentStatus()` now correctly handles `generating_report` session status (analysis agents stay "done") and recognizes additional completion message types (`completed`, `integrated_report`, `graphic_abstract`, etc.)
+- **Figure Gallery Fix**: Fixed figure previews not displaying after page reload (localStorage persistence stripped base64 data, which then overwrote fresh API data). Fixed MIME type mismatch (JPEG data displayed as PNG). Session-completed figures with `revision_requested` status now display as green "Final" instead of red "Revision Requested"
+- Bug fixes: `TaskStatus` type now includes `generating_report`, backend `/load` and upload endpoints return `filePath` for pathology and biochemistry files
+
+#### v0.7.3 (2026-02-13)
+
+- **Chat Delegation**: PI Agent can now delegate complex chat requests to specialized agents (Bioinformatics, Pathology, Biochemistry, Literature). Agents execute analysis in background, PI synthesizes results — with WebSocket progress updates and stop/cancel support
+- **Report Generation Rewrite**: Detailed report no longer uses Jupyter sandbox for code re-execution. Instead builds structured analysis record from existing code history, scans workspace for figures/tables, and PI writes narrative around existing assets — faster and more reliable
+- **Report-Only Resume**: Sessions interrupted during report generation (after all analysis rounds completed) are automatically detected and resume with report generation only, skipping redundant analysis
+- **Auto PDF Generation**: Monkey-patches `Figure.savefig` to automatically generate companion high-resolution PDFs (300 DPI, vectorized Type 42 fonts) alongside every PNG saved during analysis
+- **Deep Research Optimization**: Gemini Deep Research now merges multiple topics into a single comprehensive query. After DR completes, evaluates topic coverage and falls back to PubMed+LLM for insufficiently covered gaps
+- **Bioinformatics Session Restore**: When resuming analysis, code history is populated from restored notebook cells — prevents agent from re-running completed analysis steps. New "REUSE EXISTING RESULTS" guidelines check for existing PCA, UMAP, clustering, annotations before re-executing
+- **Batch Effect Assessment**: Bioinformatics agent now checks for batch effects after PCA/UMAP when multiple samples are present, and consults PI about correction strategy (Harmony, BBKNN, scVI, etc.)
+- **Configurable Round Wait Timer**: Round feedback countdown is now user-configurable (default 5 minutes; -1 for manual-only mode; 0 for no-wait auto-continue). Stored per-session in `round_wait_seconds`
+- **Pathology Agent Reliability**: Reduced tile batch size (20 → 5) and added dynamic timeouts (120s base + 30s per image) for more reliable vision API calls
+- **Export/Import with Sandbox State**: Session export/import now includes .pkl files for full sandbox environment restore
+- **Publication Outputs in Results Tab**: Publication figures, integrated report, graphic abstract, and download buttons moved from Analysis tab to Results tab for cleaner organization
+- **Model Defaults Updated**: Bioinformatics agent now defaults to Claude Sonnet 4.5; Literature agent gets dedicated `literature_model` field defaulting to Gemini 3 Flash Preview
+- Bug fixes: chat stop/cancel, progress message rendering, snake_case→camelCase transform for publication outputs, sandbox kernel cleanup
+
+#### v0.7.2 (2026-02-11)
+
+- **Chat Panel**: New Chat tab for free-form conversation with PI Agent — ask questions about analysis results, request scientific insights, and discuss next steps
+  - File attachment support with per-file agent targeting (PI, Pathology, Bioinformatics, Biochemistry)
+  - Inline figure display: PI can reference existing figures (`[[FIGURE:name]]`) or generate new ones on-the-fly (`[[GENERATE_FIGURE:description]]`) via Jupyter sandbox
+  - Markdown-rendered responses with PNG/PDF download buttons for figures
+  - Resizable input textarea with drag handle
+- **Session Export/Import**: Download complete sessions as tar.gz archives and restore them on any instance
+  - Export includes: session state, uploads, workspace files, reports (excludes large .pkl files)
+  - Import supports tar.gz, zip, and plain JSON formats with automatic path remapping
+  - Session browser modal with status badges and data type indicators
+- Bug fixes: chat file deduplication, sandbox message filtering, import path validation
+
+#### v0.6.3 (2026-02-11)
+
+- **Literature-based Cluster Annotation**: New `annotate_clusters` tool for bioinformatics agent — single literature search + LLM matching annotates all clusters at once, replacing per-cluster PI consultation
+- **Round Context Enrichment**: Each agent now receives previous round findings and code history, preventing redundant analyses in multi-round workflows
+- **Literature Config per Session**: Literature mode (Gemini/PubMed), Google API key, PubMed email, and search rounds are now stored per-session in `literature_config` (moved from global `APIConfig`)
+- **ConfigPanel Redesign**: PubMed email (required) and Google API key (optional, auto-enables Gemini mode) moved to main config panel
+- **LLM Client Improvements**: Robust content extraction from various response formats (string, list, None, reasoning models); reasoning model support (`o1`/`o3`/`o4` series use `max_completion_tokens` instead of `max_tokens`)
+- **RoundFeedbackDialog Timer Fix**: Countdown timer now uses wall-clock time so background browser tabs don't freeze the countdown
+- Bug fixes: literature agent cleanup, PromptsPanel literature config save, base64 stripping improvements
+
+#### v0.6.2 (2026-02-10)
+
+- **Literature Agent Rewrite**: Rebuilt with 2 research modes (removed OpenRouter deep research)
+  - Gemini Deep Research (Google Interactions API) - fixed REST payload, status polling, and response extraction
+  - PubMed + LLM (NCBI E-utilities + LLM synthesis)
+  - Multi-round iterative search with LLM-guided query refinement
+  - Automatic fallback: Gemini → PubMed → LLM knowledge only
+- **Literature-based Cluster Annotation**: `annotate_clusters()` method for two-phase cluster annotation (literature search + LLM matching)
+- **Bioinformatics Agent `annotate_clusters` Tool**: New function-calling tool to annotate all clusters via literature evidence in a single call
+- **Report Cluster Annotations**: Reports now include a cell cluster annotation table (Cluster → Cell Type → Cell Count) extracted from processed adata
+- **Session Recovery on Page Refresh**: Auto-reload session from server after page refresh; stale session detection clears sessions that no longer exist on server
+- **localStorage Overflow Prevention**: Base64 image data stripped from WebSocket messages, API responses, and Zustand persisted state
+- **Read Mode**: New read-only mode for reviewing existing analyses without starting new ones
+- **File Upload During Pause**: Users can upload pathology images while workflow is paused; uploads on the last round extend max_rounds by 1
+
+#### v0.6.1 (2026-02-10)
+
+- Bug fixes: null safety in partialize, WebSocket "session not found" detection, report findings dict key safety
+
+#### v0.6.0 (2026-02-09)
+
+- **Human-in-the-Loop Round Feedback**: New `RoundFeedbackDialog` modal appears after each analysis round with 2-minute countdown timer
+  - Displays per-agent findings (Pathology, Bioinformatics, Biochemistry, Literature)
+  - Users can provide text guidance and upload additional data files targeted to specific agents
+  - Timer auto-pauses when user starts typing; auto-continues on expiry
+  - User input on the last round extends max_rounds by 1
+- **Workflow `wait_for_user_input` node**: Backend blocks between rounds via `asyncio.Event`, respecting `round_wait_seconds` setting (-1=wait indefinitely, 0=no wait, >0=countdown+60s buffer)
+- **Cell type annotation improvements**: Strengthened bioinformatics agent prompt for mandatory cell type annotation with UMAP visualization
+- **Report generator fixes**: Now searches workspace directory for annotated data; supports both `adata_annotated.h5ad` and `annotated_adata.h5ad` filenames
+- **WebSocket reconnection fix**: Completed sessions now send full round_results and message_history on reconnect
+- **Report loading retry**: ReportPanel retries loading after 3 seconds if report is null
+
+#### v0.5.x (2026-02-06 – 2026-02-09)
+
+- **Biochemistry Agent v2**: Rebuilt with 3-step analysis workflow (structured indicators → visual image analysis → synthesis & conclusions)
+- **Real-time Message Optimization**: Improved WebSocket message streaming and deduplication
+- Enhanced frontend-backend state synchronization
+- Bug fixes for bioinformatics agent, session handling, sandbox timeout, UI components
+
+#### v0.3.0 – v0.4.x (2026-02-04 – 2026-02-05)
+
+- **Painter Agent**: Generates publication-quality graphic abstracts using Google Gemini image generation
+- **State Version Control**: Atomic state versioning prevents frontend-backend synchronization issues
+- **WebSocket Reconnection Recovery**: Automatic message history restoration after connection loss
+- **Structured Error Tracking**: Per-agent error tracking with detailed information display
+- **Parallel Analysis**: Pathology, Bioinformatics, and Biochemistry agents now run in parallel
+- **Figure Review Loop**: PI Agent reviews and approves publication-quality figures before inclusion
+- **Report Generation Rebuilt**: Complete overhaul of the detailed report generation system
+
 ## Contact
 
 For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-04*
-*Version: 0.9.0*
+*Document updated: 2026-03-07*
+*Version: 0.9.1*
