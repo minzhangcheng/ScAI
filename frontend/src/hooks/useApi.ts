@@ -590,12 +590,13 @@ export function useSession() {
     }
 
     // Sync literature config to backend before starting
-    const { literatureMode, googleApiKey, pubmedEmail, literatureMaxSearchRounds } = useAppStore.getState()
+    const { literatureMode, googleApiKey, pubmedEmail, literatureMaxSearchRounds, deepResearchModel } = useAppStore.getState()
     try {
       await apiFetch(`/session/${currentSession.id}/literature-config`, {
         method: 'POST',
         body: JSON.stringify({
           mode: literatureMode,
+          deep_research_model: deepResearchModel,
           google_api_key: googleApiKey,
           pubmed_email: pubmedEmail,
           max_search_rounds: literatureMaxSearchRounds,

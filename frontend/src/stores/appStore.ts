@@ -149,7 +149,7 @@ export interface AgentTemperatures {
 export const DEFAULT_MODELS: AgentModels = {
   pi: 'google/gemini-3.1-pro-preview',
   pathology: 'google/gemini-3.1-pro-preview',
-  bioinformatics: 'anthropic/claude-sonnet-4.5',
+  bioinformatics: 'anthropic/claude-sonnet-4.6',
   biochemistry: 'google/gemini-3.1-pro-preview',
   literature: 'google/gemini-3-flash-preview',
   painter: 'google/gemini-3-pro-image-preview'  // Image generation model via OpenRouter
@@ -216,8 +216,10 @@ interface AppState {
   setRoundWaitSeconds: (seconds: number) => void
 
   // Literature agent config
-  literatureMode: 'gemini_deep_research' | 'pubmed_llm'
+  literatureMode: 'gemini_deep_research' | 'pubmed_llm' | 'deep_research'
   setLiteratureMode: (mode: AppState['literatureMode']) => void
+  deepResearchModel: string
+  setDeepResearchModel: (model: string) => void
   googleApiKey: string
   setGoogleApiKey: (key: string) => void
   pubmedEmail: string
@@ -372,8 +374,10 @@ export const useAppStore = create<AppState>()(
       setRoundWaitSeconds: (seconds) => set({ roundWaitSeconds: seconds }),
 
       // Literature agent config
-      literatureMode: 'pubmed_llm' as AppState['literatureMode'],
+      literatureMode: 'deep_research' as AppState['literatureMode'],
       setLiteratureMode: (mode) => set({ literatureMode: mode }),
+      deepResearchModel: 'openai/o4-mini-deep-research',
+      setDeepResearchModel: (model) => set({ deepResearchModel: model }),
       googleApiKey: '',
       setGoogleApiKey: (key) => set({ googleApiKey: key }),
       pubmedEmail: '',
@@ -463,6 +467,7 @@ export const useAppStore = create<AppState>()(
         maxRounds: state.maxRounds,
         roundWaitSeconds: state.roundWaitSeconds,
         literatureMode: state.literatureMode,
+        deepResearchModel: state.deepResearchModel,
         googleApiKey: state.googleApiKey,
         pubmedEmail: state.pubmedEmail,
         literatureMaxSearchRounds: state.literatureMaxSearchRounds,

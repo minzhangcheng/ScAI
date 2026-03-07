@@ -49,7 +49,8 @@ class LiteratureAgent(BaseAgent):
         system_prompt: str,
         config: Optional['AgentConfig'] = None,
         # Literature-specific parameters
-        literature_mode: str = "pubmed_llm",
+        literature_mode: str = "deep_research",
+        deep_research_model: str = "",
         google_api_key: str = "",
         pubmed_email: str = "",
         max_search_rounds: int = 5,
@@ -67,6 +68,7 @@ class LiteratureAgent(BaseAgent):
 
         # Mode configuration
         self.literature_mode = literature_mode
+        self.deep_research_model = deep_research_model
         self.pubmed_email = pubmed_email
         self.max_search_rounds = max(1, min(20, max_search_rounds))
         self.proxy_url = proxy_url
@@ -113,7 +115,7 @@ class LiteratureAgent(BaseAgent):
         """
         Route to configured research mode with fallback chain.
 
-        Fallback: gemini → pubmed → quick_search
+        Fallback: deep_research/gemini → pubmed → quick_search
 
         Args:
             topic: Research topic
@@ -124,7 +126,9 @@ class LiteratureAgent(BaseAgent):
         mode = self.literature_mode
 
         try:
-            if mode == "gemini_deep_research":
+            if mode == "deep_research":
+                return await self._deep_research_via_chat(topic, state, current_round_findings=current_round_findings)
+            elif mode == "gemini_deep_research":
                 return await self._multi_round_gemini(topic, state)
             elif mode == "pubmed_llm":
                 return await self._multi_round_pubmed(
@@ -137,8 +141,8 @@ class LiteratureAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"[Literature] Mode {mode} failed: {e}")
 
-            # Fallback: if primary was gemini, try pubmed
-            if mode == "gemini_deep_research":
+            # Fallback: deep_research or gemini → try pubmed
+            if mode in ("gemini_deep_research", "deep_research"):
                 logger.info("[Literature] Falling back to PubMed + LLM mode")
                 try:
                     return await self._multi_round_pubmed(
@@ -185,11 +189,111 @@ class LiteratureAgent(BaseAgent):
         return await self._finalize_result(topic, report_text, references, state, 1)
 
     # ===================================================================
-    # Mode 2: OpenRouter Deep Research (multi-round)
+    # Mode 2: Deep Research via OpenRouter (single call)
     # ===================================================================
 
+    async def _deep_research_via_chat(
+        self,
+        topic: str,
+        state: Optional[AnalysisState] = None,
+        current_round_findings: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Deep research via OpenRouter chat API (OpenAI o4, Perplexity sonar, etc.).
+
+        Makes a single long-running chat call with high max_tokens and timeout.
+        The deep research model handles web search and synthesis internally.
+        """
+        if not self.deep_research_model:
+            raise ValueError("deep_research_model not configured for deep_research mode")
+
+        ctx = self._build_research_context(topic, state, current_round_findings=current_round_findings)
+
+        # Build optional context sections
+        extra_sections = []
+        if ctx["treatment_groups"]:
+            extra_sections.append(f"Treatment groups: {', '.join(ctx['treatment_groups'])}")
+        if ctx["biochemistry_indicators"]:
+            extra_sections.append(f"Biochemistry indicators: {', '.join(ctx['biochemistry_indicators'][:8])}")
+        if ctx["previous_findings"]:
+            extra_sections.append(f"Previous analysis findings:\n{ctx['previous_findings'][:500]}")
+        if ctx["current_round_findings"]:
+            extra_sections.append(f"Current round findings:\n{ctx['current_round_findings'][:300]}")
+        extra_block = "\n\n".join(extra_sections)
+
+        prompt = f"""Conduct a comprehensive biomedical literature review on the following topic.
+
+Research topic: {topic}
+
+Experimental background:
+{ctx["initial_instruction"][:500] if ctx["initial_instruction"] else "Not available."}
+
+{extra_block}
+
+Please provide:
+1. A comprehensive review covering key findings, molecular mechanisms, and clinical relevance
+2. Current research consensus and major unresolved questions
+3. Implications for the experimental context described above
+
+IMPORTANT - Citation format:
+For each cited paper, provide a reference list at the end in this exact format:
+[N] Author et al. (Year). Title. Journal. URL_or_DOI
+Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. https://doi.org/10.1038/xxx"""
+
+        logger.info(
+            f"[Literature] Deep Research via {self.deep_research_model}: "
+            f"{topic[:200]}"
+        )
+
+        response = await self.llm_client.chat(
+            model=self.deep_research_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=262144,
+            timeout=1800.0,
+        )
+
+        report_text = response.content or ""
+        if not report_text:
+            raise ValueError("Deep research returned empty response")
+
+        logger.info(
+            f"[Literature] Deep Research completed: "
+            f"{len(report_text)} chars"
+        )
+
+        references = self._extract_references_from_text(report_text)
+        return await self._finalize_result(topic, report_text, references, state, 1)
+
+    def _extract_references_from_text(self, text: str) -> List[Dict[str, str]]:
+        """Extract references from deep research output text.
+
+        Tries structured [N] Title... URL format first, falls back to plain URL extraction.
+        """
+        refs: List[Dict[str, str]] = []
+        seen: set = set()
+
+        # Try structured format: [N] Title... URL
+        for m in re.finditer(
+            r'\[(\d+)\]\s*(.{5,300}?)\s*(https?://[^\s\)\]]+)', text
+        ):
+            url = m.group(3).rstrip('.,;')
+            if url not in seen:
+                seen.add(url)
+                title = m.group(2).strip(' .-,')
+                refs.append({"title": title, "url": url})
+
+        # Fallback to plain URL extraction if structured refs are insufficient
+        if len(refs) < 3:
+            for m in re.finditer(r'https?://[^\s\)\]]+', text):
+                url = m.group(0).rstrip('.,;')
+                if url not in seen:
+                    seen.add(url)
+                    refs.append({"title": "", "url": url})
+
+        return refs
+
     # ===================================================================
-    # Mode 2: PubMed + LLM (multi-round)
+    # Mode 3: PubMed + LLM (multi-round)
     # ===================================================================
 
     async def _validate_and_degrade_query(

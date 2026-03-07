@@ -276,7 +276,8 @@ class SingleCellAnalysisWorkflow:
             model=literature_model,
             system_prompt=literature_prompt,
             config=AgentConfig(temperature=self.temperatures.get('literature', 0.6)),
-            literature_mode=literature_config.get('mode', 'pubmed_llm'),
+            literature_mode=literature_config.get('mode', 'deep_research'),
+            deep_research_model=literature_config.get('deep_research_model', ''),
             google_api_key=literature_config.get('google_api_key', ''),
             pubmed_email=literature_config.get('pubmed_email', ''),
             max_search_rounds=literature_config.get('max_search_rounds', 5),
@@ -1168,10 +1169,13 @@ Report key findings when you complete each major analysis phase."""
         # Enrich topics with previous findings for round 2+
         previous_lit_context = self._build_previous_findings_context(analysis_state, "literature")
 
-        # Check if Deep Research mode is available
+        # Check if Deep Research mode is available (merges topics into one call)
         is_deep_research = (
-            self.literature_agent.literature_mode == "gemini_deep_research"
-            and self.literature_agent._deep_research is not None
+            self.literature_agent.literature_mode in ("gemini_deep_research", "deep_research")
+            and (
+                self.literature_agent._deep_research is not None  # Gemini
+                or self.literature_agent.deep_research_model       # OpenRouter
+            )
         )
 
         limited_topics = topics[:3]

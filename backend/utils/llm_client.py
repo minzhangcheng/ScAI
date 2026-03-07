@@ -187,14 +187,14 @@ class OpenAICompatibleClient:
         if proxy_url:
             http_client = httpx.AsyncClient(
                 proxy=proxy_url,
-                timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
+                timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
             )
         
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=self.base_url,
             http_client=http_client,
-            timeout=120.0,
+            timeout=300.0,  # Safety net; deep research uses per-request timeout=1800 override
             max_retries=0,  # Disable SDK internal retries; retry_with_backoff handles all retries
             default_headers={
                 "HTTP-Referer": "https://intesc.local",
@@ -372,12 +372,14 @@ class OpenAICompatibleClient:
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat request to {model}")
-            
+
             # Use retry mechanism for the API call
-            response = await retry_with_backoff(
-                _make_request,
-                agent_name=self.agent_name
-            )
+            retry_kwargs: Dict[str, Any] = {"agent_name": self.agent_name}
+            if timeout is not None:
+                retry_kwargs["request_timeout"] = timeout
+                if timeout > 300:
+                    retry_kwargs["max_retries"] = 0  # Don't retry expensive long-running requests
+            response = await retry_with_backoff(_make_request, **retry_kwargs)
             
             # Extract content — handles reasoning models, list content, etc.
             content = ""

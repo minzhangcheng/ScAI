@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.9.1
+**Version**: 0.10.0
 **Last Updated**: 2026-03-07
 
 ## Project Overview
@@ -1266,6 +1266,15 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 - **Max Tokens Unification**: Unified `max_tokens` default from 4096 to 32768 across all LLM calls (AgentConfig, OpenAICompatibleClient.chat/chat_with_tools/chat_stream/chat_with_vision, LLMInteraction, report_generator._pi_chat, main.py chat endpoints)
 - **Bioinformatics Agent Improvements**: Reset `text_response_count` after substantive tool calls to prevent false "stuck in text loop" detection; new `completed_with_fallback` status distinguishes normal completion from fallback extraction; checkpoint cleared on `completed_with_fallback`
 - **JSON Parse Failure Logging**: Biochemistry and Pathology agents now log warnings when `_safe_parse_json` returns `raw_response` key, improving debuggability
+
+#### v0.10.0 (2026-03-07)
+
+- **Deep Research Mode (OpenRouter)**: Added `deep_research` literature mode that calls deep research models (e.g., `openai/o4-mini-deep-research`, `perplexity/sonar-deep-research`) via standard OpenRouter chat API. Single long-running call with 30-min timeout and 256K max tokens. Three modes now coexist: `deep_research` (default), `gemini_deep_research`, `pubmed_llm`
+- **Fallback Chain**: `deep_research` → `pubmed_llm` → `quick_search`; timeout propagation to `retry_with_backoff` with `max_retries=0` for requests > 300s
+- **LLM-Based Query Generation**: Removed hardcoded `_NON_GENE_WORDS` blacklist and regex-based species/tissue/gene extraction. Query generation now delegates entity identification entirely to the LLM
+- **Model Upgrades**: Bioinformatics agent default model upgraded from `anthropic/claude-sonnet-4.5` to `anthropic/claude-sonnet-4.6`
+- **Cross-Agent Context**: Deep research prompt now includes `current_round_findings` from pathology/bioinformatics agents in the same round
+- **Bug Fixes**: Fixed useEffect overriding user's manual literature mode selection; fixed skip_nodes returning stale previous-round results; fixed fallback task assignment not activating all agents; added `Literal` type validation for literature mode field
 
 #### v0.9.0 (2026-03-04)
 

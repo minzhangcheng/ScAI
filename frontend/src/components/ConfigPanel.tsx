@@ -12,7 +12,7 @@ interface ConfigPanelProps {
 
 export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
   const { apiConfig, setApiConfig, saveConfig, loading, error, clearError } = useConfig()
-  const { language, pubmedEmail, setPubmedEmail, googleApiKey, setGoogleApiKey, setLiteratureMode } = useAppStore()
+  const { language, pubmedEmail, setPubmedEmail, googleApiKey, setGoogleApiKey, literatureMode, setLiteratureMode } = useAppStore()
   const { t } = useTranslation(language)
   const [localError, setLocalError] = useState<string | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
@@ -159,7 +159,9 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
                 onChange={(e) => {
                   setGoogleApiKey(e.target.value)
                   // Auto-switch literature mode based on key presence
-                  setLiteratureMode(e.target.value ? 'gemini_deep_research' : 'pubmed_llm')
+                  if (literatureMode !== 'deep_research') {
+                    setLiteratureMode(e.target.value ? 'gemini_deep_research' : 'pubmed_llm')
+                  }
                 }}
                 placeholder="AIza..."
                 className="w-full px-4 py-3 pr-12 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all font-mono text-sm"

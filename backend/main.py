@@ -14,7 +14,7 @@ import io
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 import uuid
 import httpx
 
@@ -343,7 +343,8 @@ class TemperatureUpdateRequest(BaseModel):
 
 
 class LiteratureConfigRequest(BaseModel):
-    mode: str = Field(default="pubmed_llm")
+    mode: Literal["deep_research", "gemini_deep_research", "pubmed_llm"] = Field(default="deep_research")
+    deep_research_model: str = ""
     google_api_key: str = ""
     pubmed_email: str = ""
     max_search_rounds: int = Field(default=5, ge=1, le=20)
@@ -1314,6 +1315,7 @@ async def update_literature_config(session_id: str, request: LiteratureConfigReq
 
     state.literature_config = {
         "mode": request.mode,
+        "deep_research_model": request.deep_research_model,
         "google_api_key": request.google_api_key,
         "pubmed_email": request.pubmed_email,
         "max_search_rounds": request.max_search_rounds,
@@ -3692,7 +3694,7 @@ async def _execute_chat_agent(
             model=lit_model,
             system_prompt=lit_prompt,
             config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
-            literature_mode=lit_config.get("mode", "pubmed_llm"),
+            literature_mode=lit_config.get("mode", "deep_research"),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
             max_search_rounds=lit_config.get("max_search_rounds", 5),
@@ -3791,7 +3793,7 @@ async def _execute_chat_agent(
             model=state.custom_models.get("literature", config.models.literature_model),
             system_prompt=state.custom_prompts.get("literature", config.prompts.literature_prompt),
             config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
-            literature_mode=lit_config.get("mode", "pubmed_llm"),
+            literature_mode=lit_config.get("mode", "deep_research"),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
             max_search_rounds=lit_config.get("max_search_rounds", 5),

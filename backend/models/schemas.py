@@ -268,9 +268,10 @@ class AnalysisState(BaseModel):
 
     # Literature agent configuration
     literature_config: Dict[str, Any] = Field(default_factory=lambda: {
-        "mode": "pubmed_llm",                # gemini_deep_research | pubmed_llm
-        "google_api_key": "",                 # For Gemini Deep Research mode
-        "pubmed_email": "",                   # For PubMed mode (NCBI requirement)
+        "mode": "deep_research",              # deep_research | gemini_deep_research | pubmed_llm
+        "deep_research_model": "",           # e.g., "openai/o4-mini-deep-research"
+        "google_api_key": "",                # For Gemini Deep Research mode
+        "pubmed_email": "",                  # For PubMed mode (NCBI requirement)
         "max_search_rounds": 5,              # Max iterative search rounds
     })
     

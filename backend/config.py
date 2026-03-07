@@ -122,7 +122,7 @@ class ModelConfig(BaseModel):
     """Model configuration for each agent"""
     pi_model: str = "google/gemini-3.1-pro-preview"
     pathology_model: str = "google/gemini-3.1-pro-preview"
-    bioinformatics_model: str = "anthropic/claude-sonnet-4.5"
+    bioinformatics_model: str = "anthropic/claude-sonnet-4.6"
     biochemistry_model: str = "google/gemini-3.1-pro-preview"
     literature_model: str = "google/gemini-3-flash-preview"
     # Painter agent uses image generation model via OpenRouter
@@ -148,7 +148,7 @@ class AgentTemperatures(BaseModel):
         return AgentTemperatures(**data)
     
 # Literature agent defaults
-DEFAULT_LITERATURE_MODE = "pubmed_llm"
+DEFAULT_LITERATURE_MODE = "deep_research"
 DEFAULT_LITERATURE_MAX_SEARCH_ROUNDS = 5
 
 class AgentPrompts(BaseModel):

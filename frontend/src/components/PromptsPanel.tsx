@@ -25,6 +25,7 @@ export function PromptsPanel() {
     models, setModel,
     temperatures, setTemperature,
     literatureMode, setLiteratureMode,
+    deepResearchModel, setDeepResearchModel,
     googleApiKey,
     pubmedEmail,
     literatureMaxSearchRounds, setLiteratureMaxSearchRounds,
@@ -38,14 +39,6 @@ export function PromptsPanel() {
   const [editedTemperature, setEditedTemperature] = useState(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
-  // Auto-set literature mode based on Google API key presence
-  useEffect(() => {
-    if (googleApiKey) {
-      setLiteratureMode('gemini_deep_research')
-    } else {
-      setLiteratureMode('pubmed_llm')
-    }
-  }, [googleApiKey, setLiteratureMode])
 
   // Update edited prompt, model, and temperature when selected agent changes
   useEffect(() => {
@@ -187,6 +180,7 @@ export function PromptsPanel() {
               method: 'POST',
               body: JSON.stringify({
                 mode: literatureMode,
+                deep_research_model: deepResearchModel,
                 google_api_key: googleApiKey,
                 pubmed_email: pubmedEmail,
                 max_search_rounds: literatureMaxSearchRounds,
@@ -370,6 +364,41 @@ export function PromptsPanel() {
                   </label>
                 </div>
 
+                {/* Deep Research (OpenRouter) */}
+                <div className={`rounded-lg transition-all ${
+                  literatureMode === 'deep_research' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
+                }`}>
+                  <label className="flex items-start gap-3 p-3 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="literatureMode"
+                      value="deep_research"
+                      checked={literatureMode === 'deep_research'}
+                      onChange={() => { setLiteratureMode('deep_research'); setSaved(false) }}
+                      className="mt-0.5 accent-blue-600"
+                    />
+                    <div className="flex-1">
+                      <span className="text-sm font-medium text-slate-800">{t('literatureDeepResearch')}</span>
+                      <p className="text-xs text-slate-500 mt-0.5">{t('literatureDeepResearchDesc')}</p>
+                      {literatureMode === 'deep_research' && (
+                        <div className="mt-2 space-y-1.5">
+                          <label className="block text-xs font-medium text-slate-600">
+                            {t('literatureDeepResearchModel')}
+                          </label>
+                          <input
+                            type="text"
+                            value={deepResearchModel}
+                            placeholder={t('literatureDeepResearchModelPlaceholder')}
+                            onChange={(e) => { setDeepResearchModel(e.target.value); setSaved(false) }}
+                            className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                          />
+                          <p className="text-xs text-slate-400">{t('literatureDeepResearchNote')}</p>
+                        </div>
+                      )}
+                    </div>
+                  </label>
+                </div>
+
                 {/* PubMed Search Only */}
                 <div className={`rounded-lg transition-all ${
                   literatureMode === 'pubmed_llm' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
@@ -441,19 +470,19 @@ export function PromptsPanel() {
           </div>
           <p className="text-xs text-slate-500 mt-2 ml-8">
             {language === 'zh' ? (
-              selectedAgent === 'pi' ? '推荐: google/gemini-3.1-pro-preview' :
+              selectedAgent === 'pi' ? '推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4' :
               selectedAgent === 'pathology' ? '需要具有病理图片识别能力的模型，强烈推荐: google/gemini-3.1-pro-preview' :
-              selectedAgent === 'bioinformatics' ? '需要 coding 能力较强的模型，推荐: anthropic/claude-sonnet-4.5、anthropic/claude-opus-4.6、openai/gpt-5.2-codex 或 google/gemini-3.1-pro-preview' :
+              selectedAgent === 'bioinformatics' ? '需要 coding 能力较强的模型，推荐: anthropic/claude-sonnet-4.6、anthropic/claude-opus-4.6、openai/gpt-5.2-codex 或 google/gemini-3.1-pro-preview' :
               selectedAgent === 'biochemistry' ? '推荐: google/gemini-3.1-pro-preview。若上传了生化结果图片，需要选择支持 Vision 的模型' :
-              selectedAgent === 'literature' ? '用于文献分析与综合的 LLM 模型，推荐: google/gemini-3-flash-preview' :
+              selectedAgent === 'literature' ? '用于 PubMed 模式文献分析的 LLM 模型，推荐: google/gemini-3.1-flash-lite-preview、google/gemini-3-flash-preview' :
               selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3-pro-image-preview' :
               '使用 OpenRouter 模型格式'
             ) : (
-              selectedAgent === 'pi' ? 'Recommended: google/gemini-3.1-pro-preview' :
+              selectedAgent === 'pi' ? 'Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
               selectedAgent === 'pathology' ? 'Requires pathology image recognition capability. Strongly recommended: google/gemini-3.1-pro-preview' :
-              selectedAgent === 'bioinformatics' ? 'Requires strong coding capability. Recommended: anthropic/claude-sonnet-4.5, anthropic/claude-opus-4.6, openai/gpt-5.2-codex, or google/gemini-3.1-pro-preview' :
+              selectedAgent === 'bioinformatics' ? 'Requires strong coding capability. Recommended: anthropic/claude-sonnet-4.6, anthropic/claude-opus-4.6, openai/gpt-5.2-codex, or google/gemini-3.1-pro-preview' :
               selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3.1-pro-preview. If biochemistry images are uploaded, a Vision-capable model is required' :
-              selectedAgent === 'literature' ? 'LLM model for literature analysis and synthesis. Recommended: google/gemini-3-flash-preview' :
+              selectedAgent === 'literature' ? 'LLM model for PubMed mode literature analysis. Recommended: google/gemini-3.1-flash-lite-preview, google/gemini-3-flash-preview' :
               selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3-pro-image-preview' :
               'Use OpenRouter model format'
             )}

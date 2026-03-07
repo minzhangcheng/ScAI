@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by six specialized AI agents that collaborate like a research team.
 
-**Version**: 0.9.1
+**Version**: 0.10.0
 
 ## Core Features
 
@@ -14,7 +14,7 @@ Six specialized AI agents work together to analyze your data from different angl
 - **Pathology Agent** — Analyzes histological section images (H&E and custom staining types), identifying tissue structures, cellular patterns, and pathological changes
 - **Bioinformatics Agent** — Performs autonomous single-cell sequencing data analysis (scRNA-seq, snRNA-seq, bulk RNA-seq). Executes code in a local Jupyter environment, generates publication-quality figures, and can run up to 200 analysis steps per round
 - **Biochemistry Agent** — Interprets biochemical experimental results from structured indicator values and data images, cross-referencing findings from other agents
-- **Literature Agent** — Searches and synthesizes relevant scientific literature. Supports two modes: Google Gemini Deep Research for comprehensive surveys, and PubMed + LLM synthesis for targeted searches
+- **Literature Agent** — Searches and synthesizes relevant scientific literature. Supports three modes: Deep Research Models (e.g., openai/o4-mini-deep-research), Google Gemini Deep Research, and PubMed + LLM synthesis for targeted searches
 - **Painter Agent** — Generates graphic abstracts summarizing the research findings
 
 ### Iterative Analysis with Human-in-the-Loop
@@ -306,14 +306,16 @@ Common customizations:
 
 ## Changelog
 
-### v0.9.1 (2026-03-07)
+### v0.10.0 (2026-03-07)
 
+- Added Deep Research mode for literature agent: supports OpenAI o4-mini-deep-research, Perplexity sonar-deep-research, and other deep research models via OpenRouter
+- Three literature search modes: Deep Research Models (default), Gemini Deep Research, and PubMed + LLM
+- Upgraded bioinformatics agent default model to anthropic/claude-sonnet-4.6
 - Improved cross-agent collaboration: agents now share findings within the same round for better-informed analysis
 - Improved literature search: smarter PubMed queries with automatic retry when initial search returns no results
 - Improved PI planning: more focused and actionable literature search topics
 - Fixed a bug where some agents could be incorrectly skipped in multi-round analysis
 - Fixed round summary missing literature findings
-- Increased default output length limit for all agents
 - Various stability and performance improvements
 
 ### v0.9.0 (2026-03-04)
