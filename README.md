@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by six specialized AI agents that collaborate like a research team.
 
-**Version**: 0.10.1
+**Version**: 0.10.2
 
 ## Core Features
 
@@ -83,15 +83,18 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 │                    Backend (Port 8000)                       │
 ├─────────────────────────────────────────────────────────────┤
 │                  Multi-Agent Workflow Engine                 │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
-│  │   PI    │  │ Pathol. │  │ Bioinfo │  │ Biochem │        │
-│  │  Agent  │◄─┤  Agent  │◄─┤  Agent  │◄─┤  Agent  │        │
-│  └────┬────┘  └─────────┘  └────┬────┘  └─────────┘        │
-│       │                         │                           │
-│       │    ┌─────────────┐      │      ┌─────────────┐     │
-│       └───►│  Literature │◄─────┴─────►│   Painter   │     │
-│            │    Agent    │             │    Agent    │     │
-│            └─────────────┘             └─────────────┘     │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐       │
+│  │   PI    │  │ Pathol. │  │ Bioinfo │  │ Biochem │       │
+│  │  Agent  │  │  Agent  │  │  Agent  │  │  Agent  │       │
+│  └────▲────┘  └─────────┘  └──┬───┬──┘  └─────────┘       │
+│       │                       │   │                         │
+│       │  consult/fig review   │   │  annotate/lit search    │
+│       └───────────────────────┘   │                         │
+│                                   ▼                         │
+│            ┌───────────┐   ┌─────────────┐                  │
+│            │  Painter  │   │  Literature │                  │
+│            │   Agent   │   │    Agent    │                  │
+│            └───────────┘   └─────────────┘                  │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │  OpenRouter  │  │Local Jupyter │  │ Google APIs  │      │
@@ -305,6 +308,14 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.10.2 (2026-03-08)
+
+- Fixed critical bug: sandbox kernel now fully recovers after timeout (reconnects client, re-initializes environment, restores session variables)
+- Figure plotting is now exception-safe: `plt.close`/`plt.show` are temporarily disabled during execution and guaranteed to restore via `try/finally`
+- Added blank figure detection for publication figures (rejects files < 2KB)
+- Increased sandbox execution timeout from 5 minutes to 30 minutes for long-running analyses
+- Updated architecture documentation to reflect current sequential agent execution model
 
 ### v0.10.1 (2026-03-07)
 

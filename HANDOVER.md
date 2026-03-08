@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.10.1
-**Last Updated**: 2026-03-07
+**Version**: 0.10.2
+**Last Updated**: 2026-03-08
 
 ## Project Overview
 
@@ -28,19 +28,18 @@ This document is intended for developers and operations personnel, providing tec
 ├─────────────────────────────────────────────────────────────┤
 │                  LangGraph Workflow Engine                  │
 │  ┌────────────────────────────────────────────────────────┐ │
-│  │                    PI Agent                            │ │
-│  │                       │                                │ │
-│  │        ┌──────────────┼──────────────┐ (parallel)      │ │
-│  │        ▼              ▼              ▼                 │ │
-│  │   Pathology    Bioinformatics   Biochemistry           │ │
-│  │     Agent          Agent          Agent                │ │
-│  │        │              │              │                 │ │
-│  │        └──────────────┼──────────────┘                 │ │
-│  │                       ▼                                │ │
-│  │               Literature Agent                         │ │
-│  │                       │                                │ │
-│  │                       ▼                                │ │
-│  │                Painter Agent (graphic abstract)        │ │
+│  │  ┌─────────┐ ┌────────┐ ┌─────────┐ ┌─────────┐      │ │
+│  │  │   PI    │ │Pathol. │ │ Bioinfo │ │ Biochem │      │ │
+│  │  │  Agent  │ │ Agent  │ │  Agent  │ │  Agent  │      │ │
+│  │  └────▲────┘ └────────┘ └──┬───┬──┘ └─────────┘      │ │
+│  │       │  consult/          │   │  annotate/           │ │
+│  │       │  fig review        │   │  lit search          │ │
+│  │       └────────────────────┘   │                      │ │
+│  │                                ▼                      │ │
+│  │          ┌──────────┐   ┌────────────┐                │ │
+│  │          │ Painter  │   │ Literature │                │ │
+│  │          │  Agent   │   │   Agent    │                │ │
+│  │          └──────────┘   └────────────┘                │ │
 │  └────────────────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
@@ -194,8 +193,8 @@ class SingleCellAnalysisWorkflow:
         # state_callback: Save state after each round
 
     async def run(self, state: AnalysisState):
-        # Iteratively execute analysis rounds with parallel branches
-        # Each round: PI planning → Parallel analysis → Aggregation → Literature → PI synthesis
+        # Iteratively execute analysis rounds
+        # Each round: PI planning → Pathology → Bioinformatics → Biochemistry → Literature → PI synthesis
 ```
 
 **Workflow Graph Structure:**
@@ -206,13 +205,14 @@ initialize_round ◄────────────────────
       ▼                                   │
   pi_planning                             │
       │                                   │
-      ├───┬───┐ (Fan-out: parallel)       │
-      ▼   ▼   ▼                           │
- pathology  bioinformatics  biochemistry  │
-      │   │   │                           │
-      └───┴───┘ (Fan-in)                  │
+      ▼ (sequential)                      │
+  pathology_analysis                      │
+      │                                   │
       ▼                                   │
-  aggregate_results  ←── error tracking   │
+  bioinformatics_analysis                 │
+      │                                   │
+      ▼                                   │
+  biochemistry_analysis                   │
       │                                   │
       ▼                                   │
   literature_research                     │
@@ -244,7 +244,7 @@ initialize_round ◄────────────────────
 
 **Key Features:**
 
-1. **Parallel Execution**: Pathology/Bioinformatics/Biochemistry Agents run in parallel (Fan-out/Fan-in pattern)
+1. **Sequential Execution**: Pathology → Bioinformatics → Biochemistry Agents run sequentially, with Bioinformatics consulting PI and Literature via callbacks
 2. **Retry Mechanism**: `@with_retry(max_retries=3)` decorator with exponential backoff
 3. **Structured Error Tracking**: Errors captured in `AgentError` model with agent, type, message, details
 4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
@@ -1215,6 +1215,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.10.2 | 2026-03-08 | Sandbox kernel timeout recovery (full reconnection + session restore), plt.close/plt.show safety (try/finally in 3 code templates), blank figure detection (<2KB threshold), sandbox timeout 300s→1800s, architecture docs updated (sequential execution) |
 | 0.10.1 | 2026-03-07 | Literature fallback model (quick search uses PI model), deep research max_tokens fix (None instead of 262144), deep research model passthrough in chat mode, upload cancellation (abort in-progress + remove pending) |
 | 0.10.0 | 2026-03-07 | Deep Research mode (OpenRouter: o4-mini-deep-research, sonar-deep-research), 3 literature modes (deep_research/gemini/pubmed_llm), fallback chain, LLM-based query generation, model upgrades (claude-sonnet-4.6), cross-agent context, bug fixes |
 | 0.9.1 | 2026-03-07 | Cross-agent context passing (biochemistry + literature receive current round findings), PubMed query degradation (`_validate_and_degrade_query`), LLM-driven research context (`_build_research_context` replaces hardcoded `_build_research_query`), skip_nodes reset bug fix, skipped node result clarity, race condition fix (`_continue_event.clear()` moved to `_pi_synthesis`), PI synthesis error awareness, literature findings in round summary, fallback task assignment, human guidance source fix, max_tokens unified to 32768, bioinformatics text_response_count reset + `completed_with_fallback` status, JSON parse failure logging |
@@ -1250,6 +1251,14 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.10.2 (2026-03-08)
+
+- **Sandbox Kernel Timeout Recovery**: When kernel fails to return to idle after interrupt, now performs full recovery: `restart_kernel()` via `asyncio.to_thread`, client reconnection (`stop_channels` → new `client()` → `start_channels`), `_wait_for_ready`, `_initialized = False` → `_initialize_kernel()` → `_restore_session()`. Previously left a zombie client connection causing all subsequent executions to hang
+- **Figure plt.close/plt.show Safety**: Temporarily disables `plt.close` and `plt.show` during code execution to prevent premature figure closure before auto-save. Wrapped in `try/finally` to guarantee restoration even if user code throws exceptions. Applied to all 3 code templates: `execute_code`, `generate_publication_figure`, and figure revision
+- **Blank Figure Detection**: Publication figures with file size < 2KB are flagged as blank. Applied to both initial generation and PI-requested revisions. System prompt updated to instruct LLM not to call `plt.close()`/`plt.show()`/`plt.savefig()` in figure code
+- **Sandbox Timeout**: Increased from 300s (5 min) to 1800s (30 min) to accommodate long-running bioinformatics analyses (pathway analysis, large dataset processing)
+- **Architecture Documentation**: Updated HANDOVER.md and README.md diagrams to reflect current sequential execution model (Pathology → Bioinformatics → Biochemistry) with Bioinformatics consulting PI and Literature via callbacks
 
 #### v0.10.1 (2026-03-07)
 

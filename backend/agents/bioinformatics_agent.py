@@ -10,6 +10,7 @@ import base64
 import io
 import uuid
 import re
+import textwrap
 from pathlib import Path
 from datetime import datetime
 
@@ -616,6 +617,7 @@ class BioinformaticsAgent(BaseAgent):
 
 You are conducting single-cell RNA-seq analysis. You have access to tools:
 1. execute_code - Run Python code (scanpy, anndata, numpy, pandas, matplotlib available)
+   When writing plotting code, do NOT call plt.close() or plt.show() - the system handles figure saving and cleanup automatically.
 2. consult_pi - Ask PI for biological decisions (analysis direction, pathway selection, interpretation)
 3. search_literature - Search for marker genes, pathways, biological knowledge
 4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
@@ -623,6 +625,7 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
 6. generate_publication_figure - Generate publication-quality figures with PI review
    IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
    NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
+   Do NOT include plt.close(), plt.show(), or plt.savefig() in the figure code - the system handles saving automatically.
 
 WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
@@ -843,6 +846,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
                     figures_dir = Path(self.sandbox.working_dir) / "figures"
                     figures_dir_repr = repr(str(figures_dir))
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    indented_code = textwrap.indent(code, '    ')
 
                     wrapped_code = f'''
 import matplotlib.pyplot as plt
@@ -859,8 +863,18 @@ plt.rcParams.update({{
 _figures_dir = Path({figures_dir_repr})
 _figures_dir.mkdir(exist_ok=True)
 
-# Execute user code
-{code}
+# Temporarily disable plt.close/plt.show to keep figures alive for auto-save
+_orig_close = plt.close
+_orig_show = plt.show
+plt.close = lambda *a, **kw: None
+plt.show = lambda *a, **kw: None
+
+# Execute user code (with try-finally to guarantee restore)
+try:
+{indented_code}
+finally:
+    plt.close = _orig_close
+    plt.show = _orig_show
 
 # Detect and save all active figures
 _fig_nums = plt.get_fignums()
@@ -1256,6 +1270,7 @@ plt.close('all')
         figures_dir_repr = repr(str(figures_dir))
         png_path_repr = repr(str(png_path))
         pdf_path_repr = repr(str(pdf_path))
+        indented_code = textwrap.indent(code, '    ')
         wrapped_code = f'''
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -1274,8 +1289,18 @@ plt.rcParams.update({{
 _figures_dir = {figures_dir_repr}
 Path(_figures_dir).mkdir(exist_ok=True)
 
-# Execute the plotting code
-{code}
+# Temporarily disable plt.close/plt.show to keep figures alive
+_orig_close = plt.close
+_orig_show = plt.show
+plt.close = lambda *a, **kw: None
+plt.show = lambda *a, **kw: None
+
+# Execute the plotting code (with try-finally to guarantee restore)
+try:
+{indented_code}
+finally:
+    plt.close = _orig_close
+    plt.show = _orig_show
 
 # Get current figure
 fig = plt.gcf()
@@ -1307,6 +1332,12 @@ plt.close()
         if not png_path.exists():
             error_msg = f"PNG file was not created: {png_path}"
             logger.error(f"[Bioinformatics] {error_msg}")
+            return error_msg
+
+        # Detect blank figures (empty white PNG with bbox_inches='tight' is typically <2KB)
+        if png_path.stat().st_size < 2000:
+            error_msg = f"Figure appears to be blank (file size: {png_path.stat().st_size} bytes). The plotting code may not have generated visible content."
+            logger.warning(f"[Bioinformatics] {error_msg}")
             return error_msg
 
         # Read PNG and compress to base64
@@ -1385,6 +1416,7 @@ plt.close()
                         break
 
                     # Re-execute with revised code (rebuild wrapper instead of str.replace to avoid corruption)
+                    indented_revised_code = textwrap.indent(revised_code, '    ')
                     revised_wrapped = f'''
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -1401,7 +1433,18 @@ plt.rcParams.update({{
 _figures_dir = {figures_dir_repr}
 Path(_figures_dir).mkdir(exist_ok=True)
 
-{revised_code}
+# Temporarily disable plt.close/plt.show to keep figures alive
+_orig_close = plt.close
+_orig_show = plt.show
+plt.close = lambda *a, **kw: None
+plt.show = lambda *a, **kw: None
+
+# Execute revised code (with try-finally to guarantee restore)
+try:
+{indented_revised_code}
+finally:
+    plt.close = _orig_close
+    plt.show = _orig_show
 
 fig = plt.gcf()
 
@@ -1415,6 +1458,10 @@ plt.close()
                     result = await self.sandbox.execute(revised_wrapped)
 
                     if not result.error and png_path.exists():
+                        # Detect blank revised figure
+                        if png_path.stat().st_size < 2000:
+                            logger.warning(f"[Bioinformatics] Revised figure appears blank (size: {png_path.stat().st_size} bytes)")
+                            break
                         # Update figure with new image
                         figure.png_base64 = self._compress_image_to_base64(png_path, max_width=800)
                         await self._notify("figure", figure.png_base64)

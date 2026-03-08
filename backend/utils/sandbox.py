@@ -593,8 +593,31 @@ print(f"Session saved: {{len(_session_data)}} variables")
                                     if drain_msg['msg_type'] == 'status' and drain_msg['content']['execution_state'] == 'idle':
                                         break
                             except asyncio.TimeoutError:
-                                # Kernel may be in bad state, log but continue
+                                # Kernel may be in bad state, restart it
                                 logger.warning(f"Kernel did not return to idle after interrupt for session {self.session_id}")
+                                try:
+                                    await asyncio.to_thread(self.km.restart_kernel)
+
+                                    # Rebuild client connection
+                                    if self.kc is not None:
+                                        try:
+                                            self.kc.stop_channels()
+                                        except Exception:
+                                            pass
+                                    self.kc = self.km.client()
+                                    self.kc.start_channels()
+
+                                    # Wait for kernel to be ready
+                                    await asyncio.wait_for(self._wait_for_ready(), timeout=30)
+
+                                    # Re-initialize and restore session
+                                    self._initialized = False
+                                    await self._initialize_kernel()
+                                    await self._restore_session()
+
+                                    logger.info(f"Kernel restarted and session restored for session {self.session_id}")
+                                except Exception as restart_error:
+                                    logger.error(f"Failed to restart kernel: {restart_error}")
                         except Exception as interrupt_error:
                             logger.error(f"Failed to interrupt kernel: {interrupt_error}")
                     break
