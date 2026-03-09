@@ -482,13 +482,16 @@ except Exception as e:
 """
         result = await self.execute(restore_code, save_to_history=False)
         
-        if result.success:
+        if result.success and "Session restored:" in (result.output or ""):
             self._session_restored = True
             self._session_restore_failed = False
             logger.info("Session restored successfully")
         else:
             self._session_restore_failed = True
-            logger.warning(f"Session restore failed: {result.error}. Starting with fresh session.")
+            if result.success:
+                logger.warning(f"Session restore code ran but restore failed. Output: {result.output}")
+            else:
+                logger.warning(f"Session restore failed: {result.error}. Starting with fresh session.")
     
     async def save_session(self):
         """Save the current session state using dill - only save data variables"""

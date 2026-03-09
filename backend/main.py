@@ -133,8 +133,8 @@ async def cleanup_stale_sessions():
             async with _state_lock:
                 # Find sessions that are not running and have been inactive
                 for session_id, last_access in list(_session_access_times.items()):
-                    if session_id in workflows:
-                        # Don't evict running sessions
+                    if session_id in workflows or session_id in _initializing_sessions:
+                        # Don't evict running or initializing sessions
                         continue
                     if current_time - last_access > SESSION_CACHE_TTL:
                         sessions_to_evict.append(session_id)
@@ -144,7 +144,7 @@ async def cleanup_stale_sessions():
                     # Sort by access time, oldest first
                     sorted_sessions = sorted(
                         [(sid, _session_access_times.get(sid, 0))
-                         for sid in sessions.keys() if sid not in workflows],
+                         for sid in sessions.keys() if sid not in workflows and sid not in _initializing_sessions],
                         key=lambda x: x[1]
                     )
                     # Evict oldest sessions until we're under the limit
@@ -571,17 +571,10 @@ def _strip_message_base64(msg_type: str, content) -> any:
 async def load_session(session_id: str):
     """Load a session by ID (from memory or disk)"""
     validate_session_id(session_id)
-    # First check memory
-    if session_id in sessions:
-        state = sessions[session_id]
-    else:
-        # Try to load from disk
-        state = await asyncio.to_thread(load_session_from_disk, session_id)
-        if state is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        # Put in memory
-        sessions[session_id] = state
-    
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
     # Return complete session data including analysis results
     return {
         "session_id": state.id,
@@ -719,13 +712,21 @@ async def delete_session(session_id: str):
 
     # Remove from disk (use thread pool for blocking I/O)
     def _delete_from_disk():
+        import shutil
         session_file = SESSION_DIR / f"{session_id}.json"
         if session_file.exists():
             session_file.unlink()
         upload_dir = UPLOAD_DIR / session_id
         if upload_dir.exists():
-            import shutil
             shutil.rmtree(upload_dir)
+        workspace_dir = WORKSPACE_DIR / session_id
+        if workspace_dir.exists():
+            shutil.rmtree(workspace_dir)
+        reports_dir = REPORTS_DIR / session_id
+        if reports_dir.exists():
+            shutil.rmtree(reports_dir)
+        for state_file in STATE_DIR.glob(f"{session_id}*"):
+            state_file.unlink()
 
     await asyncio.to_thread(_delete_from_disk)
 
@@ -773,8 +774,9 @@ async def ensure_session(session_id: str, request: StartRequest):
     )
     
     sessions[session_id] = state
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
     logger.info(f"Recreated session {session_id} after server restart")
-    
+
     return APIResponse(
         success=True,
         message="Session recreated",
@@ -1217,7 +1219,7 @@ async def get_models(session_id: str):
         "pathology": state.custom_models.get("pathology", config.models.pathology_model if config else ""),
         "bioinformatics": state.custom_models.get("bioinformatics", config.models.bioinformatics_model if config else ""),
         "biochemistry": state.custom_models.get("biochemistry", config.models.biochemistry_model if config else ""),
-        "literature": state.custom_models.get("literature", config.models.pi_model if config else "google/gemini-3-flash-preview"),
+        "literature": state.custom_models.get("literature", config.models.literature_model if config else "google/gemini-3-flash-preview"),
         "painter": state.custom_models.get("painter", config.models.painter_model if config else "gemini-2.0-flash-exp-image-generation")
     }
 
@@ -1350,7 +1352,8 @@ async def run_analysis(session_id: str):
         raise HTTPException(status_code=400, detail="Analysis already running")
     
     state.status = TaskStatus.RUNNING
-    
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+
     return APIResponse(
         success=True,
         message="Analysis started. Connect to WebSocket for updates.",
@@ -1369,10 +1372,11 @@ async def pause_analysis(session_id: str):
         raise HTTPException(status_code=400, detail="Analysis not running")
     
     state.status = TaskStatus.PAUSED
-    
+    await asyncio.to_thread(save_session_to_disk, session_id, state)
+
     if session_id in workflows:
         await workflows[session_id].pause(session_id)
-    
+
     return APIResponse(
         success=True,
         message="Analysis paused"
@@ -1391,6 +1395,7 @@ async def resume_analysis(session_id: str):
         state.status = TaskStatus.RUNNING
         # Increment max_rounds to allow additional analysis
         state.max_rounds = state.current_round + 1
+        await asyncio.to_thread(save_session_to_disk, session_id, state)
         return APIResponse(
             success=True,
             message="Re-analysis started"
@@ -1398,6 +1403,7 @@ async def resume_analysis(session_id: str):
     elif state.status == TaskStatus.WAITING_INPUT:
         # Continue from round-end wait (user sent input or skipped)
         state.status = TaskStatus.RUNNING
+        await asyncio.to_thread(save_session_to_disk, session_id, state)
         # Signal the workflow to continue from _wait_for_user_input
         if session_id in workflows:
             workflows[session_id].signal_continue()
@@ -1407,6 +1413,7 @@ async def resume_analysis(session_id: str):
         )
     elif state.status == TaskStatus.PAUSED:
         state.status = TaskStatus.RUNNING
+        await asyncio.to_thread(save_session_to_disk, session_id, state)
         return APIResponse(
             success=True,
             message="Analysis resumed"
@@ -1414,6 +1421,7 @@ async def resume_analysis(session_id: str):
     elif state.status in (TaskStatus.GENERATING_REPORT, TaskStatus.FAILED):
         # Interrupted during report generation or failed — allow re-run
         state.status = TaskStatus.RUNNING
+        await asyncio.to_thread(save_session_to_disk, session_id, state)
         return APIResponse(
             success=True,
             message="Resuming analysis"
@@ -2039,21 +2047,26 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 "timestamp": datetime.now().isoformat()
             })
 
-            # Send buffered messages to allow observer to catch up
-            async with _message_buffer_lock:
-                buffered_messages = _message_buffers.get(session_id, [])
-                if buffered_messages:
-                    logger.info(f"Sending {len(buffered_messages)} buffered messages to observer")
-                    await websocket.send_json({
-                        "type": "message_history",
-                        "content": {
-                            "messages": buffered_messages,
-                            "count": len(buffered_messages)
-                        },
-                        "timestamp": datetime.now().isoformat()
-                    })
         except Exception as e:
-            logger.error(f"Failed to send status/history to observer: {e}")
+            logger.error(f"Failed to send status to observer: {e}")
+
+        # Send buffered messages to allow observer to catch up (outside lock to avoid I/O under lock)
+        async with _message_buffer_lock:
+            buffered_messages = list(_message_buffers.get(session_id, []))
+
+        if buffered_messages:
+            logger.info(f"Sending {len(buffered_messages)} buffered messages to observer")
+            try:
+                await websocket.send_json({
+                    "type": "message_history",
+                    "content": {
+                        "messages": buffered_messages,
+                        "count": len(buffered_messages)
+                    },
+                    "timestamp": datetime.now().isoformat()
+                })
+            except Exception as e:
+                logger.warning(f"Failed to send history to observer: {e}")
 
         # Wait for existing workflow to complete or for disconnect
         # Note: We don't update websockets[session_id] - let the main workflow keep control
@@ -2163,10 +2176,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         }
 
         # Add to message buffer for reconnection recovery
+        # Strip base64 to keep buffer lightweight
+        buf_data = {
+            **msg_data,
+            "content": _strip_message_base64(msg_data["type"], msg_data["content"])
+        }
+
         async with _message_buffer_lock:
             if session_id not in _message_buffers:
                 _message_buffers[session_id] = []
-            _message_buffers[session_id].append(msg_data)
+            _message_buffers[session_id].append(buf_data)
             # Trim buffer to max size
             if len(_message_buffers[session_id]) > MAX_MESSAGE_BUFFER_SIZE:
                 _message_buffers[session_id] = _message_buffers[session_id][-MAX_MESSAGE_BUFFER_SIZE:]
@@ -2468,8 +2487,8 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     )
 
     # Get models from state or use defaults
-    pi_model = state.custom_models.get("pi", "google/gemini-2.5-pro-preview-05-06")
-    bio_model = state.custom_models.get("bioinformatics", "anthropic/claude-opus-4.6")
+    pi_model = state.custom_models.get("pi", config.models.pi_model)
+    bio_model = state.custom_models.get("bioinformatics", config.models.bioinformatics_model)
     
     try:
         workspace_dir = str(WORKSPACE_DIR / session_id)
@@ -2682,9 +2701,9 @@ async def download_full_report(session_id: str):
     
     zip_buffer.seek(0)
     
-    session_name = sessions.get(session_id, {})
-    if hasattr(session_name, 'name'):
-        filename = f"{session_name.name}_full_report.zip"
+    state = await ensure_session_loaded(session_id)
+    if state and hasattr(state, 'name'):
+        filename = f"{state.name}_full_report.zip"
     else:
         filename = f"{session_id}_full_report.zip"
     
@@ -4173,7 +4192,7 @@ async def chat_with_pi(
 
     # --- Build context & prompt ---
     context, figure_inventory = _build_chat_context(state)
-    pi_model = state.custom_models.get("pi", "google/gemini-2.5-pro-preview-05-06")
+    pi_model = state.custom_models.get("pi", config.models.pi_model)
     pi_temp = state.custom_temperatures.get("pi", 0.5)
 
     system_prompt = (

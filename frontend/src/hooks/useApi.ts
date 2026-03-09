@@ -162,7 +162,7 @@ export function useSession() {
       }).filter((r: any) => r !== null)
 
       // Validate status is a known value
-      const validStatuses = ['pending', 'running', 'paused', 'waiting_input', 'completed', 'failed'] as const
+      const validStatuses = ['pending', 'running', 'paused', 'waiting_input', 'completed', 'failed', 'generating_report'] as const
       const status = validStatuses.includes(data.status) ? data.status : 'pending'
 
       const session: Session = {

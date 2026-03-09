@@ -1472,7 +1472,7 @@ plt.close()
                 if review.get('approved', False):
                     figure.review_status = FigureReviewStatus.APPROVED
                     figure.revision_history = revision_history
-                    state.publication_figures.append(figure)
+                    self._upsert_publication_figure(state, figure)
                     logger.info(f"[Bioinformatics] Figure {figure_name} approved by PI")
                     await self._notify("status", f"Figure {figure_name} approved by PI")
                     return f"Figure {figure_name} has been approved by PI and saved.\nQuality score: {review.get('quality_score', 'N/A')}/10\nFeedback: {review.get('feedback', 'Approved')}"
@@ -1570,13 +1570,24 @@ plt.close()
 
             # After 3 attempts, save with revision_requested status
             figure.review_status = FigureReviewStatus.REVISION_REQUESTED
-            state.publication_figures.append(figure)
+            self._upsert_publication_figure(state, figure)
             logger.warning(f"[Bioinformatics] Figure {figure_name} not fully approved after {revision_count} revisions")
             return f"Figure {figure_name} saved after {revision_count} revision attempts. Status: needs further revision.\nLast feedback: {figure.pi_feedback}"
 
         # No review callback, just save the figure
-        state.publication_figures.append(figure)
+        self._upsert_publication_figure(state, figure)
         return f"Figure {figure_name} has been generated and saved.\nPNG: {png_path}\nPDF: {pdf_path}"
+
+    def _upsert_publication_figure(self, state, figure):
+        """Replace existing figure with same name, or append if new."""
+        existing_idx = next(
+            (i for i, f in enumerate(state.publication_figures) if f.name == figure.name),
+            None
+        )
+        if existing_idx is not None:
+            state.publication_figures[existing_idx] = figure
+        else:
+            state.publication_figures.append(figure)
 
     def _compress_image_to_base64(self, image_path: Path, max_width: int = 800) -> str:
         """

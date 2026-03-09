@@ -102,6 +102,19 @@ async def retry_with_backoff(
     for attempt in range(max_retries + 1):
         try:
             return await asyncio.wait_for(func(), timeout=request_timeout)
+        except RateLimitError as e:
+            # RateLimitError is a subclass of APIError, so it must be caught BEFORE
+            # RETRYABLE_EXCEPTIONS (which includes APIError) to get special handling.
+            last_exception = e
+            if attempt < max_retries:
+                delay = retry_delay_base * (attempt + 1) * 2  # Double the delay for rate limits
+                logger.warning(
+                    f"[{agent_name}] Rate limited (attempt {attempt + 1}/{max_retries + 1}). "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"[{agent_name}] Rate limit exceeded after {max_retries + 1} attempts")
         except RETRYABLE_EXCEPTIONS as e:
             last_exception = e
             if attempt < max_retries:
@@ -115,18 +128,6 @@ async def retry_with_backoff(
                 logger.error(
                     f"[{agent_name}] Request failed after {max_retries + 1} attempts: {type(e).__name__}: {str(e)}"
                 )
-        except RateLimitError as e:
-            # For rate limit errors, wait longer
-            last_exception = e
-            if attempt < max_retries:
-                delay = retry_delay_base * (attempt + 1) * 2  # Double the delay for rate limits
-                logger.warning(
-                    f"[{agent_name}] Rate limited (attempt {attempt + 1}/{max_retries + 1}). "
-                    f"Retrying in {delay:.1f}s..."
-                )
-                await asyncio.sleep(delay)
-            else:
-                logger.error(f"[{agent_name}] Rate limit exceeded after {max_retries + 1} attempts")
     
     raise last_exception
 
@@ -572,9 +573,13 @@ class OpenAICompatibleClient:
     ) -> AsyncGenerator[str, None]:
         """
         Stream chat response from OpenAI-compatible API
-        
+
         Yields:
             Content chunks
+
+        TODO: Add retry mechanism for stream requests. Currently, if the stream
+        connection fails mid-stream, the entire response is lost. Unlike chat()
+        and chat_with_tools(), this method has no retry_with_backoff wrapper.
         """
         logger.info(f"[{self.agent_name}] Starting stream request to {model}")
         

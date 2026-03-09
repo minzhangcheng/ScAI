@@ -1149,6 +1149,16 @@ Report key findings when you complete each major analysis phase."""
                 analysis_state.analysis_log.append(step)
                 existing_step_ids.add(step.id)
 
+        # Dedup publication_figures by name to handle node retries
+        seen_fig_names = {}
+        for i, fig in enumerate(analysis_state.publication_figures):
+            seen_fig_names[fig.name] = i  # later index wins (keeps latest)
+        if len(seen_fig_names) < len(analysis_state.publication_figures):
+            analysis_state.publication_figures = [
+                analysis_state.publication_figures[i]
+                for i in sorted(seen_fig_names.values())
+            ]
+
         # Step 3: PI summarizes results
         await self._send_message("status", "PI is reviewing analysis results...", AgentType.PI)
 
@@ -1411,10 +1421,17 @@ Return ONLY the JSON array, nothing else."""
 
         try:
             response = await self.literature_agent.chat(prompt, temperature=0.2)
-            # Strip markdown code fences if present
-            cleaned = response.strip().strip('`')
-            if cleaned.startswith('json'):
-                cleaned = cleaned[4:].strip()
+            # Strip markdown code fences if present (e.g. ```json ... ```)
+            cleaned = response.strip()
+            if cleaned.startswith('```'):
+                first_newline = cleaned.find('\n')
+                if first_newline != -1:
+                    cleaned = cleaned[first_newline + 1:]
+                else:
+                    cleaned = cleaned[3:]
+            if cleaned.endswith('```'):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
             gaps = json.loads(cleaned)
             if isinstance(gaps, list):
                 return [g for g in gaps if isinstance(g, str)]

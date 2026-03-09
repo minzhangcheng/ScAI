@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by six specialized AI agents that collaborate like a research team.
 
-**Version**: 0.11.0
+**Version**: 0.11.1
 
 ## Core Features
 
@@ -308,6 +308,20 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.11.1 (2026-03-09)
+
+- Fixed duplicate publication figures: bioinformatics agent now upserts figures by name instead of always appending, with additional dedup in workflow sync
+- Fixed session cleanup: deleting a session now also removes workspace, reports, and state files from disk
+- Fixed session eviction: initializing sessions are no longer evicted by the cleanup task
+- Fixed literature model config: get-models endpoint now correctly reads `literature_model` instead of `pi_model`
+- Fixed hardcoded model names: report generation and chat now use configured model from settings instead of hardcoded defaults
+- Improved session persistence: status changes (start, pause, resume) are now immediately saved to disk
+- Improved WebSocket reconnection: message buffer now strips base64 data to reduce memory usage; history send moved outside lock to avoid I/O blocking
+- Improved LLM retry logic: `RateLimitError` is now caught before generic `APIError` to ensure proper backoff handling
+- Improved session restore detection: sandbox now verifies restore output instead of relying solely on exit code
+- Improved markdown code fence stripping in literature gap analysis JSON parsing
+- Added `generating_report` as a valid session status in the frontend
 
 ### v0.11.0 (2026-03-09)
 
