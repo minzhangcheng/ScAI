@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by six specialized AI agents that collaborate like a research team.
 
-**Version**: 0.10.3
+**Version**: 0.11.0
 
 ## Core Features
 
@@ -212,8 +212,8 @@ All uploaded files can be downloaded back via the download buttons in the Data p
 
 Click **"Start Analysis"** in the Analysis panel. The system will proceed through:
 
-1. **PI Planning** — PI Agent reviews your data and creates an analysis plan, assigning specific tasks to each agent
-2. **Agent Execution** — Pathology, Bioinformatics, Biochemistry, and Literature agents run their analyses. You can monitor progress in real-time via the message stream
+1. **PI Planning** — PI Agent reviews your data and creates an analysis plan, assigning specific tasks to each agent. As each agent completes, PI dynamically refines the next agent's tasks based on accumulated results
+2. **Agent Execution** — Biochemistry, Pathology, Bioinformatics, and Literature agents run their analyses sequentially. Each agent benefits from the results of previously completed agents in the same round. You can monitor progress in real-time via the message stream
 3. **PI Synthesis** — PI Agent synthesizes findings from all agents, identifies conflicts, and summarizes key results
 
 The Bioinformatics Agent runs code in a local Jupyter kernel — you can see the code and outputs in real-time. All figures are automatically saved as both PNG and high-resolution PDF.
@@ -308,6 +308,15 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.11.0 (2026-03-09)
+
+- Changed agent execution order to biochemistry → pathology → bioinformatics → literature. Biochemistry now runs first so its results inform downstream agents
+- Added dynamic PI planning: PI Agent uses `plan_agent_tasks()` to refine each downstream agent's tasks based on already-completed results within the same round, building a coherent chain of thought
+- Enhanced cross-agent context: biochemistry findings are now injected into pathology and bioinformatics agent prompts for cross-referencing
+- PI resets message history at the start of each round's planning phase; dynamic planning calls accumulate context within the round
+- Round 2+ planning now includes previous round PI summary as strategic overview for dynamic task refinement
+- Literature topics are dynamically refined based on all completed agent results before search
 
 ### v0.10.3 (2026-03-09)
 

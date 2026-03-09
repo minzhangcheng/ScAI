@@ -106,11 +106,11 @@ Reply in JSON format with the following fields:
 Project Name: {state.name}
 Research Objective: {user_instruction}
 
-You need to develop the first round analysis plan for the team. Please assign specific tasks for each direction:
+You need to develop the first round analysis plan for the team. Please assign specific tasks for each direction (listed in execution order):
 
-1. Pathology analysis: What types of sections need to be analyzed? What should be the focus?
-2. Bioinformatics analysis: Basic single-cell sequencing analysis workflow, cell types and pathways to focus on
-3. Biochemistry analysis: What indicators need attention?
+1. Biochemistry analysis: What indicators need attention?
+2. Pathology analysis: What types of sections need to be analyzed? What should be the focus?
+3. Bioinformatics analysis: Basic single-cell sequencing analysis workflow, cell types and pathways to focus on
 4. Literature research: What specific topics should be searched in PubMed?
    - Each topic should be a focused research question (e.g., "Role of TGF-beta signaling in liver fibrosis progression")
    - Avoid overly broad topics (e.g., "liver disease") or overly specific gene lists
@@ -119,9 +119,9 @@ You need to develop the first round analysis plan for the team. Please assign sp
 Reply in JSON format as follows:
 {{
     "overview": "Overview of overall research strategy",
+    "biochemistry_tasks": ["task1", "task2", ...],
     "pathology_tasks": ["task1", "task2", ...],
     "bioinformatics_tasks": ["task1", "task2", ...],
-    "biochemistry_tasks": ["task1", "task2", ...],
     "literature_topics": ["topic1", "topic2", ...]
 }}
 """
@@ -144,6 +144,83 @@ Reply in JSON format as follows:
             "literature_topics": ["Literature related to the research topic and phenotype"]
         }
     
+    async def plan_agent_tasks(
+        self,
+        agent_name: str,
+        original_tasks: List[str],
+        completed_results: Dict[str, List[str]],
+        overall_strategy: str = "",
+        research_objective: str = "",
+    ) -> List[str]:
+        """Dynamically refine tasks for an agent based on already-completed results.
+
+        Uses self.chat() to accumulate context within the round, building a
+        coherent chain of thought across successive agent planning calls.
+
+        Args:
+            agent_name: Name of the target agent (e.g., "pathology", "bioinformatics")
+            original_tasks: Tasks originally assigned by PI planning
+            completed_results: Dict of findings from already-completed agents
+            overall_strategy: Overview/strategy string for context
+            research_objective: The project's research objective
+
+        Returns:
+            Refined list of task strings. Falls back to original_tasks on error.
+        """
+        if not completed_results:
+            return original_tasks
+
+        # Build completed results summary
+        results_parts = []
+        for key, findings in completed_results.items():
+            label = key.replace("_findings", "").capitalize()
+            truncated = findings[:5]
+            results_parts.append(
+                f"### {label} Findings\n"
+                + "\n".join(f"- {f[:200]}" for f in truncated)
+            )
+        results_summary = "\n\n".join(results_parts)
+
+        prompt = f"""You are the PI coordinating a multi-agent analysis.
+
+## Research Objective
+{research_objective}
+
+## Overall Strategy
+{overall_strategy or "Not available"}
+
+## Completed Agent Results (this round)
+{results_summary}
+
+## Original Tasks for {agent_name.capitalize()} Agent
+{chr(10).join(f"- {t}" for t in original_tasks)}
+
+Based on the completed results, refine the tasks for the {agent_name} agent.
+You may: keep tasks unchanged, add specific focus areas, modify tasks to leverage
+insights, or add cross-referencing instructions.
+
+Return a JSON object:
+{{
+    "refined_tasks": ["task1", "task2", ...]
+}}
+
+Keep tasks actionable and specific. Do NOT remove core tasks unless truly unnecessary."""
+
+        try:
+            response = await self.chat(prompt, temperature=0.3)
+            result = self._safe_parse_json(response, default={})
+            refined = result.get("refined_tasks", [])
+            if refined and isinstance(refined, list) and all(isinstance(t, str) for t in refined):
+                logger.info(
+                    f"[PI] Dynamic planning refined {len(original_tasks)} -> "
+                    f"{len(refined)} tasks for {agent_name}"
+                )
+                return refined
+        except Exception as e:
+            logger.warning(f"[PI] Dynamic planning failed for {agent_name}: {e}")
+
+        return original_tasks
+
     async def process_human_guidance(
         self,
         state: AnalysisState,
@@ -151,7 +228,7 @@ Reply in JSON format as follows:
     ) -> Dict[str, Any]:
         """
         Process human researcher's guidance and adjust analysis direction
-        
+
         Args:
             state: Current analysis state
             human_input: Human researcher's guidance/instruction
@@ -517,14 +594,14 @@ Research Objective: {state.initial_instruction}
 
 This is the results summary for Round {state.current_round}. Please synthesize:
 
+## Biochemistry Analysis Results
+{biochemistry_result or "No new results"}
+
 ## Pathology Analysis Results
 {pathology_result or "No new results"}
 
 ## Bioinformatics Analysis Results
 {bioinformatics_result or "No new results"}
-
-## Biochemistry Analysis Results
-{biochemistry_result or "No new results"}
 
 ## Literature Research Results
 {literature_result or "No new results"}
@@ -532,16 +609,16 @@ This is the results summary for Round {state.current_round}. Please synthesize:
 Please provide comprehensive analysis in JSON format:
 {{
     "summary": "Summary of this round",
+    "biochemistry_findings": ["biochemistry finding 1", ...],
     "pathology_findings": ["pathology finding 1", ...],
     "bioinformatics_findings": ["bioinformatics finding 1", ...],
-    "biochemistry_findings": ["biochemistry finding 1", ...],
     "literature_findings": ["literature finding 1", ...],
     "conflicts": [
         {{"description": "conflict description", "resolution": "solution", "agents": ["agent1", "agent2"]}}
     ],
+    "next_biochemistry": ["next biochemistry task"],
     "next_pathology": ["next pathology task"],
     "next_bioinformatics": ["next bioinformatics task"],
-    "next_biochemistry": ["next biochemistry task"],
     "next_literature": ["next literature topic"],
     "new_findings": true/false,
     "should_stop": true/false,
@@ -741,18 +818,18 @@ Please write in academic paper style.
         """Extract next steps from parsed data"""
         steps = []
         
-        if "next_pathology" in data:
-            for task in data["next_pathology"]:
-                steps.append(f"[Pathology] {task}")
-        
-        if "next_bioinformatics" in data:
-            for task in data["next_bioinformatics"]:
-                steps.append(f"[Bioinformatics] {task}")
-        
         if "next_biochemistry" in data:
             for task in data["next_biochemistry"]:
                 steps.append(f"[Biochemistry] {task}")
-        
+
+        if "next_pathology" in data:
+            for task in data["next_pathology"]:
+                steps.append(f"[Pathology] {task}")
+
+        if "next_bioinformatics" in data:
+            for task in data["next_bioinformatics"]:
+                steps.append(f"[Bioinformatics] {task}")
+
         if "next_literature" in data:
             for topic in data["next_literature"]:
                 steps.append(f"[Literature] {topic}")

@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.10.3
+**Version**: 0.11.0
 **Last Updated**: 2026-03-09
 
 ## Project Overview
@@ -75,7 +75,7 @@ intesc/                         # Code directory
 │   │                           # - In-place session info editing (name + instruction)
 │   │                           # - File download (/api/download with path containment)
 │   │
-│   ├── workflow.py             # LangGraph workflow (~2240 lines)
+│   ├── workflow.py             # LangGraph workflow (~2265 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
@@ -89,7 +89,8 @@ intesc/                         # Code directory
 │   │                           # - Report-only resume via generate_report()
 │   │                           # - Selective agent activation (skip_nodes from agents_for_next_round)
 │   │                           # - Agent auto-activation when PI tasks exist but agent not in agents_for_next_round
-│   │                           # - Pathology findings context sharing with bioinformatics agent
+│   │                           # - Dynamic PI planning: refines downstream agent tasks based on completed results
+│   │                           # - Cross-agent context: biochemistry → pathology → bioinformatics findings sharing
 │   │                           # - Analysis log propagation and deduplication (by step ID)
 │   │                           # - Graphic abstract revision loop (PI review + Painter revision + best selection)
 │   │
@@ -117,7 +118,7 @@ intesc/                         # Code directory
 │   │
 │   ├── agents/
 │   │   ├── base.py             # Agent base class
-│   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer + graphic abstract reviewer, history reset on synthesis)
+│   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer + graphic abstract reviewer + dynamic task planner)
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install, cumulative revision history, analysis log)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2, ~785 lines)
@@ -200,7 +201,7 @@ class SingleCellAnalysisWorkflow:
 
     async def run(self, state: AnalysisState):
         # Iteratively execute analysis rounds
-        # Each round: PI planning → Pathology → Bioinformatics → Biochemistry → Literature → PI synthesis
+        # Each round: PI planning → Biochemistry → Pathology → Bioinformatics → Literature → PI synthesis
 ```
 
 **Workflow Graph Structure:**
@@ -212,15 +213,15 @@ initialize_round ◄────────────────────
   pi_planning                             │
       │                                   │
       ▼ (sequential)                      │
-  pathology_analysis                      │
-      │                                   │
-      ▼                                   │
-  bioinformatics_analysis                 │
-      │                                   │
-      ▼                                   │
   biochemistry_analysis                   │
       │                                   │
-      ▼                                   │
+      ▼  (PI refines tasks)               │
+  pathology_analysis                      │
+      │                                   │
+      ▼  (PI refines tasks)               │
+  bioinformatics_analysis                 │
+      │                                   │
+      ▼  (PI refines tasks)               │
   literature_research                     │
       │                                   │
       ▼                                   │
@@ -250,7 +251,7 @@ initialize_round ◄────────────────────
 
 **Key Features:**
 
-1. **Sequential Execution**: Pathology → Bioinformatics → Biochemistry Agents run sequentially, with Bioinformatics consulting PI and Literature via callbacks
+1. **Sequential Execution**: Biochemistry → Pathology → Bioinformatics Agents run sequentially, with Bioinformatics consulting PI and Literature via callbacks. Biochemistry runs first so its results inform downstream agents.
 2. **Retry Mechanism**: `@with_retry(max_retries=3)` decorator with exponential backoff
 3. **Structured Error Tracking**: Errors captured in `AgentError` model with agent, type, message, details
 4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
@@ -269,7 +270,8 @@ initialize_round ◄────────────────────
 14. **GENERATING_REPORT Status**: New `TaskStatus.GENERATING_REPORT` marks sessions in report generation phase, enabling detection of interrupted report generation on resume.
 15. **Selective Agent Activation**: From round 2 onwards, PI Agent decides which agents to activate via `RoundResult.agents_for_next_round`. Bioinformatics Agent always runs. `_pi_planning()` builds `skip_nodes` from the previous round's `agents_for_next_round`, and `@with_retry` skips deactivated nodes with WebSocket notification. Each round's `skip_nodes` is rebuilt fresh (not accumulated), so previously skipped agents can be re-activated. **Auto-activation**: If PI's `next_steps` contains tasks prefixed with an agent name (e.g., `[Pathology] ...`) but that agent is not in `agents_for_next_round`, the workflow auto-activates it.
 21. **Analysis Log Propagation**: `_post_bioinformatics()` collects `analysis_log` from the bioinformatics agent result, deduplicates by step ID, and appends to `AnalysisState.analysis_log`. Code history is similarly deduped by `CodeExecution.id`.
-22. **Pathology Context Sharing**: Current round pathology findings (up to 5) are injected into the bioinformatics agent's instruction prompt, enabling informed analysis based on histological observations.
+22. **Cross-Agent Context Sharing**: Biochemistry findings are injected into pathology and bioinformatics agent prompts. Pathology findings are injected into bioinformatics agent prompts. `_collect_current_round_results()` collects findings from already-completed agents for dynamic PI planning. Each agent benefits from the accumulated results of all preceding agents in the same round.
+23. **Dynamic PI Planning**: PI Agent's `plan_agent_tasks()` method refines each downstream agent's tasks based on already-completed results within the round. Uses `self.chat()` to accumulate context across successive planning calls, building a coherent chain of thought. PI history is reset at the start of each round's planning phase. For round 2+, previous round PI summary is passed as strategic overview context.
 16. **Docker Pip Install**: Bioinformatics Agent's `_validate_code()` allows `subprocess` calls when all usages are pip/pip3 install commands (safe in Docker environments). System prompt includes package installation guidelines.
 20. **Graphic Abstract Revision Loop**: The graphic abstract generation now uses a 3-phase revision process: (1) initial generation by Painter Agent; (2) up to 2 rounds of PI review via vision API (`review_graphic_abstract()`) + Painter revision with accumulated feedback history (`revise_graphic_abstract()`); (3) PI selects the best candidate from all versions using side-by-side vision comparison (`select_best_graphic_abstract()`). Metadata stored on `GraphicAbstract`: `revision_count`, `revision_history`, `all_candidates`, `selected_index`.
 

@@ -322,11 +322,11 @@ class SingleCellAnalysisWorkflow:
         # Add edges - sequential execution
         self.graph.add_edge("initialize_round", "pi_planning")
 
-        # Sequential analysis: pathology -> bioinformatics -> biochemistry -> literature
-        self.graph.add_edge("pi_planning", "pathology_analysis")
+        # Sequential analysis: biochemistry -> pathology -> bioinformatics -> literature
+        self.graph.add_edge("pi_planning", "biochemistry_analysis")
+        self.graph.add_edge("biochemistry_analysis", "pathology_analysis")
         self.graph.add_edge("pathology_analysis", "bioinformatics_analysis")
-        self.graph.add_edge("bioinformatics_analysis", "biochemistry_analysis")
-        self.graph.add_edge("biochemistry_analysis", "literature_research")
+        self.graph.add_edge("bioinformatics_analysis", "literature_research")
         self.graph.add_edge("literature_research", "pi_synthesis")
 
         # After synthesis, wait for user input (blocks until frontend signals continue)
@@ -584,6 +584,20 @@ Be specific and actionable in your response."""
             + "\n".join(parts)
         )
 
+    def _collect_current_round_results(self, state: WorkflowState) -> Dict[str, List[str]]:
+        """Collect findings from agents already completed in the current round."""
+        collected = {}
+        for result_key, findings_key in [
+            ("biochemistry_result", "biochemistry_findings"),
+            ("pathology_result", "pathology_findings"),
+            ("bioinformatics_result", "bioinformatics_findings"),
+        ]:
+            result = state.get(result_key)
+            if (result and result.get("findings")
+                    and result.get("status") not in ("skipped", "no_data", "waiting_data")):
+                collected[findings_key] = result["findings"]
+        return collected
+
     def _build_code_history_summary(
         self,
         analysis_state: AnalysisState,
@@ -766,6 +780,11 @@ Be specific and actionable in your response."""
         human_guidance = state.get("human_guidance")
         adjusted_instructions = state.get("adjusted_instructions")
 
+        # Reset PI message history at start of each round's planning phase.
+        # Dynamic planning calls (plan_agent_tasks) will accumulate context
+        # within this round via self.chat(), building a coherent chain of thought.
+        self.pi_agent.reset_history()
+
         logger.info(f"[{self.session_id}] PI planning for round {analysis_state.current_round}")
         if human_guidance:
             logger.info(f"[{self.session_id}] Human guidance received: {human_guidance[:100]}...")
@@ -816,6 +835,11 @@ Be specific and actionable in your response."""
                     if step.startswith(prefix):
                         instructions[key].append(step.split("] ", 1)[1].strip() if "] " in step else step[len(prefix):].strip())
                         break
+
+            # Add overview for round 2+ so PI dynamic planning has strategic context
+            if last_round:
+                summary = last_round.pi_summary or "Continue analysis based on previous round findings."
+                instructions["overview"] = summary[:500]
 
             # Fallback: if prefix matching extracted no tasks at all, use PI summary
             fallback_all_agents = False
@@ -929,11 +953,34 @@ Be specific and actionable in your response."""
             AgentType.PATHOLOGY
         )
         
+        # Dynamic PI planning: refine pathology tasks based on biochemistry results
+        overview = instructions.get("overview", "")
+        if overview:  # Guard: skip for adjusted_instructions (no overview field)
+            completed = self._collect_current_round_results(state)
+            if completed:
+                await self._send_message("status", "PI is refining pathology tasks...", AgentType.PI)
+                tasks = await self.pi_agent.plan_agent_tasks(
+                    agent_name="pathology",
+                    original_tasks=tasks,
+                    completed_results=completed,
+                    overall_strategy=overview,
+                    research_objective=analysis_state.initial_instruction,
+                )
+
         # Enrich instruction with previous findings for round 2+
         task_instruction = "\n".join(tasks)
         previous_context = self._build_previous_findings_context(analysis_state, "pathology")
         if previous_context:
             task_instruction += previous_context
+
+        # Add biochemistry context for cross-reference
+        biochemistry_result = state.get("biochemistry_result")
+        if biochemistry_result and biochemistry_result.get("findings"):
+            biochem_findings = biochemistry_result["findings"][:5]
+            task_instruction += (
+                "\n\nCurrent round biochemistry findings:\n"
+                + "\n".join(f"- {f}" for f in biochem_findings)
+            )
 
         # Let exceptions propagate to @with_retry decorator for proper retry handling
         result = await self.pathology_agent.process(
@@ -1003,7 +1050,21 @@ Be specific and actionable in your response."""
         # Get PI instructions from workflow state
         pi_instructions = state.get("pi_instructions", {})
         bioinf_tasks = pi_instructions.get("bioinformatics_tasks", [])
-        
+
+        # Dynamic PI planning: refine bioinformatics tasks based on completed results
+        overview = pi_instructions.get("overview", "")
+        if overview:
+            completed = self._collect_current_round_results(state)
+            if completed:
+                await self._send_message("status", "PI is refining bioinformatics tasks...", AgentType.PI)
+                bioinf_tasks = await self.pi_agent.plan_agent_tasks(
+                    agent_name="bioinformatics",
+                    original_tasks=bioinf_tasks,
+                    completed_results=completed,
+                    overall_strategy=overview,
+                    research_objective=analysis_state.initial_instruction,
+                )
+
         # Build previous findings and code history context for round 2+
         previous_bio_findings = self._build_previous_findings_context(analysis_state, "bioinformatics")
         code_history_context = ""
@@ -1020,6 +1081,16 @@ Be specific and actionable in your response."""
                 + "\n".join(f"- {f}" for f in path_findings)
             )
 
+        # Include current round biochemistry findings if available
+        biochemistry_context = ""
+        biochemistry_result = state.get("biochemistry_result")
+        if biochemistry_result and biochemistry_result.get("findings"):
+            biochem_findings = biochemistry_result["findings"][:5]
+            biochemistry_context = (
+                "\n\nCurrent round biochemistry findings:\n"
+                + "\n".join(f"- {f}" for f in biochem_findings)
+            )
+
         # Build comprehensive instruction for bioinformatics agent
         instruction = f"""Analyze single-cell RNA-seq data for project: {analysis_state.name}
 
@@ -1029,6 +1100,7 @@ PI's analysis goals for this round:
 {chr(10).join(f"- {task}" for task in bioinf_tasks) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
 {human_guidance}
 {pathology_context}
+{biochemistry_context}
 {previous_bio_findings}
 {code_history_context}
 
@@ -1137,11 +1209,10 @@ Report key findings when you complete each major analysis phase."""
         if previous_context:
             task_instruction += previous_context
 
-        # Pass current round's findings so biochemistry can cross-reference
-        current_round_context = {
-            "pathology_findings": state.get("pathology_result", {}).get("findings", []) if state.get("pathology_result") else [],
-            "bioinformatics_findings": state.get("bioinformatics_result", {}).get("findings", []) if state.get("bioinformatics_result") else [],
-        }
+        # Biochemistry runs first — no current-round cross-agent results available.
+        # The biochemistry agent's _get_other_agent_context() will fall back to
+        # previous round results from state.round_results for round 2+.
+        current_round_context = {}
 
         result = await self.biochemistry_agent.process(
             analysis_state,
@@ -1182,16 +1253,33 @@ Report key findings when you complete each major analysis phase."""
 
         topics = instructions.get("literature_topics", [])
         logger.info(f"[{self.session_id}] Starting literature research with topics: {topics}")
+
+        # Dynamic PI planning: refine literature topics based on all completed results
+        overview = instructions.get("overview", "")
+        if overview and topics:
+            completed = self._collect_current_round_results(state)
+            if completed:
+                await self._send_message("status", "PI is refining literature topics...", AgentType.PI)
+                topics = await self.pi_agent.plan_agent_tasks(
+                    agent_name="literature",
+                    original_tasks=topics,
+                    completed_results=completed,
+                    overall_strategy=overview,
+                    research_objective=analysis_state.initial_instruction,
+                )
+
         if not topics:
             # Default topics based on other findings
             path_findings = state.get("pathology_result", {}).get("findings", []) if state.get("pathology_result") else []
             bio_findings = state.get("bioinformatics_result", {}).get("findings", []) if state.get("bioinformatics_result") else []
+            biochem_findings = state.get("biochemistry_result", {}).get("findings", []) if state.get("biochemistry_result") else []
 
-            if path_findings or bio_findings:
+            all_source_findings = path_findings + bio_findings + biochem_findings
+            if all_source_findings:
                 # Use truncated findings as search keywords (full findings are too long for search queries)
                 short_findings = [
                     (f[:80] if isinstance(f, str) else str(f)[:80])
-                    for f in (path_findings + bio_findings)[:3]
+                    for f in all_source_findings[:3]
                 ]
                 topics = [f"single cell sequencing {' '.join(short_findings)}"]
 
@@ -1199,7 +1287,7 @@ Report key findings when you complete each major analysis phase."""
 
         # Collect current round findings from other agents for literature context
         current_round_findings: List[str] = []
-        for result_key in ("pathology_result", "bioinformatics_result", "biochemistry_result"):
+        for result_key in ("biochemistry_result", "pathology_result", "bioinformatics_result"):
             result = state.get(result_key)
             if result and result.get("findings"):
                 for f in result["findings"][:3]:
@@ -1261,6 +1349,8 @@ Report key findings when you complete each major analysis phase."""
                 result = await self.literature_agent.process(
                     analysis_state,
                     enriched_topic,
+                    # True routes to _do_research() for full PubMed pipeline,
+                    # not the external Deep Research API (guarded by is_deep_research_available).
                     use_deep_research=True,
                     current_round_findings=current_round_findings
                 )
@@ -1343,9 +1433,9 @@ Return ONLY the JSON array, nothing else."""
         # Extract findings from each agent, including error/status info for PI awareness
         agent_results = {}
         for agent_name, result_key in [
+            ("biochemistry", "biochemistry_result"),
             ("pathology", "pathology_result"),
             ("bioinformatics", "bioinformatics_result"),
-            ("biochemistry", "biochemistry_result"),
             ("literature", "literature_result"),
         ]:
             result = state.get(result_key, {}) or {}
