@@ -72,6 +72,55 @@ class CodeExecution(BaseModel):
     execution_time: float = 0.0
     timestamp: datetime = Field(default_factory=datetime.now)
 
+class AnalysisStep(BaseModel):
+    """生信Agent分析日志中的一个步骤，涵盖所有工具调用类型"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    step_number: int
+    step_type: str  # "execute_code" | "consult_pi" | "search_literature" | "annotate_clusters" | "report_findings" | "generate_publication_figure" | "text_response"
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+    # Agent reasoning (LLM response.content, truncated to 2000 chars)
+    agent_reasoning: Optional[str] = None
+
+    # execute_code fields
+    code: Optional[str] = None
+    code_output: Optional[str] = None
+    code_error: Optional[str] = None
+    code_description: Optional[str] = None
+    code_step_type: Optional[str] = None  # "technical" | "biological" (from tool arg step_type)
+    saved_figure_filenames: List[str] = Field(default_factory=list)  # disk PNG filenames, no base64
+
+    # consult_pi fields
+    pi_question: Optional[str] = None
+    pi_context: Optional[str] = None
+    pi_options: List[str] = Field(default_factory=list)
+    pi_response: Optional[str] = None
+
+    # search_literature fields
+    literature_topic: Optional[str] = None
+    literature_result: Optional[str] = None
+
+    # annotate_clusters fields
+    cluster_markers_summary: Optional[str] = None
+    annotation_tissue: Optional[str] = None
+    annotation_organism: Optional[str] = None
+    annotation_result_summary: Optional[str] = None
+
+    # report_findings fields
+    findings: List[str] = Field(default_factory=list)
+    findings_summary: Optional[str] = None
+    findings_suggestions: List[str] = Field(default_factory=list)
+
+    # generate_publication_figure fields
+    pub_figure_name: Optional[str] = None
+    pub_figure_description: Optional[str] = None
+    pub_figure_type: Optional[str] = None
+    pub_figure_code: Optional[str] = None
+    pub_figure_result: Optional[str] = None
+
+    # text_response fields
+    text_content: Optional[str] = None
+
 class BioinformaticsCheckpoint(BaseModel):
     """Checkpoint for bioinformatics analysis progress - enables step-level recovery"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -86,6 +135,7 @@ class BioinformaticsCheckpoint(BaseModel):
     findings: List[str] = Field(default_factory=list)
     figures: List[str] = Field(default_factory=list)  # Figure IDs or paths
     code_history: List[Dict[str, Any]] = Field(default_factory=list)
+    analysis_log: List[Dict[str, Any]] = Field(default_factory=list)  # Serialized AnalysisStep dicts via model_dump()
     analysis_context: Dict[str, Any] = Field(default_factory=dict)
 
     # Resumption info
@@ -179,6 +229,7 @@ class PublicationFigure(BaseModel):
     png_path: str  # Path to PNG thumbnail
     pdf_path: str  # Path to high-res PDF
     png_base64: Optional[str] = None  # Base64 encoded PNG for preview (compressed)
+    interpretation: Optional[str] = None  # Scientific interpretation of the figure
     review_status: FigureReviewStatus = FigureReviewStatus.PENDING
     pi_feedback: Optional[str] = None
     revision_history: List[Dict[str, Any]] = Field(default_factory=list)  # Accumulated feedback from all revision rounds
@@ -193,6 +244,7 @@ class PublicationTable(BaseModel):
     csv_path: str
     columns: List[str] = Field(default_factory=list)
     preview_data: List[Dict[str, Any]] = Field(default_factory=list)  # First few rows for preview
+    interpretation: Optional[str] = None  # Scientific interpretation of the table data
     review_status: FigureReviewStatus = FigureReviewStatus.PENDING
     pi_feedback: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
@@ -236,7 +288,10 @@ class AnalysisState(BaseModel):
     
     # Code execution history (for reproducibility)
     code_history: List[CodeExecution] = Field(default_factory=list)
-    
+
+    # Comprehensive analysis log (ALL steps with agent reasoning, chronological)
+    analysis_log: List[AnalysisStep] = Field(default_factory=list)
+
     # Treatment groups and uploaded data (multi-group, multi-sample)
     treatment_groups: List[TreatmentGroup] = Field(default_factory=list)
     data_files: List[DataFile] = Field(default_factory=list)

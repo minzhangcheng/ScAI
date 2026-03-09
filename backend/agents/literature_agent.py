@@ -82,6 +82,13 @@ class LiteratureAgent(BaseAgent):
                 google_api_key, proxy_url=proxy_url
             )
 
+    @property
+    def is_deep_research_available(self) -> bool:
+        """Check if deep research mode is available and properly configured."""
+        if self.literature_mode not in ("gemini_deep_research", "deep_research"):
+            return False
+        return self._deep_research is not None or bool(self.deep_research_model)
+
     async def process(
         self,
         state: AnalysisState,

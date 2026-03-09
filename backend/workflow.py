@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 MAX_NODE_RETRIES = 3
 
 from .models.schemas import (
-    AnalysisState, AgentType, TaskStatus, RoundResult,
+    AnalysisState, AnalysisStep, AgentType, TaskStatus, RoundResult,
     WebSocketMessage, AgentMessage, MessageRole, BiochemistryIndicator,
     PublicationFigure, FigureReviewStatus
 )
@@ -805,15 +805,17 @@ Be specific and actionable in your response."""
             }
 
             # Extract tasks for each agent
+            prefix_map = {
+                "[Pathology]": "pathology_tasks",
+                "[Bioinformatics]": "bioinformatics_tasks",
+                "[Biochemistry]": "biochemistry_tasks",
+                "[Literature]": "literature_topics",
+            }
             for step in (last_round.next_steps if last_round else []):
-                if step.startswith("[Pathology]"):
-                    instructions["pathology_tasks"].append(step[11:].strip())
-                elif step.startswith("[Bioinformatics]"):
-                    instructions["bioinformatics_tasks"].append(step[16:].strip())
-                elif step.startswith("[Biochemistry]"):
-                    instructions["biochemistry_tasks"].append(step[14:].strip())
-                elif step.startswith("[Literature]"):
-                    instructions["literature_topics"].append(step[12:].strip())
+                for prefix, key in prefix_map.items():
+                    if step.startswith(prefix):
+                        instructions[key].append(step.split("] ", 1)[1].strip() if "] " in step else step[len(prefix):].strip())
+                        break
 
             # Fallback: if prefix matching extracted no tasks at all, use PI summary
             fallback_all_agents = False
@@ -843,6 +845,21 @@ Be specific and actionable in your response."""
             else:
                 agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
             agents_to_activate.add("bioinformatics")  # Always activate bioinformatics
+
+            # Reconcile: if prefix parsing found tasks for an agent, ensure it's activated
+            task_to_agent = {
+                "pathology_tasks": "pathology",
+                "bioinformatics_tasks": "bioinformatics",
+                "biochemistry_tasks": "biochemistry",
+                "literature_topics": "literature",
+            }
+            for task_key, agent_key in task_to_agent.items():
+                if instructions.get(task_key) and agent_key not in agents_to_activate:
+                    agents_to_activate.add(agent_key)
+                    logger.info(
+                        f"[{self.session_id}] Auto-activated {agent_key}: "
+                        f"has tasks but was not in agents_for_next_round"
+                    )
 
             skip_nodes = []
             agent_node_map = {
@@ -993,6 +1010,16 @@ Be specific and actionable in your response."""
         if analysis_state.current_round > 1:
             code_history_context = self._build_code_history_summary(analysis_state)
 
+        # Include current round pathology findings if available
+        pathology_context = ""
+        pathology_result = state.get("pathology_result")
+        if pathology_result and pathology_result.get("findings"):
+            path_findings = pathology_result["findings"][:5]
+            pathology_context = (
+                "\n\nCurrent round pathology findings:\n"
+                + "\n".join(f"- {f}" for f in path_findings)
+            )
+
         # Build comprehensive instruction for bioinformatics agent
         instruction = f"""Analyze single-cell RNA-seq data for project: {analysis_state.name}
 
@@ -1001,6 +1028,7 @@ Research context: {analysis_state.initial_instruction}
 PI's analysis goals for this round:
 {chr(10).join(f"- {task}" for task in bioinf_tasks) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
 {human_guidance}
+{pathology_context}
 {previous_bio_findings}
 {code_history_context}
 
@@ -1033,10 +1061,21 @@ Report key findings when you complete each major analysis phase."""
         all_findings = result.get("findings", [])
         all_figures = result.get("figures", [])
 
-        # Store code executions
+        # Store code executions (dedup by id to handle node retries)
+        existing_code_ids = {c.id for c in analysis_state.code_history}
         for code_exec in result.get("code_history", []):
-            if code_exec not in analysis_state.code_history:
+            if code_exec.id not in existing_code_ids:
                 analysis_state.code_history.append(code_exec)
+                existing_code_ids.add(code_exec.id)
+
+        # Store analysis log (dedup by step id to handle node retries)
+        existing_step_ids = {s.id for s in analysis_state.analysis_log}
+        for step in result.get("analysis_log", []):
+            if isinstance(step, dict):
+                step = AnalysisStep(**step)
+            if step.id not in existing_step_ids:
+                analysis_state.analysis_log.append(step)
+                existing_step_ids.add(step.id)
 
         # Step 3: PI summarizes results
         await self._send_message("status", "PI is reviewing analysis results...", AgentType.PI)
@@ -1171,13 +1210,7 @@ Report key findings when you complete each major analysis phase."""
         previous_lit_context = self._build_previous_findings_context(analysis_state, "literature")
 
         # Check if Deep Research mode is available (merges topics into one call)
-        is_deep_research = (
-            self.literature_agent.literature_mode in ("gemini_deep_research", "deep_research")
-            and (
-                self.literature_agent._deep_research is not None  # Gemini
-                or self.literature_agent.deep_research_model       # OpenRouter
-            )
-        )
+        is_deep_research = self.literature_agent.is_deep_research_available
 
         limited_topics = topics[:3]
 
@@ -1202,15 +1235,22 @@ Report key findings when you complete each major analysis phase."""
                 if gaps:
                     logger.info(f"[{self.session_id}] Deep Research gaps detected, PubMed fallback for: {gaps}")
                     await self._send_message("status", f"Supplementing {len(gaps)} topic(s) via PubMed...", AgentType.LITERATURE)
-                    for gap_topic in gaps:
-                        enriched = gap_topic
-                        if previous_lit_context:
-                            enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
-                        gap_result = await self.literature_agent.process(
-                            analysis_state, enriched, use_deep_research=False,
-                            current_round_findings=current_round_findings
-                        )
-                        results.append(gap_result)
+                    # Temporarily switch to PubMed mode so _do_research() routes
+                    # to _multi_round_pubmed() instead of retrying Deep Research
+                    original_mode = self.literature_agent.literature_mode
+                    self.literature_agent.literature_mode = "pubmed_llm"
+                    try:
+                        for gap_topic in gaps:
+                            enriched = gap_topic
+                            if previous_lit_context:
+                                enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
+                            gap_result = await self.literature_agent.process(
+                                analysis_state, enriched, use_deep_research=True,
+                                current_round_findings=current_round_findings
+                            )
+                            results.append(gap_result)
+                    finally:
+                        self.literature_agent.literature_mode = original_mode
         else:
             # === PubMed mode: per-topic search ===
             results = []
@@ -1463,7 +1503,6 @@ Return ONLY the JSON array, nothing else."""
 
     def _should_continue(self, state: WorkflowState) -> str:
         """Determine if analysis should continue"""
-        round_result = state.get("round_result")
         analysis_state = state["analysis_state"]
 
         # Check if human requested stop (processed by PI Agent)
@@ -1494,15 +1533,13 @@ Return ONLY the JSON array, nothing else."""
         return "continue"
     
     async def _check_convergence(self, state: WorkflowState) -> WorkflowState:
-        """Check if analysis has converged"""
-        analysis_state = state["analysis_state"]
+        """Check if analysis has converged.
 
-        # Only check convergence if should_continue is currently True
-        # This preserves max_rounds and human stop decisions from _should_continue
-        current_should_continue = state.get("should_continue", True)
-        if not current_should_continue:
-            logger.info(f"[{self.session_id}] Convergence check: skipped (already stopping)")
-            return state
+        Note: This node is only reached when _should_continue() returns "continue",
+        meaning hard-stop conditions (human stop, max_rounds, paused) have already
+        been checked. Here we only evaluate soft convergence (repeated findings).
+        """
+        analysis_state = state["analysis_state"]
 
         should_stop = analysis_state.should_stop(self.config.convergence_rounds)
 

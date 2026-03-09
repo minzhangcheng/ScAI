@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.10.2
-**Last Updated**: 2026-03-08
+**Version**: 0.10.3
+**Last Updated**: 2026-03-09
 
 ## Project Overview
 
@@ -75,7 +75,7 @@ intesc/                         # Code directory
 │   │                           # - In-place session info editing (name + instruction)
 │   │                           # - File download (/api/download with path containment)
 │   │
-│   ├── workflow.py             # LangGraph workflow (~2133 lines)
+│   ├── workflow.py             # LangGraph workflow (~2240 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
@@ -88,9 +88,12 @@ intesc/                         # Code directory
 │   │                           # - Deep Research topic merging + gap coverage fallback
 │   │                           # - Report-only resume via generate_report()
 │   │                           # - Selective agent activation (skip_nodes from agents_for_next_round)
+│   │                           # - Agent auto-activation when PI tasks exist but agent not in agents_for_next_round
+│   │                           # - Pathology findings context sharing with bioinformatics agent
+│   │                           # - Analysis log propagation and deduplication (by step ID)
 │   │                           # - Graphic abstract revision loop (PI review + Painter revision + best selection)
 │   │
-│   ├── report_generator.py     # Report generator (~4683 lines)
+│   ├── report_generator.py     # Report generator (~4970 lines)
 │   │                           # - No-sandbox report compilation (v0.7.3 rewrite)
 │   │                           # - PI analysis review pre-step (reads notebook, views figures via vision API)
 │   │                           # - Builds analysis record from code_history
@@ -98,8 +101,10 @@ intesc/                         # Code directory
 │   │                           # - PI plans narrative around existing assets
 │   │                           # - Cluster annotation table extraction
 │   │                           # - Report appendix (project info, agent config, data summary, round history)
+│   │                           # - Full analysis log timeline (chronological steps with code/figures/reasoning)
+│   │                           # - Figure/table scientific interpretation rendering
 │   │
-│   ├── regenerate_report_html.py # Report HTML regeneration utility (~1087 lines, appendix support)
+│   ├── regenerate_report_html.py # Report HTML regeneration utility (~1087 lines, appendix + analysis log support)
 │   │
 │   ├── config.py               # Configuration management (~292 lines)
 │   │                           # - APIConfig: LLM keys + proxy (google_api_key moved to literature_config)
@@ -112,25 +117,26 @@ intesc/                         # Code directory
 │   │
 │   ├── agents/
 │   │   ├── base.py             # Agent base class
-│   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer + graphic abstract reviewer)
-│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install, cumulative revision history)
+│   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer + graphic abstract reviewer, history reset on synthesis)
+│   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install, cumulative revision history, analysis log)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2, ~785 lines)
 │   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~1060 lines)
 │   │   └── painter_agent.py    # Painter Agent (graphic abstract + revision support)
 │   │
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models (~486 lines)
-│   │                           # - AnalysisState: Core state with version control + treatment_groups + data_files + biochemistry_indicators
+│   │   └── schemas.py          # Pydantic data models (~540 lines)
+│   │                           # - AnalysisState: Core state with version control + treatment_groups + data_files + biochemistry_indicators + analysis_log
+│   │                           # - AnalysisStep: Comprehensive step log (code/PI/literature/annotation/findings/figure/text)
 │   │                           # - TreatmentGroup: Experimental group definition (name, sample_count)
 │   │                           # - DataFile: Universal file record (section: pathology/sequencing/biochemistry, group_id, sample_number)
 │   │                           # - BiochemistryIndicator: Manual biochemistry entry with group/sample
 │   │                           # - TaskStatus: GENERATING_REPORT status
 │   │                           # - AgentError: Structured error tracking
 │   │                           # - RoundResult: agents_for_next_round for selective activation
-│   │                           # - PublicationFigure/Table: Publication outputs
+│   │                           # - PublicationFigure/Table: Publication outputs (+ interpretation field)
 │   │                           # - GraphicAbstract: Painter agent output
-│   │                           # - BioinformaticsCheckpoint: Step-level recovery
+│   │                           # - BioinformaticsCheckpoint: Step-level recovery (+ analysis_log)
 │   │                           # - Data helper methods: get_files_by_section/group, build_experimental_design_summary
 │   │
 │   ├── utils/
@@ -261,7 +267,9 @@ initialize_round ◄────────────────────
 12. **Deep Research Topic Merging**: When using Gemini Deep Research mode, multiple topics are merged into a single comprehensive query (one DR call instead of N). After the DR call, `_evaluate_dr_coverage()` checks which topics were insufficiently covered and falls back to PubMed+LLM for gaps.
 13. **Report-Only Resume**: `generate_report()` method runs only the report generation phase (final report → graphic abstract → detailed report), bypassing analysis rounds. Used when a session completed all analysis but was interrupted during report generation. WebSocket handler detects this condition automatically.
 14. **GENERATING_REPORT Status**: New `TaskStatus.GENERATING_REPORT` marks sessions in report generation phase, enabling detection of interrupted report generation on resume.
-15. **Selective Agent Activation**: From round 2 onwards, PI Agent decides which agents to activate via `RoundResult.agents_for_next_round`. Bioinformatics Agent always runs. `_pi_planning()` builds `skip_nodes` from the previous round's `agents_for_next_round`, and `@with_retry` skips deactivated nodes with WebSocket notification. Each round's `skip_nodes` is rebuilt fresh (not accumulated), so previously skipped agents can be re-activated.
+15. **Selective Agent Activation**: From round 2 onwards, PI Agent decides which agents to activate via `RoundResult.agents_for_next_round`. Bioinformatics Agent always runs. `_pi_planning()` builds `skip_nodes` from the previous round's `agents_for_next_round`, and `@with_retry` skips deactivated nodes with WebSocket notification. Each round's `skip_nodes` is rebuilt fresh (not accumulated), so previously skipped agents can be re-activated. **Auto-activation**: If PI's `next_steps` contains tasks prefixed with an agent name (e.g., `[Pathology] ...`) but that agent is not in `agents_for_next_round`, the workflow auto-activates it.
+21. **Analysis Log Propagation**: `_post_bioinformatics()` collects `analysis_log` from the bioinformatics agent result, deduplicates by step ID, and appends to `AnalysisState.analysis_log`. Code history is similarly deduped by `CodeExecution.id`.
+22. **Pathology Context Sharing**: Current round pathology findings (up to 5) are injected into the bioinformatics agent's instruction prompt, enabling informed analysis based on histological observations.
 16. **Docker Pip Install**: Bioinformatics Agent's `_validate_code()` allows `subprocess` calls when all usages are pip/pip3 install commands (safe in Docker environments). System prompt includes package installation guidelines.
 20. **Graphic Abstract Revision Loop**: The graphic abstract generation now uses a 3-phase revision process: (1) initial generation by Painter Agent; (2) up to 2 rounds of PI review via vision API (`review_graphic_abstract()`) + Painter revision with accumulated feedback history (`revise_graphic_abstract()`); (3) PI selects the best candidate from all versions using side-by-side vision comparison (`select_best_graphic_abstract()`). Metadata stored on `GraphicAbstract`: `revision_count`, `revision_history`, `all_candidates`, `selected_index`.
 
@@ -1215,6 +1223,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.10.3 | 2026-03-09 | Comprehensive analysis log (AnalysisStep model, all tool call types), analysis log timeline in reports, figure/table scientific interpretation, PI history reset on synthesis, code history cap (100), agent auto-activation from PI tasks, pathology→bioinformatics context sharing, code history dedup by ID, deep research availability refactor |
 | 0.10.2 | 2026-03-08 | Sandbox kernel timeout recovery (full reconnection + session restore), plt.close/plt.show safety (try/finally in 3 code templates), blank figure detection (<2KB threshold), sandbox timeout 300s→1800s, architecture docs updated (sequential execution) |
 | 0.10.1 | 2026-03-07 | Literature fallback model (quick search uses PI model), deep research max_tokens fix (None instead of 262144), deep research model passthrough in chat mode, upload cancellation (abort in-progress + remove pending) |
 | 0.10.0 | 2026-03-07 | Deep Research mode (OpenRouter: o4-mini-deep-research, sonar-deep-research), 3 literature modes (deep_research/gemini/pubmed_llm), fallback chain, LLM-based query generation, model upgrades (claude-sonnet-4.6), cross-agent context, bug fixes |
@@ -1251,6 +1260,20 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.10.3 (2026-03-09)
+
+- **Comprehensive Analysis Log**: New `AnalysisStep` Pydantic model records every bioinformatics agent step (7 types: `execute_code`, `consult_pi`, `search_literature`, `annotate_clusters`, `report_findings`, `generate_publication_figure`, `text_response`). Each step captures agent reasoning, timestamps, tool-specific fields (code/output/error, PI Q&A, literature topics, cluster markers, figure metadata). Stored in `AnalysisState.analysis_log` and `BioinformaticsCheckpoint.analysis_log`. Deduplication by step ID handles node retries
+- **Analysis Log in Reports**: Reports include a full chronological analysis log timeline section (collapsible code blocks, inline figure thumbnails, PI consultations, literature results). Implemented in both `report_generator.py` (`_build_full_analysis_log` + `_build_analysis_log_html`) and `regenerate_report_html.py` (`_build_analysis_log_from_report`). Falls back to `code_history` for older sessions without `analysis_log`
+- **Figure & Table Scientific Interpretation**: Added `interpretation` field to `PublicationFigure` and `PublicationTable` models. Reports render styled interpretation sections (blue for figures, green for tables) below each figure/table
+- **PI Agent Memory Optimization**: `reset_history()` called before `synthesize_round()` and `generate_final_summary()` — these methods embed full state context in their prompts, making prior chat history unnecessary and saving tokens
+- **Bioinformatics Agent Code History Cap**: `MAX_CODE_HISTORY = 100` prevents unbounded memory growth across multi-round sessions. Figure attempt counter (`_figure_attempts`) reset between rounds so previously failed figures can be retried with updated data
+- **Workflow Agent Auto-Activation**: When PI's `next_steps` contain prefixed tasks for an agent (e.g., `[Pathology] ...`) but the agent was not included in `agents_for_next_round`, the workflow now auto-activates that agent with a log message
+- **Pathology → Bioinformatics Context Sharing**: Current round pathology findings (up to 5) are now included in the bioinformatics agent's instruction prompt for cross-agent collaboration
+- **Code History Deduplication by ID**: `_post_bioinformatics()` now deduplicates code history entries by `CodeExecution.id` instead of equality comparison, correctly handling node retries that produce identical objects
+- **Deep Research Refactoring**: `is_deep_research_available` property added to `LiteratureAgent`, replacing inline checks in `workflow.py`. PubMed gap fallback now temporarily switches agent mode to ensure `_do_research()` routes correctly
+- **Report Section Mapping Fix**: Removed "annotation" from `clustering_overview` and `key_findings` figure category lists to prevent duplicate figure placement
+- **Task Prefix Parsing Refactor**: Replaced 4 `if/elif` branches with a `prefix_map` dict loop for cleaner next_steps task extraction
 
 #### v0.10.2 (2026-03-08)
 

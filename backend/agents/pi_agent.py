@@ -486,6 +486,10 @@ Note: Extract biochemistry values from user message if they mention specific num
         """
         logger.info(f"[PI] Synthesizing round {state.current_round} results")
 
+        # Reset message history — the prompt below embeds full state context,
+        # so prior chat history is unnecessary and wastes tokens
+        self.reset_history()
+
         # Build previous rounds context for redundancy avoidance
         previous_context = ""
         if state.round_results:
@@ -632,6 +636,8 @@ IMPORTANT: agents_for_next_round controls which agents are ACTIVATED in the next
             Final summary text
         """
         logger.info(f"[PI] Generating final summary after {len(state.round_results)} rounds")
+        # Reset message history — the prompt below embeds full state context
+        self.reset_history()
         # Build summary of all rounds
         rounds_summary = []
         for result in state.round_results:

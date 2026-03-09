@@ -426,6 +426,26 @@ HTML_TEMPLATE = """
             text-align: justify;
         }}
 
+        .table-interpretation {{
+            margin-top: 12px;
+            padding: 12px;
+            background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+            border-radius: 8px;
+            border-left: 3px solid #22c55e;
+        }}
+
+        .table-interpretation strong {{
+            color: #047857;
+            font-size: 0.85rem;
+        }}
+
+        .table-interpretation p {{
+            font-size: 0.85rem;
+            color: var(--text-color);
+            margin-top: 8px;
+            text-align: justify;
+        }}
+
         .figure-actions {{
             display: flex;
             gap: 8px;
@@ -685,6 +705,141 @@ HTML_TEMPLATE = """
             margin-bottom: 4px;
         }}
 
+        /* Analysis Log Timeline */
+        .analysis-log {{
+            padding: 30px;
+        }}
+        .analysis-log h2 {{
+            font-size: 1.6rem;
+            margin-bottom: 10px;
+            color: var(--text-color);
+        }}
+        .log-subtitle {{
+            color: var(--text-secondary);
+            margin-bottom: 20px;
+        }}
+        .log-step {{
+            border-left: 3px solid var(--border-color);
+            margin-left: 20px;
+            padding: 12px 20px;
+            margin-bottom: 8px;
+            background: #fafafa;
+            border-radius: 0 8px 8px 0;
+        }}
+        .log-step-header {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }}
+        .log-step-number {{
+            font-weight: bold;
+            color: var(--primary-color);
+            min-width: 35px;
+            font-size: 0.9rem;
+        }}
+        .log-step-badge {{
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }}
+        .log-step-time {{
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            margin-left: auto;
+        }}
+        .log-reasoning-details {{
+            margin: 6px 0;
+        }}
+        .log-reasoning {{
+            background: #f0f4ff;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: #374151;
+            line-height: 1.5;
+            margin-top: 4px;
+        }}
+        .log-description {{
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: var(--text-color);
+        }}
+        .log-code {{
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            overflow-x: auto;
+            margin-top: 4px;
+        }}
+        .log-output {{
+            background: #f1f5f9;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-size: 0.8rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin-top: 4px;
+        }}
+        .log-error {{
+            background: #fef2f2;
+            color: #dc2626;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin: 6px 0;
+            font-size: 0.85rem;
+        }}
+        .log-figure {{
+            margin: 10px 0;
+            text-align: center;
+        }}
+        .log-figure img {{
+            max-width: 600px;
+            width: 100%;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+        }}
+        .log-fig-name {{
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }}
+        .log-qa {{
+            margin: 4px 0;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }}
+        .log-findings ul {{
+            padding-left: 20px;
+            margin-top: 4px;
+        }}
+        .log-findings li {{
+            font-size: 0.85rem;
+            margin-bottom: 2px;
+        }}
+        .log-text-response {{
+            background: #f8fafc;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: #475569;
+        }}
+        .analysis-log details summary {{
+            cursor: pointer;
+            color: var(--primary-color);
+            font-size: 0.85rem;
+            user-select: none;
+        }}
+        .analysis-log details summary:hover {{
+            text-decoration: underline;
+        }}
+
         @media print {{
             body {{
                 background: white;
@@ -695,6 +850,13 @@ HTML_TEMPLATE = """
             }}
             .download-btn {{
                 display: none;
+            }}
+            .analysis-log details,
+            .analysis-log details > * {{
+                display: block !important;
+            }}
+            .analysis-log details:not([open]) > :not(summary) {{
+                display: block !important;
             }}
         }}
     </style>
@@ -735,6 +897,9 @@ HTML_TEMPLATE = """
                 <h2>{conclusions_title}</h2>
                 <p>{conclusions}</p>
             </div>
+
+            <!-- Analysis Log -->
+            {analysis_log_html}
 
             <!-- Appendix: Analysis Settings & Records -->
             {appendix_html}
@@ -1221,7 +1386,8 @@ Be specific and actionable. Include:
             "status": "completed",
             "progress": 100,
             "current_step": "完成" if zh else "Complete",
-            "appendix": appendix_data
+            "appendix": appendix_data,
+            "analysis_log": self._build_full_analysis_log(state)
         }
 
         # Sanitize NaN/Infinity values before saving (pandas data can contain these)
@@ -2672,6 +2838,96 @@ IMPORTANT:
             "total_code_cells": len(state.code_history),
             "total_rounds": len(state.round_results),
         }
+
+    def _build_full_analysis_log(self, state: AnalysisState) -> List[Dict[str, Any]]:
+        """
+        Build full chronological analysis log for report.
+        Uses state.analysis_log if available, falls back to code_history.
+        No base64 image data — only filenames. HTML renderer embeds from disk.
+        """
+        if state.analysis_log:
+            log_entries = []
+            for step in state.analysis_log:
+                entry = {
+                    "step_number": step.step_number,
+                    "step_type": step.step_type,
+                    "timestamp": step.timestamp.isoformat() if hasattr(step.timestamp, 'isoformat') else str(step.timestamp),
+                    "agent_reasoning": step.agent_reasoning,
+                }
+                if step.step_type == "execute_code":
+                    entry.update({
+                        "code_description": step.code_description,
+                        "code_step_type": step.code_step_type,
+                        "code": step.code[:3000] if step.code else None,
+                        "code_output": step.code_output[:3000] if step.code_output else None,
+                        "code_error": step.code_error[:3000] if step.code_error else None,
+                        "saved_figure_filenames": step.saved_figure_filenames,
+                    })
+                elif step.step_type == "consult_pi":
+                    entry.update({
+                        "pi_question": step.pi_question,
+                        "pi_context": step.pi_context,
+                        "pi_options": step.pi_options,
+                        "pi_response": step.pi_response,
+                    })
+                elif step.step_type == "search_literature":
+                    entry.update({
+                        "literature_topic": step.literature_topic,
+                        "literature_result": (step.literature_result or "")[:2000],
+                    })
+                elif step.step_type == "annotate_clusters":
+                    entry.update({
+                        "cluster_markers_summary": step.cluster_markers_summary,
+                        "annotation_tissue": step.annotation_tissue,
+                        "annotation_organism": step.annotation_organism,
+                        "annotation_result_summary": (step.annotation_result_summary or "")[:2000],
+                    })
+                elif step.step_type == "report_findings":
+                    entry.update({
+                        "findings": step.findings,
+                        "findings_summary": step.findings_summary,
+                        "findings_suggestions": step.findings_suggestions,
+                    })
+                elif step.step_type == "generate_publication_figure":
+                    entry.update({
+                        "pub_figure_name": step.pub_figure_name,
+                        "pub_figure_description": step.pub_figure_description,
+                        "pub_figure_type": step.pub_figure_type,
+                        "pub_figure_code": step.pub_figure_code,
+                        "pub_figure_result": step.pub_figure_result,
+                    })
+                elif step.step_type == "text_response":
+                    entry["text_content"] = step.text_content
+                log_entries.append(entry)
+            return log_entries
+
+        # Fallback: build from code_history (backward compatibility)
+        log_entries = []
+        for i, cell in enumerate(state.code_history):
+            _saved = [os.path.basename(p) for p in re.findall(
+                r'\[Auto-saved\] PNG: (.+\.png)', cell.output or ""
+            )]
+            log_entries.append({
+                "step_number": i + 1,
+                "step_type": "execute_code",
+                "timestamp": cell.timestamp.isoformat() if hasattr(cell.timestamp, 'isoformat') else str(cell.timestamp),
+                "agent_reasoning": None,
+                "code": (cell.code[:3000] if cell.code else None),
+                "code_output": (cell.output[:3000] if cell.output else None),
+                "code_error": cell.error,
+                "code_description": None,
+                "saved_figure_filenames": _saved,
+            })
+        return log_entries
+
+    def _build_analysis_log_html(
+        self,
+        report: Dict[str, Any],
+        language: str,
+    ) -> str:
+        """Build the full analysis log HTML section. Delegates to shared implementation."""
+        from .regenerate_report_html import _build_analysis_log_from_report
+        return _build_analysis_log_from_report(report, language, self.figures_dir)
 
     def _extract_cluster_annotations_from_state(self, state: AnalysisState):
         """
@@ -4360,10 +4616,10 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         # Map section IDs to figure categories
         section_figure_map = {
             "qc_overview": ["qc"],
-            "clustering_overview": ["umap", "clustering", "annotation"],
+            "clustering_overview": ["umap", "clustering"],
             "marker_genes": ["markers", "heatmap"],
             "differential_expression": ["de", "violin"],
-            "key_findings": ["de", "violin", "heatmap", "annotation", "other"]
+            "key_findings": ["de", "violin", "heatmap", "other"]
         }
 
         # Track which figures have been used
@@ -4498,8 +4754,18 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 csv_path = table.get("csv_path", "")
                 columns = table.get("columns", [])
                 preview_data = table.get("preview_data", [])
+                tbl_interpretation = table.get("interpretation", "")
 
                 csv_filename = url_quote(os.path.basename(csv_path)) if csv_path else ""
+                tbl_interpretation_html = markdown_to_html(tbl_interpretation) if tbl_interpretation else ""
+
+                tbl_interpretation_section = ""
+                if tbl_interpretation_html:
+                    tbl_interpretation_section = f'''
+                            <div class="table-interpretation">
+                                <strong>{"科学解读" if zh else "Scientific Interpretation"}:</strong>
+                                <p>{tbl_interpretation_html}</p>
+                            </div>'''
 
                 # Build table HTML
                 table_header = "".join([f"<th>{html_module.escape(str(col))}</th>" for col in columns])
@@ -4522,6 +4788,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                                 <tbody>{table_rows}</tbody>
                             </table>
                         </div>
+                        {tbl_interpretation_section}
                         {"<div class='table-info'>" + (f"显示前10行，共{len(preview_data)}行" if zh else f"Showing 10 of {len(preview_data)} rows") + "</div>" if len(preview_data) > 10 else ""}
                     </div>
                 '''
@@ -4642,6 +4909,17 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 </div>
             </div>'''
 
+        # Build analysis log HTML
+        analysis_log_html = ""
+        if report.get("analysis_log"):
+            analysis_log_html = self._build_analysis_log_html(report, language)
+            if analysis_log_html:
+                log_toc_label = "完整分析日志" if zh else "Complete Analysis Log"
+                toc_items.append(
+                    f'<li><a href="#analysis_log">{log_toc_label}</a>'
+                    f'<span class="section-type specific">{"日志" if zh else "Log"}</span></li>'
+                )
+
         # Build appendix HTML (analysis settings & records)
         appendix_html = ""
         if state is not None:
@@ -4670,6 +4948,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             sections_html=_safe_format_value("\n".join(sections_html)),
             conclusions_title="结论" if zh else "Conclusions",
             conclusions=_safe_format_value(conclusions_html),
+            analysis_log_html=_safe_format_value(analysis_log_html),
             appendix_html=_safe_format_value(appendix_html)
         )
 

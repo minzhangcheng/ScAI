@@ -303,6 +303,46 @@ HTML_TEMPLATE = """
             margin-bottom: 8px;
         }}
 
+        .figure-interpretation {{
+            margin-top: 12px;
+            padding: 12px;
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            border-radius: 8px;
+            border-left: 3px solid #0ea5e9;
+        }}
+
+        .figure-interpretation strong {{
+            color: #0369a1;
+            font-size: 0.85rem;
+        }}
+
+        .figure-interpretation p {{
+            font-size: 0.85rem;
+            color: var(--text-color);
+            margin-top: 8px;
+            text-align: justify;
+        }}
+
+        .table-interpretation {{
+            margin-top: 12px;
+            padding: 12px;
+            background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+            border-radius: 8px;
+            border-left: 3px solid #22c55e;
+        }}
+
+        .table-interpretation strong {{
+            color: #047857;
+            font-size: 0.85rem;
+        }}
+
+        .table-interpretation p {{
+            font-size: 0.85rem;
+            color: var(--text-color);
+            margin-top: 8px;
+            text-align: justify;
+        }}
+
         .figure-actions {{
             display: flex;
             gap: 8px;
@@ -558,6 +598,141 @@ HTML_TEMPLATE = """
             margin-bottom: 4px;
         }}
 
+        /* Analysis Log Timeline */
+        .analysis-log {{
+            padding: 30px;
+        }}
+        .analysis-log h2 {{
+            font-size: 1.6rem;
+            margin-bottom: 10px;
+            color: var(--text-color);
+        }}
+        .log-subtitle {{
+            color: var(--text-secondary);
+            margin-bottom: 20px;
+        }}
+        .log-step {{
+            border-left: 3px solid var(--border-color);
+            margin-left: 20px;
+            padding: 12px 20px;
+            margin-bottom: 8px;
+            background: #fafafa;
+            border-radius: 0 8px 8px 0;
+        }}
+        .log-step-header {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }}
+        .log-step-number {{
+            font-weight: bold;
+            color: var(--primary-color);
+            min-width: 35px;
+            font-size: 0.9rem;
+        }}
+        .log-step-badge {{
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }}
+        .log-step-time {{
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            margin-left: auto;
+        }}
+        .log-reasoning-details {{
+            margin: 6px 0;
+        }}
+        .log-reasoning {{
+            background: #f0f4ff;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: #374151;
+            line-height: 1.5;
+            margin-top: 4px;
+        }}
+        .log-description {{
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: var(--text-color);
+        }}
+        .log-code {{
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            overflow-x: auto;
+            margin-top: 4px;
+        }}
+        .log-output {{
+            background: #f1f5f9;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-size: 0.8rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin-top: 4px;
+        }}
+        .log-error {{
+            background: #fef2f2;
+            color: #dc2626;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin: 6px 0;
+            font-size: 0.85rem;
+        }}
+        .log-figure {{
+            margin: 10px 0;
+            text-align: center;
+        }}
+        .log-figure img {{
+            max-width: 600px;
+            width: 100%;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+        }}
+        .log-fig-name {{
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }}
+        .log-qa {{
+            margin: 4px 0;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }}
+        .log-findings ul {{
+            padding-left: 20px;
+            margin-top: 4px;
+        }}
+        .log-findings li {{
+            font-size: 0.85rem;
+            margin-bottom: 2px;
+        }}
+        .log-text-response {{
+            background: #f8fafc;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: #475569;
+        }}
+        .analysis-log details summary {{
+            cursor: pointer;
+            color: var(--primary-color);
+            font-size: 0.85rem;
+            user-select: none;
+        }}
+        .analysis-log details summary:hover {{
+            text-decoration: underline;
+        }}
+
         @media print {{
             body {{
                 background: white;
@@ -568,6 +743,13 @@ HTML_TEMPLATE = """
             }}
             .download-btn {{
                 display: none;
+            }}
+            .analysis-log details,
+            .analysis-log details > * {{
+                display: block !important;
+            }}
+            .analysis-log details:not([open]) > :not(summary) {{
+                display: block !important;
             }}
         }}
 
@@ -609,6 +791,9 @@ HTML_TEMPLATE = """
                 <p>{conclusions}</p>
             </div>
 
+            <!-- Analysis Log -->
+            {analysis_log_html}
+
             <!-- Appendix: Analysis Settings & Records -->
             {appendix_html}
         </div>
@@ -616,6 +801,169 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
+
+
+def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Path) -> str:
+    """Build analysis log HTML from report.json data. Mirrors DetailedReportGenerator._build_analysis_log_html()."""
+    zh = language == "zh"
+    esc = html_module.escape
+
+    log_data = report.get("analysis_log", [])
+    if not log_data:
+        return ""
+
+    title = "完整分析日志" if zh else "Complete Analysis Log"
+    subtitle = (
+        f"以下按时间顺序展示了全部 {len(log_data)} 个分析步骤及其结果。"
+        if zh else
+        f"The following shows all {len(log_data)} analysis steps and their results in chronological order."
+    )
+
+    type_badges = {
+        "execute_code": ("代码执行" if zh else "Code", "#dbeafe", "#1d4ed8"),
+        "consult_pi": ("PI咨询" if zh else "PI Consultation", "#f3e8ff", "#7c3aed"),
+        "search_literature": ("文献检索" if zh else "Literature Search", "#d1fae5", "#047857"),
+        "annotate_clusters": ("细胞注释" if zh else "Cluster Annotation", "#fef3c7", "#b45309"),
+        "report_findings": ("分析发现" if zh else "Findings Report", "#dcfce7", "#15803d"),
+        "generate_publication_figure": ("发表图生成" if zh else "Publication Figure", "#fce7f3", "#be185d"),
+        "text_response": ("Agent回复" if zh else "Agent Response", "#f1f5f9", "#64748b"),
+    }
+
+    steps_html = ""
+    for idx, entry in enumerate(log_data):
+        step_num = entry.get("step_number", "?")
+        step_type = entry.get("step_type", "unknown")
+        timestamp = str(entry.get("timestamp", ""))[:19]
+        reasoning = entry.get("agent_reasoning", "")
+
+        badge_text, badge_bg, badge_color = type_badges.get(
+            step_type, ("Step", "#f1f5f9", "#64748b")
+        )
+
+        step_html = f'''
+        <div class="log-step" id="log-step-{idx}">
+            <div class="log-step-header">
+                <span class="log-step-number">#{step_num}</span>
+                <span class="log-step-badge" style="background:{badge_bg};color:{badge_color}">{badge_text}</span>
+                <span class="log-step-time">{esc(timestamp)}</span>
+            </div>
+        '''
+
+        if reasoning:
+            reasoning_label = "Agent 推理" if zh else "Agent Reasoning"
+            step_html += f'<details class="log-reasoning-details"><summary>{reasoning_label}</summary><div class="log-reasoning">{esc(reasoning[:1000])}</div></details>'
+
+        if step_type == "execute_code":
+            desc = entry.get("code_description", "")
+            code = entry.get("code", "")
+            output = entry.get("code_output", "")
+            error = entry.get("code_error", "")
+            saved_figs = entry.get("saved_figure_filenames", [])
+
+            if desc:
+                step_html += f'<div class="log-description">{esc(desc)}</div>'
+            if code:
+                code_label = "查看代码" if zh else "View Code"
+                step_html += f'<details><summary>{code_label}</summary><pre class="log-code"><code>{esc(code[:2500])}</code></pre></details>'
+            if output:
+                output_label = "输出" if zh else "Output"
+                step_html += f'<details open><summary>{output_label}</summary><pre class="log-output">{esc(output[:2000])}</pre></details>'
+            if error:
+                error_label = "错误" if zh else "Error"
+                step_html += f'<div class="log-error"><strong>{error_label}:</strong> {esc(error[:500])}</div>'
+
+            if saved_figs and figures_dir:
+                for fig_fname in saved_figs:
+                    fig_path = figures_dir / os.path.basename(fig_fname)
+                    if fig_path.exists():
+                        img_src = compress_image_to_base64(str(fig_path), max_width=600, quality=80)
+                        if img_src:
+                            step_html += f'<div class="log-figure"><img src="{img_src}" alt="{esc(fig_fname)}" /><p class="log-fig-name">{esc(os.path.basename(fig_fname))}</p></div>'
+
+        elif step_type == "consult_pi":
+            q = entry.get("pi_question", "")
+            r = entry.get("pi_response", "")
+            q_label = "问题" if zh else "Question"
+            r_label = "PI 回复" if zh else "PI Response"
+            if q:
+                step_html += f'<div class="log-qa"><strong>{q_label}:</strong> {esc(q[:500])}</div>'
+            if r:
+                step_html += f'<div class="log-qa"><strong>{r_label}:</strong> {esc(r[:800])}</div>'
+
+        elif step_type == "search_literature":
+            topic = entry.get("literature_topic", "")
+            result_text = entry.get("literature_result", "")
+            topic_label = "检索主题" if zh else "Search Topic"
+            result_label = "检索结果" if zh else "Results"
+            if topic:
+                step_html += f'<div class="log-qa"><strong>{topic_label}:</strong> {esc(topic)}</div>'
+            if result_text:
+                step_html += f'<details open><summary>{result_label}</summary><pre class="log-output">{esc(result_text[:1500])}</pre></details>'
+
+        elif step_type == "annotate_clusters":
+            markers = entry.get("cluster_markers_summary", "")
+            tissue = entry.get("annotation_tissue", "")
+            organism = entry.get("annotation_organism", "")
+            ann_result = entry.get("annotation_result_summary", "")
+            if markers:
+                markers_label = "Marker 基因" if zh else "Cluster Markers"
+                step_html += f'<div class="log-qa"><strong>{markers_label}:</strong> {esc(markers[:500])}</div>'
+            if tissue or organism:
+                ctx_label = "组织/物种" if zh else "Tissue/Organism"
+                step_html += f'<div class="log-qa"><strong>{ctx_label}:</strong> {esc(tissue)} / {esc(organism)}</div>'
+            if ann_result:
+                result_label = "注释结果" if zh else "Annotation Results"
+                step_html += f'<details open><summary>{result_label}</summary><pre class="log-output">{esc(ann_result[:1500])}</pre></details>'
+
+        elif step_type == "report_findings":
+            findings_list = entry.get("findings", [])
+            summary = entry.get("findings_summary", "")
+            suggestions = entry.get("findings_suggestions", [])
+            if summary:
+                summary_label = "摘要" if zh else "Summary"
+                step_html += f'<div class="log-qa"><strong>{summary_label}:</strong> {esc(summary[:500])}</div>'
+            if findings_list:
+                findings_label = "发现列表" if zh else "Findings"
+                items = "".join(f"<li>{esc(f[:300])}</li>" for f in findings_list[:20])
+                step_html += f'<div class="log-findings"><strong>{findings_label}:</strong><ul>{items}</ul></div>'
+            if suggestions:
+                sugg_label = "建议" if zh else "Suggestions"
+                items = "".join(f"<li>{esc(s[:200])}</li>" for s in suggestions[:10])
+                step_html += f'<div class="log-findings"><strong>{sugg_label}:</strong><ul>{items}</ul></div>'
+
+        elif step_type == "generate_publication_figure":
+            fig_name = entry.get("pub_figure_name", "")
+            fig_desc = entry.get("pub_figure_description", "")
+            fig_code = entry.get("pub_figure_code", "")
+            fig_result = entry.get("pub_figure_result", "")
+            if fig_name:
+                name_label = "图名" if zh else "Figure Name"
+                step_html += f'<div class="log-qa"><strong>{name_label}:</strong> {esc(fig_name)}</div>'
+            if fig_desc:
+                desc_label = "描述" if zh else "Description"
+                step_html += f'<div class="log-qa"><strong>{desc_label}:</strong> {esc(fig_desc[:300])}</div>'
+            if fig_code:
+                code_label = "查看代码" if zh else "View Code"
+                step_html += f'<details><summary>{code_label}</summary><pre class="log-code"><code>{esc(fig_code[:2500])}</code></pre></details>'
+            if fig_result:
+                result_label = "结果" if zh else "Result"
+                step_html += f'<details open><summary>{result_label}</summary><pre class="log-output">{esc(fig_result[:1000])}</pre></details>'
+
+        elif step_type == "text_response":
+            text = entry.get("text_content", "")
+            if text:
+                step_html += f'<div class="log-text-response">{esc(text[:1000])}</div>'
+
+        step_html += '</div>'
+        steps_html += step_html
+
+    return f'''
+    <div class="analysis-log" id="analysis_log">
+        <h2>{title}</h2>
+        <p class="log-subtitle">{subtitle}</p>
+        {steps_html}
+    </div>
+    '''
 
 
 def _build_appendix_from_report(report: dict, language: str) -> str:
@@ -905,7 +1253,18 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             fig_caption = figure.get("caption", "")
             fig_caption_html = markdown_to_html(fig_caption) if fig_caption else ""
 
+            fig_interpretation = figure.get("interpretation", "")
+            fig_interpretation_html = markdown_to_html(fig_interpretation) if fig_interpretation else ""
+
             img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else "<p>Image not available</p>"
+
+            interpretation_section = ""
+            if fig_interpretation_html:
+                interpretation_section = f'''
+                            <div class="figure-interpretation">
+                                <strong>{"科学解读" if zh else "Scientific Interpretation"}:</strong>
+                                <p>{fig_interpretation_html}</p>
+                            </div>'''
 
             section_html += f'''
                 <div class="figure-container" id="fig-{fig_id}">
@@ -915,6 +1274,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                     <div class="figure-caption">
                         <h4>{html_module.escape(fig_label)}: {html_module.escape(fig_name)}</h4>
                         {"<p>" + fig_caption_html + "</p>" if fig_caption_html else ""}
+                        {interpretation_section}
                         <div class="figure-actions">
                             <a href="figures/{png_filename}" download class="download-btn png">
                                 {"下载 PNG" if zh else "Download PNG"}
@@ -934,8 +1294,18 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             csv_path = table.get("csv_path", "")
             columns = table.get("columns", [])
             preview_data = table.get("preview_data", [])
+            tbl_interpretation = table.get("interpretation", "")
 
             csv_filename = url_quote(os.path.basename(csv_path)) if csv_path else ""
+            tbl_interpretation_html = markdown_to_html(tbl_interpretation) if tbl_interpretation else ""
+
+            tbl_interpretation_section = ""
+            if tbl_interpretation_html:
+                tbl_interpretation_section = f'''
+                            <div class="table-interpretation">
+                                <strong>{"科学解读" if zh else "Scientific Interpretation"}:</strong>
+                                <p>{tbl_interpretation_html}</p>
+                            </div>'''
 
             table_header = "".join([f"<th>{html_module.escape(str(col))}</th>" for col in columns])
             table_rows = ""
@@ -957,6 +1327,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                             <tbody>{table_rows}</tbody>
                         </table>
                     </div>
+                    {tbl_interpretation_section}
                     {"<div class='table-info'>" + ("显示 10 / " if zh else "Showing 10 of ") + str(len(preview_data)) + (" 行" if zh else " rows") + "</div>" if len(preview_data) > 10 else ""}
                 </div>
             '''
@@ -1039,8 +1410,17 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     def _safe_format_value(v: str) -> str:
         return v.replace("{", "{{").replace("}", "}}")
 
-    # Build appendix HTML from report.json data if available
+    # Build analysis log HTML from report.json data if available
     zh = language == "zh"
+    analysis_log_html = _build_analysis_log_from_report(report, language, figures_dir) if report.get("analysis_log") else ""
+    if analysis_log_html:
+        log_toc_label = "完整分析日志" if zh else "Complete Analysis Log"
+        toc_items.append(
+            f'<li><a href="#analysis_log">{log_toc_label}</a>'
+            f'<span class="section-type specific">{"日志" if zh else "Log"}</span></li>'
+        )
+
+    # Build appendix HTML from report.json data if available
     appendix_html = _build_appendix_from_report(report, language) if report.get("appendix") else ""
     if appendix_html:
         appendix_toc_label = "附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"
@@ -1061,6 +1441,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         sections_html=_safe_format_value("\n".join(sections_html)),
         conclusions_title="结论" if zh else "Conclusions",
         conclusions=_safe_format_value(conclusions_html),
+        analysis_log_html=_safe_format_value(analysis_log_html),
         appendix_html=_safe_format_value(appendix_html)
     )
 

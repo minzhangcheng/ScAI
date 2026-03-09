@@ -101,7 +101,7 @@ class CheckpointManager:
         return step > 0 and step % self.CHECKPOINT_INTERVAL == 0
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, CodeExecution,
-    PublicationFigure, FigureReviewStatus
+    PublicationFigure, FigureReviewStatus, AnalysisStep
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall
 from ..utils.sandbox import LocalJupyterSandbox, CodeExecutionResult
@@ -420,9 +420,14 @@ class BioinformaticsAgent(BaseAgent):
         """Build context string from notebook history"""
         if not self.code_history:
             return "Notebook is empty. This is the first code cell."
-        
+
+        # Prevent unbounded memory growth across rounds
+        MAX_CODE_HISTORY = 100
+        if len(self.code_history) > MAX_CODE_HISTORY:
+            self.code_history = self.code_history[-MAX_CODE_HISTORY:]
+
         context_parts = ["=== Notebook History (last 10 cells) ===\n"]
-        
+
         recent_history = self.code_history[-10:]
         start_idx = len(self.code_history) - len(recent_history)
         
@@ -724,6 +729,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
             # Fix: extend max_steps from the resume point so the agent gets a full budget of new steps
             max_steps = step_count + max_steps
             self.analysis_context = checkpoint.get('analysis_context', {})
+            analysis_log = [AnalysisStep(**s) for s in checkpoint.get('analysis_log', [])]
             logger.info(f"[Bioinformatics] Restored state: step={step_count}, findings={len(all_findings)}, figures={len(all_figures)}, new max_steps={max_steps}")
         else:
             messages = [
@@ -733,6 +739,10 @@ Before running sc.tl.pca() or any dimensionality reduction:
             all_findings = []
             all_figures = []
             step_count = 0
+            analysis_log = []
+            # Reset figure attempt counter so figures that failed in previous
+            # rounds can be retried with updated data
+            self.analysis_context.pop("_figure_attempts", None)
 
         completed = False
         text_response_count = 0
@@ -754,6 +764,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
                     'figures': all_figures,
                     'code_history': [ce.model_dump() if hasattr(ce, 'model_dump') else ce.__dict__
                                      for ce in self.code_history],
+                    'analysis_log': [step.model_dump() for step in analysis_log],
                     'analysis_context': self.analysis_context,
                     'completed': False
                 }
@@ -774,11 +785,22 @@ Before running sc.tl.pca() or any dimensionality reduction:
             except Exception as e:
                 await self._notify("error", f"LLM call failed: {str(e)}")
                 break
-            
+
+            # Capture agent reasoning from response content (before tool calls)
+            agent_reasoning = response.content[:2000] if response.content else None
+
             if not response.has_tool_calls:
                 if response.content:
                     await self._notify("response", response.content)
                     messages.append({"role": "assistant", "content": response.content})
+
+                # Record text-only response in analysis log
+                analysis_log.append(AnalysisStep(
+                    step_number=step_count, step_type="text_response",
+                    agent_reasoning=agent_reasoning,
+                    text_content=(response.content or "")[:2000],
+                ))
+                agent_reasoning = None
 
                 text_response_count += 1
                 if text_response_count >= MAX_TEXT_RESPONSES:
@@ -837,6 +859,14 @@ Before running sc.tl.pca() or any dimensionality reduction:
                             "tool_call_id": tool_call.id,
                             "content": f"Execution blocked: {error_msg}. Please rewrite the code without using dangerous operations."
                         })
+                        # Record blocked execution in analysis log
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="execute_code",
+                            agent_reasoning=agent_reasoning,
+                            code=code, code_error=error_msg,
+                            code_description=description, code_step_type=step_type,
+                        ))
+                        agent_reasoning = None
                         continue
 
                     await self._notify("status", f"[{step_type.upper()}] {description}")
@@ -911,7 +941,21 @@ plt.close('all')
                     )
                     self.code_history.append(code_exec)
                     self.last_result = result
-                    
+
+                    # Record execute_code step in analysis log
+                    _saved_figs = []
+                    if result.output:
+                        _saved_figs = [Path(p).name for p in re.findall(r'\[Auto-saved\] PNG: (.+\.png)', result.output)]
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count, step_type="execute_code",
+                        agent_reasoning=agent_reasoning,
+                        code=code, code_output=(result.output or "")[:3000],
+                        code_error=(result.error or "")[:3000] if result.error else None,
+                        code_description=description,
+                        code_step_type=step_type, saved_figure_filenames=_saved_figs,
+                    ))
+                    agent_reasoning = None  # Only record reasoning for first tool call in this turn
+
                     if result.output:
                         await self._notify("result", result.output[:2000])
                     for fig in result.figures:
@@ -960,6 +1004,15 @@ plt.close('all')
                         "content": f"PI Response: {pi_response}"
                     })
 
+                    # Record consult_pi step in analysis log
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count, step_type="consult_pi",
+                        agent_reasoning=agent_reasoning,
+                        pi_question=question, pi_context=context[:1000],
+                        pi_options=options or [], pi_response=(pi_response or "")[:2000],
+                    ))
+                    agent_reasoning = None
+
                 elif tool_name == "search_literature":
                     figure_only_iteration = False
                     topic = args.get("topic", "")
@@ -978,6 +1031,14 @@ plt.close('all')
                         "tool_call_id": tool_call.id,
                         "content": f"Literature findings: {lit_result[:2000]}"
                     })
+
+                    # Record search_literature step in analysis log
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count, step_type="search_literature",
+                        agent_reasoning=agent_reasoning,
+                        literature_topic=topic, literature_result=(lit_result or "")[:2000],
+                    ))
+                    agent_reasoning = None
 
                 elif tool_name == "annotate_clusters":
                     figure_only_iteration = False
@@ -1048,6 +1109,21 @@ plt.close('all')
                         "content": tool_result[:3000]
                     })
 
+                    # Record annotate_clusters step in analysis log
+                    markers_summary = ", ".join(
+                        f"Cluster {k}: {', '.join(str(x) for x in v[:3]) if isinstance(v, list) else str(v)[:50]}"
+                        for k, v in list(cluster_markers.items())[:5]
+                    )
+                    if len(cluster_markers) > 5:
+                        markers_summary += f" ... ({len(cluster_markers)} clusters total)"
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count, step_type="annotate_clusters",
+                        agent_reasoning=agent_reasoning,
+                        cluster_markers_summary=markers_summary, annotation_tissue=tissue,
+                        annotation_organism=organism, annotation_result_summary=(tool_result or "")[:2000],
+                    ))
+                    agent_reasoning = None
+
                 elif tool_name == "report_findings":
                     figure_only_iteration = False
                     findings = args.get("findings", [])
@@ -1067,6 +1143,15 @@ plt.close('all')
                         "tool_call_id": tool_call.id,
                         "content": "Findings recorded. Continue or wait for instructions."
                     })
+
+                    # Record report_findings step in analysis log
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count, step_type="report_findings",
+                        agent_reasoning=agent_reasoning,
+                        findings=findings, findings_summary=summary,
+                        findings_suggestions=suggestions or [],
+                    ))
+                    agent_reasoning = None
 
                     completed = True
                     break
@@ -1116,6 +1201,16 @@ plt.close('all')
                         "content": tool_result
                     })
 
+                    # Record generate_publication_figure step in analysis log
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count, step_type="generate_publication_figure",
+                        agent_reasoning=agent_reasoning,
+                        pub_figure_name=figure_name, pub_figure_description=description,
+                        pub_figure_type=figure_type, pub_figure_code=code,
+                        pub_figure_result=(tool_result or "")[:2000],
+                    ))
+                    agent_reasoning = None
+
             # Reset text-only counter when a substantive tool call was made
             if not figure_only_iteration and response.has_tool_calls:
                 text_response_count = 0
@@ -1156,6 +1251,7 @@ plt.close('all')
             "figures": all_figures,
             "steps_executed": step_count,
             "code_history": self.code_history,
+            "analysis_log": analysis_log,
             "success": True
         }
 
@@ -1189,6 +1285,8 @@ plt.close('all')
             "findings": result["findings"],
             "figures": result["figures"],
             "code_execution": self.code_history[-1] if self.code_history else None,
+            "code_history": self.code_history,
+            "analysis_log": result.get("analysis_log", []),
             "success": result["success"],
             "steps_executed": result["steps_executed"]
         }

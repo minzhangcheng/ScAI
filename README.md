@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by six specialized AI agents that collaborate like a research team.
 
-**Version**: 0.10.2
+**Version**: 0.10.3
 
 ## Core Features
 
@@ -308,6 +308,18 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.10.3 (2026-03-09)
+
+- Added comprehensive analysis log: every bioinformatics agent step (code execution, PI consultation, literature search, cluster annotation, figure generation) is recorded with agent reasoning, timestamps, and results
+- Reports now include a full chronological analysis log timeline with collapsible code, outputs, and inline figures
+- Added scientific interpretation sections for publication figures and tables in reports
+- PI Agent resets message history before synthesis and final summary, reducing token waste
+- Bioinformatics Agent: capped code history at 100 entries to prevent memory growth; figure attempt counter resets between rounds for retry
+- Workflow auto-activates agents when PI assigns tasks but forgets to include them in `agents_for_next_round`
+- Pathology findings now shared with bioinformatics agent for cross-agent collaboration within the same round
+- Code history deduplication by ID to handle node retries correctly
+- Refactored deep research availability check; improved PubMed gap fallback mode switching
 
 ### v0.10.2 (2026-03-08)
 
