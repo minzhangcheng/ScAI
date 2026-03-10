@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
+import ReactMarkdown from 'react-markdown'
 import {
   FileText,
   Image,
@@ -14,7 +15,10 @@ import {
   Eye,
   Code,
   ExternalLink,
-  Package
+  Package,
+  Settings,
+  Database,
+  MessageSquare
 } from 'lucide-react'
 
 const API_BASE = '/api'
@@ -48,6 +52,17 @@ interface ReportSection {
   tables: ReportTable[]
 }
 
+interface ReportAppendix {
+  project_name?: string
+  project_description?: string
+  created_at?: string
+  agent_models?: Record<string, string>
+  agent_temperatures?: Record<string, number>
+  treatment_groups?: Array<{ name: string; description: string; sample_count: number }>
+  data_files?: Array<{ filename: string; section: string; data_type: string }>
+  human_messages?: string[]
+}
+
 interface DetailedReport {
   id: string
   session_id: string
@@ -63,6 +78,7 @@ interface DetailedReport {
   progress: number
   current_step: string
   html_path?: string
+  appendix?: ReportAppendix
 }
 
 interface ReportPreview {
@@ -632,7 +648,9 @@ export function ReportPanel() {
                     <span className="w-1 h-6 bg-indigo-500 rounded-full" />
                     {language === 'zh' ? '摘要' : 'Abstract'}
                   </h2>
-                  <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{report.abstract}</p>
+                  <div className="prose prose-slate prose-sm max-w-none">
+                    <ReactMarkdown>{report.abstract}</ReactMarkdown>
+                  </div>
                 </div>
               )}
 
@@ -669,8 +687,8 @@ export function ReportPanel() {
                     <div className="px-6 pb-6 space-y-6">
                       {/* Text Content */}
                       {section.content && (
-                        <div className="text-slate-700 leading-relaxed whitespace-pre-wrap">
-                          {section.content}
+                        <div className="prose prose-slate prose-sm max-w-none">
+                          <ReactMarkdown>{section.content}</ReactMarkdown>
                         </div>
                       )}
 
@@ -775,9 +793,146 @@ export function ReportPanel() {
                     <CheckCircle className="w-5 h-5 text-green-500" />
                     {language === 'zh' ? '结论' : 'Conclusions'}
                   </h2>
-                  <div className="text-slate-700 leading-relaxed whitespace-pre-wrap">
-                    {report.conclusions}
+                  <div className="prose prose-slate prose-sm max-w-none">
+                    <ReactMarkdown>{report.conclusions}</ReactMarkdown>
                   </div>
+                </div>
+              )}
+
+              {/* Appendix: Analysis Settings & Records */}
+              {report.appendix && (
+                <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm space-y-4">
+                  <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                    <Settings className="w-5 h-5 text-slate-500" />
+                    {language === 'zh' ? '附录：分析设置与记录' : 'Appendix: Analysis Settings & Records'}
+                  </h2>
+
+                  {/* Project Info */}
+                  {report.appendix.project_name && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-2">
+                        {language === 'zh' ? '项目信息' : 'Project Information'}
+                      </h3>
+                      <div className="text-sm text-slate-600 space-y-1">
+                        <p><span className="font-medium">{language === 'zh' ? '项目名称：' : 'Project: '}</span>{report.appendix.project_name}</p>
+                        {report.appendix.created_at && (
+                          <p><span className="font-medium">{language === 'zh' ? '创建时间：' : 'Created: '}</span>{report.appendix.created_at}</p>
+                        )}
+                        {report.generated_at && (
+                          <p><span className="font-medium">{language === 'zh' ? '报告生成时间：' : 'Report Generated: '}</span>{report.generated_at}</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Agent Configuration */}
+                  {report.appendix.agent_models && Object.keys(report.appendix.agent_models).length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-1">
+                        <Database className="w-4 h-4" />
+                        {language === 'zh' ? 'Agent 配置' : 'Agent Configuration'}
+                      </h3>
+                      <div className="overflow-x-auto">
+                        <table className="text-sm w-full border-collapse">
+                          <thead>
+                            <tr className="border-b border-slate-200">
+                              <th className="text-left py-1.5 px-2 text-slate-600 font-medium">Agent</th>
+                              <th className="text-left py-1.5 px-2 text-slate-600 font-medium">{language === 'zh' ? '模型' : 'Model'}</th>
+                              {report.appendix.agent_temperatures && (
+                                <th className="text-left py-1.5 px-2 text-slate-600 font-medium">Temperature</th>
+                              )}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Object.entries(report.appendix.agent_models).map(([agent, model]) => (
+                              <tr key={agent} className="border-b border-slate-100">
+                                <td className="py-1.5 px-2 text-slate-700 capitalize">{agent}</td>
+                                <td className="py-1.5 px-2 text-slate-600 font-mono text-xs">{model}</td>
+                                {report.appendix?.agent_temperatures && (
+                                  <td className="py-1.5 px-2 text-slate-600">{report.appendix.agent_temperatures[agent] ?? '-'}</td>
+                                )}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Data Files */}
+                  {report.appendix.data_files && report.appendix.data_files.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-2">
+                        {language === 'zh' ? '数据文件' : 'Data Files'}
+                      </h3>
+                      <div className="overflow-x-auto">
+                        <table className="text-sm w-full border-collapse">
+                          <thead>
+                            <tr className="border-b border-slate-200">
+                              <th className="text-left py-1.5 px-2 text-slate-600 font-medium">{language === 'zh' ? '文件名' : 'Filename'}</th>
+                              <th className="text-left py-1.5 px-2 text-slate-600 font-medium">{language === 'zh' ? '类型' : 'Type'}</th>
+                              <th className="text-left py-1.5 px-2 text-slate-600 font-medium">{language === 'zh' ? '类别' : 'Section'}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {report.appendix.data_files.map((file, idx) => (
+                              <tr key={idx} className="border-b border-slate-100">
+                                <td className="py-1.5 px-2 text-slate-700 font-mono text-xs">{file.filename}</td>
+                                <td className="py-1.5 px-2 text-slate-600">{file.data_type}</td>
+                                <td className="py-1.5 px-2 text-slate-600">{file.section}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Treatment Groups */}
+                  {report.appendix.treatment_groups && report.appendix.treatment_groups.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-2">
+                        {language === 'zh' ? '实验分组' : 'Treatment Groups'}
+                      </h3>
+                      <div className="overflow-x-auto">
+                        <table className="text-sm w-full border-collapse">
+                          <thead>
+                            <tr className="border-b border-slate-200">
+                              <th className="text-left py-1.5 px-2 text-slate-600 font-medium">{language === 'zh' ? '组名' : 'Group'}</th>
+                              <th className="text-left py-1.5 px-2 text-slate-600 font-medium">{language === 'zh' ? '描述' : 'Description'}</th>
+                              <th className="text-left py-1.5 px-2 text-slate-600 font-medium">{language === 'zh' ? '样本数' : 'Samples'}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {report.appendix.treatment_groups.map((group, idx) => (
+                              <tr key={idx} className="border-b border-slate-100">
+                                <td className="py-1.5 px-2 text-slate-700">{group.name}</td>
+                                <td className="py-1.5 px-2 text-slate-600">{group.description}</td>
+                                <td className="py-1.5 px-2 text-slate-600">{group.sample_count}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* User Instructions */}
+                  {report.appendix.human_messages && report.appendix.human_messages.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-1">
+                        <MessageSquare className="w-4 h-4" />
+                        {language === 'zh' ? '用户输入' : 'User Instructions'}
+                      </h3>
+                      <div className="space-y-2">
+                        {report.appendix.human_messages.map((msg, idx) => (
+                          <div key={idx} className="text-sm text-slate-600 bg-slate-50 rounded-lg p-3 border border-slate-100">
+                            {msg}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.12.1
+**Version**: 0.12.3
 **Last Updated**: 2026-03-10
 
 ## Project Overview
@@ -94,7 +94,7 @@ intesc/                         # Code directory
 │   │                           # - Analysis log propagation and deduplication (by step ID)
 │   │                           # - Graphic abstract revision loop (PI review + Painter revision + best selection)
 │   │
-│   ├── report_generator.py     # Report generator (~4970 lines)
+│   ├── report_generator.py     # Report generator (~5100 lines)
 │   │                           # - No-sandbox report compilation (v0.7.3 rewrite)
 │   │                           # - PI analysis review pre-step (reads notebook, views figures via vision API)
 │   │                           # - Builds analysis record from code_history
@@ -105,7 +105,7 @@ intesc/                         # Code directory
 │   │                           # - Full analysis log timeline (chronological steps with code/figures/reasoning)
 │   │                           # - Figure/table scientific interpretation rendering
 │   │
-│   ├── regenerate_report_html.py # Report HTML regeneration utility (~1087 lines, appendix + analysis log support)
+│   ├── regenerate_report_html.py # Report HTML regeneration utility (~1479 lines, appendix + analysis log support)
 │   │
 │   ├── config.py               # Configuration management (~300 lines)
 │   │                           # - APIConfig: LLM keys + proxy (google_api_key moved to literature_config)
@@ -1268,6 +1268,8 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.12.3 | 2026-03-10 | Report markdown rendering fix (headers/lists in HTML), conclusions formatting cleanup, frontend ReactMarkdown rendering, frontend appendix display, supervisor agent HTML appendix |
+| 0.12.2 | 2026-03-10 | Analysis stop/pause support, publication figure checklist, figure revision auto-retry, progressive figure review leniency, WebSocket reconnection improvements |
 | 0.10.3 | 2026-03-09 | Comprehensive analysis log (AnalysisStep model, all tool call types), analysis log timeline in reports, figure/table scientific interpretation, PI history reset on synthesis, code history cap (100), agent auto-activation from PI tasks, pathology→bioinformatics context sharing, code history dedup by ID, deep research availability refactor |
 | 0.10.2 | 2026-03-08 | Sandbox kernel timeout recovery (full reconnection + session restore), plt.close/plt.show safety (try/finally in 3 code templates), blank figure detection (<2KB threshold), sandbox timeout 300s→1800s, architecture docs updated (sequential execution) |
 | 0.10.1 | 2026-03-07 | Literature fallback model (quick search uses PI model), deep research max_tokens fix (None instead of 262144), deep research model passthrough in chat mode, upload cancellation (abort in-progress + remove pending) |
@@ -1305,6 +1307,43 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.12.3 (2026-03-10)
+
+- **Report Markdown Rendering Fix**: Enhanced `markdown_to_html()` in `report_generator.py`, `supervisor_agent.py`, and `regenerate_report_html.py` to convert markdown headers (`#`–`####`) to `<h1>`–`<h4>` HTML tags and added bullet list (`- item` → `<ul><li>`) support. Previously headers appeared as raw text like `<p>### 3. Conclusions</p>` in generated HTML reports.
+- **Conclusions/Abstract Prompt Optimization**: Updated LLM prompts in `_generate_conclusions()` and `_generate_abstract()` to explicitly instruct LLM not to generate redundant section headers (report template already provides them). Added defensive regex cleanup to strip any remaining `### Conclusions` or `**Abstract**` prefixes from LLM output.
+- **Frontend ReactMarkdown Rendering**: `ReportPanel.tsx` Detail view now renders abstract, section content, and conclusions via `ReactMarkdown` component (already installed as dependency) instead of raw `whitespace-pre-wrap` text, properly displaying bold, italic, headers, and lists.
+- **Frontend Appendix Display**: Added `ReportAppendix` interface and appendix rendering section to `ReportPanel.tsx` showing project info, agent model configurations with temperatures, data files, treatment groups, and user instructions in a styled card layout.
+- **Supervisor Agent HTML Appendix**: Added `_build_appendix_html_section()` static method to `SupervisorAgent`, inserting a full appendix (project info, agent config, data files, treatment groups, analysis rounds) into the HTML report between conclusions and footer.
+
+#### v0.12.2 (2026-03-10)
+
+- **Analysis Stop/Pause Support**: Added UI buttons and backend endpoint (`POST /api/session/{session_id}/stop`) to pause or terminate analysis. Support immediate termination (pause/save) or termination with summary (stop-and-summarize report generation). Implemented task tracking (`_run_tasks`) and cancellation support for workflow execution.
+- **Publication-Quality Bioinformatics Figures**: Added mandatory checklist (UMAP axis labels, font sizes, legend placement) and strict composition barplot rules to bioinformatics agent's system prompt. Updated default matplotlib/seaborn themes in sandbox for professional "publication" aesthetics.
+- **Figure Revision Auto-Retry**: Bioinformatics Agent now automatically attempts to fix runtime errors during figure code revision once using the error message as context, improving reliability of figure generation.
+- **Progressive Figure Review Leniency**: PI Agent's figure review now employs progressive leniency (from revision 2+) to focus on scientific accuracy over minor aesthetics, avoiding infinite revision loops for minor cosmetic issues.
+- **WebSocket Reconnection Improvements**: WebSocket handler now updates the global reference for active workflows, ensuring users can reliably observe real-time progress after a connection drop or refresh.
+- **UI UX Polish**: Feedback dialog "Skip" button renamed to "Continue" for clarity; added Stop/Summarize buttons to feedback dialog and Analysis panel.
+
+#### v0.12.1 (2026-03-10)
+
+- **Centralized Code Safety**: Moved safety validation to `sandbox.py`, protecting all components (Bioinfo, Report, Chat).
+- **Report Resumption**: Added `CheckpointManager` for report generation, allowing resumption from last completed step.
+- **Race Condition Fixes**: Serialized session saves to prevent JSON mutation; improved session eviction logic to prevent re-activation conflicts.
+- **Memory Optimization**: Added message caps and base64 stripping for realtime message history.
+
+#### v0.12.0 (2026-03-10)
+
+- **Supervisor Agent**: Real-time monitoring of bioinformatics analysis steps for issue detection and PI escalation.
+- **Bug Fixes**: Fixed LLM retry logic (InternalServerError only), settings sync, WebSocket version conflict recovery, and UUID generation in non-HTTPS contexts.
+- **UX Improvements**: Expand/collapse buttons for truncated messages; last-round guidance indicators; automatic cleanup of partial failed uploads.
+
+#### v0.11.0 - v0.11.1 (2026-03-09)
+
+- **Sequential Execution**: Reordered agents to Biochemistry → Pathology → Bioinformatics → Literature for better context flow.
+- **Dynamic PI Planning**: PI Agent refines downstream tasks based on completed results within the same round.
+- **Cross-Agent Context**: findings shared between agents in real-time (e.g., Biochemistry results injected into Bioinfo).
+- **Session Improvements**: Deleting session now removes all disk artifacts; fixed duplicate figure generation via upsert logic; improved session persistence timing.
 
 #### v0.10.3 (2026-03-09)
 
@@ -1542,5 +1581,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-07*
-*Version: 0.9.1*
+*Document updated: 2026-03-10*
+*Version: 0.12.2*

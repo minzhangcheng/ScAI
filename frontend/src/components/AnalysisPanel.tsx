@@ -17,7 +17,9 @@ import {
   ChevronDown,
   ChevronUp,
   Palette,
-  Eye
+  Eye,
+  Pause,
+  Square
 } from 'lucide-react'
 
 const API_BASE = '/api'
@@ -40,7 +42,7 @@ export interface RoundSummary {
 
 export function AnalysisPanel() {
   const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors, readMode, addMessage } = useAppStore()
-  const { startAnalysis, resumeAnalysis, continueRound } = useSession()
+  const { startAnalysis, resumeAnalysis, continueRound, pauseAnalysis, stopAnalysis } = useSession()
   const { checkStatus, validateApiKey } = useConfig()
   const { t } = useTranslation(language)
 
@@ -51,6 +53,10 @@ export function AnalysisPanel() {
   const [showFeedbackDialog, setShowFeedbackDialog] = useState(false)
   const [feedbackRoundData, setFeedbackRoundData] = useState<RoundSummary | null>(null)
   const lastDialogRoundRef = useRef<number>(-1)
+
+  // Stop dialog state
+  const [showStopDialog, setShowStopDialog] = useState(false)
+  const [stopping, setStopping] = useState(false)
 
   // API validation state
   const [validating, setValidating] = useState(false)
@@ -315,7 +321,7 @@ export function AnalysisPanel() {
     setShowFeedbackDialog(false)
   }, [currentSession, resumeAnalysis, wsConnected, wsConnect])
 
-  // Dialog handler: Skip (auto-proceed without input)
+  // Dialog handler: Skip/Continue (auto-proceed without input)
   const handleDialogSkip = useCallback(async () => {
     try {
       await continueRound()
@@ -327,6 +333,29 @@ export function AnalysisPanel() {
     }
     setShowFeedbackDialog(false)
   }, [continueRound, wsConnected, wsConnect])
+
+  // Pause handler
+  const handlePause = useCallback(async () => {
+    try {
+      await pauseAnalysis()
+    } catch (e) {
+      console.error('Failed to pause:', e)
+    }
+  }, [pauseAnalysis])
+
+  // Stop handler (immediate or summarize)
+  const handleStop = useCallback(async (action: 'immediate' | 'summarize') => {
+    setStopping(true)
+    try {
+      await stopAnalysis(action)
+      setShowStopDialog(false)
+      setShowFeedbackDialog(false)
+    } catch (e) {
+      console.error('Failed to stop:', e)
+    } finally {
+      setStopping(false)
+    }
+  }, [stopAnalysis])
 
   // Auto-connect WebSocket when session is running and not connected
   // Uses wsConnect from the store (managed by App.tsx) to avoid duplicate WebSocket instances
@@ -464,18 +493,43 @@ export function AnalysisPanel() {
           )}
           
           {isRunning && (
-            <div className="flex items-center gap-2 px-4 py-2 bg-blue-100 text-blue-700 rounded-xl">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span className="font-medium">Round {currentSession.currentRound}</span>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 px-4 py-2 bg-blue-100 text-blue-700 rounded-xl">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span className="font-medium">Round {currentSession.currentRound}</span>
+              </div>
+              <button
+                onClick={handlePause}
+                className="flex items-center gap-1.5 px-3 py-2 bg-amber-100 hover:bg-amber-200 text-amber-700 rounded-xl text-sm font-medium transition-colors"
+              >
+                <Pause className="w-4 h-4" />
+                {language === 'zh' ? '暂停' : 'Pause'}
+              </button>
+              <button
+                onClick={() => setShowStopDialog(true)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-xl text-sm font-medium transition-colors"
+              >
+                <Square className="w-3.5 h-3.5" />
+                {language === 'zh' ? '停止' : 'Stop'}
+              </button>
             </div>
           )}
-          
+
           {isWaitingInput && (
-            <div className="flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-700 rounded-xl">
-              <AlertCircle className="w-4 h-4" />
-              <span className="font-medium">
-                {language === 'zh' ? '等待输入' : 'Waiting for Input'}
-              </span>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-700 rounded-xl">
+                <AlertCircle className="w-4 h-4" />
+                <span className="font-medium">
+                  {language === 'zh' ? '等待输入' : 'Waiting for Input'}
+                </span>
+              </div>
+              <button
+                onClick={() => setShowStopDialog(true)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-xl text-sm font-medium transition-colors"
+              >
+                <Square className="w-3.5 h-3.5" />
+                {language === 'zh' ? '停止' : 'Stop'}
+              </button>
             </div>
           )}
           
@@ -763,7 +817,79 @@ export function AnalysisPanel() {
           treatmentGroups={currentSession.treatmentGroups || []}
           onSend={handleDialogSend}
           onSkip={handleDialogSkip}
+          onStopImmediate={() => handleStop('immediate')}
+          onStopSummarize={() => handleStop('summarize')}
         />
+      )}
+
+      {/* Stop Confirmation Dialog */}
+      {showStopDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4">
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 bg-red-100 rounded-full">
+                  <Square className="w-5 h-5 text-red-600" />
+                </div>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  {language === 'zh' ? '停止分析' : 'Stop Analysis'}
+                </h3>
+              </div>
+              <p className="text-sm text-slate-600 mb-4">
+                {language === 'zh' ? '请选择停止方式：' : 'Choose how to stop:'}
+              </p>
+            </div>
+            <div className="px-6 pb-6 space-y-2">
+              <button
+                onClick={() => handleStop('immediate')}
+                disabled={stopping}
+                className="w-full flex items-center gap-3 px-4 py-3 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl text-left transition-colors disabled:opacity-50"
+              >
+                <Square className="w-5 h-5 text-red-600 flex-shrink-0" />
+                <div>
+                  <div className="font-medium text-red-800">
+                    {language === 'zh' ? '立即终止' : 'Terminate Immediately'}
+                  </div>
+                  <div className="text-xs text-red-600">
+                    {language === 'zh'
+                      ? '完全终止分析，保存状态，稍后可恢复继续'
+                      : 'Stop analysis, save state, resume later'}
+                  </div>
+                </div>
+              </button>
+              <button
+                onClick={() => handleStop('summarize')}
+                disabled={stopping}
+                className="w-full flex items-center gap-3 px-4 py-3 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-xl text-left transition-colors disabled:opacity-50"
+              >
+                <CheckCircle2 className="w-5 h-5 text-amber-600 flex-shrink-0" />
+                <div>
+                  <div className="font-medium text-amber-800">
+                    {language === 'zh' ? '终止分析并总结结果' : 'Terminate and Summarize'}
+                  </div>
+                  <div className="text-xs text-amber-600">
+                    {language === 'zh'
+                      ? '停止分析轮次，根据已有结果生成报告'
+                      : 'Stop rounds, generate report from current results'}
+                  </div>
+                </div>
+              </button>
+              <button
+                onClick={() => setShowStopDialog(false)}
+                disabled={stopping}
+                className="w-full px-4 py-3 text-slate-600 hover:bg-slate-100 rounded-xl font-medium transition-colors text-center disabled:opacity-50"
+              >
+                {language === 'zh' ? '按错了，继续' : 'Cancel, Continue'}
+              </button>
+              {stopping && (
+                <div className="flex items-center gap-2 text-sm text-blue-600 pt-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  {language === 'zh' ? '正在停止...' : 'Stopping...'}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

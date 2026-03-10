@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.12.1
+**Version**: 0.12.3
 
 ## Core Features
 
@@ -309,6 +309,24 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.12.3 (2026-03-10)
+
+- **Improved Report Markdown Rendering**: Enhanced `markdown_to_html()` across all three report generators (`report_generator.py`, `supervisor_agent.py`, `regenerate_report_html.py`) to convert markdown headers (`#`/`##`/`###`/`####`) to proper HTML heading tags, and added bullet list support. Previously, markdown headers appeared as raw text in HTML reports.
+- **Fixed Conclusions Formatting**: Updated LLM prompts for abstract and conclusions generation to prevent redundant section headers (e.g., `### 3. Conclusions`). Added defensive post-processing to strip any remaining header artifacts from LLM output.
+- **Frontend Markdown Rendering**: ReportPanel Detail view now uses ReactMarkdown (already installed) for rendering abstract, section content, and conclusions, replacing raw `whitespace-pre-wrap` text display.
+- **Frontend Appendix Display**: Added appendix section to Report Detail view showing project information, agent model configurations, data files, treatment groups, and user instructions — data already existed in backend but was not rendered in the frontend.
+- **Supervisor Agent HTML Appendix**: Supervisor Agent's HTML report now includes a full appendix section (project info, agent config, data files, treatment groups, analysis rounds), matching the depth of the main report generator.
+
+### v0.12.2 (2026-03-10)
+
+- **Analysis Stop/Pause Support**: Added UI buttons and backend endpoint (`POST /api/session/{id}/stop`) to pause or terminate analysis. Support immediate termination (pause/save) or termination with summary (stop-and-summarize report generation).
+- **Publication-Quality Bioinformatics Figures**: Added mandatory checklist (UMAP axis labels, font sizes, legend placement) and strict composition barplot rules to bioinformatics agent's system prompt. Updated default matplotlib/seaborn themes in sandbox for professional "publication" aesthetics.
+- **Figure Revision Auto-Retry**: Bioinformatics Agent now automatically attempts to fix runtime errors during figure code revision once using the error message as context.
+- **Progressive Figure Review Leniency**: PI Agent's figure review now employs progressive leniency (from revision 2+) to focus on scientific accuracy over minor aesthetics, avoiding infinite revision loops.
+- **WebSocket Reconnection Improvements**: WebSocket handler now updates the global reference for active workflows, ensuring users can reliably observe real-time progress after a connection drop.
+- **UI UX Polish**: Feedback dialog "Skip" button renamed to "Continue"; added Stop/Summarize buttons to feedback dialog for easier control.
+- **Code Stability**: Fixed WebSocket handling for completed sessions; improved LLM retry logic; centralized code safety validation in sandbox.
 
 ### v0.12.1 (2026-03-10)
 

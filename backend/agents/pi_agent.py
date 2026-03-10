@@ -1227,6 +1227,23 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 - For violin/dotplots: check group comparisons, statistical annotations if needed.
 """
 
+        # Apply progressive leniency for multiple revisions
+        if figure.revision_count >= 3:
+            prompt += """
+**FINAL REVISION - MUST APPROVE unless critical issues exist:**
+- This is the final revision attempt. APPROVE if quality_score >= 5.
+- Only reject for: fabricated data, completely missing labels, or scientific errors.
+- Aesthetic issues at this stage should be noted in feedback but should NOT prevent approval.
+"""
+        elif figure.revision_count >= 2:
+            prompt += """
+**IMPORTANT - REVISION LENIENCY POLICY (revision count >= 2):**
+- This figure has been revised multiple times. Focus ONLY on critical issues.
+- Approve if quality_score >= 6 AND there are no data accuracy/fabrication issues.
+- Minor aesthetic preferences (color choices, exact font sizes, spacing) should NOT block approval.
+- Only reject if there are scientific accuracy issues, missing essential labels, or data fidelity problems.
+"""
+
         # Use vision capability to analyze the figure
         try:
             response = await self.llm_client.chat_with_vision(

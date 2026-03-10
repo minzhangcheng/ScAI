@@ -510,13 +510,22 @@ import matplotlib.pyplot as plt
 # Import dill for session persistence
 import dill
 
-# Set matplotlib defaults
-plt.rcParams['figure.figsize'] = (10, 6)
-plt.rcParams['figure.dpi'] = 100
-plt.rcParams['savefig.dpi'] = 100
-plt.rcParams['font.size'] = 10
-plt.rcParams['pdf.fonttype'] = 42   # Vectorized fonts for editable PDFs
-plt.rcParams['ps.fonttype'] = 42
+# Set matplotlib defaults for publication-quality figures
+plt.rcParams.update({
+    'figure.figsize': (10, 6),
+    'figure.dpi': 100,
+    'savefig.dpi': 100,
+    'font.size': 12,
+    'axes.titlesize': 14,
+    'axes.labelsize': 12,
+    'xtick.labelsize': 10,
+    'ytick.labelsize': 10,
+    'legend.fontsize': 10,
+    'axes.grid': False,
+    'axes.linewidth': 1.2,
+    'pdf.fonttype': 42,   # Vectorized fonts for editable PDFs
+    'ps.fonttype': 42,
+})
 
 # === Monkey-patch Figure.savefig to auto-generate PDF alongside PNG ===
 import matplotlib.figure as _mpl_figure
@@ -557,7 +566,7 @@ except ImportError:
 
 try:
     import seaborn as sns
-    sns.set_style('whitegrid')
+    sns.set_theme(style="ticks", font_scale=1.2)
 except ImportError:
     pass
 

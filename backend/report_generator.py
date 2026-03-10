@@ -184,6 +184,12 @@ def markdown_to_html(text: str) -> str:
     # Escape HTML entities first to prevent XSS
     text = html_module.escape(text)
 
+    # Headers: must be processed before bold/italic (longest prefix first)
+    text = re.sub(r'^####\s+(.+)$', r'<h4>\1</h4>', text, flags=re.MULTILINE)
+    text = re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
+    text = re.sub(r'^##\s+(.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
+    text = re.sub(r'^#\s+(.+)$', r'<h1>\1</h1>', text, flags=re.MULTILINE)
+
     # Bold: **text** or __text__
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
@@ -194,6 +200,10 @@ def markdown_to_html(text: str) -> str:
 
     # Code: `text`
     text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+
+    # Bullet lists
+    text = re.sub(r'^- (.+)$', r'<li>\1</li>', text, flags=re.MULTILINE)
+    text = re.sub(r'(<li>.*?</li>\n?)+', r'<ul>\g<0></ul>', text)
 
     # Line breaks
     text = text.replace('\n\n', '</p><p>')
@@ -4403,6 +4413,19 @@ Example format:
 {key_results[:1000] if key_results else ""}
 """
 
+        if zh:
+            abstract_instruction = (
+                "用中文撰写摘要，200-300字，包括背景、方法（具体的分析方法和参数）、主要发现和结论。"
+                "注意：直接输出摘要正文，不要以标题（如 **摘要** 或 ## Abstract）开头，报告模板已提供标题。"
+            )
+        else:
+            abstract_instruction = (
+                "Write abstract in English, 150-250 words, including background, methods "
+                "(specific analysis methods and parameters), main findings and conclusions. "
+                "IMPORTANT: Output the abstract text directly. Do NOT start with a title like "
+                "'**Abstract**' or '## Abstract' - the section heading is already provided by the report template."
+            )
+
         prompt = f"""Write an abstract for this research report.
 
 ## Research Project
@@ -4419,10 +4442,15 @@ Objective: {state.initial_instruction}
 ## Final Summary:
 {findings['summary'][:1500] if findings['summary'] else 'Not available'}
 
-{"用中文撰写摘要，200-300字，包括背景、方法（具体的分析方法和参数）、主要发现和结论" if zh else "Write abstract in English, 150-250 words, including background, methods (specific analysis methods and parameters), main findings and conclusions"}
+{abstract_instruction}
 """
 
-        return await self._pi_chat(prompt, temperature=0.3)
+        abstract = await self._pi_chat(prompt, temperature=0.3)
+        # Strip redundant leading title that LLM may have added
+        abstract = re.sub(r'^\*{0,2}Abstract\*{0,2}\s*\n*', '', abstract, flags=re.IGNORECASE).strip()
+        abstract = re.sub(r'^\*{0,2}摘要\*{0,2}\s*\n*', '', abstract, flags=re.IGNORECASE).strip()
+        abstract = re.sub(r'^#{1,4}\s+.*?(Abstract|摘要).*?\n+', '', abstract, flags=re.IGNORECASE).strip()
+        return abstract
 
     async def _generate_conclusions(
         self,
@@ -4445,6 +4473,21 @@ Objective: {state.initial_instruction}
 {key_results[:1500]}
 """
 
+        if zh:
+            conclusions_instruction = (
+                "用中文撰写结论，包括：1)主要发现总结（引用具体数据）2)生物学意义 3)研究局限性 4)未来方向。300-500字。"
+                "注意：直接输出结论正文，不要以标题（如 ### 结论）开头，报告模板已提供标题。"
+                "使用**粗体文本**作为各小节标签（如 **主要发现总结**），后接正文段落。"
+            )
+        else:
+            conclusions_instruction = (
+                "Write conclusions in English including: 1) Summary of main findings (cite specific numbers) "
+                "2) Biological significance 3) Limitations 4) Future directions. 250-400 words. "
+                "IMPORTANT: Output the conclusions text directly. Do NOT start with a header like "
+                "'### Conclusions' - the section heading is already provided by the report template. "
+                "Use **bold text** for subtopic labels (e.g., **Summary of Findings**), followed by paragraph text."
+            )
+
         prompt = f"""Write the final conclusions for this research report.
 
 ## Research Objective:
@@ -4462,10 +4505,13 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 ## Final Summary from Analysis:
 {findings['summary'][:2000] if findings['summary'] else 'Not available'}
 
-{"用中文撰写结论，包括：1)主要发现总结（引用具体数据）2)生物学意义 3)研究局限性 4)未来方向。300-500字" if zh else "Write conclusions in English including: 1) Summary of main findings (cite specific numbers) 2) Biological significance 3) Limitations 4) Future directions. 250-400 words"}
+{conclusions_instruction}
 """
 
-        return await self._pi_chat(prompt, temperature=0.3)
+        conclusions = await self._pi_chat(prompt, temperature=0.3)
+        # Strip redundant leading title that LLM may have added
+        conclusions = re.sub(r'^#{1,4}\s+[\d.]*\s*(Conclusions?|结论).*?\n+', '', conclusions, flags=re.IGNORECASE).strip()
+        return conclusions
 
     def _build_appendix_html(
         self,

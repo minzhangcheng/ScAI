@@ -601,7 +601,20 @@ export function useSession() {
     await apiFetch(`/session/${session.id}/resume`, { method: 'POST' })
     useAppStore.getState().updateSession({ status: 'running' })
   }, [])
-  
+
+  const stopAnalysis = useCallback(async (action: 'immediate' | 'summarize') => {
+    if (!currentSession) throw new Error('No active session')
+    await apiFetch(`/session/${currentSession.id}/stop`, {
+      method: 'POST',
+      body: JSON.stringify({ action }),
+    })
+    if (action === 'immediate') {
+      updateSession({ status: 'paused' })
+    } else {
+      updateSession({ status: 'generating_report' })
+    }
+  }, [currentSession, updateSession])
+
   const exportState = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
     
@@ -653,6 +666,7 @@ export function useSession() {
     pauseAnalysis,
     resumeAnalysis,
     continueRound,
+    stopAnalysis,
     exportState,
     getReport,
     updateSession,

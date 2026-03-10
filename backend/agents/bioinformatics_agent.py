@@ -487,6 +487,28 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
    NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
    Do NOT include plt.close(), plt.show(), or plt.savefig() in the figure code - the system handles saving automatically.
 
+   **PUBLICATION FIGURE MANDATORY CHECKLIST:**
+   - When using sc.pl.umap/tsne, ALWAYS set show=False and capture the axes: `ax = sc.pl.umap(adata, ..., show=False, return_fig=True)`
+   - ALWAYS manually add ax.set_xlabel('UMAP1') and ax.set_ylabel('UMAP2') to ALL embedding plots
+   - If UMAP legends overlap data, use legend_loc='right margin' — NEVER manually set legend coordinates
+   - All text elements must have fontsize >= 10pt
+   - Legend must NOT overlap data — place outside plot or use bbox_to_anchor
+   - Use consistent naming across ALL panels (e.g., always 'Cholangiocyte', never abbreviate in some panels)
+   - No grid lines unless explicitly needed for the figure type
+   - Always call ax.set_xticks() BEFORE ax.set_xticklabels() to ensure label count matches tick count
+
+   **COMPOSITION / PROPORTION BARPLOT RULES:**
+   - When plotting cell type proportions across conditions (e.g., WT vs DKO):
+     1. The cell type categories on the y-axis must be CONDITION-INDEPENDENT (e.g., 'Hepatocyte', not 'Hepatocyte_WT')
+     2. If cell types in adata.obs contain condition suffixes (e.g., 'Hepatocyte_WT', 'Hepatocyte_DKO'), you MUST strip/merge them first
+     3. Compute proportions as: (cells of type X in condition A) / (total cells in condition A)
+     4. A correct composition plot should show MIXED colors in each bar — if any bar is 100% one color, check for tautological grouping
+   - For pandas Categorical columns: call .cat.add_categories('NewCat') BEFORE assigning a new category value
+   - Example pattern for merging:
+     ct = adata.obs['cell_type'].astype(str)
+     for cond in conditions:
+         ct = ct.str.replace(f'_{{cond}}', '', regex=False)
+
 WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
 - **REUSE EXISTING RESULTS (CRITICAL for chat follow-up analyses)**:
@@ -1255,7 +1277,13 @@ from pathlib import Path
 plt.rcParams.update({{
     'figure.dpi': 300,
     'savefig.dpi': 300,
-    'font.size': 10,
+    'font.size': 12,
+    'axes.titlesize': 14,
+    'axes.labelsize': 12,
+    'xtick.labelsize': 10,
+    'ytick.labelsize': 10,
+    'legend.fontsize': 10,
+    'axes.grid': False,
     'axes.linewidth': 1.2,
     'pdf.fonttype': 42,  # Ensure fonts are vectorized in PDF
     'ps.fonttype': 42,
@@ -1405,7 +1433,13 @@ from pathlib import Path
 plt.rcParams.update({{
     'figure.dpi': 300,
     'savefig.dpi': 300,
-    'font.size': 10,
+    'font.size': 12,
+    'axes.titlesize': 14,
+    'axes.labelsize': 12,
+    'xtick.labelsize': 10,
+    'ytick.labelsize': 10,
+    'legend.fontsize': 10,
+    'axes.grid': False,
     'axes.linewidth': 1.2,
     'pdf.fonttype': 42,
     'ps.fonttype': 42,
@@ -1449,7 +1483,75 @@ plt.close()
                         current_code = revised_code
                     else:
                         logger.warning(f"[Bioinformatics] Revision failed: {result.error}")
-                        break  # Don't review the same unchanged figure again
+                        # Auto-retry: feed error back to LLM for a single fix attempt
+                        error_msg = str(result.error)[:1000]
+                        logger.info(f"[Bioinformatics] Auto-retrying revision with error context")
+                        try:
+                            retry_code = await self._revise_figure_code(
+                                revised_code,
+                                f"The previous code revision caused a runtime error:\n{error_msg}\nFix this error while keeping ALL the style improvements from the revision.",
+                                [f"Fix the runtime error: {error_msg}"],
+                                ["The code must execute without errors"],
+                                figure_type, state, figure.png_base64,
+                                revision_history=revision_history
+                            )
+                            is_valid_retry, err_retry = self._validate_code(retry_code)
+                            if is_valid_retry:
+                                indented_retry_code = textwrap.indent(retry_code, '    ')
+                                retry_wrapped = f'''
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+plt.rcParams.update({{
+    'figure.dpi': 300,
+    'savefig.dpi': 300,
+    'font.size': 12,
+    'axes.titlesize': 14,
+    'axes.labelsize': 12,
+    'xtick.labelsize': 10,
+    'ytick.labelsize': 10,
+    'legend.fontsize': 10,
+    'axes.grid': False,
+    'axes.linewidth': 1.2,
+    'pdf.fonttype': 42,
+    'ps.fonttype': 42,
+}})
+
+_figures_dir = {figures_dir_repr}
+Path(_figures_dir).mkdir(exist_ok=True)
+
+_orig_close = plt.close
+_orig_show = plt.show
+plt.close = lambda *a, **kw: None
+plt.show = lambda *a, **kw: None
+
+try:
+{indented_retry_code}
+finally:
+    plt.close = _orig_close
+    plt.show = _orig_show
+
+fig = plt.gcf()
+
+_png_path = {png_path_repr}
+_pdf_path = {pdf_path_repr}
+
+fig.savefig(_png_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
+fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+plt.close()
+'''
+                                retry_result = await self.sandbox.execute(retry_wrapped)
+                                if not retry_result.error and png_path.exists() and png_path.stat().st_size >= 2000:
+                                    logger.info(f"[Bioinformatics] Auto-retry succeeded for {figure_name}")
+                                    figure.png_base64 = self._compress_image_to_base64(png_path, max_width=800)
+                                    await self._notify("figure", figure.png_base64)
+                                    current_code = retry_code
+                                    continue  # Back to review loop
+                                else:
+                                    logger.warning(f"[Bioinformatics] Auto-retry also failed: {retry_result.error}")
+                        except Exception as retry_err:
+                            logger.warning(f"[Bioinformatics] Auto-retry exception: {retry_err}")
+                        break  # Both attempts failed
 
             # After 3 attempts, save with revision_requested status
             figure.review_status = FigureReviewStatus.REVISION_REQUESTED
@@ -1585,9 +1687,12 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
                     round_text += f"- Must Fix: {'; '.join(str(m) for m in hist_must_fix)}\n"
                 history_parts.append(round_text)
             history_section = (
-                "**Previous Revision History (earlier rounds - text only):**\n"
-                "The following feedback was given in prior rounds. Ensure these issues have been addressed "
-                "and do NOT reintroduce previously fixed problems.\n\n"
+                "**Previous Revision History (CRITICAL - read carefully):**\n"
+                "The following issues were identified and some were FIXED in prior rounds.\n"
+                "You MUST:\n"
+                "1. Keep ALL previously applied fixes (do NOT revert them)\n"
+                "2. Address the NEW issues from the current round\n"
+                "3. Before submitting, mentally verify each previous fix is still present in your code\n\n"
                 + "\n".join(history_parts) + "\n"
             )
 
@@ -1611,10 +1716,13 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
 **Requirements:**
 1. Fix all critical issues listed above
 2. Address as many suggestions as possible
-3. If there is revision history above, verify that previously reported issues are still fixed
+3. CRITICAL: Do NOT revert previously applied fixes. If Round 1 changed grid lines to dashed, keep them dashed. If Round 2 added axis labels, keep them.
 4. Maintain the same overall figure structure
 5. Keep using the same data variables (assume they exist), but REMOVE any fabricated/dummy data for groups not in the experimental design
-6. Return ONLY the revised Python code, no explanations
+6. Before calling set_xticklabels()/set_yticklabels(), ALWAYS call set_xticks()/set_yticks() first with matching count
+7. For pandas Categorical columns, use .cat.add_categories() before assigning new category values
+8. Use legend_.get_legend_handles_labels() instead of legend_.legendHandles (deprecated in newer matplotlib)
+9. Return ONLY the revised Python code, no explanations
 
 **Common fixes for publication figures:**
 - Add/improve axis labels and titles

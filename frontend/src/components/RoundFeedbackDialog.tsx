@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Pause,
   Play,
-  SkipForward,
   Send,
   Upload,
   X,
@@ -14,7 +13,9 @@ import {
   AlertTriangle,
   Clock,
   Users,
-  ChevronDown
+  ChevronDown,
+  Square,
+  CheckCircle2
 } from 'lucide-react'
 import { useTranslation, Language } from '../i18n/translations'
 import { TreatmentGroup } from '../stores/appStore'
@@ -72,6 +73,8 @@ interface RoundFeedbackDialogProps {
   treatmentGroups: TreatmentGroup[]
   onSend: (message: string, files: UploadedFileWithAgent[]) => Promise<void>
   onSkip: () => Promise<void>
+  onStopImmediate?: () => void
+  onStopSummarize?: () => void
 }
 
 const AGENT_OPTIONS = [
@@ -90,6 +93,8 @@ export function RoundFeedbackDialog({
   treatmentGroups,
   onSend,
   onSkip,
+  onStopImmediate,
+  onStopSummarize,
 }: RoundFeedbackDialogProps) {
   const { t } = useTranslation(language)
 
@@ -311,18 +316,42 @@ export function RoundFeedbackDialog({
             {/* Manual mode indicator */}
             {isManualMode && (
               <span className="text-xs text-slate-500 font-medium">
-                {language === 'zh' ? '手动跳过模式' : 'Manual skip mode'}
+                {language === 'zh' ? '手动模式' : 'Manual mode'}
               </span>
             )}
-            {/* Skip button */}
+            {/* Continue button (renamed from Skip) */}
             <button
               onClick={handleSkip}
               disabled={sending}
-              className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors disabled:opacity-50"
+              className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-blue-100 hover:bg-blue-200 text-blue-700 transition-colors disabled:opacity-50"
             >
-              <SkipForward className="w-3.5 h-3.5" />
+              <Play className="w-3.5 h-3.5" />
               {t('skipRound')}
             </button>
+            {/* Terminate immediately */}
+            {onStopImmediate && (
+              <button
+                onClick={onStopImmediate}
+                disabled={sending}
+                className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-red-100 hover:bg-red-200 text-red-700 transition-colors disabled:opacity-50"
+                title={language === 'zh' ? '立即终止分析' : 'Terminate immediately'}
+              >
+                <Square className="w-3.5 h-3.5" />
+                {language === 'zh' ? '立即终止' : 'Terminate'}
+              </button>
+            )}
+            {/* Terminate and summarize */}
+            {onStopSummarize && (
+              <button
+                onClick={onStopSummarize}
+                disabled={sending}
+                className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-700 transition-colors disabled:opacity-50"
+                title={language === 'zh' ? '终止分析并生成报告' : 'Terminate and summarize'}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                {language === 'zh' ? '终止并总结' : 'Summarize'}
+              </button>
+            )}
           </div>
         </div>
 
