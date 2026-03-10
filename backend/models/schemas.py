@@ -536,7 +536,9 @@ class WebSocketMessage(BaseModel):
         # Cluster annotation
         "annotation_result",
         # Chat delegation
-        "chat_delegation", "chat_result", "chat_error"
+        "chat_delegation", "chat_result", "chat_error",
+        # Supervisor monitoring
+        "supervisor_feedback", "supervisor_checkpoint", "supervisor_summary"
     ]
     agent: Optional[AgentType] = None
     content: Any

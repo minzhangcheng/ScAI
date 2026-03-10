@@ -17,94 +17,20 @@ from datetime import datetime
 import aiofiles
 
 from .base import BaseAgent, AgentConfig
+from ..utils.sandbox import (
+    validate_code_safety, DANGEROUS_PATTERNS, extract_code_from_markdown,
+    LocalJupyterSandbox, CodeExecutionResult,
+)
+from ..utils.checkpoint import CheckpointManager
 
 # Configure logger
 logger = logging.getLogger(__name__)
 
-
-class CheckpointManager:
-    """
-    Manages step-level checkpoints for bioinformatics analysis.
-    Enables recovery from interruptions during the 80-step analysis loop.
-    """
-
-    CHECKPOINT_INTERVAL = 5  # Save checkpoint every N steps
-
-    def __init__(self, session_id: str, state_dir: str):
-        """
-        Initialize checkpoint manager.
-
-        Args:
-            session_id: Session ID for this analysis
-            state_dir: Directory to store checkpoint files
-        """
-        self.session_id = session_id
-        self.state_dir = Path(state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.checkpoint_path = self.state_dir / f"{session_id}_bioinfo_checkpoint.json"
-
-    async def save(self, checkpoint: Dict[str, Any]):
-        """
-        Save checkpoint to disk atomically.
-
-        Args:
-            checkpoint: Checkpoint data to save
-        """
-        checkpoint['updated_at'] = datetime.now().isoformat()
-
-        # Atomic write: write to temp file then rename
-        tmp_path = self.checkpoint_path.with_suffix('.tmp')
-        try:
-            async with aiofiles.open(tmp_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(checkpoint, indent=2, default=str))
-            tmp_path.replace(self.checkpoint_path)
-            logger.info(f"[{self.session_id}] Checkpoint saved at step {checkpoint.get('step_number', 0)}")
-        except Exception as e:
-            logger.error(f"[{self.session_id}] Failed to save checkpoint: {e}")
-            if tmp_path.exists():
-                tmp_path.unlink()
-
-    async def load(self) -> Optional[Dict[str, Any]]:
-        """
-        Load checkpoint from disk.
-
-        Returns:
-            Checkpoint data or None if not found
-        """
-        if not self.checkpoint_path.exists():
-            return None
-
-        try:
-            async with aiofiles.open(self.checkpoint_path, 'r', encoding='utf-8') as f:
-                content = await f.read()
-                return json.loads(content)
-        except Exception as e:
-            logger.error(f"[{self.session_id}] Failed to load checkpoint: {e}")
-            return None
-
-    def clear(self):
-        """Clear checkpoint after successful completion."""
-        if self.checkpoint_path.exists():
-            self.checkpoint_path.unlink()
-            logger.info(f"[{self.session_id}] Checkpoint cleared")
-
-    def should_checkpoint(self, step: int) -> bool:
-        """
-        Check if we should save a checkpoint at this step.
-
-        Args:
-            step: Current step number
-
-        Returns:
-            True if checkpoint should be saved
-        """
-        return step > 0 and step % self.CHECKPOINT_INTERVAL == 0
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, CodeExecution,
     PublicationFigure, FigureReviewStatus, AnalysisStep
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall
-from ..utils.sandbox import LocalJupyterSandbox, CodeExecutionResult
 
 
 # Define the tools for bioinformatics agent
@@ -285,69 +211,10 @@ class BioinformaticsAgent(BaseAgent):
     - Trajectory analysis decisions
     """
 
-    # Dangerous code patterns that should not be executed
-    DANGEROUS_PATTERNS = [
-        # System command execution
-        (r'\bos\.system\b', 'os.system calls'),
-        (r'\bsubprocess\b', 'subprocess module'),
-        (r'\bos\.popen\b', 'os.popen calls'),
-        (r'\bos\.spawn\w*\b', 'os.spawn* calls'),
-        (r'\bos\.exec\w*\b', 'os.exec* calls'),
-        (r'\bos\.fork\b', 'os.fork calls'),
-        (r'\bpty\b', 'pty module'),
-
-        # Code execution
-        (r'\beval\s*\(', 'eval() function'),
-        (r'\bexec\s*\(', 'exec() function'),
-        (r'\b__import__\b', '__import__ function'),
-        (r'\bcompile\s*\(', 'compile() function'),
-        (r'\bimportlib\b', 'importlib module'),
-
-        # Dangerous attribute access
-        (r'\b__builtins__\b', '__builtins__ access'),
-        (r'\b__class__\s*\.\s*__bases__\b', '__class__.__bases__ access'),
-        (r'\b__class__\s*\.\s*__mro__\b', '__class__.__mro__ access'),
-        (r'\b__subclasses__\s*\(', '__subclasses__ access'),
-        (r'\bglobals\s*\(\s*\)', 'globals() function'),
-        (r'\blocals\s*\(\s*\)', 'locals() function'),
-        (r'\bgetattr\s*\([^,]+,\s*["\']__', 'getattr with dunder'),
-        (r'\bsetattr\s*\([^,]+,\s*["\']__', 'setattr with dunder'),
-        (r'\bdelattr\s*\([^,]+,\s*["\']__', 'delattr with dunder'),
-        (r'\bvars\s*\(\s*\)', 'vars() function'),
-
-        # File system operations (destructive)
-        (r'\bopen\s*\([^)]*["\'][wa]', 'file write operations outside safe directories'),
-        (r'\brm\s+-rf\b', 'rm -rf command'),
-        (r'\bshutil\.rmtree\b', 'shutil.rmtree'),
-        (r'\bos\.remove\b', 'os.remove'),
-        (r'\bos\.unlink\b', 'os.unlink'),
-        (r'\bos\.rmdir\b', 'os.rmdir'),
-        (r'\bos\.makedirs\b', 'os.makedirs (use Path.mkdir instead)'),
-        (r'\bos\.rename\b', 'os.rename'),
-        (r'\bos\.replace\b', 'os.replace'),
-        (r'\bshutil\.move\b', 'shutil.move'),
-        (r'\bshutil\.copy\b', 'shutil.copy (use explicit paths)'),
-
-        # Network access
-        (r'\bsocket\b', 'socket module'),
-        (r'\brequests\.(?:get|post|put|delete|patch|head|options)\b', 'HTTP requests'),
-        (r'\burllib\b', 'urllib module'),
-        (r'\bhttpx\b', 'httpx module'),
-        (r'\baiohttp\b', 'aiohttp module'),
-
-        # Low-level / dangerous modules
-        (r'\bctypes\b', 'ctypes module'),
-        (r'\bmultiprocessing\b', 'multiprocessing module'),
-        (r'\bpickle\.loads?\b', 'pickle.load/loads (arbitrary code execution)'),
-        (r'\bcPickle\b', 'cPickle module'),
-        (r'\bmarshal\b', 'marshal module'),
-        (r'\bshelve\b', 'shelve module'),
-
-        # Environment manipulation (os.environ allowed for setting runtime flags like NUMBA_DISABLE_JIT)
-        (r'\bos\.chdir\b', 'os.chdir (changing working directory)'),
-        (r'\bos\.chroot\b', 'os.chroot'),
-        (r'\bsys\.path\s*\.(?:append|insert|extend)\b', 'sys.path modification'),
-    ]
+    # Dangerous code patterns — now defined centrally in sandbox.py and enforced
+    # at the sandbox.execute() level. This class-level alias is kept for backward
+    # compatibility (e.g. tests or external callers that reference it).
+    DANGEROUS_PATTERNS = DANGEROUS_PATTERNS
     
     def __init__(
         self,
@@ -386,6 +253,7 @@ class BioinformaticsAgent(BaseAgent):
     def _validate_code(self, code: str) -> Tuple[bool, str]:
         """
         Validate code for security before execution.
+        Delegates to the shared validate_code_safety() in sandbox.py.
 
         Args:
             code: The Python code to validate
@@ -393,25 +261,7 @@ class BioinformaticsAgent(BaseAgent):
         Returns:
             Tuple of (is_safe, error_message)
         """
-        for pattern, description in self.DANGEROUS_PATTERNS:
-            if re.search(pattern, code):
-                # Allow subprocess when ALL usages are pip install commands (safe in Docker)
-                if 'subprocess' in description:
-                    # Check each line containing 'subprocess'
-                    subprocess_lines = [
-                        line.strip() for line in code.splitlines()
-                        if re.search(r'\bsubprocess\b', line)
-                    ]
-                    pip_pattern = r'subprocess\.\w+\(\s*\[?\s*["\'](?:pip|pip3)["\'].*install'
-                    import_pattern = r'^(?:import|from)\s+subprocess'
-                    non_import_lines = [
-                        line for line in subprocess_lines
-                        if not re.match(import_pattern, line)
-                    ]
-                    if not non_import_lines or all(re.search(pip_pattern, line) for line in non_import_lines):
-                        continue
-                return False, f"Dangerous pattern detected: {description}"
-        return True, ""
+        return validate_code_safety(code)
 
     async def _notify(self, message_type: str, content: str):
         """Send notification via callback"""
@@ -438,9 +288,10 @@ class BioinformaticsAgent(BaseAgent):
             context_parts.append(f"```python\n{execution.code}\n```")
             
             if execution.output:
-                output = execution.output[:800]
-                if len(execution.output) > 800:
-                    output += "\n... (truncated)"
+                if len(execution.output) > 2000:
+                    output = f"[... first {len(execution.output) - 2000} chars truncated]\n{execution.output[-2000:]}"
+                else:
+                    output = execution.output
                 context_parts.append(f"Output:\n{output}")
             
             if execution.error:
@@ -730,8 +581,10 @@ Before running sc.tl.pca() or any dimensionality reduction:
             all_findings = checkpoint.get('findings', [])
             all_figures = checkpoint.get('figures', [])
             step_count = checkpoint.get('step_number', 0)
-            # Fix: extend max_steps from the resume point so the agent gets a full budget of new steps
-            max_steps = step_count + max_steps
+            # Give resumed agent its remaining budget based on original total_steps cap
+            # Use the larger of (caller's max_steps, checkpoint's total_steps) to avoid shrinking budget
+            original_total = max(max_steps, checkpoint.get('total_steps', max_steps))
+            max_steps = step_count + original_total
             self.analysis_context = checkpoint.get('analysis_context', {})
             analysis_log = [AnalysisStep(**s) for s in checkpoint.get('analysis_log', [])]
             logger.info(f"[Bioinformatics] Restored state: step={step_count}, findings={len(all_findings)}, figures={len(all_figures)}, new max_steps={max_steps}")
@@ -744,9 +597,11 @@ Before running sc.tl.pca() or any dimensionality reduction:
             all_figures = []
             step_count = 0
             analysis_log = []
-            # Reset figure attempt counter so figures that failed in previous
-            # rounds can be retried with updated data
-            self.analysis_context.pop("_figure_attempts", None)
+            # Reset per-run state to avoid pollution from previous rounds
+            # (process() does this but workflow calls run_autonomous_analysis directly)
+            self.code_history = []
+            self.analysis_context = {}
+            self.last_result = None
 
         completed = False
         text_response_count = 0
@@ -766,8 +621,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
                     'messages': messages,
                     'findings': all_findings,
                     'figures': all_figures,
-                    'code_history': [ce.model_dump() if hasattr(ce, 'model_dump') else ce.__dict__
-                                     for ce in self.code_history],
+                    'code_history': [ce.model_dump() for ce in self.code_history],
                     'analysis_log': [step.model_dump() for step in analysis_log],
                     'analysis_context': self.analysis_context,
                     'completed': False
@@ -955,7 +809,7 @@ plt.close('all')
                     analysis_log.append(AnalysisStep(
                         step_number=step_count, step_type="execute_code",
                         agent_reasoning=agent_reasoning,
-                        code=code, code_output=(result.output or "")[:3000],
+                        code=code, code_output=(result.output or "")[-3000:],
                         code_error=(result.error or "")[:3000] if result.error else None,
                         code_description=description,
                         code_step_type=step_type, saved_figure_filenames=_saved_figs,
@@ -1234,7 +1088,6 @@ plt.close('all')
                             "role": "user",
                             "content": f"[Supervisor] {supervisor_feedback}"
                         })
-                        await self._notify("supervisor_feedback", supervisor_feedback[:500])
                 except Exception as e:
                     logger.warning(f"[Bioinformatics] Supervisor callback error: {e}")
             # === END SUPERVISOR ===
@@ -1265,8 +1118,9 @@ plt.close('all')
 
         logger.info(f"[Bioinformatics] Analysis {status}: {step_count} steps executed, {len(all_findings)} findings, {len(all_figures)} figures")
 
-        # Clear checkpoint only on successful completion (preserve for resume on max_steps_reached)
-        if completed or status in ("completed", "completed_with_fallback"):
+        # Clear checkpoint only on explicit completion via report_findings
+        # Preserve checkpoint for max_steps_reached and completed_with_fallback to allow resumption
+        if completed:
             checkpoint_mgr.clear()
 
         return {
@@ -1526,10 +1380,15 @@ plt.close()
                     logger.info(f"[Bioinformatics] Revising figure {figure_name}: {feedback}")
 
                     # Generate revised code with full revision history
-                    revised_code = await self._revise_figure_code(
-                        current_code, feedback, suggestions, must_fix, figure_type, state, figure.png_base64,
-                        revision_history=revision_history
-                    )
+                    try:
+                        revised_code = await self._revise_figure_code(
+                            current_code, feedback, suggestions, must_fix, figure_type, state, figure.png_base64,
+                            revision_history=revision_history
+                        )
+                    except Exception as revise_err:
+                        logger.error(f"[Bioinformatics] _revise_figure_code failed: {revise_err}, keeping current version")
+                        await self._notify("status", f"Figure revision failed ({revise_err}), keeping current version")
+                        break
 
                     # Validate revised code before execution
                     is_valid, error_msg = self._validate_code(revised_code)
@@ -1793,20 +1652,7 @@ Return only the Python code:"""
             logger.warning("[Bioinformatics] Empty response from LLM for code revision")
             return original_code  # Return unchanged code
 
-        # Extract code from response with safe bounds checking
-        code = response_text
-        try:
-            if "```python" in response_text:
-                parts = response_text.split("```python")
-                if len(parts) > 1:
-                    code_parts = parts[1].split("```")
-                    code = code_parts[0] if code_parts else parts[1]
-            elif "```" in response_text:
-                parts = response_text.split("```")
-                if len(parts) > 1:
-                    code = parts[1]
-        except (IndexError, AttributeError) as e:
-            logger.warning(f"Failed to extract code from response: {e}, using raw response")
-            code = response_text
+        # Extract code from markdown response
+        code = extract_code_from_markdown(response_text)
 
         return code.strip()

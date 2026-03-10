@@ -87,6 +87,8 @@ Severity guide:
 - warning: potential issue that analyst should be aware of
 - critical: blank/broken figure, repeated errors, zero cells, memory errors, obviously wrong results
 
+IMPORTANT: Code and output may be truncated for display (only the last 2000 characters are shown for long content). If content is marked as truncated, do NOT report it as syntactically incomplete or missing. Only report syntax errors if the Execution status is FAILED and the Error indicates a SyntaxError.
+
 Biological checkpoint criteria (set is_biological_checkpoint=true when):
 - A major analysis phase completed (clustering, DE, annotation, trajectory, batch correction)
 - Results require biological interpretation or domain expertise
@@ -112,6 +114,7 @@ class SupervisorAgent:
         message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
         session_id: str = "default",
         temperature: float = 0.1,
+        system_prompt: str = "",
     ):
         self.llm_client = llm_client
         self.model = model
@@ -119,6 +122,8 @@ class SupervisorAgent:
         self.message_callback = message_callback
         self.session_id = session_id
         self.temperature = temperature
+        # Use custom system_prompt if provided, otherwise fall back to built-in default
+        self.system_prompt = system_prompt.strip() if system_prompt else ""
 
         # Current round state
         self.supervision_log: List[SupervisorRecord] = []
@@ -153,8 +158,8 @@ class SupervisorAgent:
             step_number=step.step_number,
             step_type=step.step_type,
             timestamp=step.timestamp,
-            code=step.code[:800] if step.code else None,
-            code_output=step.code_output[:600] if step.code_output else None,
+            code=step.code[-2000:] if step.code else None,
+            code_output=step.code_output[-2000:] if step.code_output else None,
             code_error=step.code_error[:400] if step.code_error else None,
             saved_figure_filenames=list(step.saved_figure_filenames),
             agent_reasoning=step.agent_reasoning[:500] if step.agent_reasoning else None,
@@ -507,11 +512,24 @@ class SupervisorAgent:
         if step.agent_reasoning:
             parts.append(f"Agent reasoning: {step.agent_reasoning[:500]}")
         if step.code:
-            parts.append(f"Code:\n```python\n{step.code[:800]}\n```")
+            if len(step.code) > 2000:
+                parts.append(f"Code (last 2000 chars of {len(step.code)}):\n```python\n{step.code[-2000:]}\n```")
+            else:
+                parts.append(f"Code:\n```python\n{step.code}\n```")
         if step.code_output:
-            parts.append(f"Output:\n{step.code_output[:600]}")
+            if len(step.code_output) > 2000:
+                parts.append(f"Output (last 2000 chars of {len(step.code_output)}):\n{step.code_output[-2000:]}")
+            else:
+                parts.append(f"Output:\n{step.code_output}")
         if step.code_error:
             parts.append(f"Error:\n{step.code_error[:400]}")
+        if step.step_type == "execute_code":
+            if step.code_error:
+                parts.append("Execution status: FAILED (see Error above)")
+            elif step.code_output is not None:
+                parts.append("Execution status: SUCCESS")
+            else:
+                parts.append("Execution status: No output recorded")
         if step.literature_topic:
             parts.append(f"Literature search topic: {step.literature_topic}")
         if step.literature_result:
@@ -522,6 +540,13 @@ class SupervisorAgent:
             parts.append(f"Findings: {'; '.join(step.findings[:3])}")
 
         text_context = "\n\n".join(parts)
+
+        # Build effective system prompt: user-custom prompt prepended to built-in default
+        effective_prompt = (
+            f"{self.system_prompt}\n\n{_SUPERVISOR_SYSTEM_PROMPT}"
+            if self.system_prompt
+            else _SUPERVISOR_SYSTEM_PROMPT
+        )
 
         # If we have figures, try vision evaluation
         if figures:
@@ -539,7 +564,7 @@ class SupervisorAgent:
 
                 response = await self.llm_client.chat_with_vision(
                     model=self.model,
-                    text_prompt=f"{_SUPERVISOR_SYSTEM_PROMPT}\n\n{text_with_fig_note}",
+                    text_prompt=f"{effective_prompt}\n\n{text_with_fig_note}",
                     images=compressed,
                     temperature=self.temperature,
                     max_tokens=512,
@@ -556,7 +581,7 @@ class SupervisorAgent:
         response = await self.llm_client.chat(
             model=self.model,
             messages=[
-                {"role": "system", "content": _SUPERVISOR_SYSTEM_PROMPT},
+                {"role": "system", "content": effective_prompt},
                 {"role": "user", "content": text_context},
             ],
             temperature=self.temperature,
@@ -591,7 +616,7 @@ class SupervisorAgent:
         """Build context string for a step (used in PI escalation for critical issues)."""
         parts = [f"Step {step.step_number} ({step.step_type})"]
         if step.code_output:
-            parts.append(f"Output: {step.code_output[:500]}")
+            parts.append(f"Output: {step.code_output[-500:]}")
         if step.code_error:
             parts.append(f"Error: {step.code_error[:300]}")
         return "\n".join(parts)
@@ -613,7 +638,7 @@ class SupervisorAgent:
                     parts.append(f"  Key findings: {lit.literature_result[:300]}")
 
         if step.code_output:
-            parts.append(f"\nMost recent output:\n{step.code_output[:1000]}")
+            parts.append(f"\nMost recent output:\n{step.code_output[-1000:]}")
         if step.annotation_result_summary:
             parts.append(f"\nAnnotation result: {step.annotation_result_summary[:500]}")
         if step.findings:
@@ -705,9 +730,9 @@ class SupervisorAgent:
             if rec.get("agent_reasoning"):
                 lines.append(f"Reasoning: {rec['agent_reasoning'][:300]}")
             if rec.get("code"):
-                lines.append(f"Code:\n```python\n{rec['code'][:600]}\n```")
+                lines.append(f"Code:\n```python\n{rec['code'][-600:]}\n```")
             if rec.get("code_output"):
-                lines.append(f"Output: {rec['code_output'][:400]}")
+                lines.append(f"Output: {rec['code_output'][-400:]}")
             if rec.get("code_error"):
                 lines.append(f"Error: {rec['code_error'][:200]}")
             if rec.get("saved_figure_filenames"):
@@ -859,6 +884,9 @@ Make the report thorough but concise. Reference specific step numbers and figure
                 "title": title,
                 "content": section_content,
                 "analysis_type": "general",
+                "description": "",
+                "figures": [],
+                "tables": [],
             })
 
         if not sections:
@@ -868,6 +896,9 @@ Make the report thorough but concise. Reference specific step numbers and figure
                 "title": "Analysis Report" if language == "en" else "分析报告",
                 "content": content,
                 "analysis_type": "general",
+                "description": "",
+                "figures": [],
+                "tables": [],
             })
 
         return sections

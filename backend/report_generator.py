@@ -27,6 +27,7 @@ from PIL import Image
 from .models.schemas import AnalysisState, AgentType, CodeExecution
 from .utils.llm_client import OpenAICompatibleClient
 from .utils.sandbox import LocalJupyterSandbox
+from .utils.checkpoint import CheckpointManager
 from .config import STATE_DIR, WORKSPACE_DIR
 
 logger = logging.getLogger(__name__)
@@ -1227,9 +1228,14 @@ Be specific and actionable. Include:
     async def generate_report(
         self,
         state: AnalysisState,
+        resume_from_checkpoint: bool = True,
     ) -> Dict[str, Any]:
         """
         Generate a detailed research report by compiling existing analysis results.
+
+        Supports checkpoint-based resumption: if a previous attempt was interrupted
+        (e.g. API rate limit), the method resumes from the last successfully
+        completed step instead of starting over.
 
         NO code execution or Jupyter sandbox — the report is built entirely from:
         - state.code_history (what analyses were done)
@@ -1239,17 +1245,37 @@ Be specific and actionable. Include:
 
         Args:
             state: Analysis state with results
+            resume_from_checkpoint: Whether to attempt resuming from a saved checkpoint
 
         Returns:
             Detailed report structure
         """
-        report_id = str(uuid.uuid4())
+        # Initialize checkpoint manager for report generation
+        checkpoint_mgr = CheckpointManager(
+            session_id=state.id,
+            state_dir=str(STATE_DIR),
+            prefix="report"
+        )
+
+        # Try loading existing checkpoint
+        checkpoint = None
+        last_step = 0
+        if resume_from_checkpoint:
+            checkpoint = await checkpoint_mgr.load()
+            if checkpoint and not checkpoint.get('completed', False):
+                last_step = checkpoint.get('last_step', 0)
+                logger.info(f"Resuming report generation from step {last_step}")
+            else:
+                checkpoint = None
+
+        report_id = checkpoint.get('report_id', str(uuid.uuid4())) if checkpoint else str(uuid.uuid4())
         language = "zh" if any('\u4e00' <= c <= '\u9fff' for c in state.initial_instruction) else "en"
         zh = language == "zh"
 
         await self._report_progress(2, "初始化报告编排..." if zh else "Initializing report compilation...")
 
         # Step 1: Build structured analysis record from state data
+        # (Pure data extraction, fast — always re-run to pick up latest state)
         await self._report_progress(5, "读取分析记录..." if zh else "Reading analysis records...")
         analysis_record = self._build_analysis_record(state)
         logger.info(
@@ -1271,27 +1297,62 @@ Be specific and actionable. Include:
         # Extract cluster annotations from state data (no sandbox needed)
         self._extract_cluster_annotations_from_state(state)
 
-        # Step 3.5: PI reviews actual analysis code, figures, and tables
-        await self._report_progress(16, "PI Agent审阅分析代码和图表..." if zh else "PI Agent reviewing analysis code and figures...")
-        analysis_summary = await self._pi_review_analysis(
-            state, analysis_record, findings, existing_figures, existing_tables, language
-        )
-        logger.info(f"Analysis review complete: methodology={bool(analysis_summary.get('methodology_overview'))}, "
-                     f"workflow={bool(analysis_summary.get('workflow_summary'))}, "
-                     f"results={bool(analysis_summary.get('key_results'))}")
+        # Step 3.5: PI reviews actual analysis code, figures, and tables (expensive LLM call)
+        if last_step >= 4 and checkpoint:
+            analysis_summary = checkpoint.get('analysis_summary', {})
+            logger.info("Restored analysis_summary from checkpoint")
+        else:
+            await self._report_progress(16, "PI Agent审阅分析代码和图表..." if zh else "PI Agent reviewing analysis code and figures...")
+            analysis_summary = await self._pi_review_analysis(
+                state, analysis_record, findings, existing_figures, existing_tables, language
+            )
+            logger.info(f"Analysis review complete: methodology={bool(analysis_summary.get('methodology_overview'))}, "
+                         f"workflow={bool(analysis_summary.get('workflow_summary'))}, "
+                         f"results={bool(analysis_summary.get('key_results'))}")
+            # Checkpoint after expensive LLM call
+            await checkpoint_mgr.save({
+                'report_id': report_id, 'last_step': 4, 'step_name': 'pi_review_analysis',
+                'analysis_summary': analysis_summary, 'language': language,
+            })
 
-        # Step 4: PI plans report structure based on analysis record + analysis summary
-        await self._report_progress(30, "PI Agent规划报告结构..." if zh else "PI Agent planning report structure...")
-        report_plan = await self._plan_report_from_analysis(
-            state, analysis_record, findings, existing_figures, existing_tables, language,
-            analysis_summary=analysis_summary
-        )
+        # Step 4: PI plans report structure based on analysis record + analysis summary (expensive LLM call)
+        if last_step >= 5 and checkpoint:
+            report_plan = checkpoint.get('report_plan', {})
+            logger.info("Restored report_plan from checkpoint")
+        else:
+            await self._report_progress(30, "PI Agent规划报告结构..." if zh else "PI Agent planning report structure...")
+            report_plan = await self._plan_report_from_analysis(
+                state, analysis_record, findings, existing_figures, existing_tables, language,
+                analysis_summary=analysis_summary
+            )
+            await checkpoint_mgr.save({
+                'report_id': report_id, 'last_step': 5, 'step_name': 'plan_report',
+                'analysis_summary': analysis_summary, 'report_plan': report_plan,
+                'language': language,
+            })
 
         # Step 5: Generate each section using existing figures + PI narrative (with vision + analysis context)
-        sections = []
+        # Restore already-completed sections from checkpoint
+        sections = checkpoint.get('sections', []) if checkpoint and last_step >= 6 else []
+        completed_section_count = len(sections)
         total_sections = len(report_plan.get("sections", []))
 
+        # Restore generated_figures/tables from checkpoint BEFORE the section loop,
+        # so that new sections append to the already-recovered list and per-section
+        # checkpoint saves contain the full cumulative data.
+        if checkpoint and last_step >= 6:
+            saved_figs = checkpoint.get('generated_figures', [])
+            saved_tbls = checkpoint.get('generated_tables', [])
+            if saved_figs:
+                self.generated_figures = saved_figs
+            if saved_tbls:
+                self.generated_tables = saved_tbls
+
         for i, section_plan in enumerate(report_plan.get("sections", [])):
+            # Skip sections already completed in checkpoint
+            if i < completed_section_count:
+                continue
+
             progress = 35 + (i / max(total_sections, 1)) * 45
             section_title = section_plan.get("title", f"Section {i+1}")
             await self._report_progress(
@@ -1308,12 +1369,42 @@ Be specific and actionable. Include:
             )
             sections.append(section)
 
-        # Step 6: PI writes abstract and conclusions
-        await self._report_progress(85, "撰写摘要..." if zh else "Writing abstract...")
-        abstract = await self._generate_abstract(state, sections, findings, language, analysis_summary=analysis_summary)
+            # Checkpoint after each section (per-section granularity)
+            await checkpoint_mgr.save({
+                'report_id': report_id, 'last_step': 6, 'step_name': f'section_{i+1}',
+                'analysis_summary': analysis_summary, 'report_plan': report_plan,
+                'sections': sections, 'generated_figures': self.generated_figures,
+                'generated_tables': self.generated_tables, 'language': language,
+            })
 
-        await self._report_progress(92, "撰写结论..." if zh else "Writing conclusions...")
-        conclusions = await self._generate_conclusions(state, sections, findings, language, analysis_summary=analysis_summary)
+        # Step 6: PI writes abstract and conclusions (expensive LLM calls)
+        if last_step >= 7 and checkpoint:
+            abstract = checkpoint.get('abstract', '')
+            logger.info("Restored abstract from checkpoint")
+        else:
+            await self._report_progress(85, "撰写摘要..." if zh else "Writing abstract...")
+            abstract = await self._generate_abstract(state, sections, findings, language, analysis_summary=analysis_summary)
+            await checkpoint_mgr.save({
+                'report_id': report_id, 'last_step': 7, 'step_name': 'abstract',
+                'analysis_summary': analysis_summary, 'report_plan': report_plan,
+                'sections': sections, 'generated_figures': self.generated_figures,
+                'generated_tables': self.generated_tables, 'abstract': abstract,
+                'language': language,
+            })
+
+        if last_step >= 8 and checkpoint:
+            conclusions = checkpoint.get('conclusions', '')
+            logger.info("Restored conclusions from checkpoint")
+        else:
+            await self._report_progress(92, "撰写结论..." if zh else "Writing conclusions...")
+            conclusions = await self._generate_conclusions(state, sections, findings, language, analysis_summary=analysis_summary)
+            await checkpoint_mgr.save({
+                'report_id': report_id, 'last_step': 8, 'step_name': 'conclusions',
+                'analysis_summary': analysis_summary, 'report_plan': report_plan,
+                'sections': sections, 'generated_figures': self.generated_figures,
+                'generated_tables': self.generated_tables, 'abstract': abstract,
+                'conclusions': conclusions, 'language': language,
+            })
 
         # Save graphic abstract image to figures dir if available
         graphic_abstract_path = None
@@ -1411,6 +1502,9 @@ Be specific and actionable. Include:
         await self._report_progress(95, "生成HTML报告..." if zh else "Generating HTML report...")
         html_path = await self._generate_html_report(report, language, state=state)
         report["html_path"] = str(html_path)
+
+        # Clear checkpoint on successful completion
+        checkpoint_mgr.clear()
 
         await self._report_progress(100, "完成" if zh else "Complete", "completed")
 

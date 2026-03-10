@@ -298,6 +298,7 @@ class SingleCellAnalysisWorkflow:
 
         # Initialize Supervisor Agent for real-time analysis monitoring
         supervisor_model = custom_models.get('supervisor', self.config.models.supervisor_model)
+        supervisor_prompt = custom_prompts.get('supervisor', getattr(self.config.prompts, 'supervisor_prompt', ''))
         self.supervisor_agent = SupervisorAgent(
             llm_client=self.llm_manager.openrouter,
             model=supervisor_model,
@@ -305,6 +306,7 @@ class SingleCellAnalysisWorkflow:
             message_callback=self._supervisor_message_callback,
             session_id=self.session_id,
             temperature=self.temperatures.get('supervisor', 0.1),
+            system_prompt=supervisor_prompt,
         )
 
         logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model}, Literature={literature_model}, Painter={painter_model}, Supervisor={supervisor_model}")

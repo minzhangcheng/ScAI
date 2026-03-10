@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.12.0
+**Version**: 0.12.1
 
 ## Core Features
 
@@ -309,6 +309,32 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.12.1 (2026-03-10)
+
+- Centralized code safety validation: moved `DANGEROUS_PATTERNS` and `validate_code_safety()` to `sandbox.py`, enforced at sandbox level so all callers (bioinformatics agent, report generator, chat sandbox) are protected
+- Extracted `CheckpointManager` to standalone `backend/utils/checkpoint.py` module, now shared by bioinformatics analysis and report generation
+- Added checkpoint-based resumption for report generation: interrupted reports (e.g. API rate limit) resume from last completed step instead of restarting
+- Fixed session save race condition: `async_save_session()` serializes JSON on the event-loop thread before writing in thread pool, preventing concurrent mutation during serialization
+- Fixed session eviction race: cleanup task now re-checks if session was re-activated before evicting, and properly closes Jupyter kernels and chat sandboxes for evicted sessions
+- Fixed completed session WebSocket handling: multiple clients can now connect to completed sessions without overwriting global WebSocket reference
+- Added `MAX_REALTIME_MESSAGES = 1000` cap to prevent unbounded memory growth from realtime messages
+- Strip base64 data from figure messages before persisting to realtime_messages to reduce memory usage
+- Added stale import job cleanup (1-hour TTL) to prevent memory leak from completed/failed import jobs
+- Added `rollback_last_turn()` method to BaseAgent, replacing duplicated inline rollback patterns across PI Agent
+- Changed output truncation strategy from head (first N chars) to tail (last N chars) across bioinformatics agent, supervisor agent, and analysis log — more useful for debugging as recent output is preserved
+- Supervisor Agent: added `system_prompt` parameter for user-customizable monitoring prompts; added explicit "Execution status" field and instruction to ignore truncation artifacts
+- Added `VALID_AGENTS` Literal type for API endpoint validation (prompt/model/temperature updates)
+- Added shared `extract_code_from_markdown()` utility with state-machine parsing to sandbox.py
+- Fixed bioinformatics checkpoint resume budget: uses `original_total` to avoid budget inflation on repeated resumes
+- Fixed bioinformatics checkpoint clearing: only clears on explicit completion via `report_findings`, preserving checkpoint for `max_steps_reached` and `completed_with_fallback` to allow resumption
+- Reset bioinformatics per-run state (code_history, analysis_context, last_result) at start of fresh runs to prevent cross-round pollution
+- Added graceful error handling for figure revision failures — keeps current version instead of crashing
+- Added `supervisor_feedback`, `supervisor_checkpoint`, `supervisor_summary` to WebSocket message types in schema
+- Supervisor Agent now appears in Prompts panel with model/temperature configuration (Eye icon, cyan theme)
+- Added sandbox-level code safety check with `skip_safety_check` flag for trusted internal code (kernel init, session restore/save)
+- Workflow now passes user-configured supervisor prompt to SupervisorAgent
+- Grab workflow reference under lock in pause/resume endpoints to avoid race with cleanup task
 
 ### v0.12.0 (2026-03-10)
 

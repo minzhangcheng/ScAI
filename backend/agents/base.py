@@ -121,7 +121,26 @@ class BaseAgent(ABC):
     def reset_history(self):
         """Reset message history"""
         self.message_history = []
-        
+
+    def rollback_last_turn(self) -> bool:
+        """Remove the last user+assistant turn from history.
+
+        Safely verifies that the last two messages are an assistant reply
+        followed by the user prompt that triggered it (in history order:
+        [..., user, assistant]) before removing them.
+
+        Returns:
+            True if a turn was removed, False if history was too short
+            or the tail didn't match the expected pattern.
+        """
+        if (len(self.message_history) >= 2
+                and self.message_history[-1].get("role") == "assistant"
+                and self.message_history[-2].get("role") == "user"):
+            self.message_history.pop()  # assistant
+            self.message_history.pop()  # user
+            return True
+        return False
+
     def add_to_history(self, role: str, content: str):
         """Add a message to history"""
         self.message_history.append({

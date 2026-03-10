@@ -10,6 +10,7 @@ import {
   FlaskConical,
   BookOpen,
   Palette,
+  Eye,
   Save,
   RotateCcw,
   Cpu,
@@ -103,6 +104,14 @@ export function PromptsPanel() {
       bgIconSelected: 'bg-pink-100',
       textIcon: 'text-slate-500',
       textIconSelected: 'text-pink-600'
+    },
+    cyan: {
+      bgSelected: 'bg-cyan-50',
+      borderSelected: 'border-cyan-200',
+      bgIcon: 'bg-slate-100',
+      bgIconSelected: 'bg-cyan-100',
+      textIcon: 'text-slate-500',
+      textIconSelected: 'text-cyan-600'
     }
   }
 
@@ -154,6 +163,13 @@ export function PromptsPanel() {
       description: t('painterAgentDesc'),
       icon: Palette,
       color: 'pink'
+    },
+    {
+      id: 'supervisor',
+      name: t('supervisorAgent'),
+      description: t('supervisorAgentDesc'),
+      icon: Eye,
+      color: 'cyan'
     },
   ]
 
@@ -219,6 +235,7 @@ export function PromptsPanel() {
     // Reset literature config if on literature agent
     if (selectedAgent === 'literature') {
       setLiteratureMode(googleApiKey ? 'gemini_deep_research' : 'pubmed_llm')
+      setDeepResearchModel('')
       setLiteratureMaxSearchRounds(5)
     }
 
@@ -476,6 +493,7 @@ export function PromptsPanel() {
               selectedAgent === 'biochemistry' ? '推荐: google/gemini-3.1-pro-preview。若上传了生化结果图片，需要选择支持 Vision 的模型' :
               selectedAgent === 'literature' ? '用于 PubMed 模式文献分析的 LLM 模型，推荐: google/gemini-3.1-flash-lite-preview、google/gemini-3-flash-preview' :
               selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3-pro-image-preview' :
+              selectedAgent === 'supervisor' ? '使用低成本、快速的模型进行实时监控，推荐: google/gemini-3.1-flash-lite-preview' :
               '使用 OpenRouter 模型格式'
             ) : (
               selectedAgent === 'pi' ? 'Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
@@ -484,6 +502,7 @@ export function PromptsPanel() {
               selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3.1-pro-preview. If biochemistry images are uploaded, a Vision-capable model is required' :
               selectedAgent === 'literature' ? 'LLM model for PubMed mode literature analysis. Recommended: google/gemini-3.1-flash-lite-preview, google/gemini-3-flash-preview' :
               selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3-pro-image-preview' :
+              selectedAgent === 'supervisor' ? 'Uses a cheap, fast model for real-time monitoring. Recommended: google/gemini-3.1-flash-lite-preview' :
               'Use OpenRouter model format'
             )}
           </p>
@@ -524,15 +543,25 @@ export function PromptsPanel() {
         </div>
 
         <div className="flex-1 relative">
-          <textarea
-            value={editedPrompt}
-            onChange={(e) => {
-              setEditedPrompt(e.target.value)
-              setSaved(false)
-            }}
-            className="w-full h-full p-4 border border-slate-300 rounded-xl font-mono text-sm resize-none focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
-            placeholder={language === 'zh' ? '输入 Agent 的系统提示词...' : 'Enter the agent system prompt...'}
-          />
+          {selectedAgent === 'supervisor' ? (
+            <div className="w-full h-full p-4 border border-slate-200 rounded-xl bg-slate-50 flex items-center justify-center">
+              <p className="text-sm text-slate-400 text-center">
+                {language === 'zh'
+                  ? 'Supervisor Agent 使用内置监控逻辑，不支持自定义 Prompt。可通过上方调整模型和温度。'
+                  : 'Supervisor Agent uses built-in monitoring logic and does not support custom prompts. You can adjust the model and temperature above.'}
+              </p>
+            </div>
+          ) : (
+            <textarea
+              value={editedPrompt}
+              onChange={(e) => {
+                setEditedPrompt(e.target.value)
+                setSaved(false)
+              }}
+              className="w-full h-full p-4 border border-slate-300 rounded-xl font-mono text-sm resize-none focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+              placeholder={language === 'zh' ? '输入 Agent 的系统提示词...' : 'Enter the agent system prompt...'}
+            />
+          )}
         </div>
 
         <div className="mt-4 p-4 bg-slate-50 rounded-xl">

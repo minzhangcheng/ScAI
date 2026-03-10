@@ -105,6 +105,7 @@ _chat_sandboxes: Dict[str, Any] = {}  # session_id → sandbox for active chat (
 
 # Memory management settings
 MAX_CACHED_SESSIONS = 50  # Maximum number of sessions to keep in memory
+MAX_REALTIME_MESSAGES = 1000  # Maximum realtime messages per session to prevent memory bloat
 SESSION_CACHE_TTL = 3600  # Seconds before an inactive session is evicted (1 hour)
 _session_access_times: Dict[str, float] = {}  # Track last access time for each session
 
@@ -113,8 +114,9 @@ MAX_MESSAGE_BUFFER_SIZE = 100  # Keep last N messages per session
 _message_buffers: Dict[str, List[Dict[str, Any]]] = {}  # session_id -> list of messages
 _message_buffer_lock = asyncio.Lock()
 
-# Background import jobs: import_id -> {"status": "pending"|"completed"|"failed", ...}
+# Background import jobs: import_id -> {"status": "pending"|"completed"|"failed", "created_at": float, ...}
 _import_jobs: Dict[str, dict] = {}
+_IMPORT_JOB_TTL = 3600  # Clean up completed/failed import jobs after 1 hour
 
 # Log the data directory location (directories are created in config.py)
 logger.info(f"Data directory: {DATA_BASE_DIR.resolve()}")
@@ -156,6 +158,11 @@ async def cleanup_stale_sessions():
             # Evict sessions - release lock during I/O operations to prevent blocking
             for session_id in sessions_to_evict:
                 async with _state_lock:
+                    # Re-check: session may have been re-activated (resumed/reconnected)
+                    # between building the eviction list and executing eviction
+                    if session_id in _initializing_sessions or session_id in workflows:
+                        logger.info(f"Skipping eviction of session {session_id}: re-activated since eviction list was built")
+                        continue
                     if session_id in sessions:
                         state_to_save = sessions[session_id]
                         del sessions[session_id]
@@ -163,6 +170,25 @@ async def cleanup_stale_sessions():
                         state_to_save = None
                     if session_id in _session_access_times:
                         del _session_access_times[session_id]
+                    # Grab workflow reference (if any) for cleanup outside lock
+                    workflow_to_close = workflows.pop(session_id, None)
+
+                # Stop Jupyter kernel via workflow.close() to prevent zombie kernels
+                if workflow_to_close:
+                    try:
+                        await workflow_to_close.close()
+                        logger.info(f"Closed workflow/kernel for evicted session {session_id}")
+                    except Exception as close_error:
+                        logger.error(f"Failed to close workflow for session {session_id}: {close_error}")
+
+                # Also stop any active chat sandbox for this session
+                chat_sandbox = _chat_sandboxes.pop(session_id, None)
+                if chat_sandbox:
+                    try:
+                        await chat_sandbox.stop()
+                        logger.info(f"Stopped chat sandbox for evicted session {session_id}")
+                    except Exception as sb_error:
+                        logger.error(f"Failed to stop chat sandbox for session {session_id}: {sb_error}")
 
                 # Also clean up message buffer for evicted session
                 async with _message_buffer_lock:
@@ -172,12 +198,23 @@ async def cleanup_stale_sessions():
                 # Save to disk outside the lock using thread pool to avoid blocking
                 if state_to_save:
                     try:
-                        await asyncio.to_thread(save_session_to_disk, session_id, state_to_save)
+                        await async_save_session(session_id, state_to_save)
                     except Exception as save_error:
                         logger.error(f"Failed to save session {session_id} during eviction: {save_error}")
 
             if sessions_to_evict:
                 logger.info(f"Evicted {len(sessions_to_evict)} stale sessions from memory")
+
+            # Clean up stale import jobs (completed/failed older than TTL)
+            stale_jobs = [
+                jid for jid, job in _import_jobs.items()
+                if job.get("status") in ("completed", "failed")
+                and current_time - job.get("created_at", 0) > _IMPORT_JOB_TTL
+            ]
+            for jid in stale_jobs:
+                del _import_jobs[jid]
+            if stale_jobs:
+                logger.info(f"Cleaned up {len(stale_jobs)} stale import jobs")
 
         except Exception as e:
             logger.error(f"Error in session cleanup task: {e}")
@@ -198,14 +235,12 @@ async def startup_event():
 
 
 # Session persistence helpers
-def save_session_to_disk(session_id: str, state: AnalysisState):
-    """Save session state to disk for persistence using atomic write"""
+def _write_session_json(session_id: str, json_str: str):
+    """Write pre-serialized session JSON to disk using atomic write (thread-safe)."""
     import tempfile
     try:
         session_file = SESSION_DIR / f"{session_id}.json"
         SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        # Use atomic write: write to temp file first, then rename
-        # This prevents data corruption if the process crashes during write
         fd, tmp_path = tempfile.mkstemp(
             suffix='.json.tmp',
             prefix=f'{session_id}_',
@@ -213,17 +248,35 @@ def save_session_to_disk(session_id: str, state: AnalysisState):
         )
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                f.write(state.model_dump_json(indent=2))
-            # Atomic rename (on POSIX systems)
+                f.write(json_str)
             os.replace(tmp_path, session_file)
             logger.info(f"Session {session_id} saved to disk")
         except Exception:
-            # Clean up temp file on error
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             raise
     except Exception as e:
         logger.error(f"Failed to save session {session_id}: {e}")
+
+
+def save_session_to_disk(session_id: str, state: AnalysisState):
+    """Save session state to disk for persistence.
+
+    Serializes to JSON first (must be called from the event loop thread
+    to get a consistent snapshot), then writes atomically.
+    When called via asyncio.to_thread, use save_session_snapshot instead.
+    """
+    _write_session_json(session_id, state.model_dump_json(indent=2))
+
+
+async def async_save_session(session_id: str, state: AnalysisState):
+    """Serialize state to JSON on the event-loop thread (consistent snapshot),
+    then write to disk in a thread pool. This avoids the race where
+    asyncio.to_thread would read mutable state attributes while the event loop
+    mutates them concurrently.
+    """
+    json_str = state.model_dump_json(indent=2)
+    await asyncio.to_thread(_write_session_json, session_id, json_str)
 
 
 def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
@@ -327,18 +380,21 @@ class StartRequest(BaseModel):
     session_name: Optional[str] = None
 
 
+VALID_AGENTS = Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor"]
+
+
 class PromptUpdateRequest(BaseModel):
-    agent: str
+    agent: VALID_AGENTS
     prompt: str = Field(max_length=50000)
 
 
 class ModelUpdateRequest(BaseModel):
-    agent: str
+    agent: VALID_AGENTS
     model: str
 
 
 class TemperatureUpdateRequest(BaseModel):
-    agent: str
+    agent: VALID_AGENTS
     temperature: float
 
 
@@ -502,7 +558,7 @@ async def start_session(request: StartRequest):
     sessions[session_id] = state
     
     # Save to disk for persistence
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
     
     return APIResponse(
         success=True,
@@ -544,7 +600,7 @@ async def list_sessions():
     return {"sessions": disk_sessions}
 
 
-def _strip_message_base64(msg_type: str, content) -> any:
+def _strip_message_base64(msg_type: str, content) -> Any:
     """Strip large base64 image data from message content to reduce response size."""
     # figure type: content is raw base64 string
     if msg_type == "figure" and isinstance(content, str) and len(content) > 1000:
@@ -774,7 +830,7 @@ async def ensure_session(session_id: str, request: StartRequest):
     )
     
     sessions[session_id] = state
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
     logger.info(f"Recreated session {session_id} after server restart")
 
     return APIResponse(
@@ -823,7 +879,7 @@ async def create_group(session_id: str, request: GroupCreateRequest):
         order=len(state.treatment_groups)
     )
     state.treatment_groups.append(group)
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -845,7 +901,7 @@ async def update_session_info(session_id: str, request: SessionUpdateRequest):
     if request.instruction is not None:
         state.initial_instruction = request.instruction
 
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
     return APIResponse(
         success=True,
         message="Session info updated",
@@ -886,7 +942,7 @@ async def update_group(session_id: str, group_id: str, request: GroupUpdateReque
                     )
         group.sample_count = request.sample_count
 
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
     return APIResponse(
         success=True,
         message=f"Group updated: {group.name}",
@@ -920,7 +976,7 @@ async def delete_group(session_id: str, group_id: str):
     state.biochemistry_indicators = [i for i in state.biochemistry_indicators if i.group_id != group_id]
     state.treatment_groups = [g for g in state.treatment_groups if g.id != group_id]
 
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
     return APIResponse(
         success=True,
         message=f"Group deleted: {group.name} (and {len(files_to_remove)} associated files)"
@@ -1008,7 +1064,7 @@ async def upload_data(
             "id": data_file.id
         })
 
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -1056,7 +1112,7 @@ async def save_session(session_id: str):
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
     
     return APIResponse(
         success=True,
@@ -1100,7 +1156,7 @@ async def add_indicator(session_id: str, request: BiochemistryInput):
         sample_number=sample_number
     )
     state.biochemistry_indicators.append(indicator)
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -1122,7 +1178,7 @@ async def delete_indicator(session_id: str, indicator_id: str):
         raise HTTPException(status_code=404, detail="Indicator not found")
 
     state.biochemistry_indicators = [ind for ind in state.biochemistry_indicators if ind.id != indicator_id]
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
     return APIResponse(success=True, message=f"Indicator deleted: {deleted_name}")
 
 
@@ -1145,7 +1201,7 @@ async def delete_data_file(session_id: str, file_id: str):
                 logger.warning(f"Failed to delete file {df.file_path}: {e}")
 
             state.data_files.pop(i)
-            await asyncio.to_thread(save_session_to_disk, session_id, state)
+            await async_save_session(session_id, state)
 
             return APIResponse(
                 success=True,
@@ -1165,7 +1221,7 @@ async def update_prompts(session_id: str, request: PromptUpdateRequest):
     state.custom_prompts[request.agent] = request.prompt
 
     # Save to disk
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -1206,7 +1262,7 @@ async def update_models(session_id: str, request: ModelUpdateRequest):
     state.custom_models[request.agent] = request.model
 
     # Save to disk
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -1247,7 +1303,7 @@ async def update_temperatures(session_id: str, request: TemperatureUpdateRequest
     state.custom_temperatures[request.agent] = request.temperature
 
     # Save to disk
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -1282,7 +1338,7 @@ async def update_max_rounds(session_id: str, request: MaxRoundsRequest):
     state.max_rounds = request.max_rounds
 
     # Auto-save session
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
     
     return APIResponse(
         success=True,
@@ -1311,7 +1367,7 @@ async def update_round_wait(session_id: str, request: RoundWaitRequest):
         raise HTTPException(status_code=404, detail="Session not found")
     state.round_wait_seconds = request.round_wait_seconds
 
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -1334,7 +1390,7 @@ async def update_literature_config(session_id: str, request: LiteratureConfigReq
         "max_search_rounds": request.max_search_rounds,
     }
 
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -1363,7 +1419,7 @@ async def run_analysis(session_id: str):
         raise HTTPException(status_code=400, detail="Analysis already running")
     
     state.status = TaskStatus.RUNNING
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -1383,10 +1439,13 @@ async def pause_analysis(session_id: str):
         raise HTTPException(status_code=400, detail="Analysis not running")
     
     state.status = TaskStatus.PAUSED
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
-    if session_id in workflows:
-        await workflows[session_id].pause(session_id)
+    # Grab workflow reference under lock to avoid race with cleanup_stale_sessions
+    async with _state_lock:
+        workflow = workflows.get(session_id)
+    if workflow:
+        await workflow.pause(session_id)
 
     return APIResponse(
         success=True,
@@ -1406,7 +1465,7 @@ async def resume_analysis(session_id: str):
         state.status = TaskStatus.RUNNING
         # Increment max_rounds to allow additional analysis
         state.max_rounds = state.current_round + 1
-        await asyncio.to_thread(save_session_to_disk, session_id, state)
+        await async_save_session(session_id, state)
         return APIResponse(
             success=True,
             message="Re-analysis started"
@@ -1414,17 +1473,20 @@ async def resume_analysis(session_id: str):
     elif state.status == TaskStatus.WAITING_INPUT:
         # Continue from round-end wait (user sent input or skipped)
         state.status = TaskStatus.RUNNING
-        await asyncio.to_thread(save_session_to_disk, session_id, state)
+        await async_save_session(session_id, state)
         # Signal the workflow to continue from _wait_for_user_input
-        if session_id in workflows:
-            workflows[session_id].signal_continue()
+        # Grab workflow reference under lock to avoid race with cleanup_stale_sessions
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if workflow:
+            workflow.signal_continue()
         return APIResponse(
             success=True,
             message="Continuing analysis"
         )
     elif state.status == TaskStatus.PAUSED:
         state.status = TaskStatus.RUNNING
-        await asyncio.to_thread(save_session_to_disk, session_id, state)
+        await async_save_session(session_id, state)
         return APIResponse(
             success=True,
             message="Analysis resumed"
@@ -1432,7 +1494,7 @@ async def resume_analysis(session_id: str):
     elif state.status in (TaskStatus.GENERATING_REPORT, TaskStatus.FAILED):
         # Interrupted during report generation or failed — allow re-run
         state.status = TaskStatus.RUNNING
-        await asyncio.to_thread(save_session_to_disk, session_id, state)
+        await async_save_session(session_id, state)
         return APIResponse(
             success=True,
             message="Resuming analysis"
@@ -1551,7 +1613,7 @@ async def export_state(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     # Save latest state to disk first
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     # Write tar.gz to a temp file on disk (not in memory)
     tmp = tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False, dir=str(UPLOAD_TEMP_DIR))
@@ -1643,7 +1705,7 @@ async def export_prepare(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     # Save latest state to disk first
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     # Build tar to a stable temp file
     export_dir = REPORTS_DIR / session_id
@@ -1755,7 +1817,7 @@ async def import_state(background_tasks: BackgroundTasks, file: UploadFile = Fil
         # ---- tar.gz: save to disk, then extract in background to avoid proxy timeouts ----
         # Register import job BEFORE saving file so frontend can poll even if proxy times out
         import_job_id = import_id or str(uuid.uuid4())
-        _import_jobs[import_job_id] = {"status": "uploading"}
+        _import_jobs[import_job_id] = {"status": "uploading", "created_at": time.time()}
 
         tmp_path = UPLOAD_TEMP_DIR / f"import_{uuid.uuid4().hex}.tar.gz"
         try:
@@ -1790,7 +1852,7 @@ async def import_state(background_tasks: BackgroundTasks, file: UploadFile = Fil
         raise HTTPException(status_code=400, detail="Invalid session ID in imported data")
 
     # Save state to disk and load into memory
-    await asyncio.to_thread(save_session_to_disk, state.id, state)
+    await async_save_session(state.id, state)
     sessions[state.id] = state
 
     return APIResponse(
@@ -1810,7 +1872,7 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str):
             _import_jobs[import_job_id] = {"status": "failed", "error": "Invalid session ID in imported data"}
             return
 
-        await asyncio.to_thread(save_session_to_disk, state.id, state)
+        await async_save_session(state.id, state)
         sessions[state.id] = state
         _import_jobs[import_job_id] = {"status": "completed", "session_id": state.id, "name": state.name}
     except HTTPException as e:
@@ -2098,8 +2160,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # Check if session is already completed - don't restart workflow
     if state.status == TaskStatus.COMPLETED:
         logger.info(f"Session {session_id} already completed, not restarting workflow")
-        # Update websocket reference for this completed session
-        websockets[session_id] = websocket
+        # Don't overwrite global websockets[session_id] -- multiple clients may
+        # connect to a completed session simultaneously (read-only). Each handler
+        # uses its own local `websocket` variable instead.
         # Remove from initializing set since we're not starting a workflow
         async with _state_lock:
             _initializing_sessions.discard(session_id)
@@ -2161,9 +2224,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     pass
         except WebSocketDisconnect:
             logger.info(f"WebSocket disconnected for completed session {session_id}")
-        finally:
-            if websockets.get(session_id) == websocket:
-                del websockets[session_id]
         return
     
     # Create message callback that uses the global websockets dict
@@ -2176,7 +2236,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         nonlocal ws_closed
 
         # Save message to state.realtime_messages for session restoration
-        state.realtime_messages.append(msg)
+        # Strip base64 from figure messages before persisting to avoid memory bloat
+        if msg.type == "figure" and isinstance(msg.content, str) and len(msg.content) > 1000:
+            from copy import copy
+            stripped_msg = copy(msg)
+            stripped_msg.content = "[image]"
+            state.realtime_messages.append(stripped_msg)
+        else:
+            state.realtime_messages.append(msg)
+        # Cap realtime_messages to prevent unbounded memory growth
+        if len(state.realtime_messages) > MAX_REALTIME_MESSAGES:
+            state.realtime_messages = state.realtime_messages[-MAX_REALTIME_MESSAGES:]
 
         msg_data = {
             "type": msg.type,
@@ -2265,7 +2335,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     async def state_callback(state: AnalysisState):
         sessions[session_id] = state
         # Use thread pool for disk I/O to avoid blocking event loop
-        await asyncio.to_thread(save_session_to_disk, session_id, state)
+        await async_save_session(session_id, state)
 
     # Create workflow with session_id for state persistence
     workflow = SingleCellAnalysisWorkflow(
@@ -2319,7 +2389,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         logger.info(f"Workflow completed for session {session_id}")
 
         # Save completed state to disk (use thread pool for I/O)
-        await asyncio.to_thread(save_session_to_disk, session_id, final_state)
+        await async_save_session(session_id, final_state)
 
         # Send completion message (safely)
         await safe_send({
@@ -2345,7 +2415,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         current_state = sessions.get(session_id, state)
         current_state.status = TaskStatus.FAILED
         sessions[session_id] = current_state
-        await asyncio.to_thread(save_session_to_disk, session_id, current_state)
+        await async_save_session(session_id, current_state)
 
     finally:
         # Cancel the WebSocket monitor task
@@ -3190,7 +3260,7 @@ async def complete_chunked_upload(
     )
     state.data_files.append(data_file)
 
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -3252,7 +3322,7 @@ async def retry_node(session_id: str, request: RetryNodeRequest):
         state.status = TaskStatus.PAUSED  # Allow resumption
         message = f"Session ready to retry from node {request.node_name}"
 
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
 
     return APIResponse(
         success=True,
@@ -3450,8 +3520,8 @@ async def _generate_figures_in_chat(
             )
 
             code_text = code_resp.content or ""
-            code_match = re.search(r'```python\s*\n(.*?)```', code_text, re.DOTALL)
-            code = code_match.group(1) if code_match else code_text
+            from .utils.sandbox import extract_code_from_markdown
+            code = extract_code_from_markdown(code_text)
             if not code.strip():
                 logger.warning(f"Chat sandbox: empty code for description '{desc[:80]}'")
                 continue
@@ -3910,7 +3980,6 @@ async def _run_chat_delegation(
 
         agent_results: Dict[str, Dict[str, Any]] = {}
         all_figures: List[Dict[str, str]] = []
-        figure_timestamp = time.time()  # Track when delegation started for figure collection
 
         for priority in sorted(priority_groups.keys()):
             group = priority_groups[priority]
@@ -4046,7 +4115,7 @@ async def _run_chat_delegation(
 
         # 10. Persist state
         sessions[session_id] = state
-        await asyncio.to_thread(save_session_to_disk, session_id, state)
+        await async_save_session(session_id, state)
 
         duration = time.time() - start_time
         logger.info(f"Chat delegation completed for {session_id} in {duration:.1f}s, "
@@ -4065,7 +4134,7 @@ async def _run_chat_delegation(
         try:
             await _send_chat_ws(session_id, "chat_cancelled", {"message": "Cancelled by user"})
             sessions[session_id] = state
-            await asyncio.to_thread(save_session_to_disk, session_id, state)
+            await async_save_session(session_id, state)
         except Exception:
             pass
         raise
@@ -4084,7 +4153,7 @@ async def _run_chat_delegation(
                 break
         await _send_chat_ws(session_id, "chat_error", {"error": error_msg})
         sessions[session_id] = state
-        await asyncio.to_thread(save_session_to_disk, session_id, state)
+        await async_save_session(session_id, state)
 
     finally:
         async with _chat_task_lock:
@@ -4348,7 +4417,7 @@ async def chat_with_pi(
             "timestamp": datetime.now().isoformat(),
             "delegation_active": True,
         })
-        await asyncio.to_thread(save_session_to_disk, session_id, state)
+        await async_save_session(session_id, state)
 
         # Launch background task
         task = asyncio.create_task(
@@ -4400,7 +4469,7 @@ async def chat_with_pi(
     if response_figures:
         assistant_msg["figures"] = list(response_figures)
     state.chat_messages.append(assistant_msg)
-    await asyncio.to_thread(save_session_to_disk, session_id, state)
+    await async_save_session(session_id, state)
     logger.info(f"Chat response: text saved ({len(cleaned_content)} chars, {len(response_figures)} existing figures)")
 
     # Now try to generate new figures (may take long, but text is already saved)
@@ -4412,7 +4481,7 @@ async def chat_with_pi(
                 existing = assistant_msg.get("figures", [])
                 assistant_msg["figures"] = existing + generated
                 response_figures.extend(generated)
-                await asyncio.to_thread(save_session_to_disk, session_id, state)
+                await async_save_session(session_id, state)
         except Exception as e:
             logger.error(f"Chat figure generation failed: {e}")
             logger.error(traceback.format_exc())

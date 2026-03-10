@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.12.0
+**Version**: 0.12.1
 **Last Updated**: 2026-03-10
 
 ## Project Overview
@@ -117,14 +117,14 @@ intesc/                         # Code directory
 │   │                           # - Literature agent defaults (mode, max_search_rounds)
 │   │
 │   ├── agents/
-│   │   ├── base.py             # Agent base class
+│   │   ├── base.py             # Agent base class (rollback_last_turn for safe history cleanup)
 │   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer + graphic abstract reviewer + dynamic task planner)
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install, cumulative revision history, analysis log)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2, ~785 lines)
 │   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~1060 lines)
 │   │   ├── painter_agent.py    # Painter Agent (graphic abstract + revision support)
-│   │   └── supervisor_agent.py # Supervisor Agent (real-time bioinformatics step monitoring, PI escalation)
+│   │   └── supervisor_agent.py # Supervisor Agent (real-time bioinformatics step monitoring, PI escalation, custom system_prompt)
 │   │
 │   ├── models/
 │   │   └── schemas.py          # Pydantic data models (~540 lines)
@@ -143,7 +143,8 @@ intesc/                         # Code directory
 │   │
 │   ├── utils/
 │   │   ├── llm_client.py       # LLM client (~872 lines, OpenRouter + Google DR, precise retry with InternalServerError)
-│   │   ├── sandbox.py          # Jupyter execution environment (~793 lines, auto PDF monkey-patch)
+│   │   ├── sandbox.py          # Jupyter execution environment (~946 lines, auto PDF, code safety validation, extract_code_from_markdown)
+│   │   ├── checkpoint.py       # Generic checkpoint manager (analysis + report resumption)
 │   │   ├── image_utils.py      # Image processing
 │   │   ├── upload.py           # Chunked upload manager (~398 lines)
 │   │   └── llm_logger.py       # LLM logging
@@ -303,6 +304,9 @@ initialize_round ◄────────────────────
 | `chat_delegation` | Chat delegation progress (started/agent_complete/agent_error/synthesizing) |
 | `chat_result` | Final chat delegation result |
 | `chat_error` | Chat delegation error |
+| `supervisor_feedback` | Supervisor Agent monitoring feedback |
+| `supervisor_checkpoint` | Supervisor biological checkpoint notification |
+| `supervisor_summary` | Supervisor round summary |
 
 ### 1.1 Biochemistry Agent (v2 - 3-Step Workflow)
 
@@ -423,8 +427,13 @@ states/{session_id}_session.pkl # dill-serialized Python environment
 **Key Functions (main.py):**
 
 ```python
+async def async_save_session(session_id: str, state: AnalysisState):
+    """Serialize state to JSON on the event-loop thread (consistent snapshot),
+    then write to disk in a thread pool. Prevents race conditions where
+    asyncio.to_thread would read mutable state while the event loop mutates it."""
+
 def save_session_to_disk(session_id: str, state: AnalysisState):
-    """Save complete state to disk"""
+    """Save complete state to disk (synchronous, for legacy callers)"""
 
 def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
     """Load state from disk"""
@@ -440,15 +449,33 @@ def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
 - When analysis completes
 - When user pauses
 
+**Memory Management:**
+
+- `MAX_CACHED_SESSIONS = 50`: Maximum sessions kept in memory
+- `MAX_REALTIME_MESSAGES = 1000`: Cap per-session realtime messages to prevent memory bloat
+- `SESSION_CACHE_TTL = 3600`: Inactive session eviction after 1 hour
+- `_IMPORT_JOB_TTL = 3600`: Stale import job cleanup after 1 hour
+- Session eviction re-checks activation status, closes Jupyter kernels and chat sandboxes
+- Figure message base64 data stripped before persisting to realtime_messages
+
 ### 3. Jupyter Code Execution (sandbox.py)
 
 ```python
+# Centralized code safety validation
+DANGEROUS_PATTERNS = [...]  # ~40 patterns for system commands, code execution, file ops, network, etc.
+
+def validate_code_safety(code: str) -> Tuple[bool, str]:
+    """Validate code for security before execution. Allows subprocess for pip install."""
+
+def extract_code_from_markdown(text: str, language: str = "python") -> str:
+    """Extract code from markdown-formatted LLM response using state-machine parsing."""
+
 class LocalJupyterSandbox:
     async def start(self):
         """Start Jupyter kernel"""
 
-    async def execute(self, code: str) -> CodeExecutionResult:
-        """Execute code, return output and charts"""
+    async def execute(self, code: str, save_to_history=True, skip_safety_check=False) -> CodeExecutionResult:
+        """Execute code with safety validation. skip_safety_check=True for trusted internal code."""
 
     async def stop(self):
         """Stop kernel"""
@@ -469,6 +496,8 @@ class LocalJupyterSandbox:
 - Fixed random seed (42) ensures reproducibility
 - **Auto PDF generation**: Monkey-patches `Figure.savefig` to automatically generate companion high-res PDFs (300 DPI) alongside every PNG saved. Uses vectorized Type 42 fonts for editable PDFs
 - **Code history extraction**: `get_code_history()` returns executed cells from the notebook, used by bioinformatics agent to populate code_history on session restore
+- **Centralized code safety**: `DANGEROUS_PATTERNS` and `validate_code_safety()` moved here from bioinformatics agent, enforced at sandbox level so all callers are protected. Internal code (kernel init, session restore/save) uses `skip_safety_check=True`
+- **Code extraction**: `extract_code_from_markdown()` shared utility for extracting code from LLM responses, replacing duplicated regex-based extraction across agents
 
 ### 4. Report Generator (report_generator.py, ~4683 lines)
 
@@ -488,11 +517,14 @@ class LocalJupyterSandbox:
 
 **Generation Flow (v0.9.0 — No Sandbox, PI Analysis Review):**
 
-Since v0.7.3, the report generator compiles reports from existing analysis artifacts without re-executing code. Since v0.9.0, a PI analysis review pre-step grounds the report in actual notebook content:
+Since v0.7.3, the report generator compiles reports from existing analysis artifacts without re-executing code. Since v0.9.0, a PI analysis review pre-step grounds the report in actual notebook content. Since v0.12.1, checkpoint-based resumption allows interrupted reports to continue from the last completed step:
 
 ```python
 class DetailedReportGenerator:
-    async def generate_report(self, state: AnalysisState):
+    async def generate_report(self, state: AnalysisState, resume_from_checkpoint: bool = True):
+        # 0. Initialize CheckpointManager and try loading existing checkpoint
+        checkpoint_mgr = CheckpointManager(session_id=state.id, state_dir=..., prefix="report")
+
         # 1. Build structured analysis record from state.code_history
         analysis_record = self._build_analysis_record(state)
 
@@ -503,22 +535,25 @@ class DetailedReportGenerator:
         # 3. Extract findings from round results
         findings = self._extract_findings(state)
 
-        # 3.5 PI reviews analysis (reads notebook, views figures via vision API)
+        # 3.5 PI reviews analysis — checkpoint after (expensive LLM call)
         analysis_summary = await self._pi_review_analysis(state, ...)
 
-        # 4. PI plans report structure from analysis record + analysis_summary
+        # 4. PI plans report structure — checkpoint after (expensive LLM call)
         report_plan = await self._plan_report_from_analysis(...)
 
-        # 5. Generate each section using existing figures + PI narrative
+        # 5. Generate each section — checkpoint after each section
         for section_plan in report_plan["sections"]:
             section = await self._generate_section_from_existing_figures(...)
 
-        # 6. Generate abstract and conclusions (using analysis_summary)
+        # 6. Abstract and conclusions — checkpoint after each
         abstract = await self._generate_abstract(...)
         conclusions = await self._generate_conclusions(...)
 
         # 7. Build appendix (no LLM — pure data extraction)
         appendix_html = self._build_appendix_html(state, report, language)
+
+        # 8. Clear checkpoint on successful completion
+        checkpoint_mgr.clear()
 ```
 
 **PI Analysis Review (v0.9.0 — Step 3.5):**
@@ -677,6 +712,10 @@ type MessageType =
   | 'chat_delegation'   // Delegation progress (started/agent_complete/agent_error/synthesizing)
   | 'chat_result'       // Final delegation result
   | 'chat_error'        // Delegation error
+  // Supervisor monitoring
+  | 'supervisor_feedback'    // Supervisor monitoring feedback
+  | 'supervisor_checkpoint'  // Biological checkpoint notification
+  | 'supervisor_summary'     // Supervisor round summary
 ```
 
 **State Sync Message:**

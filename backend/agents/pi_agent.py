@@ -655,12 +655,7 @@ IMPORTANT: agents_for_next_round controls which agents are ACTIVATED in the next
                 break
             logger.warning(f"[PI] Empty response on synthesis attempt {attempt + 1}, retrying...")
             # Remove failed attempt from history to avoid pollution
-            # Verify the last two messages are assistant+user before popping
-            if (len(self.message_history) >= 2
-                    and self.message_history[-1].get("role") == "assistant"
-                    and self.message_history[-2].get("role") == "user"):
-                self.message_history.pop()  # empty assistant
-                self.message_history.pop()  # duplicate user
+            self.rollback_last_turn()
             await asyncio.sleep(1)  # Brief delay before retry
 
         # Use base class safe JSON parser
@@ -758,11 +753,7 @@ Please write in academic paper style.
             if response and response.strip():
                 return response
             logger.warning(f"[PI] Empty response on final summary attempt {attempt + 1}, retrying...")
-            if (len(self.message_history) >= 2
-                    and self.message_history[-1].get("role") == "assistant"
-                    and self.message_history[-2].get("role") == "user"):
-                self.message_history.pop()
-                self.message_history.pop()
+            self.rollback_last_turn()
             await asyncio.sleep(1)
 
         # If all retries failed, generate a basic summary from round results
@@ -1580,11 +1571,7 @@ Generate a comprehensive research report in Markdown format suitable for publica
             if report and report.strip():
                 return report.strip()
             logger.warning(f"[PI] Empty response on integrated report attempt {attempt + 1}, retrying...")
-            if (len(self.message_history) >= 2
-                    and self.message_history[-1].get("role") == "assistant"
-                    and self.message_history[-2].get("role") == "user"):
-                self.message_history.pop()
-                self.message_history.pop()
+            self.rollback_last_turn()
             await asyncio.sleep(1)
 
         # Fallback if all retries failed
@@ -1716,11 +1703,7 @@ Return ONLY the summary text, no additional formatting.
             if summary and summary.strip():
                 return summary.strip()
             logger.warning(f"[PI] Empty response on graphic abstract prompt attempt {attempt + 1}, retrying...")
-            if (len(self.message_history) >= 2
-                    and self.message_history[-1].get("role") == "assistant"
-                    and self.message_history[-2].get("role") == "user"):
-                self.message_history.pop()
-                self.message_history.pop()
+            self.rollback_last_turn()
             await asyncio.sleep(1)
 
         # Fallback if all retries failed

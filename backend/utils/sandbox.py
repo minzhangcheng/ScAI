@@ -6,6 +6,7 @@ Supports pause/resume by saving and restoring the full session state.
 """
 
 import os
+import re
 import json
 import base64
 import asyncio
@@ -18,6 +19,159 @@ from nbformat.v4 import new_notebook, new_code_cell, new_output
 from jupyter_client import KernelManager
 
 logger = logging.getLogger(__name__)
+
+
+# Dangerous code patterns that should not be executed in the sandbox.
+# Enforced at the sandbox level so ALL callers (BioinformaticsAgent,
+# report_generator, chat sandbox, etc.) are protected.
+DANGEROUS_PATTERNS = [
+    # System command execution
+    (r'\bos\.system\b', 'os.system calls'),
+    (r'\bsubprocess\b', 'subprocess module'),
+    (r'\bos\.popen\b', 'os.popen calls'),
+    (r'\bos\.spawn\w*\b', 'os.spawn* calls'),
+    (r'\bos\.exec\w*\b', 'os.exec* calls'),
+    (r'\bos\.fork\b', 'os.fork calls'),
+    (r'\bpty\b', 'pty module'),
+
+    # Code execution
+    (r'\beval\s*\(', 'eval() function'),
+    (r'\bexec\s*\(', 'exec() function'),
+    (r'\b__import__\b', '__import__ function'),
+    (r'\bcompile\s*\(', 'compile() function'),
+    (r'\bimportlib\b', 'importlib module'),
+
+    # Dangerous attribute access
+    (r'\b__builtins__\b', '__builtins__ access'),
+    (r'\b__class__\s*\.\s*__bases__\b', '__class__.__bases__ access'),
+    (r'\b__class__\s*\.\s*__mro__\b', '__class__.__mro__ access'),
+    (r'\b__subclasses__\s*\(', '__subclasses__ access'),
+    (r'\bglobals\s*\(\s*\)', 'globals() function'),
+    (r'\blocals\s*\(\s*\)', 'locals() function'),
+    (r'\bgetattr\s*\([^,]+,\s*["\']__', 'getattr with dunder'),
+    (r'\bsetattr\s*\([^,]+,\s*["\']__', 'setattr with dunder'),
+    (r'\bdelattr\s*\([^,]+,\s*["\']__', 'delattr with dunder'),
+    (r'\bvars\s*\(\s*\)', 'vars() function'),
+
+    # File system operations (destructive)
+    (r'\bopen\s*\([^)]*["\'][wa]', 'file write operations outside safe directories'),
+    (r'\brm\s+-rf\b', 'rm -rf command'),
+    (r'\bshutil\.rmtree\b', 'shutil.rmtree'),
+    (r'\bos\.remove\b', 'os.remove'),
+    (r'\bos\.unlink\b', 'os.unlink'),
+    (r'\bos\.rmdir\b', 'os.rmdir'),
+    (r'\bos\.makedirs\b', 'os.makedirs (use Path.mkdir instead)'),
+    (r'\bos\.rename\b', 'os.rename'),
+    (r'\bos\.replace\b', 'os.replace'),
+    (r'\bshutil\.move\b', 'shutil.move'),
+    (r'\bshutil\.copy\b', 'shutil.copy (use explicit paths)'),
+
+    # Network access
+    (r'\bsocket\b', 'socket module'),
+    (r'\brequests\.(?:get|post|put|delete|patch|head|options)\b', 'HTTP requests'),
+    (r'\burllib\b', 'urllib module'),
+    (r'\bhttpx\b', 'httpx module'),
+    (r'\baiohttp\b', 'aiohttp module'),
+
+    # Low-level / dangerous modules
+    (r'\bctypes\b', 'ctypes module'),
+    (r'\bmultiprocessing\b', 'multiprocessing module'),
+    (r'\bpickle\.loads?\b', 'pickle.load/loads (arbitrary code execution)'),
+    (r'\bcPickle\b', 'cPickle module'),
+    (r'\bmarshal\b', 'marshal module'),
+    (r'\bshelve\b', 'shelve module'),
+
+    # Environment manipulation
+    (r'\bos\.chdir\b', 'os.chdir (changing working directory)'),
+    (r'\bos\.chroot\b', 'os.chroot'),
+    (r'\bsys\.path\s*\.(?:append|insert|extend)\b', 'sys.path modification'),
+]
+
+
+def validate_code_safety(code: str) -> Tuple[bool, str]:
+    """
+    Validate code for security before execution.
+
+    Args:
+        code: The Python code to validate
+
+    Returns:
+        Tuple of (is_safe, error_message). is_safe is True if the code
+        passes all security checks.
+    """
+    for pattern, description in DANGEROUS_PATTERNS:
+        if re.search(pattern, code):
+            # Allow subprocess when ALL usages are pip install commands
+            if 'subprocess' in description:
+                subprocess_lines = [
+                    line.strip() for line in code.splitlines()
+                    if re.search(r'\bsubprocess\b', line)
+                ]
+                pip_pattern = r'subprocess\.\w+\(\s*\[?\s*["\'](?:pip|pip3)["\'].*install'
+                import_pattern = r'^(?:import|from)\s+subprocess'
+                non_import_lines = [
+                    line for line in subprocess_lines
+                    if not re.match(import_pattern, line)
+                ]
+                if not non_import_lines or all(re.search(pip_pattern, line) for line in non_import_lines):
+                    continue
+            return False, f"Dangerous pattern detected: {description}"
+    return True, ""
+
+
+def extract_code_from_markdown(text: str, language: str = "python") -> str:
+    """
+    Extract code from a markdown-formatted LLM response.
+
+    Uses a state-machine approach to correctly handle:
+    - Fenced code blocks with language tag (```python ... ```)
+    - Fenced code blocks without language tag (``` ... ```)
+    - Multiple code blocks (returns the first matching one)
+    - Nested backticks inside code blocks
+
+    Args:
+        text: The LLM response text that may contain markdown code blocks
+        language: The language tag to look for (default "python")
+
+    Returns:
+        The extracted code string, or the original text stripped if no
+        code block is found.
+    """
+    if not text:
+        return ""
+
+    fence_with_lang = f"```{language}"
+    fence_plain = "```"
+
+    # Try language-tagged fence first, then plain fence
+    for fence_start in (fence_with_lang, fence_plain):
+        pos = text.find(fence_start)
+        if pos == -1:
+            continue
+
+        # Move past the opening fence line
+        code_start = text.find("\n", pos)
+        if code_start == -1:
+            continue
+        code_start += 1  # skip the newline
+
+        # Find closing fence: scan for ``` at the start of a line
+        # (handles nested backticks by requiring ``` on its own line)
+        search_pos = code_start
+        while search_pos < len(text):
+            line_end = text.find("\n", search_pos)
+            if line_end == -1:
+                line_end = len(text)
+            line = text[search_pos:line_end].strip()
+            if line == fence_plain:
+                return text[code_start:search_pos].strip()
+            search_pos = line_end + 1
+
+        # No closing fence found — take everything after the opening fence
+        return text[code_start:].strip()
+
+    # No code block found — return text as-is
+    return text.strip()
 
 
 class CodeExecutionResult:
@@ -445,7 +599,7 @@ def check_and_fix_nan(adata, fix=True):
 print(f"Environment initialized with SEED={SEED} for reproducibility")
 print("Helper functions available: get_seed(), check_and_fix_nan(adata)")
 """
-        result = await self.execute(init_code, save_to_history=False)
+        result = await self.execute(init_code, save_to_history=False, skip_safety_check=True)
         self._initialized = True
         logger.info("Kernel initialized")
     
@@ -480,8 +634,8 @@ try:
 except Exception as e:
     print(f"Note: Could not restore session ({{e}}), starting fresh")
 """
-        result = await self.execute(restore_code, save_to_history=False)
-        
+        result = await self.execute(restore_code, save_to_history=False, skip_safety_check=True)
+
         if result.success and "Session restored:" in (result.output or ""):
             self._session_restored = True
             self._session_restore_failed = False
@@ -542,8 +696,8 @@ with open({escaped_path}, 'wb') as f:
 
 print(f"Session saved: {{len(_session_data)}} variables")
 """
-        result = await self.execute(save_code, save_to_history=False)
-        
+        result = await self.execute(save_code, save_to_history=False, skip_safety_check=True)
+
         if result.success:
             logger.info("Session saved successfully")
         else:
@@ -554,9 +708,27 @@ print(f"Session saved: {{len(_session_data)}} variables")
     async def execute(
         self,
         code: str,
-        save_to_history: bool = True
+        save_to_history: bool = True,
+        skip_safety_check: bool = False
     ) -> CodeExecutionResult:
-        """Execute code in the kernel"""
+        """Execute code in the kernel.
+
+        Args:
+            code: Python code to execute
+            save_to_history: Whether to save successful execution to notebook history
+            skip_safety_check: If True, skip dangerous-pattern validation.
+                Only set this for trusted internal code (e.g. kernel init, session restore).
+        """
+        # Validate code safety before execution (unless explicitly skipped for internal code)
+        if not skip_safety_check:
+            is_safe, error_msg = validate_code_safety(code)
+            if not is_safe:
+                logger.warning(f"Code blocked by safety check for session {self.session_id}: {error_msg}")
+                return CodeExecutionResult(
+                    success=False,
+                    error=f"Code execution blocked: {error_msg}"
+                )
+
         if self.kc is None:
             await self.start()
         
