@@ -2,12 +2,12 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.11.1
-**Last Updated**: 2026-03-09
+**Version**: 0.12.0
+**Last Updated**: 2026-03-10
 
 ## Project Overview
 
-**InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of six specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, and Painter), it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, structured error tracking, and optimized real-time communication.
+**InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of seven specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, Painter, and Supervisor), it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, structured error tracking, and optimized real-time communication.
 
 ## Technical Architecture
 
@@ -35,11 +35,11 @@ This document is intended for developers and operations personnel, providing tec
 │  │       │  consult/          │   │  annotate/           │ │
 │  │       │  fig review        │   │  lit search          │ │
 │  │       └────────────────────┘   │                      │ │
-│  │                                ▼                      │ │
-│  │          ┌──────────┐   ┌────────────┐                │ │
-│  │          │ Painter  │   │ Literature │                │ │
-│  │          │  Agent   │   │   Agent    │                │ │
-│  │          └──────────┘   └────────────┘                │ │
+│  │       │                        ▼                      │ │
+│  │  ┌────┴──────┐ ┌──────────┐ ┌────────────┐           │ │
+│  │  │Supervisor │ │ Painter  │ │ Literature │           │ │
+│  │  │  Agent    │ │  Agent   │ │   Agent    │           │ │
+│  │  └───────────┘ └──────────┘ └────────────┘           │ │
 │  └────────────────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
@@ -107,11 +107,11 @@ intesc/                         # Code directory
 │   │
 │   ├── regenerate_report_html.py # Report HTML regeneration utility (~1087 lines, appendix + analysis log support)
 │   │
-│   ├── config.py               # Configuration management (~292 lines)
+│   ├── config.py               # Configuration management (~300 lines)
 │   │                           # - APIConfig: LLM keys + proxy (google_api_key moved to literature_config)
-│   │                           # - ModelConfig: Model selection per agent (incl. literature_model)
-│   │                           # - AgentTemperatures: Per-agent temperatures
-│   │                           # - AgentPrompts: System prompts (English, batch effect + PDF guidelines)
+│   │                           # - ModelConfig: Model selection per agent (incl. literature_model, supervisor_model)
+│   │                           # - AgentTemperatures: Per-agent temperatures (incl. supervisor)
+│   │                           # - AgentPrompts: System prompts (English, batch effect + PDF guidelines, painter_prompt + supervisor_prompt placeholders)
 │   │                           # - SystemConfig: System parameters
 │   │                           # - Data directory path definitions
 │   │                           # - Literature agent defaults (mode, max_search_rounds)
@@ -123,7 +123,8 @@ intesc/                         # Code directory
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2, ~785 lines)
 │   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~1060 lines)
-│   │   └── painter_agent.py    # Painter Agent (graphic abstract + revision support)
+│   │   ├── painter_agent.py    # Painter Agent (graphic abstract + revision support)
+│   │   └── supervisor_agent.py # Supervisor Agent (real-time bioinformatics step monitoring, PI escalation)
 │   │
 │   ├── models/
 │   │   └── schemas.py          # Pydantic data models (~540 lines)
@@ -141,7 +142,7 @@ intesc/                         # Code directory
 │   │                           # - Data helper methods: get_files_by_section/group, build_experimental_design_summary
 │   │
 │   ├── utils/
-│   │   ├── llm_client.py       # LLM client (~872 lines, OpenRouter + Google DR)
+│   │   ├── llm_client.py       # LLM client (~872 lines, OpenRouter + Google DR, precise retry with InternalServerError)
 │   │   ├── sandbox.py          # Jupyter execution environment (~793 lines, auto PDF monkey-patch)
 │   │   ├── image_utils.py      # Image processing
 │   │   ├── upload.py           # Chunked upload manager (~398 lines)
@@ -532,7 +533,7 @@ class DetailedReportGenerator:
 **Report Appendix (v0.9.0):**
 - `_build_appendix_html()`: Generates HTML appendix with no LLM calls, containing:
   1. Project Information (name, description, creation time, report generation time)
-  2. Agent Configuration (model + temperature for all 6 agents)
+  2. Agent Configuration (model + temperature for all 7 agents)
   3. Uploaded Data (treatment groups, data files, biochemistry indicator count)
   4. Analysis Rounds (timestamp, per-agent finding counts)
   5. User Inputs Between Rounds (messages with round tags, timestamps, attached files)
@@ -591,7 +592,7 @@ class LLMManager:
 - `_extract_content_from_message()`: Robust content extraction handling multiple formats — string content, list content (multimodal), None content with model_dump fallback, reasoning model responses (`reasoning`/`reasoning_content` fields), refusal detection, and debug logging for empty content with non-zero completion tokens
 - `_detect_image_mime_type()`: Module-level helper that inspects the first 9 bytes of base64-encoded image data to identify JPEG/PNG/GIF/WebP, falling back to `image/png`. Used by `chat_with_vision()` to send correct `Content-Type` in multimodal requests
 - `LLMToolResponse.raw_assistant_message`: Stores the serialized assistant message (via `model_dump()`) so callers can echo it back verbatim. Required for providers such as Gemini that attach extra fields (e.g. `thought_signature`) to tool-call responses and must receive them unmodified in subsequent requests
-- `retry_with_backoff()`: Max 3 retries with exponential backoff (2x delay), rate limit handling
+- `retry_with_backoff()`: Max 3 retries with exponential backoff (2x delay), rate limit handling. Only retries transient errors (`InternalServerError`, timeouts, connection errors); non-transient errors (`AuthenticationError`, `BadRequestError`) fail immediately
 - Per-request `timeout` override: Deep research models pass `timeout=660.0` without changing client default (120s)
 
 ## API Endpoints
@@ -1017,10 +1018,11 @@ uvicorn stdout      # API logs
 |-------|--------------|
 | PI | `google/gemini-3.1-pro-preview` |
 | Pathology | `google/gemini-3.1-pro-preview` |
-| Bioinformatics | `anthropic/claude-sonnet-4.5` |
+| Bioinformatics | `anthropic/claude-sonnet-4.6` |
 | Biochemistry | `google/gemini-3.1-pro-preview` |
 | Painter | `google/gemini-3-pro-image-preview` |
 | Literature | `google/gemini-3-flash-preview` (chat); Deep Research via mode config |
+| Supervisor | `google/gemini-3.1-flash-lite-preview` |
 
 **Agent Temperatures:**
 
@@ -1032,6 +1034,7 @@ uvicorn stdout      # API logs
 | Biochemistry | 0.2 | Objective interpretation |
 | Literature | 0.6 | Broader exploration |
 | Painter | 0.7 | Creative image generation |
+| Supervisor | 0.1 | High-certainty evaluation |
 
 ### Common Issues
 
@@ -1144,14 +1147,15 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 | Bioinformatics Agent (autonomous + figure budget + pip install + vision revision + cumulative history) | `bioinformatics_agent.py` | ~1628 lines |
 | PI Agent (coordinator + reviewer + GA reviewer + agent activation + data fidelity + brief figure curation) | `pi_agent.py` | ~1642 lines |
 | Literature Agent (2 modes + annotation) | `literature_agent.py` | ~1060 lines |
-| LLM client (OpenRouter + Google DR + MIME detection) | `llm_client.py` | ~914 lines |
+| LLM client (OpenRouter + Google DR + MIME detection + precise retry) | `llm_client.py` | ~914 lines |
 | Jupyter sandbox (+ auto PDF) | `sandbox.py` | ~793 lines |
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~785 lines |
 | Pathology Agent (batch size 5 + dynamic timeout) | `pathology_agent.py` | ~453 lines |
 | Chunked upload manager | `upload.py` | ~398 lines |
 | Data models & schemas | `schemas.py` | ~486 lines |
 | Painter Agent (graphic abstract + revision) | `painter_agent.py` | ~440 lines |
-| Configuration & prompts | `config.py` | ~292 lines |
+| Supervisor Agent (real-time step monitoring + PI escalation) | `supervisor_agent.py` | ~442 lines |
+| Configuration & prompts (+ supervisor/painter prompt fields) | `config.py` | ~300 lines |
 | Agent base class | `base.py` | ~246 lines |
 
 ### Frontend

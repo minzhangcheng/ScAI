@@ -24,7 +24,8 @@ import {
   Palette,
   FileText,
   Clock,
-  Loader2
+  Loader2,
+  Eye
 } from 'lucide-react'
 
 // Type interfaces for message content
@@ -60,6 +61,23 @@ interface GraphicAbstractContent {
   imageBase64?: string
 }
 
+// Reusable truncated text with expand/collapse
+function TruncatedText({ text, limit, className }: { text: string; limit: number; className?: string }) {
+  const [expanded, setExpanded] = useState(false)
+  if (text.length <= limit) return <>{text}</>
+  return (
+    <>
+      {expanded ? text : text.slice(0, limit) + '...'}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className={`ml-1 text-xs text-blue-500 hover:text-blue-700 underline ${className || ''}`}
+      >
+        {expanded ? '收起' : '展开全文'}
+      </button>
+    </>
+  )
+}
+
 const agentIcons: Record<AgentType, typeof Users> = {
   pi: Users,
   pathology: Microscope,
@@ -67,6 +85,7 @@ const agentIcons: Record<AgentType, typeof Users> = {
   biochemistry: FlaskConical,
   literature: BookOpen,
   painter: Palette,
+  supervisor: Eye,
 }
 
 const agentBgColors: Record<AgentType, string> = {
@@ -76,6 +95,7 @@ const agentBgColors: Record<AgentType, string> = {
   biochemistry: 'bg-amber-50 border-amber-200',
   literature: 'bg-blue-50 border-blue-200',
   painter: 'bg-pink-50 border-pink-200',
+  supervisor: 'bg-cyan-50 border-cyan-200',
 }
 
 const MessageItem = memo(function MessageItem({ message, language }: { message: Message; language: 'zh' | 'en' }) {
@@ -88,6 +108,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
     biochemistry: language === 'zh' ? '生化 Agent' : 'Biochemistry Agent',
     literature: language === 'zh' ? '文献 Agent' : 'Literature Agent',
     painter: language === 'zh' ? 'Painter Agent' : 'Painter Agent',
+    supervisor: language === 'zh' ? '监督 Agent' : 'Supervisor Agent',
   }
 
   const agent = message.agent
@@ -124,14 +145,12 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
             </div>
             <div className="bg-slate-800 rounded-lg p-3 text-sm text-slate-100 overflow-x-auto">
               <pre className="whitespace-pre-wrap font-mono text-xs">
-                {typeof message.content === 'string' 
-                  ? message.content.slice(0, 1000) + (message.content.length > 1000 ? '...' : '')
-                  : JSON.stringify(message.content, null, 2).slice(0, 1000)}
+                <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1000} />
               </pre>
             </div>
           </div>
         )
-      
+
       case 'response':
         // LLM的回复
         return (
@@ -142,9 +161,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
             </div>
             <div className={`${bgColor} border rounded-lg p-3 text-sm`}>
               <pre className="whitespace-pre-wrap text-slate-700 text-xs">
-                {typeof message.content === 'string' 
-                  ? message.content.slice(0, 1500) + (message.content.length > 1500 ? '...' : '')
-                  : JSON.stringify(message.content, null, 2).slice(0, 1500)}
+                <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1500} />
               </pre>
             </div>
           </div>
@@ -280,9 +297,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           <div className="space-y-1">
             <span className="text-xs text-slate-500">{language === 'zh' ? '输出' : 'Output'}:</span>
             <pre className="text-xs text-slate-700 bg-slate-100 rounded-lg p-2 overflow-x-auto whitespace-pre-wrap">
-              {typeof message.content === 'string' 
-                ? message.content.slice(0, 1000) + (message.content.length > 1000 ? '...' : '')
-                : JSON.stringify(message.content, null, 2)}
+              <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1000} />
             </pre>
           </div>
         )
@@ -439,15 +454,69 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               </div>
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
                 <pre className="whitespace-pre-wrap text-xs">
-                  {typeof message.content === 'string' 
-                    ? message.content.slice(0, 1500) + (message.content.length > 1500 ? '...' : '')
-                    : JSON.stringify(message.content, null, 2)}
+                  <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1500} />
                 </pre>
               </div>
             </div>
           )
         }
         
+        if (message.type === 'supervisor_feedback') {
+          return (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs text-cyan-600">
+                <Eye className="w-3 h-3" />
+                <span>{language === 'zh' ? '监督反馈' : 'Supervisor Feedback'}</span>
+              </div>
+              <div className="bg-cyan-50 border border-cyan-200 rounded-lg p-3 text-sm text-cyan-800">
+                <pre className="whitespace-pre-wrap text-xs">
+                  {typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}
+                </pre>
+              </div>
+            </div>
+          )
+        }
+
+        if (message.type === 'supervisor_summary') {
+          let stats = message.content
+          try {
+            if (typeof message.content === 'string') {
+              stats = JSON.parse(message.content)
+            }
+          } catch { stats = {} }
+
+          return (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs text-cyan-600">
+                <Eye className="w-3 h-3" />
+                <span>{language === 'zh' ? '监督摘要' : 'Supervision Summary'}</span>
+              </div>
+              <div className="bg-cyan-50 border border-cyan-200 rounded-lg p-3">
+                <div className="flex flex-wrap gap-3 text-sm">
+                  <span className="text-cyan-700">{language === 'zh' ? '监控步骤' : 'Steps'}: <strong>{stats.total_steps_monitored ?? '-'}</strong></span>
+                  <span className="text-cyan-700">{language === 'zh' ? '技术问题' : 'Issues'}: <strong>{stats.steps_with_technical_issues ?? '-'}</strong></span>
+                  <span className="text-cyan-700">{language === 'zh' ? 'PI介入' : 'PI Escalations'}: <strong>{stats.pi_escalations ?? '-'}</strong></span>
+                  <span className="text-cyan-700">{language === 'zh' ? '严重问题' : 'Critical'}: <strong>{stats.critical_issues ?? '-'}</strong></span>
+                </div>
+              </div>
+            </div>
+          )
+        }
+
+        if (message.type === 'supervisor_checkpoint') {
+          return (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs text-cyan-600">
+                <Eye className="w-3 h-3" />
+                <span>{language === 'zh' ? '检查点上报' : 'Checkpoint Escalation'}</span>
+              </div>
+              <div className="bg-cyan-50 border border-cyan-300 rounded-lg p-3 text-sm text-cyan-800">
+                {typeof message.content === 'string' ? message.content : JSON.stringify(message.content)}
+              </div>
+            </div>
+          )
+        }
+
         if (message.type === 'pi_question') {
           let questionData = message.content
           try {
@@ -754,6 +823,7 @@ export function MessageStream() {
     biochemistry: language === 'zh' ? '生化 Agent' : 'Biochemistry',
     literature: language === 'zh' ? '文献 Agent' : 'Literature',
     painter: 'Painter',
+    supervisor: language === 'zh' ? '监督 Agent' : 'Supervisor',
   }
 
   return (

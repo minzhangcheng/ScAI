@@ -1,6 +1,6 @@
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
-import { useSession, useConfig } from '../hooks/useApi'
+import { useSession, useConfig, generateId } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
@@ -16,7 +16,8 @@ import {
   BookOpen,
   ChevronDown,
   ChevronUp,
-  Palette
+  Palette,
+  Eye
 } from 'lucide-react'
 
 const API_BASE = '/api'
@@ -38,7 +39,7 @@ export interface RoundSummary {
 }
 
 export function AnalysisPanel() {
-  const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors, readMode } = useAppStore()
+  const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors, readMode, addMessage } = useAppStore()
   const { startAnalysis, resumeAnalysis, continueRound } = useSession()
   const { checkStatus, validateApiKey } = useConfig()
   const { t } = useTranslation(language)
@@ -49,6 +50,7 @@ export function AnalysisPanel() {
   // Round feedback dialog state
   const [showFeedbackDialog, setShowFeedbackDialog] = useState(false)
   const [feedbackRoundData, setFeedbackRoundData] = useState<RoundSummary | null>(null)
+  const lastDialogRoundRef = useRef<number>(-1)
 
   // API validation state
   const [validating, setValidating] = useState(false)
@@ -63,6 +65,7 @@ export function AnalysisPanel() {
     { id: 'biochemistry', name: t('biochemistryAgent'), icon: FlaskConical, color: 'amber' },
     { id: 'literature', name: t('literatureAgent'), icon: BookOpen, color: 'blue' },
     { id: 'painter', name: t('painterAgent'), icon: Palette, color: 'pink' },
+    { id: 'supervisor', name: t('supervisorAgent'), icon: Eye, color: 'cyan' },
   ]
 
   // Memoize unresolved errors to avoid recalculation
@@ -174,6 +177,17 @@ export function AnalysisPanel() {
     return summaries.sort((a, b) => a.round - b.round)
   }, [messages, currentSession?.roundResults])
 
+  const notifySyncFailures = (failures: string[]) => {
+    if (failures.length === 0) return
+    const label = language === 'zh' ? '以下设置同步失败，将使用默认值' : 'Settings sync failed, using defaults for'
+    addMessage({
+      id: generateId(),
+      type: 'error',
+      content: `${label}: ${failures.join(', ')}`,
+      timestamp: new Date().toISOString(),
+    })
+  }
+
   const handleStart = async () => {
     // Block in read mode
     if (readMode) {
@@ -199,7 +213,8 @@ export function AnalysisPanel() {
 
       if (validation.valid) {
         // Key is valid - proceed
-        await startAnalysis()
+        const failures = await startAnalysis()
+        if (failures) notifySyncFailures(failures)
         setTimeout(() => wsConnect?.(), 100)
       } else {
         // Key is invalid or uncertain - show dialog
@@ -216,7 +231,8 @@ export function AnalysisPanel() {
   const handleIgnoreValidationError = async () => {
     setShowValidationDialog(false)
     try {
-      await startAnalysis()
+      const failures = await startAnalysis()
+      if (failures) notifySyncFailures(failures)
       setTimeout(() => wsConnect?.(), 100)
     } catch (e) {
       console.error('Failed to start analysis:', e)
@@ -330,7 +346,10 @@ export function AnalysisPanel() {
       setExpandedRound(latest.round)
 
       // Show feedback dialog when a round completes and is waiting for input
-      if (latest.status === 'waiting_input' && currentSession?.status === 'waiting_input') {
+      // Use ref guard to prevent duplicate triggers for the same round
+      if (latest.status === 'waiting_input' && currentSession?.status === 'waiting_input'
+          && latest.round !== lastDialogRoundRef.current) {
+        lastDialogRoundRef.current = latest.round
         setFeedbackRoundData(latest)
         setShowFeedbackDialog(true)
       }

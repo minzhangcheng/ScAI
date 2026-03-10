@@ -329,7 +329,7 @@ class StartRequest(BaseModel):
 
 class PromptUpdateRequest(BaseModel):
     agent: str
-    prompt: str
+    prompt: str = Field(max_length=50000)
 
 
 class ModelUpdateRequest(BaseModel):
@@ -973,12 +973,20 @@ async def upload_data(
     validate_path_within(file_path, upload_parent)
 
     # For large sequencing files, use stream save
-    if section == "sequencing":
-        await stream_save_file(file, file_path)
-    else:
-        content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+    try:
+        if section == "sequencing":
+            await stream_save_file(file, file_path)
+        else:
+            content = await file.read()
+            with open(file_path, "wb") as f:
+                f.write(content)
+    except Exception:
+        # Clean up partial file on failure
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
     # Create DataFile record
     data_file = DataFile(
@@ -1180,7 +1188,9 @@ async def get_prompts(session_id: str):
         "pathology": state.custom_prompts.get("pathology", config.prompts.pathology_prompt if config else ""),
         "bioinformatics": state.custom_prompts.get("bioinformatics", config.prompts.bioinformatics_prompt if config else ""),
         "biochemistry": state.custom_prompts.get("biochemistry", config.prompts.biochemistry_prompt if config else ""),
-        "literature": state.custom_prompts.get("literature", config.prompts.literature_prompt if config else "")
+        "literature": state.custom_prompts.get("literature", config.prompts.literature_prompt if config else ""),
+        "painter": state.custom_prompts.get("painter", config.prompts.painter_prompt if config else ""),
+        "supervisor": state.custom_prompts.get("supervisor", config.prompts.supervisor_prompt if config else "")
     }
     
     return prompts
@@ -1220,7 +1230,8 @@ async def get_models(session_id: str):
         "bioinformatics": state.custom_models.get("bioinformatics", config.models.bioinformatics_model if config else ""),
         "biochemistry": state.custom_models.get("biochemistry", config.models.biochemistry_model if config else ""),
         "literature": state.custom_models.get("literature", config.models.literature_model if config else "google/gemini-3-flash-preview"),
-        "painter": state.custom_models.get("painter", config.models.painter_model if config else "gemini-2.0-flash-exp-image-generation")
+        "painter": state.custom_models.get("painter", config.models.painter_model if config else "gemini-2.0-flash-exp-image-generation"),
+        "supervisor": state.custom_models.get("supervisor", config.models.supervisor_model if config else "google/gemini-3.1-flash-lite-preview")
     }
 
     return models

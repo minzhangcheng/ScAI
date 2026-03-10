@@ -113,8 +113,10 @@ export const translations = {
     literatureMaxSearchRoundsNote: 'Agent 可根据搜索结果动态调整查询，进行多轮迭代搜索',
     literaturePubmedSettings: 'PubMed 搜索设置',
     literaturePubmedSettingsNote: '所有模式在搜索失败时都会回退到 PubMed 检索',
-    painterAgent: 'Painter Agent',
+    painterAgent: '绘图 Agent',
     painterAgentDesc: '图形摘要绘制',
+    supervisorAgent: '监督 Agent',
+    supervisorAgentDesc: '实时分析监控与质量控制',
 
     // Publication figures and reports
     figureGallery: '图片库',
@@ -478,6 +480,8 @@ export const translations = {
     literaturePubmedSettingsNote: 'All modes fall back to PubMed search on failure',
     painterAgent: 'Painter Agent',
     painterAgentDesc: 'Graphic abstract generation',
+    supervisorAgent: 'Supervisor Agent',
+    supervisorAgentDesc: 'Real-time analysis monitoring and quality control',
 
     // Publication figures and reports
     figureGallery: 'Figure Gallery',
@@ -928,5 +932,7 @@ Style guidelines:
 - Minimal text, maximum visual communication
 - Include simple labels for key elements
 
-Note: This agent uses Google Gemini's image generation API.`
+Note: This agent uses Google Gemini's image generation API.`,
+
+  supervisor: `You are a bioinformatics analysis supervisor. Your role is to monitor analysis steps for technical correctness and identify important biological decision points. You use a cheap vision-capable LLM to evaluate every step in real-time.`
 }

@@ -32,6 +32,7 @@ from .agents.bioinformatics_agent import BioinformaticsAgent
 from .agents.biochemistry_agent import BiochemistryAgent
 from .agents.literature_agent import LiteratureAgent
 from .agents.painter_agent import PainterAgent
+from .agents.supervisor_agent import SupervisorAgent
 from .agents.base import AgentConfig
 from .utils.llm_client import LLMManager, OpenAICompatibleClient
 from .utils.sandbox import LocalJupyterSandbox
@@ -175,6 +176,7 @@ class SingleCellAnalysisWorkflow:
         self.biochemistry_agent: Optional[BiochemistryAgent] = None
         self.literature_agent: Optional[LiteratureAgent] = None
         self.painter_agent: Optional[PainterAgent] = None
+        self.supervisor_agent: Optional[SupervisorAgent] = None
         
         # Workflow graph
         self.graph = None
@@ -259,6 +261,7 @@ class SingleCellAnalysisWorkflow:
             pi_callback=self._pi_callback,
             annotate_clusters_callback=self._annotate_clusters_callback,
             message_callback=self._agent_message_callback,
+            supervisor_callback=self._supervisor_callback,
             config=AgentConfig(temperature=self.temperatures.get('bioinformatics', 0.1))
         )
 
@@ -293,7 +296,18 @@ class SingleCellAnalysisWorkflow:
             config=AgentConfig(temperature=self.temperatures.get('painter', 0.7))
         )
 
-        logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model}, Literature={literature_model}, Painter={painter_model}")
+        # Initialize Supervisor Agent for real-time analysis monitoring
+        supervisor_model = custom_models.get('supervisor', self.config.models.supervisor_model)
+        self.supervisor_agent = SupervisorAgent(
+            llm_client=self.llm_manager.openrouter,
+            model=supervisor_model,
+            pi_callback=self._pi_callback,
+            message_callback=self._supervisor_message_callback,
+            session_id=self.session_id,
+            temperature=self.temperatures.get('supervisor', 0.1),
+        )
+
+        logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model}, Literature={literature_model}, Painter={painter_model}, Supervisor={supervisor_model}")
 
         # Build workflow graph
         self._build_graph()
@@ -496,6 +510,20 @@ Be specific and actionable in your response."""
     async def _agent_message_callback(self, msg_type: str, content: str):
         """Callback for agent messages"""
         await self._send_message(msg_type, content, AgentType.BIOINFORMATICS)
+
+    async def _supervisor_message_callback(self, msg_type: str, content: str):
+        """Callback for supervisor agent messages"""
+        await self._send_message(msg_type, content, AgentType.SUPERVISOR)
+
+    async def _supervisor_callback(self, step: AnalysisStep, figures: Optional[List[str]] = None) -> Optional[str]:
+        """Bridge bioinformatics agent's supervisor_callback to SupervisorAgent."""
+        if not self.supervisor_agent:
+            return None
+        try:
+            return await self.supervisor_agent.evaluate_step(step, figures or [])
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] Supervisor callback failed: {e}")
+            return None
 
     async def _figure_review_callback(self, figure: PublicationFigure) -> Dict[str, Any]:
         """
@@ -1113,12 +1141,27 @@ Report key findings when you complete each major analysis phase."""
         # Step 2: Bioinformatics agent runs autonomously with figure review support
         await self._send_message("status", "Bioinformatics agent is running autonomous analysis...", AgentType.BIOINFORMATICS)
 
+        # Reset supervisor state for this round
+        if self.supervisor_agent:
+            self.supervisor_agent.reset_for_round()
+
         result = await self.bioinformatics_agent.run_autonomous_analysis(
             analysis_state,
             instruction,
             max_steps=200,  # Allow sufficient steps for full analysis + figure review loops
-            figure_review_callback=self._figure_review_callback
+            figure_review_callback=self._figure_review_callback,
+            supervisor_callback=self._supervisor_callback,
         )
+
+        # Collect supervisor stats
+        if self.supervisor_agent:
+            supervision_stats = self.supervisor_agent.get_summary_stats()
+            await self._send_message("supervisor_summary", json.dumps(supervision_stats), AgentType.SUPERVISOR)
+            logger.info(
+                f"[{self.session_id}] Supervisor: {supervision_stats['total_steps_monitored']} steps, "
+                f"{supervision_stats['steps_with_technical_issues']} issues, "
+                f"checkpoints: {supervision_stats['checkpoints_reached']}"
+            )
 
         # Check result status and log accordingly
         result_status = result.get("status", "unknown")
@@ -1545,11 +1588,20 @@ Return ONLY the JSON array, nothing else."""
         # Set status to waiting for user input
         analysis_state.status = TaskStatus.WAITING_INPUT
 
-        await self._send_message(
-            "status",
-            f"Round {round_result.round_number} complete. Waiting for your input - you can provide additional data or instructions.",
-            AgentType.PI
-        )
+        max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
+        is_last_round = analysis_state.current_round >= max_rounds
+        if is_last_round:
+            await self._send_message(
+                "status",
+                f"Round {round_result.round_number} complete (final round). You can provide additional data to extend analysis, or skip to generate the final report.",
+                AgentType.PI
+            )
+        else:
+            await self._send_message(
+                "status",
+                f"Round {round_result.round_number} complete. Waiting for your input - you can provide additional data or instructions.",
+                AgentType.PI
+            )
 
         # Send state sync for round completion
         await self._send_state_sync(analysis_state, "round_complete")
@@ -2009,17 +2061,26 @@ Return ONLY the JSON array, nothing else."""
 
             workspace_dir = str(WORKSPACE_DIR / self.session_id)
 
-            generator = DetailedReportGenerator(
-                llm_client=llm_client,
-                pi_model=pi_model,
-                bio_model=bio_model,
-                output_dir=output_dir,
-                workspace_dir=workspace_dir,
-                progress_callback=progress_callback
-            )
-
-            # Generate report
-            report = await generator.generate_report(analysis_state)
+            if self.supervisor_agent:
+                # Supervisor generates report from its accumulated analysis records
+                report = await self.supervisor_agent.generate_detailed_report(
+                    analysis_state=analysis_state,
+                    report_model=pi_model,
+                    output_dir=output_dir,
+                    workspace_dir=str(WORKSPACE_DIR / self.session_id),
+                    progress_callback=progress_callback,
+                )
+            else:
+                # Fallback: use original DetailedReportGenerator
+                generator = DetailedReportGenerator(
+                    llm_client=llm_client,
+                    pi_model=pi_model,
+                    bio_model=bio_model,
+                    output_dir=output_dir,
+                    workspace_dir=workspace_dir,
+                    progress_callback=progress_callback
+                )
+                report = await generator.generate_report(analysis_state)
 
             await self._send_message(
                 "detailed_report",

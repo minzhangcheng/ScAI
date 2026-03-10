@@ -3,6 +3,15 @@ import { useAppStore, Message, Session, AgentType } from '../stores/appStore'
 
 const API_BASE = '/api'
 
+// Generate UUID compatible with all browsers (including non-HTTPS contexts)
+export function generateId(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0
+    const v = c === 'x' ? r : (r & 0x3 | 0x8)
+    return v.toString(16)
+  })
+}
+
 // Generic fetch wrapper (exported for direct use)
 export async function apiFetch<T>(
   endpoint: string,
@@ -253,7 +262,7 @@ export function useSession() {
       // Load realtime messages history (WebSocket messages)
       if (data.messages && Array.isArray(data.messages)) {
         const messages: Message[] = data.messages.map((msg: any) => ({
-          id: msg.id || crypto.randomUUID(),
+          id: msg.id || generateId(),
           type: msg.type || 'message',
           agent: msg.agent as AgentType | undefined,
           content: msg.content,
@@ -513,87 +522,49 @@ export function useSession() {
   
   const startAnalysis = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
-    
+
     // Get current models, prompts, and temperatures from store
     const { models, prompts, temperatures } = useAppStore.getState()
-    
-    // Sync all models to backend before starting
-    for (const agent of ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature', 'painter'] as const) {
-      try {
-        await apiFetch(`/session/${currentSession.id}/models`, {
-          method: 'POST',
-          body: JSON.stringify({
-            session_id: currentSession.id,
-            agent,
-            model: models[agent],
-          }),
-        })
-      } catch (e) {
-        console.error(`Failed to sync model for ${agent}:`, e)
-      }
-    }
-    
-    // Sync all prompts to backend before starting
-    for (const agent of ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature', 'painter'] as const) {
-      try {
-        await apiFetch(`/session/${currentSession.id}/prompts`, {
-          method: 'POST',
-          body: JSON.stringify({
-            session_id: currentSession.id,
-            agent,
-            prompt: prompts[agent],
-          }),
-        })
-      } catch (e) {
-        console.error(`Failed to sync prompt for ${agent}:`, e)
-      }
-    }
-    
-    // Sync all temperatures to backend before starting
-    for (const agent of ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature', 'painter'] as const) {
-      try {
-        await apiFetch(`/session/${currentSession.id}/temperatures`, {
-          method: 'POST',
-          body: JSON.stringify({
-            session_id: currentSession.id,
-            agent,
-            temperature: temperatures[agent],
-          }),
-        })
-      } catch (e) {
-        console.error(`Failed to sync temperature for ${agent}:`, e)
-      }
-    }
-    
-    // Sync max rounds to backend before starting
-    const maxRounds = useAppStore.getState().maxRounds
-    try {
-      await apiFetch(`/session/${currentSession.id}/max-rounds`, {
-        method: 'POST',
-        body: JSON.stringify({
-          session_id: currentSession.id,
-          max_rounds: maxRounds,
-        }),
-      })
-    } catch (e) {
-      console.error('Failed to sync max rounds:', e)
-    }
+    const syncFailures: string[] = []
+    const agents = ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature', 'painter', 'supervisor'] as const
 
-    // Sync round wait seconds to backend before starting
+    // Sync all agent settings in parallel (models, prompts, temperatures)
+    await Promise.allSettled([
+      ...agents.map(agent =>
+        apiFetch(`/session/${currentSession.id}/models`, {
+          method: 'POST',
+          body: JSON.stringify({ session_id: currentSession.id, agent, model: models[agent] }),
+        }).catch(e => { syncFailures.push(`model/${agent}`); throw e })
+      ),
+      ...agents.map(agent =>
+        apiFetch(`/session/${currentSession.id}/prompts`, {
+          method: 'POST',
+          body: JSON.stringify({ session_id: currentSession.id, agent, prompt: prompts[agent] }),
+        }).catch(e => { syncFailures.push(`prompt/${agent}`); throw e })
+      ),
+      ...agents.map(agent =>
+        apiFetch(`/session/${currentSession.id}/temperatures`, {
+          method: 'POST',
+          body: JSON.stringify({ session_id: currentSession.id, agent, temperature: temperatures[agent] }),
+        }).catch(e => { syncFailures.push(`temperature/${agent}`); throw e })
+      ),
+    ])
+
+    // Sync remaining settings in parallel
+    const maxRounds = useAppStore.getState().maxRounds
     const roundWaitSeconds = useAppStore.getState().roundWaitSeconds
-    try {
-      await apiFetch(`/session/${currentSession.id}/round-wait`, {
+    const { literatureMode, googleApiKey, pubmedEmail, literatureMaxSearchRounds, deepResearchModel } = useAppStore.getState()
+
+    await Promise.allSettled([
+      apiFetch(`/session/${currentSession.id}/max-rounds`, {
+        method: 'POST',
+        body: JSON.stringify({ session_id: currentSession.id, max_rounds: maxRounds }),
+      }).catch(e => { syncFailures.push('max_rounds'); throw e }),
+      apiFetch(`/session/${currentSession.id}/round-wait`, {
         method: 'POST',
         body: JSON.stringify({ round_wait_seconds: roundWaitSeconds }),
-      })
-    } catch (e) {
-      console.error('Failed to sync round wait seconds:', e)
-    }
-
-    // Sync literature config to backend before starting
-    const { literatureMode, googleApiKey, pubmedEmail, literatureMaxSearchRounds, deepResearchModel } = useAppStore.getState()
-    try {
-      await apiFetch(`/session/${currentSession.id}/literature-config`, {
+      }).catch(e => { syncFailures.push('round_wait'); throw e }),
+      apiFetch(`/session/${currentSession.id}/literature-config`, {
         method: 'POST',
         body: JSON.stringify({
           mode: literatureMode,
@@ -602,13 +573,12 @@ export function useSession() {
           pubmed_email: pubmedEmail,
           max_search_rounds: literatureMaxSearchRounds,
         }),
-      })
-    } catch (e) {
-      console.error('Failed to sync literature config:', e)
-    }
+      }).catch(e => { syncFailures.push('literature_config'); throw e }),
+    ])
 
     await apiFetch(`/session/${currentSession.id}/run`, { method: 'POST' })
     updateSession({ status: 'running' })
+    return syncFailures
   }, [currentSession, updateSession])
   
   const pauseAnalysis = useCallback(async () => {
@@ -697,17 +667,10 @@ export function useWebSocket() {
   const reconnectCountRef = useRef<number>(0)  // Track reconnection attempts for history recovery
   const [connected, setConnected] = useState(false)
 
-  // Generate UUID compatible with all browsers (including non-HTTPS)
-  const generateId = () => {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-      const r = Math.random() * 16 | 0
-      const v = c === 'x' ? r : (r & 0x3 | 0x8)
-      return v.toString(16)
-    })
-  }
-
   const connect = useCallback(() => {
-    if (!currentSession) {
+    // Use fresh state to avoid stale closure references
+    const session = useAppStore.getState().currentSession
+    if (!session) {
       console.log('WebSocket: No current session, skipping connect')
       return
     }
@@ -732,7 +695,7 @@ export function useWebSocket() {
     const isReconnect = reconnectCountRef.current > 0
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/${currentSession.id}`
+    const wsUrl = `${protocol}//${window.location.host}/ws/${session.id}`
 
     console.log(`WebSocket: Connecting to ${wsUrl}${isReconnect ? ' (reconnect #' + reconnectCountRef.current + ')' : ''}`)
 
@@ -864,10 +827,28 @@ export function useWebSocket() {
           const syncContent = data.content
           const currentVersion = useAppStore.getState().stateVersion
 
-          // Check for version conflict
+          // Check for version conflict - reload full session state from server
           if (syncContent.version < currentVersion) {
-            console.warn('WebSocket: Received outdated state sync, current:', currentVersion, 'received:', syncContent.version)
-            // Could trigger full state reload here if needed
+            console.warn('WebSocket: Received outdated state sync, current:', currentVersion, 'received:', syncContent.version, '. Reloading session state.')
+            const sessionId = useAppStore.getState().currentSession?.id
+            if (sessionId) {
+              fetch(`${API_BASE}/session/${sessionId}/load`)
+                .then(resp => resp.ok ? resp.json() : null)
+                .then(reloadData => {
+                  if (reloadData) {
+                    if (reloadData.status) {
+                      useAppStore.getState().updateSession({
+                        status: reloadData.status,
+                        currentRound: reloadData.current_round ?? 0,
+                      })
+                    }
+                    if (reloadData.state_version != null) {
+                      setStateVersion(reloadData.state_version)
+                    }
+                  }
+                })
+                .catch(reloadErr => console.error('WebSocket: Failed to reload session state:', reloadErr))
+            }
           } else {
             // Update state version and session status
             setStateVersion(syncContent.version)

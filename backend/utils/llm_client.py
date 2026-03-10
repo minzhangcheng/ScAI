@@ -10,7 +10,7 @@ import logging
 import time
 from typing import List, Dict, Any, Optional, AsyncGenerator, Union
 from dataclasses import dataclass, field
-from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError
+from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError
 
 from .llm_logger import get_llm_logger, LLMInteraction
 
@@ -43,10 +43,12 @@ def _detect_image_mime_type(img_b64: str) -> str:
 MAX_RETRIES = 3
 RETRY_DELAY_BASE = 2.0  # Base delay in seconds, will be multiplied by attempt number
 # Include JSONDecodeError for when API returns invalid JSON (truncated response, etc.)
+# Note: Only retry transient errors. Non-transient errors like AuthenticationError,
+# BadRequestError, NotFoundError etc. should NOT be retried.
 RETRYABLE_EXCEPTIONS = (
     APITimeoutError,
     APIConnectionError,
-    APIError,  # General API errors
+    InternalServerError,  # 500 - transient server errors
     httpx.ConnectTimeout,
     httpx.ReadTimeout,
     asyncio.TimeoutError,
@@ -103,8 +105,7 @@ async def retry_with_backoff(
         try:
             return await asyncio.wait_for(func(), timeout=request_timeout)
         except RateLimitError as e:
-            # RateLimitError is a subclass of APIError, so it must be caught BEFORE
-            # RETRYABLE_EXCEPTIONS (which includes APIError) to get special handling.
+            # RateLimitError needs special handling with longer backoff delays.
             last_exception = e
             if attempt < max_retries:
                 delay = retry_delay_base * (attempt + 1) * 2  # Double the delay for rate limits

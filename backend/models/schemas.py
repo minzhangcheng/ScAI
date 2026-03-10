@@ -18,6 +18,7 @@ class AgentType(str, Enum):
     BIOCHEMISTRY = "biochemistry"
     LITERATURE = "literature"
     PAINTER = "painter"
+    SUPERVISOR = "supervisor"
 
 class MessageRole(str, Enum):
     USER = "user"

@@ -3,13 +3,13 @@ import { persist } from 'zustand/middleware'
 import { Language, getDefaultPrompts } from '../i18n/translations'
 
 // Types
-export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter'
+export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor'
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'generating_report'
 export type FigureReviewStatus = 'pending' | 'approved' | 'revision_requested'
 
 export interface Message {
   id: string
-  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error'
+  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint'
   agent?: AgentType
   content: any
   timestamp: string
@@ -125,6 +125,7 @@ export interface AgentPrompts {
   biochemistry: string
   literature: string
   painter: string
+  supervisor: string
 }
 
 export interface AgentModels {
@@ -134,6 +135,7 @@ export interface AgentModels {
   biochemistry: string
   literature: string
   painter: string
+  supervisor: string
 }
 
 export interface AgentTemperatures {
@@ -143,6 +145,7 @@ export interface AgentTemperatures {
   biochemistry: number
   literature: number
   painter: number
+  supervisor: number
 }
 
 // Default models
@@ -152,7 +155,8 @@ export const DEFAULT_MODELS: AgentModels = {
   bioinformatics: 'anthropic/claude-sonnet-4.6',
   biochemistry: 'google/gemini-3.1-pro-preview',
   literature: 'google/gemini-3-flash-preview',
-  painter: 'google/gemini-3-pro-image-preview'  // Image generation model via OpenRouter
+  painter: 'google/gemini-3-pro-image-preview',  // Image generation model via OpenRouter
+  supervisor: 'google/gemini-3.1-flash-lite-preview'
 }
 
 // Default temperatures
@@ -164,7 +168,8 @@ export const DEFAULT_TEMPERATURES: AgentTemperatures = {
   bioinformatics: 0.1, // Bioinformatics must be highly deterministic
   biochemistry: 0.2,  // Biochemistry needs objective interpretation
   literature: 0.6,   // Literature search can explore more broadly
-  painter: 0.7       // Painter benefits from creative variation in image generation
+  painter: 0.7,       // Painter benefits from creative variation in image generation
+  supervisor: 0.1    // Supervisor needs high-certainty evaluation
 }
 
 interface AppState {
@@ -458,6 +463,18 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: 'intesc-storage',
+      // Validate critical fields on hydration to prevent crashes from corrupted/outdated localStorage
+      merge: (persistedState: unknown, currentState) => {
+        const ps = (persistedState && typeof persistedState === 'object') ? persistedState as Record<string, any> : {}
+        // Validate key types; fall back to current (default) state for invalid fields
+        if (ps.models && typeof ps.models !== 'object') delete ps.models
+        if (ps.temperatures && typeof ps.temperatures !== 'object') delete ps.temperatures
+        if (ps.prompts && typeof ps.prompts !== 'object') delete ps.prompts
+        if (ps.language && typeof ps.language !== 'string') delete ps.language
+        if (ps.maxRounds && typeof ps.maxRounds !== 'number') delete ps.maxRounds
+        if (ps.messages && !Array.isArray(ps.messages)) delete ps.messages
+        return { ...currentState, ...ps }
+      },
       partialize: (state) => ({
         language: state.language,
         apiConfig: state.apiConfig,

@@ -127,6 +127,8 @@ class ModelConfig(BaseModel):
     literature_model: str = "google/gemini-3-flash-preview"
     # Painter agent uses image generation model via OpenRouter
     painter_model: str = "google/gemini-3-pro-image-preview"
+    # Supervisor agent uses cheap vision model for real-time monitoring
+    supervisor_model: str = "google/gemini-3.1-flash-lite-preview"
 
 class AgentTemperatures(BaseModel):
     """Default temperatures for each agent - centralized configuration"""
@@ -136,6 +138,7 @@ class AgentTemperatures(BaseModel):
     biochemistry: float = 0.2  # Objective interpretation
     literature: float = 0.6  # Broader exploration
     painter: float = 0.7  # Creative image generation
+    supervisor: float = 0.1  # High-certainty evaluation
 
     def get(self, agent: str, default: float = 0.5) -> float:
         """Get temperature for an agent by name"""
@@ -264,6 +267,11 @@ Please search for relevant biomedical literature, focusing on:
 4. Latest research progress
 
 Please provide a detailed literature review report with specific citation information."""
+
+    # Painter and supervisor agents use their own internal system prompts.
+    # These fields are kept for API consistency (GET /prompts returns all agents).
+    painter_prompt: str = ""
+    supervisor_prompt: str = ""
 
 class SystemConfig(BaseModel):
     """System configuration"""

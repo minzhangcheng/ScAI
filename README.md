@@ -1,14 +1,14 @@
 # InteSc - Integrated and Intelligent Single Cell Sequencing Analysis
 
-**InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by six specialized AI agents that collaborate like a research team.
+**InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.11.1
+**Version**: 0.12.0
 
 ## Core Features
 
 ### Multi-Agent Collaboration
 
-Six specialized AI agents work together to analyze your data from different angles:
+Seven specialized AI agents work together to analyze your data from different angles:
 
 - **PI Agent** — The project coordinator. Plans analysis strategy, synthesizes results from all agents, resolves conflicts, and reviews generated figures for publication quality
 - **Pathology Agent** — Analyzes histological section images (H&E and custom staining types), identifying tissue structures, cellular patterns, and pathological changes
@@ -16,6 +16,7 @@ Six specialized AI agents work together to analyze your data from different angl
 - **Biochemistry Agent** — Interprets biochemical experimental results from structured indicator values and data images, cross-referencing findings from other agents
 - **Literature Agent** — Searches and synthesizes relevant scientific literature. Supports three modes: Deep Research Models (e.g., openai/o4-mini-deep-research), Google Gemini Deep Research, and PubMed + LLM synthesis for targeted searches
 - **Painter Agent** — Generates graphic abstracts summarizing the research findings
+- **Supervisor Agent** — Monitors bioinformatics analysis steps in real-time using a lightweight vision LLM, detecting issues, identifying biological checkpoints, and escalating critical problems to the PI Agent
 
 ### Iterative Analysis with Human-in-the-Loop
 
@@ -90,11 +91,11 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 │       │                       │   │                         │
 │       │  consult/fig review   │   │  annotate/lit search    │
 │       └───────────────────────┘   │                         │
-│                                   ▼                         │
-│            ┌───────────┐   ┌─────────────┐                  │
-│            │  Painter  │   │  Literature │                  │
-│            │   Agent   │   │    Agent    │                  │
-│            └───────────┘   └─────────────┘                  │
+│       │                           ▼                         │
+│  ┌────┴──────┐ ┌───────────┐ ┌─────────────┐               │
+│  │Supervisor │ │  Painter  │ │  Literature │               │
+│  │   Agent   │ │   Agent   │ │    Agent    │               │
+│  └───────────┘ └───────────┘ └─────────────┘               │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │  OpenRouter  │  │Local Jupyter │  │ Google APIs  │      │
@@ -308,6 +309,25 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.12.0 (2026-03-10)
+
+- Added Supervisor Agent: real-time monitoring of bioinformatics analysis steps with issue detection, biological checkpoint identification, and PI escalation
+- Fixed Supervisor Agent settings never syncing to backend — model, prompt, and temperature are now included in pre-analysis sync and GET API endpoints
+- Fixed LLM retry logic: replaced overly broad `APIError` with `InternalServerError` in retryable exceptions, preventing unnecessary retries on authentication failures and bad requests
+- Fixed settings sync failures being silently ignored — failures are now collected and displayed as error messages in the message stream so users are informed
+- Fixed round feedback dialog potentially triggering multiple times for the same round by adding a ref-based guard
+- Fixed WebSocket `state_sync` version conflict having no recovery — outdated versions now trigger a full session state reload from the server
+- Fixed `crypto.randomUUID()` usage that could crash in non-HTTPS contexts — replaced with a browser-safe UUID generator
+- Fixed WebSocket `connect()` using stale closure references for session ID — now reads fresh state from the store
+- Improved pre-analysis settings sync: all agent models/prompts/temperatures and remaining config now sync in parallel via `Promise.allSettled()`, reducing startup latency
+- Improved last-round UX: the waiting-for-input message now indicates it is the final round and that users can provide data to extend analysis
+- Added expand/collapse buttons to truncated message content (prompts, responses, outputs, literature) so users can view full text
+- Added localStorage hydration validation to prevent crashes from corrupted or outdated persisted state
+- Added `max_length=50000` validation for custom prompt updates to prevent oversized payloads
+- Added automatic cleanup of partial files when uploads fail mid-stream
+- Added `painter_prompt` and `supervisor_prompt` fields to backend `AgentPrompts` config for API consistency
+- Fixed Chinese translation for Painter Agent name
 
 ### v0.11.1 (2026-03-09)
 

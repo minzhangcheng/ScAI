@@ -360,6 +360,7 @@ class BioinformaticsAgent(BaseAgent):
         annotate_clusters_callback: Optional[Callable[[Dict, str, str], Awaitable[Dict[str, Any]]]] = None,
         message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
+        supervisor_callback: Optional[Callable[['AnalysisStep', List[str]], Awaitable[Optional[str]]]] = None,
         config: Optional[AgentConfig] = None
     ):
         super().__init__(
@@ -375,6 +376,7 @@ class BioinformaticsAgent(BaseAgent):
         self.annotate_clusters_callback = annotate_clusters_callback
         self.message_callback = message_callback
         self.figure_review_callback = figure_review_callback
+        self.supervisor_callback = supervisor_callback
 
         # Track execution history
         self.code_history: List[CodeExecution] = []
@@ -511,6 +513,7 @@ class BioinformaticsAgent(BaseAgent):
         initial_instruction: str,
         max_steps: int = 200,
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
+        supervisor_callback: Optional[Callable] = None,
         resume_from_checkpoint: bool = True
     ) -> Dict[str, Any]:
         """
@@ -528,6 +531,7 @@ class BioinformaticsAgent(BaseAgent):
         """
         # Use provided callback or fall back to instance callback
         review_callback = figure_review_callback or self.figure_review_callback
+        _supervisor_callback = supervisor_callback or self.supervisor_callback
 
         # Initialize checkpoint manager for step-level recovery
         if hasattr(self.sandbox, 'state_dir') and self.sandbox.state_dir:
@@ -838,6 +842,8 @@ Before running sc.tl.pca() or any dimensionality reduction:
                     ]
                 })
 
+            _step_figures: List[str] = []  # Figures generated in this iteration (for supervisor)
+
             for tool_call in response.tool_calls:
                 tool_name = tool_call.name
                 args = tool_call.arguments
@@ -961,6 +967,7 @@ plt.close('all')
                     for fig in result.figures:
                         await self._notify("figure", fig)
                         all_figures.append(fig)
+                        _step_figures.append(fig)
                     if result.error:
                         await self._notify("error", result.error)
                     
@@ -1214,6 +1221,23 @@ plt.close('all')
             # Reset text-only counter when a substantive tool call was made
             if not figure_only_iteration and response.has_tool_calls:
                 text_response_count = 0
+
+            # === SUPERVISOR monitoring (every step) ===
+            if _supervisor_callback and analysis_log:
+                try:
+                    supervisor_feedback = await _supervisor_callback(
+                        analysis_log[-1],   # Latest step
+                        _step_figures       # Figures from this iteration (may be empty)
+                    )
+                    if supervisor_feedback:
+                        messages.append({
+                            "role": "user",
+                            "content": f"[Supervisor] {supervisor_feedback}"
+                        })
+                        await self._notify("supervisor_feedback", supervisor_feedback[:500])
+                except Exception as e:
+                    logger.warning(f"[Bioinformatics] Supervisor callback error: {e}")
+            # === END SUPERVISOR ===
 
             # Figure-only iterations don't count toward analysis step budget (with safety cap)
             if figure_only_iteration and response.has_tool_calls:
