@@ -36,7 +36,7 @@ from .agents.supervisor_agent import SupervisorAgent
 from .agents.base import AgentConfig
 from .utils.llm_client import LLMManager, OpenAICompatibleClient
 from .utils.sandbox import LocalJupyterSandbox
-from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR
+from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR, get_session_reports, get_session_workspace, get_session_states
 from .report_generator import DetailedReportGenerator, compress_image_to_base64
 
 
@@ -205,11 +205,11 @@ class SingleCellAnalysisWorkflow:
             agent_name="workflow"
         )
         
-        # Initialize local Jupyter sandbox with session ID for state persistence
+        # Initialize local Jupyter sandbox with session-specific paths
         self.sandbox = LocalJupyterSandbox(
             session_id=self.session_id,
-            state_dir=self.config.state_dir,
-            working_dir=self.config.workspace_dir,
+            state_dir=str(get_session_states(self.session_id)),
+            working_dir=str(get_session_workspace(self.session_id)),
             timeout=self.config.sandbox_timeout
         )
         
@@ -1748,7 +1748,7 @@ Return ONLY the JSON array, nothing else."""
             analysis_state.integrated_report = integrated_report
 
             # --- Collect all workspace figures (figures/ subdir + workspace root) ---
-            workspace_dir = WORKSPACE_DIR / self.session_id
+            workspace_dir = get_session_workspace(self.session_id)
             pub_figure_names = {fig.name for fig in analysis_state.publication_figures}
             all_workspace_figs: List[Dict[str, Any]] = []
             seen_stems: set = set()
@@ -2035,7 +2035,7 @@ Return ONLY the JSON array, nothing else."""
 
         try:
             import os
-            output_dir = str(REPORTS_DIR / self.session_id)
+            output_dir = str(get_session_reports(self.session_id))
             os.makedirs(output_dir, exist_ok=True)
 
             # Progress callback for report generation
@@ -2061,7 +2061,7 @@ Return ONLY the JSON array, nothing else."""
             pi_model = analysis_state.custom_models.get("pi", self.config.models.pi_model)
             bio_model = analysis_state.custom_models.get("bioinformatics", self.config.models.bioinformatics_model)
 
-            workspace_dir = str(WORKSPACE_DIR / self.session_id)
+            workspace_dir = str(get_session_workspace(self.session_id))
 
             if self.supervisor_agent:
                 # Supervisor generates report from its accumulated analysis records
@@ -2069,7 +2069,7 @@ Return ONLY the JSON array, nothing else."""
                     analysis_state=analysis_state,
                     report_model=pi_model,
                     output_dir=output_dir,
-                    workspace_dir=str(WORKSPACE_DIR / self.session_id),
+                    workspace_dir=str(get_session_workspace(self.session_id)),
                     progress_callback=progress_callback,
                 )
             else:

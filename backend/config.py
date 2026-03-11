@@ -21,12 +21,16 @@ DATA_BASE_DIR = Path(os.environ.get(
 
 # Create data directory structure
 DATA_BASE_DIR.mkdir(exist_ok=True)
+
+# Legacy top-level directories (kept for backward compatibility / migration fallback)
 UPLOAD_DIR = DATA_BASE_DIR / "uploads"
 STATE_DIR = DATA_BASE_DIR / "states"
 WORKSPACE_DIR = DATA_BASE_DIR / "workspace"
-SESSION_DIR = DATA_BASE_DIR / "sessions"
 REPORTS_DIR = DATA_BASE_DIR / "reports"
 LOG_DIR = DATA_BASE_DIR / "logs"
+
+# Session-centric directory: all per-session data lives under sessions/{session_id}/
+SESSION_DIR = DATA_BASE_DIR / "sessions"
 
 for d in [UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR]:
     d.mkdir(exist_ok=True)
@@ -36,6 +40,53 @@ UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024 * 1024  # 10GB maximum file size
 UPLOAD_TEMP_DIR = DATA_BASE_DIR / "upload_temp"
 UPLOAD_TEMP_DIR.mkdir(exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Per-session path helpers (new session-centric layout)
+# ---------------------------------------------------------------------------
+
+def get_session_dir(session_id: str) -> Path:
+    """Root directory for a specific session's data."""
+    return SESSION_DIR / session_id
+
+
+def get_session_metadata_path(session_id: str) -> Path:
+    """Path to session.json metadata file."""
+    return get_session_dir(session_id) / "session.json"
+
+
+def get_session_workspace(session_id: str) -> Path:
+    """Workspace directory for a session (analysis code, figures)."""
+    return get_session_dir(session_id) / "workspace"
+
+
+def get_session_states(session_id: str) -> Path:
+    """States directory for a session (checkpoints, notebook, pkl)."""
+    return get_session_dir(session_id) / "states"
+
+
+def get_session_uploads(session_id: str) -> Path:
+    """Uploads directory for a session."""
+    return get_session_dir(session_id) / "uploads"
+
+
+def get_session_reports(session_id: str) -> Path:
+    """Reports directory for a session."""
+    return get_session_dir(session_id) / "reports"
+
+
+def get_session_logs(session_id: str) -> Path:
+    """Logs directory for a session (LLM interaction logs)."""
+    return get_session_dir(session_id) / "logs"
+
+
+def ensure_session_dirs(session_id: str) -> Path:
+    """Create all subdirectories for a session, return session root."""
+    root = get_session_dir(session_id)
+    for sub in ["workspace", "states", "uploads", "reports", "logs"]:
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def setup_logging(log_level: int = logging.INFO) -> None:
@@ -292,7 +343,8 @@ class SystemConfig(BaseModel):
     max_rounds: int = 3  # Maximum analysis rounds
     convergence_rounds: int = 2  # Rounds without new findings to stop
     
-    # State persistence - use the centralized data directory
+    # State persistence (deprecated: use get_session_states/get_session_workspace instead)
+    # Kept for serialization compatibility only.
     state_dir: str = str(STATE_DIR)
     workspace_dir: str = str(WORKSPACE_DIR)
 

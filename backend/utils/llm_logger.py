@@ -16,7 +16,7 @@ import threading
 logger = logging.getLogger(__name__)
 
 # Log directory - use centralized data directory
-from ..config import LOG_DIR
+from ..config import LOG_DIR, get_session_logs
 LLM_LOG_DIR = LOG_DIR / "llm"
 LLM_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -53,7 +53,7 @@ class LLMLogger:
 
     Logs are written to:
     - {DATA_BASE_DIR}/logs/llm/YYYY-MM-DD.jsonl (all interactions, one per line)
-    - {DATA_BASE_DIR}/logs/llm/sessions/<session_id>.jsonl (per-session logs)
+    - {DATA_BASE_DIR}/sessions/<session_id>/logs/llm.jsonl (per-session logs)
     """
     
     _instance = None
@@ -75,9 +75,8 @@ class LLMLogger:
         self.enabled = True
         self.log_to_console = True
         
-        # Create session log directory
+        # Legacy session log directory (no longer used for new writes)
         self.session_log_dir = LLM_LOG_DIR / "sessions"
-        self.session_log_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"LLM Logger initialized. Logs at: {LLM_LOG_DIR.absolute()}")
     
@@ -87,8 +86,10 @@ class LLMLogger:
         return LLM_LOG_DIR / f"{date_str}.jsonl"
     
     def _get_session_log_path(self, session_id: str) -> Path:
-        """Get path for session-specific log file"""
-        return self.session_log_dir / f"{session_id}.jsonl"
+        """Get path for session-specific log file (inside session dir)"""
+        session_log_dir = get_session_logs(session_id)
+        session_log_dir.mkdir(parents=True, exist_ok=True)
+        return session_log_dir / "llm.jsonl"
     
     def log_interaction(self, interaction: LLMInteraction):
         """Log an LLM interaction"""

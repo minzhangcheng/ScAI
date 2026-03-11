@@ -383,7 +383,8 @@ class LocalJupyterSandbox:
     ):
         self.session_id = session_id
         self.state_dir = state_dir
-        self.working_dir = Path(working_dir) / session_id
+        # Caller passes session-specific working dir (e.g. sessions/{id}/workspace)
+        self.working_dir = Path(working_dir)
         self.working_dir.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
         

@@ -29,7 +29,9 @@ from .config import (
     SystemConfig, AgentTemperatures,
     DATA_BASE_DIR, UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR,
     UPLOAD_CHUNK_SIZE, MAX_UPLOAD_SIZE, UPLOAD_TEMP_DIR,
-    setup_logging
+    setup_logging,
+    get_session_dir, get_session_metadata_path, get_session_workspace,
+    get_session_states, get_session_uploads, get_session_reports, ensure_session_dirs,
 )
 from .models.schemas import (
     AnalysisState, APIRequest, APIResponse, TaskStatus,
@@ -242,12 +244,12 @@ def _write_session_json(session_id: str, json_str: str):
     """Write pre-serialized session JSON to disk using atomic write (thread-safe)."""
     import tempfile
     try:
-        session_file = SESSION_DIR / f"{session_id}.json"
-        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        session_file = get_session_metadata_path(session_id)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(
             suffix='.json.tmp',
             prefix=f'{session_id}_',
-            dir=SESSION_DIR
+            dir=session_file.parent
         )
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -283,9 +285,12 @@ async def async_save_session(session_id: str, state: AnalysisState):
 
 
 def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
-    """Load session state from disk"""
+    """Load session state from disk (new path first, legacy fallback)"""
     try:
-        session_file = SESSION_DIR / f"{session_id}.json"
+        session_file = get_session_metadata_path(session_id)
+        if not session_file.exists():
+            # Legacy fallback
+            session_file = SESSION_DIR / f"{session_id}.json"
         if session_file.exists():
             with open(session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -335,30 +340,47 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
 
 
 def list_saved_sessions() -> List[Dict[str, Any]]:
-    """List all saved sessions on disk"""
+    """List all saved sessions on disk (new structure + legacy fallback)"""
     sessions_list = []
+    seen_ids: set = set()
+
+    def _parse_session_file(session_file: Path, fallback_id: str = ""):
+        try:
+            with open(session_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            sid = data.get("id", fallback_id)
+            if sid in seen_ids:
+                return
+            seen_ids.add(sid)
+            data_files = data.get("data_files", [])
+            sessions_list.append({
+                "id": sid,
+                "name": data.get("name", "Unknown"),
+                "status": data.get("status", "unknown"),
+                "created_at": data.get("created_at", ""),
+                "updated_at": data.get("updated_at", ""),
+                "current_round": data.get("current_round", 0),
+                "has_pathology": any(f.get("section") == "pathology" for f in data_files),
+                "has_sequencing": any(f.get("section") == "sequencing" for f in data_files),
+                "has_biochemistry": any(f.get("section") == "biochemistry" for f in data_files) or len(data.get("biochemistry_indicators", [])) > 0,
+            })
+        except Exception as e:
+            logger.warning(f"Failed to read session file {session_file}: {e}")
+
     try:
+        # New structure: sessions/{session_id}/session.json
+        for entry in SESSION_DIR.iterdir():
+            if entry.is_dir():
+                sf = entry / "session.json"
+                if sf.exists():
+                    _parse_session_file(sf, fallback_id=entry.name)
+        # Legacy fallback: sessions/{session_id}.json (flat files)
         for session_file in SESSION_DIR.glob("*.json"):
-            try:
-                with open(session_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                data_files = data.get("data_files", [])
-                sessions_list.append({
-                    "id": data.get("id", session_file.stem),
-                    "name": data.get("name", "Unknown"),
-                    "status": data.get("status", "unknown"),
-                    "created_at": data.get("created_at", ""),
-                    "updated_at": data.get("updated_at", ""),
-                    "current_round": data.get("current_round", 0),
-                    "has_pathology": any(f.get("section") == "pathology" for f in data_files),
-                    "has_sequencing": any(f.get("section") == "sequencing" for f in data_files),
-                    "has_biochemistry": any(f.get("section") == "biochemistry" for f in data_files) or len(data.get("biochemistry_indicators", [])) > 0,
-                })
-            except Exception as e:
-                logger.warning(f"Failed to read session file {session_file}: {e}")
+            if session_file.is_file():
+                _parse_session_file(session_file, fallback_id=session_file.stem)
     except Exception as e:
         logger.error(f"Failed to list sessions: {e}")
-    
+
     # Sort by updated_at descending
     sessions_list.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
     return sessions_list
@@ -772,18 +794,17 @@ async def delete_session(session_id: str):
     # Remove from disk (use thread pool for blocking I/O)
     def _delete_from_disk():
         import shutil
-        session_file = SESSION_DIR / f"{session_id}.json"
-        if session_file.exists():
-            session_file.unlink()
-        upload_dir = UPLOAD_DIR / session_id
-        if upload_dir.exists():
-            shutil.rmtree(upload_dir)
-        workspace_dir = WORKSPACE_DIR / session_id
-        if workspace_dir.exists():
-            shutil.rmtree(workspace_dir)
-        reports_dir = REPORTS_DIR / session_id
-        if reports_dir.exists():
-            shutil.rmtree(reports_dir)
+        # New structure: single directory to remove
+        session_dir = get_session_dir(session_id)
+        if session_dir.exists() and session_dir.is_dir():
+            shutil.rmtree(session_dir)
+        # Legacy cleanup
+        legacy_file = SESSION_DIR / f"{session_id}.json"
+        if legacy_file.is_file():
+            legacy_file.unlink()
+        for legacy_dir in [UPLOAD_DIR / session_id, WORKSPACE_DIR / session_id, REPORTS_DIR / session_id]:
+            if legacy_dir.exists():
+                shutil.rmtree(legacy_dir)
         for state_file in STATE_DIR.glob(f"{session_id}*"):
             state_file.unlink()
 
@@ -1020,9 +1041,9 @@ async def upload_data(
     # Build storage path
     if group_id:
         sample_dir = str(sample_number) if sample_number else "_unsorted"
-        upload_parent = UPLOAD_DIR / session_id / section / group_id / sample_dir
+        upload_parent = get_session_uploads(session_id) / section / group_id / sample_dir
     else:
-        upload_parent = UPLOAD_DIR / session_id / section / "_ungrouped"
+        upload_parent = get_session_uploads(session_id) / section / "_ungrouped"
 
     sanitized_name = safe_filename(file.filename)
     if not sanitized_name:
@@ -1091,7 +1112,7 @@ async def upload_generic_file(
     sanitized_name = safe_filename(file.filename)
     if not sanitized_name:
         raise HTTPException(status_code=400, detail="Invalid filename")
-    upload_parent = UPLOAD_DIR / session_id / "files"
+    upload_parent = get_session_uploads(session_id) / "files"
     file_path = upload_parent / sanitized_name
     upload_parent.mkdir(parents=True, exist_ok=True)
     validate_path_within(file_path, upload_parent)
@@ -1698,39 +1719,53 @@ async def export_state(session_id: str):
             }, indent=2).encode("utf-8")
             _add_bytes(f"{session_id}/manifest.json", manifest)
 
-            # 1. sessions/{session_id}.json
-            session_file = SESSION_DIR / f"{session_id}.json"
+            # 1. session.json
+            session_file = get_session_metadata_path(session_id)
+            if not session_file.exists():
+                session_file = SESSION_DIR / f"{session_id}.json"
             if session_file.exists():
                 tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
 
-            # 2. states/{session_id}* (including .pkl for sandbox restore)
+            # 2. states (checkpoints, notebook, pkl)
+            states_dir = get_session_states(session_id)
+            if states_dir.exists():
+                for state_file in states_dir.iterdir():
+                    if state_file.is_file():
+                        tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
+            # Legacy fallback
             for state_file in STATE_DIR.glob(f"{session_id}*"):
                 if state_file.is_file():
                     tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
 
-            # 3. uploads/{session_id}/ (recursive)
-            upload_dir = UPLOAD_DIR / session_id
+            # 3. uploads (recursive)
+            upload_dir = get_session_uploads(session_id)
+            if not upload_dir.exists():
+                upload_dir = UPLOAD_DIR / session_id
             if upload_dir.exists():
                 for file_path in upload_dir.rglob("*"):
                     if file_path.is_file():
-                        rel = file_path.relative_to(DATA_BASE_DIR)
-                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+                        rel = file_path.relative_to(upload_dir)
+                        tf.add(str(file_path), arcname=f"{session_id}/uploads/{session_id}/{rel}")
 
-            # 4. workspace/{session_id}/ (recursive)
-            workspace_dir = WORKSPACE_DIR / session_id
+            # 4. workspace (recursive)
+            workspace_dir = get_session_workspace(session_id)
+            if not workspace_dir.exists():
+                workspace_dir = WORKSPACE_DIR / session_id
             if workspace_dir.exists():
                 for file_path in workspace_dir.rglob("*"):
                     if file_path.is_file():
-                        rel = file_path.relative_to(DATA_BASE_DIR)
-                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+                        rel = file_path.relative_to(workspace_dir)
+                        tf.add(str(file_path), arcname=f"{session_id}/workspace/{session_id}/{rel}")
 
-            # 5. reports/{session_id}/ (recursive)
-            reports_dir = REPORTS_DIR / session_id
+            # 5. reports (recursive)
+            reports_dir = get_session_reports(session_id)
+            if not reports_dir.exists():
+                reports_dir = REPORTS_DIR / session_id
             if reports_dir.exists():
                 for file_path in reports_dir.rglob("*"):
                     if file_path.is_file():
-                        rel = file_path.relative_to(DATA_BASE_DIR)
-                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+                        rel = file_path.relative_to(reports_dir)
+                        tf.add(str(file_path), arcname=f"{session_id}/reports/{session_id}/{rel}")
 
     await asyncio.to_thread(_build_tar)
 
@@ -1771,7 +1806,7 @@ async def export_prepare(session_id: str):
     await async_save_session(session_id, state)
 
     # Build tar to a stable temp file
-    export_dir = REPORTS_DIR / session_id
+    export_dir = get_session_reports(session_id)
     export_dir.mkdir(parents=True, exist_ok=True)
 
     safe_name = "".join(c if c.isalnum() or c in '-_ ' else '' for c in state.name).strip().replace(' ', '_')
@@ -1789,42 +1824,59 @@ async def export_prepare(session_id: str):
 
             manifest = json.dumps({
                 "session_id": session_id,
-                "version": "1.0",
+                "version": "2.0",
                 "data_base_dir": str(DATA_BASE_DIR)
             }, indent=2).encode("utf-8")
             _add_bytes(f"{session_id}/manifest.json", manifest)
 
-            session_file = SESSION_DIR / f"{session_id}.json"
+            # session.json
+            session_file = get_session_metadata_path(session_id)
+            if not session_file.exists():
+                session_file = SESSION_DIR / f"{session_id}.json"
             if session_file.exists():
                 tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
 
-            for state_file in STATE_DIR.glob(f"{session_id}*"):
-                if state_file.is_file():
-                    tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
+            # states
+            states_dir = get_session_states(session_id)
+            if states_dir.exists():
+                for sf in states_dir.iterdir():
+                    if sf.is_file():
+                        tf.add(str(sf), arcname=f"{session_id}/states/{sf.name}")
+            for sf in STATE_DIR.glob(f"{session_id}*"):
+                if sf.is_file():
+                    tf.add(str(sf), arcname=f"{session_id}/states/{sf.name}")
 
-            upload_dir = UPLOAD_DIR / session_id
+            # uploads
+            upload_dir = get_session_uploads(session_id)
+            if not upload_dir.exists():
+                upload_dir = UPLOAD_DIR / session_id
             if upload_dir.exists():
                 for file_path in upload_dir.rglob("*"):
                     if file_path.is_file():
-                        rel = file_path.relative_to(DATA_BASE_DIR)
-                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+                        rel = file_path.relative_to(upload_dir)
+                        tf.add(str(file_path), arcname=f"{session_id}/uploads/{session_id}/{rel}")
 
-            workspace_dir = WORKSPACE_DIR / session_id
+            # workspace
+            workspace_dir = get_session_workspace(session_id)
+            if not workspace_dir.exists():
+                workspace_dir = WORKSPACE_DIR / session_id
             if workspace_dir.exists():
                 for file_path in workspace_dir.rglob("*"):
                     if file_path.is_file():
-                        rel = file_path.relative_to(DATA_BASE_DIR)
-                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+                        rel = file_path.relative_to(workspace_dir)
+                        tf.add(str(file_path), arcname=f"{session_id}/workspace/{session_id}/{rel}")
 
-            reports_dir = REPORTS_DIR / session_id
-            if reports_dir.exists():
-                for file_path in reports_dir.rglob("*"):
+            # reports
+            rpts_dir = get_session_reports(session_id)
+            if not rpts_dir.exists():
+                rpts_dir = REPORTS_DIR / session_id
+            if rpts_dir.exists():
+                for file_path in rpts_dir.rglob("*"):
                     if file_path.is_file():
-                        # Skip the export tar itself
                         if file_path.name == filename:
                             continue
-                        rel = file_path.relative_to(DATA_BASE_DIR)
-                        tf.add(str(file_path), arcname=f"{session_id}/{rel}")
+                        rel = file_path.relative_to(rpts_dir)
+                        tf.add(str(file_path), arcname=f"{session_id}/reports/{session_id}/{rel}")
 
     await asyncio.to_thread(_build_tar)
 
@@ -1999,7 +2051,7 @@ def _import_tar_gz(file_path: str) -> AnalysisState:
             if member.name.endswith('/manifest.json'):
                 continue
 
-            # Determine destination: strip session_id prefix, rest maps to DATA_BASE_DIR
+            # Determine destination: strip session_id prefix, rest maps to session dir
             parts = member.name.split('/', 1)
             if len(parts) < 2:
                 continue
@@ -2011,7 +2063,24 @@ def _import_tar_gz(file_path: str) -> AnalysisState:
                 if f:
                     state_json_data = f.read()
 
-            dest_path = (DATA_BASE_DIR / relative_to_base).resolve()
+            # Map archive paths to new session-centric structure
+            if relative_to_base.startswith(f"sessions/{session_id}.json"):
+                # Will be handled via state_json_data below
+                continue
+            elif relative_to_base.startswith("states/"):
+                fname = relative_to_base.split("/", 1)[1]
+                dest_path = (get_session_states(session_id) / fname).resolve()
+            elif relative_to_base.startswith(f"uploads/{session_id}/"):
+                rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
+                dest_path = (get_session_uploads(session_id) / rest).resolve()
+            elif relative_to_base.startswith(f"workspace/{session_id}/"):
+                rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
+                dest_path = (get_session_workspace(session_id) / rest).resolve()
+            elif relative_to_base.startswith(f"reports/{session_id}/"):
+                rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
+                dest_path = (get_session_reports(session_id) / rest).resolve()
+            else:
+                dest_path = (DATA_BASE_DIR / relative_to_base).resolve()
 
             # Validate path stays within DATA_BASE_DIR
             if not str(dest_path).startswith(data_base_str + os.sep) and str(dest_path) != data_base_str:
@@ -2031,11 +2100,20 @@ def _import_tar_gz(file_path: str) -> AnalysisState:
     if old_base_dir and old_base_dir != data_base_str:
         state_json_str = state_json_str.replace(old_base_dir, data_base_str)
 
+    # Remap legacy paths to new session-centric paths
+    state_json_str = state_json_str.replace(
+        str(UPLOAD_DIR / session_id), str(get_session_uploads(session_id)))
+    state_json_str = state_json_str.replace(
+        str(WORKSPACE_DIR / session_id), str(get_session_workspace(session_id)))
+    state_json_str = state_json_str.replace(
+        str(REPORTS_DIR / session_id), str(get_session_reports(session_id)))
+
     state_data = json.loads(state_json_str)
     state = AnalysisState(**state_data)
 
-    # Overwrite the session file with remapped paths
-    session_file = SESSION_DIR / f"{state.id}.json"
+    # Write session file to new location
+    session_file = get_session_metadata_path(state.id)
+    session_file.parent.mkdir(parents=True, exist_ok=True)
     session_file.write_text(state.model_dump_json(indent=2), encoding='utf-8')
 
     return state
@@ -2063,26 +2141,29 @@ def _import_zip(content: bytes) -> AnalysisState:
         state = AnalysisState(**state_data)
 
         # Extract notebook if exists
+        states_dir = get_session_states(session_id)
+        states_dir.mkdir(parents=True, exist_ok=True)
         notebook_path = f"{session_id}/notebook.ipynb"
         if notebook_path in namelist:
-            (STATE_DIR / f"{session_id}.ipynb").write_bytes(zf.read(notebook_path))
+            (states_dir / f"{session_id}.ipynb").write_bytes(zf.read(notebook_path))
 
         # Extract session.pkl if exists (for sandbox restore)
         pkl_path = f"{session_id}/session.pkl"
         if pkl_path in namelist:
-            (STATE_DIR / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
+            (states_dir / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
 
         # Extract metadata if exists
         metadata_path = f"{session_id}/metadata.json"
         if metadata_path in namelist:
-            (STATE_DIR / f"{session_id}_state.json").write_bytes(zf.read(metadata_path))
+            (states_dir / f"{session_id}_state.json").write_bytes(zf.read(metadata_path))
 
         # Extract workspace files with path traversal protection
-        workspace_parent = (WORKSPACE_DIR / session_id).resolve()
+        ws_dir = get_session_workspace(session_id)
+        workspace_parent = ws_dir.resolve()
         for wf in namelist:
             if wf.startswith(f"{session_id}/workspace/") and not wf.endswith('/'):
                 relative_path = wf.replace(f"{session_id}/workspace/", "")
-                dest_path = (WORKSPACE_DIR / session_id / relative_path).resolve()
+                dest_path = (ws_dir / relative_path).resolve()
                 if not str(dest_path).startswith(str(workspace_parent) + os.sep):
                     logger.warning(f"Skipping zip entry with path traversal: {wf}")
                     continue
@@ -2590,7 +2671,7 @@ async def get_detailed_report(session_id: str):
         return {"report": _sanitize_nan(detailed_reports[session_id])}
 
     # Try to load from disk first (avoid session loading overhead)
-    report_path = REPORTS_DIR / session_id / "report.json"
+    report_path = get_session_reports(session_id) / "report.json"
     if report_path.exists():
         try:
             # Use parse_float to handle NaN/Infinity in JSON text
@@ -2608,8 +2689,9 @@ async def get_detailed_report(session_id: str):
             logger.error(f"Failed to load report for {session_id}: {e}")
 
     # Only check session exists if no report found
-    session_file = SESSION_DIR / f"{session_id}.json"
-    if not session_file.exists() and session_id not in sessions:
+    session_meta = get_session_metadata_path(session_id)
+    legacy_meta = SESSION_DIR / f"{session_id}.json"
+    if not session_meta.exists() and not legacy_meta.is_file() and session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
     return {"report": None}
@@ -2647,7 +2729,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     logger.info(f"  state.status: {state.status}")
     logger.info(f"  round_results count: {len(state.round_results)}")
     
-    output_dir = str(REPORTS_DIR / session_id)
+    output_dir = str(get_session_reports(session_id))
     os.makedirs(output_dir, exist_ok=True)
     
     # Progress callback
@@ -2685,7 +2767,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     bio_model = state.custom_models.get("bioinformatics", config.models.bioinformatics_model)
     
     try:
-        workspace_dir = str(WORKSPACE_DIR / session_id)
+        workspace_dir = str(get_session_workspace(session_id))
         generator = DetailedReportGenerator(
             llm_client=llm_client,
             pi_model=pi_model,
@@ -2749,10 +2831,11 @@ async def get_file(path: str):
     # Security: only allow files in the data directory
     # Use Path.relative_to() for proper path containment check (handles symlinks correctly)
     allowed_dirs = [
-        Path(REPORTS_DIR).resolve(),
-        Path(UPLOAD_DIR).resolve(),
-        Path(STATE_DIR).resolve(),
-        Path(WORKSPACE_DIR).resolve(),
+        Path(SESSION_DIR).resolve(),  # Covers all session subdirs (new structure)
+        Path(REPORTS_DIR).resolve(),  # Legacy
+        Path(UPLOAD_DIR).resolve(),   # Legacy
+        Path(STATE_DIR).resolve(),    # Legacy
+        Path(WORKSPACE_DIR).resolve(),  # Legacy
     ]
 
     # Resolve the real path to prevent traversal attacks like /../../../etc/passwd
@@ -2790,10 +2873,11 @@ async def download_file(path: str):
     # Security: only allow files in the data directory
     # Use Path.relative_to() for proper path containment check (handles symlinks correctly)
     allowed_dirs = [
-        Path(REPORTS_DIR).resolve(),
-        Path(UPLOAD_DIR).resolve(),
-        Path(STATE_DIR).resolve(),
-        Path(WORKSPACE_DIR).resolve(),
+        Path(SESSION_DIR).resolve(),  # Covers all session subdirs (new structure)
+        Path(REPORTS_DIR).resolve(),  # Legacy
+        Path(UPLOAD_DIR).resolve(),   # Legacy
+        Path(STATE_DIR).resolve(),    # Legacy
+        Path(WORKSPACE_DIR).resolve(),  # Legacy
     ]
 
     # Resolve the real path to prevent traversal attacks
@@ -2830,7 +2914,7 @@ async def download_file(path: str):
 async def download_all_figures(session_id: str):
     """Download all figures as a ZIP file"""
     validate_session_id(session_id)
-    figures_dir = REPORTS_DIR / session_id / "figures"
+    figures_dir = get_session_reports(session_id) / "figures"
     
     if not figures_dir.exists():
         raise HTTPException(status_code=404, detail="No figures found")
@@ -2855,7 +2939,7 @@ async def download_all_figures(session_id: str):
 async def download_all_tables(session_id: str):
     """Download all tables as a ZIP file"""
     validate_session_id(session_id)
-    tables_dir = REPORTS_DIR / session_id / "tables"
+    tables_dir = get_session_reports(session_id) / "tables"
     
     if not tables_dir.exists():
         raise HTTPException(status_code=404, detail="No tables found")
@@ -2880,7 +2964,7 @@ async def download_all_tables(session_id: str):
 async def download_full_report(session_id: str):
     """Download full report including figures, tables, and report JSON"""
     validate_session_id(session_id)
-    report_dir = REPORTS_DIR / session_id
+    report_dir = get_session_reports(session_id)
     
     if not report_dir.exists():
         raise HTTPException(status_code=404, detail="Report not found")
@@ -2912,7 +2996,7 @@ async def download_full_report(session_id: str):
 async def get_report_html(session_id: str):
     """Get the HTML report for preview"""
     validate_session_id(session_id)
-    report_dir = REPORTS_DIR / session_id
+    report_dir = get_session_reports(session_id)
     html_path = report_dir / "report.html"
 
     if not html_path.exists():
@@ -2929,7 +3013,7 @@ async def get_report_html(session_id: str):
 async def preview_report(session_id: str):
     """Get report preview data including HTML content and metadata"""
     validate_session_id(session_id)
-    report_dir = REPORTS_DIR / session_id
+    report_dir = get_session_reports(session_id)
 
     if not report_dir.exists():
         raise HTTPException(status_code=404, detail="Report not found")
@@ -2987,7 +3071,7 @@ async def preview_report(session_id: str):
 async def get_report_figure(session_id: str, filename: str):
     """Get a specific figure from the report"""
     safe_name = safe_filename(filename)
-    figure_parent = REPORTS_DIR / session_id / "figures"
+    figure_parent = get_session_reports(session_id) / "figures"
     figure_path = figure_parent / safe_name
     validate_path_within(figure_path, figure_parent)
 
@@ -3022,7 +3106,7 @@ async def get_report_figure_alt(session_id: str, filename: str):
 async def get_report_table(session_id: str, filename: str):
     """Get a specific table from the report"""
     safe_name = safe_filename(filename)
-    table_parent = REPORTS_DIR / session_id / "tables"
+    table_parent = get_session_reports(session_id) / "tables"
     table_path = table_parent / safe_name
     validate_path_within(table_path, table_parent)
 
@@ -3173,14 +3257,14 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str):
         if explicit_pdf and Path(explicit_pdf).exists():
             pdf_path = Path(explicit_pdf)
         else:
-            pdf_path = WORKSPACE_DIR / session_id / "figures" / f"{fig_name}.pdf"
+            pdf_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.pdf"
 
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="PDF file not found on disk")
 
     # Validate path is within allowed directories
     resolved = pdf_path.resolve()
-    allowed_parents = [REPORTS_DIR.resolve(), WORKSPACE_DIR.resolve(), UPLOAD_DIR.resolve()]
+    allowed_parents = [SESSION_DIR.resolve(), REPORTS_DIR.resolve(), WORKSPACE_DIR.resolve(), UPLOAD_DIR.resolve()]
     if not any(str(resolved).startswith(str(p) + os.sep) or resolved == p for p in allowed_parents):
         raise HTTPException(status_code=403, detail="Access denied: file outside allowed directories")
 
@@ -3211,14 +3295,14 @@ async def download_publication_figure_png(session_id: str, figure_id: str):
         if fig_data is None:
             raise HTTPException(status_code=404, detail="Figure not found")
         fig_name = fig_data.get('name', '')
-        png_path = WORKSPACE_DIR / session_id / "figures" / f"{fig_name}.png"
+        png_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.png"
 
     if not png_path.exists():
         raise HTTPException(status_code=404, detail="PNG file not found on disk")
 
     # Validate path is within allowed directories
     resolved = png_path.resolve()
-    allowed_parents = [REPORTS_DIR.resolve(), WORKSPACE_DIR.resolve(), UPLOAD_DIR.resolve()]
+    allowed_parents = [SESSION_DIR.resolve(), REPORTS_DIR.resolve(), WORKSPACE_DIR.resolve(), UPLOAD_DIR.resolve()]
     if not any(str(resolved).startswith(str(p) + os.sep) or resolved == p for p in allowed_parents):
         raise HTTPException(status_code=403, detail="Access denied: file outside allowed directories")
 
@@ -3340,16 +3424,17 @@ async def complete_chunked_upload(
     filename = safe_filename(status["filename"])
     if not filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
+    session_uploads = get_session_uploads(session_id)
     if file_type == "snrna_seq":
-        final_path = UPLOAD_DIR / session_id / "snrna_seq" / (group or "control") / filename
+        final_path = session_uploads / "snrna_seq" / (group or "control") / filename
     elif file_type == "loom":
-        final_path = UPLOAD_DIR / session_id / "loom" / (group or "control") / filename
+        final_path = session_uploads / "loom" / (group or "control") / filename
     elif file_type == "pathology":
-        final_path = UPLOAD_DIR / session_id / "pathology" / filename
+        final_path = session_uploads / "pathology" / filename
     elif file_type == "biochemistry":
-        final_path = UPLOAD_DIR / session_id / "biochemistry" / filename
+        final_path = session_uploads / "biochemistry" / filename
     else:
-        final_path = UPLOAD_DIR / session_id / "files" / filename
+        final_path = session_uploads / "files" / filename
 
     # Complete upload
     result = await upload_manager.complete_upload(upload_id, final_path.resolve())
@@ -3487,7 +3572,7 @@ async def resume_bioinformatics(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     # Check for checkpoint
-    checkpoint_path = STATE_DIR / f"{session_id}_bioinfo_checkpoint.json"
+    checkpoint_path = get_session_states(session_id) / f"{session_id}_bioinfo_checkpoint.json"
     if not checkpoint_path.exists():
         raise HTTPException(status_code=404, detail="No bioinformatics checkpoint found")
 
@@ -3575,9 +3660,9 @@ def _build_chat_context(state: AnalysisState) -> tuple:
                 seen_names.add(png.stem)
                 figure_inventory.append({"name": png.stem, "path": str(png)})
 
-    _add_pngs(WORKSPACE_DIR / state.id)
-    _add_pngs(WORKSPACE_DIR / state.id / "figures")
-    _add_pngs(REPORTS_DIR / state.id / "figures")
+    _add_pngs(get_session_workspace(state.id))
+    _add_pngs(get_session_workspace(state.id) / "figures")
+    _add_pngs(get_session_reports(state.id) / "figures")
 
     if figure_inventory:
         parts.append(f"\nAvailable Figures ({len(figure_inventory)} on disk):")
@@ -3598,8 +3683,8 @@ async def _generate_figures_in_chat(
 
     sandbox = LocalJupyterSandbox(
         session_id=session_id,
-        state_dir=str(STATE_DIR),
-        working_dir=str(WORKSPACE_DIR),
+        state_dir=str(get_session_states(session_id)),
+        working_dir=str(get_session_workspace(session_id)),
     )
     _chat_sandboxes[session_id] = sandbox
     try:
@@ -3640,7 +3725,7 @@ async def _generate_figures_in_chat(
                 continue
 
             ts = _time.strftime("%Y%m%d_%H%M%S")
-            fig_dir = WORKSPACE_DIR / session_id / "figures"
+            fig_dir = get_session_workspace(session_id) / "figures"
             fig_dir.mkdir(parents=True, exist_ok=True)
 
             # Wrap code: neutralize plt.show/plt.close, capture figures as PNG via IPython.display
@@ -3848,14 +3933,14 @@ def _collect_session_figures(
         seen_stems.add(png.stem)
 
     # 1. figures/ subdirectory (highest priority — publication figures)
-    fig_dir = WORKSPACE_DIR / session_id / "figures"
+    fig_dir = get_session_workspace(session_id) / "figures"
     if fig_dir.exists():
         for png in sorted(fig_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
             _add_png(png)
 
     # 2. Workspace root — picks up UMAP and other plots saved via explicit plt.savefig()
     #    when LLM code calls plt.close() before the auto-save wrapper can capture them.
-    root_dir = WORKSPACE_DIR / session_id
+    root_dir = get_session_workspace(session_id)
     if root_dir.exists():
         for png in sorted(root_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
             _add_png(png)
@@ -3890,8 +3975,8 @@ async def _execute_chat_agent(
         # Create sandbox with session restore
         sandbox = LocalJupyterSandbox(
             session_id=session_id,
-            state_dir=str(STATE_DIR),
-            working_dir=str(WORKSPACE_DIR),
+            state_dir=str(get_session_states(session_id)),
+            working_dir=str(get_session_workspace(session_id)),
             timeout=config.sandbox_timeout if hasattr(config, 'sandbox_timeout') else 120
         )
         _chat_sandboxes[session_id] = sandbox
@@ -4318,7 +4403,7 @@ async def chat_with_pi(
     data_file_contents: List[str] = []
     IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg'}
 
-    chat_upload_dir = UPLOAD_DIR / session_id / "chat"
+    chat_upload_dir = get_session_uploads(session_id) / "chat"
     chat_upload_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, upload_file in enumerate(files):

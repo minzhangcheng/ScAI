@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.12.3
+**Version**: 0.12.4
 
 ## Core Features
 
@@ -309,6 +309,12 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.12.4 (2026-03-11)
+
+- **Session-Centric Data Organization**: Restructured `intesc_data/` directory from type-based layout to session-centric layout. All per-session files (workspace, reports, uploads, states, LLM logs) are now co-located under `intesc_data/sessions/{session_id}/`, making multi-session management clean and predictable. Session deletion is now a single directory removal.
+- **Backward Compatibility**: The system automatically falls back to legacy paths when new-structure files are not found, ensuring existing sessions continue to work without migration.
+- **Migration Script**: Added `backend/migrate_to_session_dirs.py` to migrate existing data from the old layout to the new session-centric layout. Supports `--dry-run` mode for safe preview.
 
 ### v0.12.3 (2026-03-10)
 

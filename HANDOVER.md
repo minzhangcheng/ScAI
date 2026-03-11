@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.12.3
-**Last Updated**: 2026-03-10
+**Version**: 0.12.4
+**Last Updated**: 2026-03-11
 
 ## Project Overview
 
@@ -173,12 +173,21 @@ intesc/                         # Code directory
 └── HANDOVER.md
 
 intesc_data/                    # Data directory (sibling to code directory)
-├── sessions/                   # Session JSON files
-├── uploads/                    # Uploaded data files
-├── reports/                    # Generated reports
-├── states/                     # Jupyter state files (.ipynb, .pkl)
-├── workspace/                  # Jupyter working directory
-└── logs/                       # LLM interaction logs
+├── sessions/                   # Session-centric data (new layout since v0.12.4)
+│   └── {session_id}/
+│       ├── session.json        # Session metadata
+│       ├── workspace/          # Analysis code, figures
+│       ├── reports/            # HTML reports, figures, tables
+│       ├── uploads/            # Uploaded data files
+│       ├── states/             # Checkpoints, notebook (.ipynb), env (.pkl)
+│       └── logs/               # Session LLM interaction logs (llm.jsonl)
+├── logs/                       # Global system logs (app.log, error.log, debug.log)
+│   └── llm/                    # Daily aggregated LLM logs ({YYYY-MM-DD}.jsonl)
+├── upload_temp/                # Global upload temp (chunked uploads)
+├── uploads/                    # (legacy, kept for backward compatibility)
+├── states/                     # (legacy, kept for backward compatibility)
+├── workspace/                  # (legacy, kept for backward compatibility)
+└── reports/                    # (legacy, kept for backward compatibility)
 
 intesc_dep/                     # Dependencies directory (sibling to code directory)
 ├── venv/                       # Python virtual environment
@@ -1005,12 +1014,10 @@ cd frontend && npm run build && npx serve -s dist -l 3000 &
 
 ```
 intesc_data/                # Data directory (must backup)
-├── sessions/               # Session state
-├── uploads/                # User uploaded data
-├── reports/                # Generated reports
-├── states/                 # Jupyter state
-├── workspace/              # Jupyter working directory
-└── logs/                   # LLM interaction logs
+├── sessions/               # All session data (session-centric layout since v0.12.4)
+│   └── {session_id}/       # Each session's workspace, reports, uploads, states, logs
+├── logs/                   # Global system logs
+└── upload_temp/            # Temporary upload chunks (can skip)
 
 intesc_dep/                 # Dependencies directory (optional backup, can reinstall)
 ├── venv/                   # Python virtual environment
@@ -1268,6 +1275,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.12.4 | 2026-03-11 | Session-centric data directory restructure, backward-compatible path resolution, data migration script |
 | 0.12.3 | 2026-03-10 | Report markdown rendering fix (headers/lists in HTML), conclusions formatting cleanup, frontend ReactMarkdown rendering, frontend appendix display, supervisor agent HTML appendix |
 | 0.12.2 | 2026-03-10 | Analysis stop/pause support, publication figure checklist, figure revision auto-retry, progressive figure review leniency, WebSocket reconnection improvements |
 | 0.10.3 | 2026-03-09 | Comprehensive analysis log (AnalysisStep model, all tool call types), analysis log timeline in reports, figure/table scientific interpretation, PI history reset on synthesis, code history cap (100), agent auto-activation from PI tasks, pathology→bioinformatics context sharing, code history dedup by ID, deep research availability refactor |
@@ -1307,6 +1315,14 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.12.4 (2026-03-11)
+
+- **Session-Centric Data Organization**: Restructured `intesc_data/` from type-based layout (`uploads/`, `states/`, `workspace/`, `reports/` as top-level dirs) to session-centric layout (`sessions/{session_id}/` containing all subdirs). Each session now has its own isolated directory with `workspace/`, `reports/`, `uploads/`, `states/`, and `logs/` subdirectories.
+- **Path Helper Functions**: Added `get_session_dir()`, `get_session_workspace()`, `get_session_states()`, `get_session_uploads()`, `get_session_reports()`, `get_session_logs()`, `get_session_metadata_path()`, and `ensure_session_dirs()` to `config.py`.
+- **Backward Compatibility**: All path resolution falls back to legacy directories when new-structure files are not found. Session listing, loading, and deletion handle both layouts.
+- **Migration Script**: Added `backend/migrate_to_session_dirs.py` with `--dry-run` support to migrate existing data. Handles session metadata, uploads, workspace, reports, state files, and LLM logs. Remaps embedded absolute paths in session JSON.
+- **Files Changed**: `config.py`, `main.py`, `workflow.py`, `sandbox.py`, `llm_logger.py`, `report_generator.py`.
 
 #### v0.12.3 (2026-03-10)
 
@@ -1581,5 +1597,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-10*
-*Version: 0.12.2*
+*Document updated: 2026-03-11*
+*Version: 0.12.4*

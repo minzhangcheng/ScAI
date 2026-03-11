@@ -28,7 +28,7 @@ from .models.schemas import AnalysisState, AgentType, CodeExecution
 from .utils.llm_client import OpenAICompatibleClient
 from .utils.sandbox import LocalJupyterSandbox
 from .utils.checkpoint import CheckpointManager
-from .config import STATE_DIR, WORKSPACE_DIR
+from .config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -1263,7 +1263,7 @@ Be specific and actionable. Include:
         # Initialize checkpoint manager for report generation
         checkpoint_mgr = CheckpointManager(
             session_id=state.id,
-            state_dir=str(STATE_DIR),
+            state_dir=str(get_session_states(state.id)),
             prefix="report"
         )
 
@@ -1695,13 +1695,12 @@ print("Data loader ready. Use load_data(file_path) to load data files.")
         and the upload directory (where raw data resides).
         """
         import os
-        from .config import WORKSPACE_DIR
 
         # Build list of directories to search
         search_dirs = []
 
         # 1. Workspace directory (bioinformatics agent output - highest priority)
-        workspace_session_dir = WORKSPACE_DIR / state.id
+        workspace_session_dir = get_session_workspace(state.id)
         if workspace_session_dir.exists():
             search_dirs.append(workspace_session_dir)
 
@@ -1941,7 +1940,7 @@ print("CLUSTER_ANNOTATIONS_JSON:" + _json.dumps(_mapping, ensure_ascii=False))
         """
         import re as _re
 
-        notebook_path = STATE_DIR / f"{state.id}.ipynb"
+        notebook_path = get_session_states(state.id) / f"{state.id}.ipynb"
 
         cells = []
 
