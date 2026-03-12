@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.12.4
+**Version**: 0.13.0
 
 ## Core Features
 
@@ -211,11 +211,19 @@ All uploaded files can be downloaded back via the download buttons in the Data p
 
 ### 5. Start Analysis
 
-Click **"Start Analysis"** in the Analysis panel. The system will proceed through:
+Click **"Start Analysis"** in the Analysis panel. The system runs a **two-phase analysis workflow**:
 
-1. **PI Planning** — PI Agent reviews your data and creates an analysis plan, assigning specific tasks to each agent. As each agent completes, PI dynamically refines the next agent's tasks based on accumulated results
-2. **Agent Execution** — Biochemistry, Pathology, Bioinformatics, and Literature agents run their analyses sequentially. Each agent benefits from the results of previously completed agents in the same round. You can monitor progress in real-time via the message stream
-3. **PI Synthesis** — PI Agent synthesizes findings from all agents, identifies conflicts, and summarizes key results
+**Phase 1 — Exploration (Round 1)**
+
+1. **PI Planning** — PI Agent reviews your data and creates an analysis plan, assigning specific tasks to each agent
+2. **Agent Execution** — Biochemistry, Pathology, Bioinformatics, and Literature agents run their analyses sequentially
+3. **Cell Annotation Confirmation** — After the Bioinformatics Agent completes cluster annotation, analysis pauses and a dialog appears showing each cluster's cell type, confidence level (high/medium/low), and key markers. Low-confidence clusters require manual confirmation or correction before analysis continues. High-confidence results auto-confirm after a countdown
+4. **PI Synthesis** — PI Agent synthesizes findings from all agents
+5. **Exploration Report** — At the end of Round 1, PI generates a structured Exploration Report summarizing cluster overview, data quality warnings, heterogeneity findings, pathway changes, and research direction candidates. A dialog allows you to select a direction for Phase 2 (from AI-suggested candidates, a custom direction, or let PI decide automatically)
+
+**Phase 2 — Innovation (Round 2+)**
+
+Following rounds use your chosen research direction as the focal point for deeper, hypothesis-driven analysis. PI Agent and specialized agents conduct in-depth investigation of the selected direction. From round 2 onwards, PI intelligently decides which agents need to run, saving time and API costs.
 
 The Bioinformatics Agent runs code in a local Jupyter kernel — you can see the code and outputs in real-time. All figures are automatically saved as both PNG and high-resolution PDF.
 
@@ -309,6 +317,13 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.13.0 (2026-03-12)
+
+- **Two-Phase Analysis Workflow**: Introduced a structured two-phase analysis workflow. Round 1 is now an "Exploration Phase" that comprehensively maps the full cellular landscape. After Round 1, an Exploration Report is generated summarizing cluster overview, data quality warnings, strongest heterogeneity signals, key pathway changes, abnormal markers, and AI-assessed research direction candidates. Users choose a direction (from AI suggestions or a custom input) before entering the "Innovation Phase" (Round 2+) for focused, hypothesis-driven analysis.
+- **Cell Annotation Confirmation Dialog**: During the Exploration Phase, the Bioinformatics Agent pauses after completing cluster annotation to present annotations for user review. A new dialog shows each cluster's cell type, confidence level (high/medium/low), and key marker genes. Low-confidence clusters require manual confirmation or correction before analysis continues. High-confidence-only results auto-confirm after a countdown timer.
+- **Exploration Report Dialog**: A new dialog presented at the end of Phase 1 shows structured exploration findings and offers research direction candidates with rationale, expected innovation value, and data reliability notes. Users can select a suggested direction, enter a custom direction, or let the PI Agent decide automatically.
+- **New Backend State**: Added `analysis_phase` ("exploration"/"innovation"), `annotation_state`, `exploration_report`, `user_chosen_direction`, and `current_round_direction` fields to `AnalysisState`. New `WAITING_ANNOTATION` task status for annotation confirmation pauses. New data models: `ClusterAnnotation`, `AnnotationConfirmationState`, `ExplorationReport`.
 
 ### v0.12.4 (2026-03-11)
 

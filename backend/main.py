@@ -170,11 +170,8 @@ async def cleanup_stale_sessions():
                         continue
                     if session_id in sessions:
                         state_to_save = sessions[session_id]
-                        del sessions[session_id]
                     else:
                         state_to_save = None
-                    if session_id in _session_access_times:
-                        del _session_access_times[session_id]
                     # Grab workflow reference (if any) for cleanup outside lock
                     workflow_to_close = workflows.pop(session_id, None)
 
@@ -185,6 +182,24 @@ async def cleanup_stale_sessions():
                         logger.info(f"Closed workflow/kernel for evicted session {session_id}")
                     except Exception as close_error:
                         logger.error(f"Failed to close workflow for session {session_id}: {close_error}")
+
+                # Save state outside lock
+                if state_to_save:
+                    try:
+                        await async_save_session(session_id, state_to_save)
+                        logger.info(f"Saved state for evicted session {session_id}")
+                    except Exception as save_error:
+                        logger.error(f"Failed to save state for evicted session {session_id}: {save_error}")
+
+                # Re-acquire lock to safely delete from memory after save
+                async with _state_lock:
+                    if session_id in _initializing_sessions or session_id in workflows:
+                        # Re-activated while saving
+                        continue
+                    if session_id in sessions:
+                        del sessions[session_id]
+                    if session_id in _session_access_times:
+                        del _session_access_times[session_id]
 
                 # Also stop any active chat sandbox for this session
                 chat_sandbox = _chat_sandboxes.pop(session_id, None)
@@ -1492,7 +1507,8 @@ async def resume_analysis(session_id: str):
         await async_save_session(session_id, state)
         return APIResponse(
             success=True,
-            message="Re-analysis started"
+            message="Re-analysis started",
+            data={"needs_reconnect": True}
         )
     elif state.status == TaskStatus.WAITING_INPUT:
         # Continue from round-end wait (user sent input or skipped)
@@ -1504,16 +1520,41 @@ async def resume_analysis(session_id: str):
             workflow = workflows.get(session_id)
         if workflow:
             workflow.signal_continue()
-        return APIResponse(
-            success=True,
-            message="Continuing analysis"
-        )
+            return APIResponse(
+                success=True,
+                message="Continuing analysis"
+            )
+        else:
+            return APIResponse(
+                success=True,
+                message="Continuing analysis",
+                data={"needs_reconnect": True}
+            )
+    elif state.status == TaskStatus.WAITING_ANNOTATION:
+        # Continue from annotation confirmation wait
+        state.status = TaskStatus.RUNNING
+        await async_save_session(session_id, state)
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if workflow:
+            workflow.signal_annotation_confirmed()
+            return APIResponse(
+                success=True,
+                message="Annotation confirmed, continuing analysis"
+            )
+        else:
+            return APIResponse(
+                success=True,
+                message="Annotation confirmed, continuing analysis",
+                data={"needs_reconnect": True}
+            )
     elif state.status == TaskStatus.PAUSED:
         state.status = TaskStatus.RUNNING
         await async_save_session(session_id, state)
         return APIResponse(
             success=True,
-            message="Analysis resumed"
+            message="Analysis resumed",
+            data={"needs_reconnect": True}
         )
     elif state.status in (TaskStatus.GENERATING_REPORT, TaskStatus.FAILED):
         # Interrupted during report generation or failed — allow re-run
@@ -1521,7 +1562,8 @@ async def resume_analysis(session_id: str):
         await async_save_session(session_id, state)
         return APIResponse(
             success=True,
-            message="Resuming analysis"
+            message="Resuming analysis",
+            data={"needs_reconnect": True}
         )
     else:
         raise HTTPException(status_code=400, detail="Analysis not paused, waiting, or completed")
@@ -1539,7 +1581,7 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT):
+    if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION):
         raise HTTPException(status_code=400, detail=f"Cannot stop: {state.status.value}")
 
     if req.action == "immediate":
@@ -1575,6 +1617,18 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
                 workflow = workflows.get(session_id)
             if workflow:
                 workflow.signal_continue()
+            return APIResponse(success=True, message="Generating report...")
+        elif state.status == TaskStatus.WAITING_ANNOTATION:
+            # Workflow is blocked at _annotation_event.wait() inside callback
+            # Unblock it and let the round finish, then route to report gen
+            state.max_rounds = state.current_round
+            state.status = TaskStatus.RUNNING
+            sessions[session_id] = state
+            await async_save_session(session_id, state)
+            async with _state_lock:
+                workflow = workflows.get(session_id)
+            if workflow:
+                workflow.signal_annotation_confirmed()
             return APIResponse(success=True, message="Generating report...")
         else:
             # RUNNING - mid-agent execution: cancel task, start report generation
@@ -1652,12 +1706,96 @@ async def get_human_input_status(session_id: str):
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     return {
         "waiting_for_input": state.human_input_requested,
         "pending_input": state.pending_human_input,
         "history": state.human_messages[-10:]  # Last 10 messages
     }
+
+
+class AnnotationConfirmation(BaseModel):
+    """Request body for confirming cluster annotations"""
+    annotations: List[Dict[str, Any]] = Field(default_factory=list)
+    # Each item: {"cluster_id": str, "user_override": Optional[str], "user_confirmed": bool}
+
+
+@app.post("/api/session/{session_id}/confirm-annotations")
+async def confirm_annotations(session_id: str, request: AnnotationConfirmation):
+    """User confirms or modifies cell type annotations during exploration phase"""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if state.status != TaskStatus.WAITING_ANNOTATION:
+        raise HTTPException(status_code=400, detail="Session is not waiting for annotation confirmation")
+
+    # Apply user modifications to annotation state
+    if state.annotation_state:
+        for ua in request.annotations:
+            cid = ua.get("cluster_id", "")
+            for ca in state.annotation_state.cluster_annotations:
+                if ca.cluster_id == cid:
+                    if ua.get("user_override"):
+                        ca.user_override = ua["user_override"]
+                    ca.user_confirmed = True
+                    break
+        state.annotation_state.confirmed = True
+        state.annotation_state.pending = False
+
+    sessions[session_id] = state
+    await async_save_session(session_id, state)
+
+    # Signal the workflow to continue from annotation wait
+    async with _state_lock:
+        workflow = workflows.get(session_id)
+    if workflow:
+        workflow.signal_annotation_confirmed()
+
+    return APIResponse(
+        success=True,
+        message="Annotations confirmed"
+    )
+
+
+class DirectionChoice(BaseModel):
+    """Request body for choosing innovation phase direction"""
+    direction: str = ""
+    let_pi_decide: bool = False
+
+
+@app.post("/api/session/{session_id}/choose-direction")
+async def choose_direction(session_id: str, request: DirectionChoice):
+    """User chooses research direction for innovation phase after exploration report"""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if state.status != TaskStatus.WAITING_INPUT:
+        raise HTTPException(status_code=400, detail="Session is not waiting for input")
+
+    if request.let_pi_decide:
+        state.user_chosen_direction = "[PI_DECIDE]"
+        state.pending_human_input = "[PI_DECIDE]"
+    else:
+        state.user_chosen_direction = request.direction
+        state.pending_human_input = request.direction
+
+    sessions[session_id] = state
+    await async_save_session(session_id, state)
+
+    # Signal the workflow to continue from wait_for_user_input
+    async with _state_lock:
+        workflow = workflows.get(session_id)
+    if workflow:
+        workflow.signal_continue()
+
+    return APIResponse(
+        success=True,
+        message=f"Direction selected: {'PI decides' if request.let_pi_decide else request.direction[:100]}"
+    )
 
 
 @app.post("/api/session/{session_id}/request-input")
@@ -2378,10 +2516,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # This way, if the websocket reconnects, messages go to the new connection
     # Track WebSocket closed state with lock for thread-safe access
     ws_closed = False
+    active_ws = websocket
     ws_lock = asyncio.Lock()
 
     async def message_callback(msg: WebSocketMessage):
-        nonlocal ws_closed
+        nonlocal ws_closed, active_ws
 
         # Save message to state.realtime_messages for session restoration
         # Strip base64 from figure messages before persisting to avoid memory bloat
@@ -2421,16 +2560,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
         # Get websocket reference atomically with ws_closed check
         async with ws_lock:
+            current_ws = websockets.get(session_id)
             if ws_closed:
                 # Check if a new websocket has connected (reset ws_closed if so)
-                current_ws = websockets.get(session_id)
-                if current_ws and current_ws != websocket:
+                if current_ws and current_ws != active_ws:
                     # New connection detected, reset closed state
                     ws_closed = False
+                    active_ws = current_ws
                 else:
                     return  # Still closed, skip
             else:
-                current_ws = websockets.get(session_id)
+                if current_ws and current_ws != active_ws:
+                    active_ws = current_ws
 
         if not current_ws:
             logger.warning(f"[{session_id}] No WebSocket connection, message buffered: {msg.type}")
@@ -2445,18 +2586,20 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     # Helper to safely send JSON
     async def safe_send(data: dict):
-        nonlocal ws_closed
+        nonlocal ws_closed, active_ws
         # Get websocket reference atomically with ws_closed check
         async with ws_lock:
+            current_ws = websockets.get(session_id)
             if ws_closed:
                 # Check if a new websocket has connected
-                current_ws = websockets.get(session_id)
-                if current_ws and current_ws != websocket:
+                if current_ws and current_ws != active_ws:
                     ws_closed = False
+                    active_ws = current_ws
                 else:
                     return False
             else:
-                current_ws = websockets.get(session_id)
+                if current_ws and current_ws != active_ws:
+                    active_ws = current_ws
 
         if not current_ws:
             return False
@@ -2531,8 +2674,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         f"{len(state.round_results)} round results)")
             run_coro = workflow.generate_report(state, session_id)
         else:
-            logger.info(f"Starting workflow for session {session_id}")
-            run_coro = workflow.run(state, session_id)
+            # Check if we should resume or start fresh
+            if state.current_round > 0 or state.status in (TaskStatus.PAUSED, TaskStatus.WAITING_INPUT):
+                logger.info(f"Resuming workflow for session {session_id}")
+                run_coro = workflow.resume(session_id, state)
+            else:
+                logger.info(f"Starting workflow for session {session_id}")
+                run_coro = workflow.run(state, session_id)
 
         # Wrap in asyncio.Task for cancellation support (stop endpoint)
         run_task = asyncio.create_task(run_coro)

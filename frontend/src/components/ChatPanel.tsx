@@ -207,6 +207,9 @@ export function ChatPanel() {
   const handleSend = async () => {
     if ((!input.trim() && selectedFiles.length === 0) || !currentSession?.id || chatLoading) return
 
+    // Capture session ID at send time to detect cross-session pollution
+    const sendSessionId = currentSession.id
+
     const message = input.trim() || (selectedFiles.length > 0 ? `[${selectedFiles.map(sf => sf.file.name).join(', ')}]` : '')
     setInput('')
     setError(null)
@@ -256,6 +259,12 @@ export function ChatPanel() {
       }
 
       const data = await response.json()
+
+      // Guard: discard response if user switched session during the request
+      if (useAppStore.getState().currentSession?.id !== sendSessionId) {
+        console.warn('ChatPanel: Session changed during request, discarding response')
+        return
+      }
 
       if (data.status === 'processing') {
         // Delegation mode: response will arrive via WebSocket (chat_result)

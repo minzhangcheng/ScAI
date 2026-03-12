@@ -12,7 +12,7 @@ from .base import BaseAgent
 # Configure logger
 logger = logging.getLogger(__name__)
 from ..models.schemas import (
-    AgentType, AnalysisState, MessageRole, RoundResult,
+    AgentType, AnalysisState, MessageRole, RoundResult, ExplorationReport,
     PublicationFigure, FigureReviewStatus, GraphicAbstract
 )
 from ..utils.llm_client import OpenAICompatibleClient
@@ -106,14 +106,25 @@ Reply in JSON format with the following fields:
 Project Name: {state.name}
 Research Objective: {user_instruction}
 
-You need to develop the first round analysis plan for the team. Please assign specific tasks for each direction (listed in execution order):
+## Available Data
+{state.build_experimental_design_summary()}
 
-1. Biochemistry analysis: What indicators need attention?
-2. Pathology analysis: What types of sections need to be analyzed? What should be the focus?
-3. Bioinformatics analysis: Basic single-cell sequencing analysis workflow, cell types and pathways to focus on
+You need to develop the first round analysis plan for the team.
+
+IMPORTANT: You must assign tasks based ONLY on the data that is actually available (listed above).
+- Do NOT instruct agents to perform experiments or staining that are not in the available data.
+- Each agent should analyze the data types listed for their section.
+- If a section has no data files, assign minimal or no tasks for that agent.
+- You MAY include a brief "recommended_future_experiments" list suggesting additional experiments/staining that would strengthen the analysis, but the primary tasks must use only available data.
+
+Please assign specific tasks for each direction (listed in execution order):
+
+1. Biochemistry analysis: Analyze the available biochemistry data/indicators. What patterns and abnormalities should be assessed?
+2. Pathology analysis: Analyze the available histology images. What morphological features and pathological changes should be evaluated?
+3. Bioinformatics analysis: Analyze the available sequencing data. Standard workflow plus cell types and pathways to focus on.
 4. Literature research: What specific topics should be searched in PubMed?
    - Each topic should be a focused research question (e.g., "Role of TGF-beta signaling in liver fibrosis progression")
-   - Avoid overly broad topics (e.g., "liver disease") or overly specific gene lists
+   - Avoid overly broad or overly specific topics
    - Include 2-4 topics covering different aspects (mechanism, phenotype, therapeutic relevance)
 
 Reply in JSON format as follows:
@@ -122,7 +133,8 @@ Reply in JSON format as follows:
     "biochemistry_tasks": ["task1", "task2", ...],
     "pathology_tasks": ["task1", "task2", ...],
     "bioinformatics_tasks": ["task1", "task2", ...],
-    "literature_topics": ["topic1", "topic2", ...]
+    "literature_topics": ["topic1", "topic2", ...],
+    "recommended_future_experiments": ["experiment1", "experiment2", ...]
 }}
 """
         
@@ -144,6 +156,387 @@ Reply in JSON format as follows:
             "literature_topics": ["Literature related to the research topic and phenotype"]
         }
     
+    async def initial_exploration_instruction(
+        self,
+        state: AnalysisState,
+        user_instruction: str
+    ) -> Dict[str, Any]:
+        """
+        Generate exploration-phase instructions (Round 1) — unbiased, comprehensive.
+
+        The PI is constrained to plan without hypothesis-driven bias,
+        focusing on broad data extraction rather than targeted investigation.
+        """
+        logger.info(f"[PI] Generating exploration-phase instructions for project: {state.name}")
+        prompt = f"""
+## Project Information
+Project Name: {state.name}
+Research Objective: {user_instruction}
+
+## Available Data
+{state.build_experimental_design_summary()}
+
+You are generating the EXPLORATION PHASE plan (Round 1). This round performs comprehensive, unbiased data exploration.
+
+CRITICAL CONSTRAINTS:
+- Do NOT let the research objective bias your exploration tasks.
+- The goal is to discover what the data shows, NOT to confirm pre-existing hypotheses.
+- Prioritize broad, efficient, high-information analyses (e.g., DEG + GO/KEGG) over targeted deep analyses.
+- Do NOT instruct agents to perform experiments or staining that are not in the available data.
+
+## Fixed Mandatory Pipeline (MUST be included in bioinformatics_tasks)
+1. Quality Control (QC) and filtering
+2. Doublet removal assessment (if data quality suggests it is needed)
+3. Batch effect assessment and correction (if multiple samples/batches exist)
+4. Normalization, HVG selection, PCA, UMAP
+5. Clustering (leiden/louvain)
+6. Cell type annotation via annotate_clusters tool
+7. ALL clusters: condition-level DEG (treatment vs control per cluster) + GO/KEGG enrichment
+8. Cell-cell communication analysis (CellChat or NicheNet)
+
+## Your Additional Planning (UNBIASED exploration)
+Beyond the fixed pipeline, plan these additional analyses:
+1. Decide which cluster comparisons are biologically meaningful for cross-cluster DEG
+   - Do NOT compare unrelated cell types (e.g., T cells vs B cells)
+   - Focus on: same cell type across conditions, related subtypes within a lineage
+2. Decide which subtypes should be merged for additional condition-level comparisons
+   (e.g., merge all macrophage subtypes into one group for condition comparison)
+3. Keep all analyses simple and high-throughput
+
+IMPORTANT: You must assign tasks based ONLY on the data that is actually available.
+You MAY include a brief "recommended_future_experiments" list, but primary tasks must use only available data.
+
+Please assign specific tasks for each direction (listed in execution order):
+
+1. Biochemistry analysis: Analyze available biochemistry data/indicators
+2. Pathology analysis: Analyze available histology images
+3. Bioinformatics analysis: The fixed pipeline above PLUS your additional unbiased exploration tasks
+4. Literature research: Broad topics covering expected cell types and pathways in this tissue/disease context
+
+Reply in JSON format:
+{{
+    "overview": "Exploration strategy overview (unbiased, comprehensive)",
+    "biochemistry_tasks": ["task1", "task2", ...],
+    "pathology_tasks": ["task1", "task2", ...],
+    "bioinformatics_tasks": ["task1", "task2", ...],
+    "literature_topics": ["topic1", "topic2", ...],
+    "cluster_comparison_strategy": "Which clusters to compare and why (brief)",
+    "merge_strategy": "Which subtypes to merge for condition comparison (brief)",
+    "recommended_future_experiments": ["experiment1", ...]
+}}
+"""
+
+        response = await self.chat(prompt, temperature=0.3)
+        result = self._safe_parse_json(response, default={})
+
+        if result and "overview" in result:
+            return result
+
+        return {
+            "overview": response or "Failed to generate exploration instructions",
+            "pathology_tasks": ["Analyze tissue sections, assess overall morphological changes"],
+            "bioinformatics_tasks": [
+                "Execute standard scRNA-seq analysis: QC, normalization, clustering, annotation, "
+                "then condition-level DEG + GO/KEGG for ALL clusters, cell communication analysis"
+            ],
+            "biochemistry_tasks": ["Summarize existing biochemical indicators"],
+            "literature_topics": ["Cell types and pathways relevant to the tissue and disease context"]
+        }
+
+    async def review_cluster_annotations(
+        self,
+        state: AnalysisState,
+        annotations: Dict[str, Any],
+        tissue: str,
+        organism: str
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        PI reviews Literature Agent's cluster annotations and assigns confidence scores.
+
+        Returns dict mapping cluster_id to adjusted annotation fields.
+        """
+        logger.info(f"[PI] Reviewing cluster annotations for {organism} {tissue}")
+
+        # Build compact annotation summary for PI review
+        ann_lines = []
+        for cid, info in annotations.items():
+            if isinstance(info, dict):
+                ct = info.get("cell_type", "Unknown")
+                markers = ", ".join(info.get("key_markers", [])[:5])
+                evidence = (info.get("evidence", ""))[:200]
+                ann_lines.append(
+                    f"- Cluster {cid}: {ct} | Markers: {markers} | Evidence: {evidence}"
+                )
+        ann_text = "\n".join(ann_lines) if ann_lines else "No annotations available"
+
+        prompt = f"""You are reviewing cell type annotations generated by a literature search for {organism} {tissue}.
+
+## Cluster Annotations from Literature Search
+{ann_text}
+
+For EACH cluster, evaluate:
+1. Is the cell type annotation correct given the marker genes and tissue context?
+2. Assign a confidence level:
+   - "high": Markers strongly and specifically match the annotated cell type in this tissue
+   - "medium": Markers partially match or could belong to a related cell type
+   - "low": Markers are ambiguous, contradictory, or insufficient for confident annotation
+
+Reply in JSON format (include ALL clusters):
+{{
+    "<cluster_id>": {{
+        "cell_type": "confirmed or corrected cell type",
+        "confidence": "high/medium/low"
+    }},
+    ...
+}}
+"""
+
+        response = await self.chat(prompt, temperature=0.2)
+        result = self._safe_parse_json(response, default={})
+
+        if not result or not isinstance(result, dict):
+            return {}
+
+        return result
+
+    async def generate_exploration_report(
+        self,
+        state: AnalysisState,
+        round_result: RoundResult
+    ) -> ExplorationReport:
+        """
+        Generate structured exploration report (Report A) after Phase 1.
+
+        Summarizes all findings into a structured format for PI decision-making
+        in the Innovation phase and for user review.
+        """
+        logger.info(f"[PI] Generating exploration report")
+        self.reset_history()
+
+        # Build annotation context
+        ann_summary = "No annotation data"
+        if state.annotation_state and state.annotation_state.cluster_annotations:
+            ann_lines = []
+            for ca in state.annotation_state.cluster_annotations:
+                override_note = f" (user override: {ca.user_override})" if ca.user_override else ""
+                ann_lines.append(
+                    f"- Cluster {ca.cluster_id}: {ca.cell_type}{override_note} "
+                    f"[confidence: {ca.confidence}] markers: {', '.join(ca.key_markers[:5])}"
+                )
+            ann_summary = "\n".join(ann_lines)
+
+        prompt = f"""Based on the Round 1 exploration results, generate a structured exploration report.
+
+## Round 1 Results
+**Bioinformatics findings**: {json.dumps(round_result.bioinformatics_findings[:15], ensure_ascii=False)}
+**Pathology findings**: {json.dumps(round_result.pathology_findings[:5], ensure_ascii=False)}
+**Biochemistry findings**: {json.dumps(round_result.biochemistry_findings[:5], ensure_ascii=False)}
+**Literature findings**: {json.dumps(round_result.literature_findings[:5], ensure_ascii=False)}
+**PI Summary**: {round_result.pi_summary[:1000]}
+
+## Cell Annotations
+{ann_summary}
+
+Generate a comprehensive structured report in JSON:
+{{
+    "cluster_overview": "Summary of all clusters: count, major cell type categories, proportions, condition distribution",
+    "data_quality_warnings": ["Warning about clusters with very few cells (<50)", "Warning about poor QC metrics", ...],
+    "strongest_heterogeneity": ["Which clusters/cell types show the strongest changes between conditions", ...],
+    "key_pathway_changes": ["Significant pathway enrichment results across clusters", ...],
+    "abnormal_markers": ["Clusters with unexpected marker expression patterns", ...],
+    "low_confidence_annotations": ["Clusters with uncertain cell type identity", ...],
+    "pi_direction_assessment": "Your overall assessment of the most promising research directions based on ALL the data",
+    "research_direction_candidates": [
+        {{
+            "direction": "A specific research question, e.g., 'Macrophage polarization shift in disease group'",
+            "rationale": "Why this is interesting based on the data (cite specific findings)"
+        }},
+        ...
+    ]
+}}
+
+IMPORTANT:
+- Include 3-5 research direction candidates
+- Each candidate should be a specific, actionable research question (not vague)
+- Base all assessments on actual data findings, not assumptions
+"""
+
+        response = await self.chat(prompt, temperature=0.3)
+        data = self._safe_parse_json(response, default={})
+
+        # Build ExplorationReport from parsed data
+        valid_fields = {k: v for k, v in data.items() if k in ExplorationReport.model_fields}
+        report = ExplorationReport(**valid_fields)
+
+        return report
+
+    async def innovation_instruction(
+        self,
+        state: AnalysisState,
+        user_direction: str
+    ) -> Dict[str, Any]:
+        """
+        Generate innovation-phase instructions based on user's chosen direction.
+
+        The PI generates targeted, hypothesis-driven tasks focused on the selected direction.
+        """
+        logger.info(f"[PI] Generating innovation-phase instructions for direction: {user_direction[:100]}")
+
+        # Build exploration context
+        exploration_context = ""
+        if state.exploration_report:
+            exploration_context = f"""
+## Exploration Phase Summary
+Cluster Overview: {state.exploration_report.cluster_overview[:500]}
+Key Pathway Changes: {json.dumps(state.exploration_report.key_pathway_changes[:5], ensure_ascii=False)}
+Data Quality Warnings: {json.dumps(state.exploration_report.data_quality_warnings[:3], ensure_ascii=False)}
+PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]}
+"""
+
+        prompt = f"""
+## Project: {state.name}
+## Research Objective: {state.initial_instruction}
+## User's Chosen Research Direction: {user_direction}
+{exploration_context}
+
+## Available Data
+{state.build_experimental_design_summary()}
+
+You are now in the INNOVATION PHASE. Generate TARGETED, HYPOTHESIS-DRIVEN analysis tasks.
+Focus specifically on: {user_direction}
+
+Design specific analyses to deeply investigate this direction:
+- Targeted DEG analysis on relevant cell populations
+- Specific pathway analysis (beyond basic GO/KEGG if needed, e.g., GSEA, ssGSEA)
+- Trajectory/pseudotime analysis (if differentiation is relevant)
+- Transcription factor activity analysis (pySCENIC, decoupleR)
+- Subpopulation-specific comparisons within the relevant cell types
+- Cell communication focused on relevant cell types
+
+IMPORTANT:
+- Do NOT repeat analyses already completed in Round 1 (basic pipeline, annotation, etc.)
+- The Jupyter kernel retains all Round 1 variables — build upon existing results
+- Focus on depth over breadth
+
+Reply in JSON format:
+{{
+    "overview": "Innovation strategy for: {user_direction}",
+    "biochemistry_tasks": [...],
+    "pathology_tasks": [...],
+    "bioinformatics_tasks": [...],
+    "literature_topics": [...]
+}}
+"""
+
+        response = await self.chat(prompt, temperature=0.4)
+        result = self._safe_parse_json(response, default={})
+
+        if result and "overview" in result:
+            return result
+
+        return {
+            "overview": f"Innovation phase: {user_direction}",
+            "bioinformatics_tasks": [f"Perform targeted analysis on: {user_direction}"],
+            "pathology_tasks": [],
+            "biochemistry_tasks": [],
+            "literature_topics": [f"Literature review on: {user_direction}"]
+        }
+
+    async def innovation_instruction_pi_directed(
+        self,
+        state: AnalysisState
+    ) -> Dict[str, Any]:
+        """
+        PI autonomously selects a research direction using 3-dimension evaluation,
+        then generates innovation-phase instructions.
+
+        Dimensions:
+        1. Innovation — is this well-studied or emerging? (Literature search)
+        2. Novelty — is this expected or surprising? (PI reasoning)
+        3. Reliability — is the supporting data reliable? (Data quality)
+        """
+        logger.info(f"[PI] PI-directed innovation: evaluating research directions")
+
+        # Get candidates from exploration report
+        candidates = []
+        if state.exploration_report and state.exploration_report.research_direction_candidates:
+            candidates = state.exploration_report.research_direction_candidates
+
+        if not candidates:
+            # Fallback: generate candidates from round results
+            candidates = [{"direction": "Continue analysis based on Round 1 findings", "rationale": "No candidates available"}]
+
+        # Build exploration context
+        exploration_context = ""
+        if state.exploration_report:
+            exploration_context = f"""
+Cluster Overview: {state.exploration_report.cluster_overview[:500]}
+Key Pathway Changes: {json.dumps(state.exploration_report.key_pathway_changes[:5], ensure_ascii=False)}
+Strongest Heterogeneity: {json.dumps(state.exploration_report.strongest_heterogeneity[:5], ensure_ascii=False)}
+Data Quality Warnings: {json.dumps(state.exploration_report.data_quality_warnings[:3], ensure_ascii=False)}
+"""
+
+        prompt = f"""Evaluate the following research direction candidates for the innovation phase.
+
+## Exploration Report
+{exploration_context}
+
+## Candidates
+{json.dumps(candidates, ensure_ascii=False, indent=2)}
+
+For EACH candidate, evaluate on 3 dimensions:
+
+1. **Innovation**: Based on your knowledge of the biomedical literature, is this a well-studied area (low innovation) or an emerging/under-explored area (high innovation)?
+   - Score: high / medium / low
+   - Provide brief evidence for your assessment
+
+2. **Novelty**: Given the experimental design and tissue context, is this finding expected (low novelty) or surprising/counter-intuitive (high novelty)?
+   - Score: high / medium / low
+   - IMPORTANT: You MUST explain WHY this is novel or expected
+
+3. **Reliability**: Based on the data quality (sample sizes, statistical significance, effect sizes from the exploration report), how reliable is the supporting evidence?
+   - Score: high / medium / low
+   - Provide evidence from the data
+
+DECISION RULE:
+- Reliability is the BASELINE: low-reliability directions are NOT recommended regardless of other scores
+- Among reliable directions: Innovation + Novelty together determine priority
+- If multiple directions are equally ranked, prefer the one with higher novelty
+
+Return JSON:
+{{
+    "evaluations": [
+        {{
+            "direction": "...",
+            "innovation_score": "high/medium/low",
+            "innovation_evidence": "...",
+            "novelty_score": "high/medium/low",
+            "novelty_reasoning": "WHY this is novel or expected",
+            "reliability_score": "high/medium/low",
+            "reliability_evidence": "...",
+            "overall_priority": "high/medium/low"
+        }}
+    ],
+    "selected_direction": "The highest-priority direction to pursue",
+    "rationale": "Why this direction was selected over others"
+}}
+"""
+
+        response = await self.chat(prompt, temperature=0.4)
+        data = self._safe_parse_json(response, default={})
+
+        selected = data.get("selected_direction", "")
+
+        if not selected and candidates:
+            selected = candidates[0].get("direction", "Continue analysis based on Round 1 findings")
+
+        logger.info(f"[PI] Selected direction: {selected}")
+
+        # Generate tasks for the selected direction
+        result = await self.innovation_instruction(state, selected)
+        result["_chosen_direction"] = selected
+        return result
+
     async def plan_agent_tasks(
         self,
         agent_name: str,
@@ -151,6 +544,7 @@ Reply in JSON format as follows:
         completed_results: Dict[str, List[str]],
         overall_strategy: str = "",
         research_objective: str = "",
+        state: Optional[AnalysisState] = None,
     ) -> List[str]:
         """Dynamically refine tasks for an agent based on already-completed results.
 
@@ -163,6 +557,7 @@ Reply in JSON format as follows:
             completed_results: Dict of findings from already-completed agents
             overall_strategy: Overview/strategy string for context
             research_objective: The project's research objective
+            state: Optional AnalysisState for data availability context
 
         Returns:
             Refined list of task strings. Falls back to original_tasks on error.
@@ -181,10 +576,15 @@ Reply in JSON format as follows:
             )
         results_summary = "\n\n".join(results_parts)
 
+        data_summary = state.build_experimental_design_summary() if state else "Not available"
+
         prompt = f"""You are the PI coordinating a multi-agent analysis.
 
 ## Research Objective
 {research_objective}
+
+## Available Data
+{data_summary}
 
 ## Overall Strategy
 {overall_strategy or "Not available"}
@@ -198,6 +598,7 @@ Reply in JSON format as follows:
 Based on the completed results, refine the tasks for the {agent_name} agent.
 You may: keep tasks unchanged, add specific focus areas, modify tasks to leverage
 insights, or add cross-referencing instructions.
+Ensure refined tasks are grounded in the available data. Do NOT add tasks requiring data that is not available.
 
 Return a JSON object:
 {{
@@ -549,7 +950,8 @@ Note: Extract biochemistry values from user message if they mention specific num
         pathology_result: Optional[str] = None,
         bioinformatics_result: Optional[str] = None,
         biochemistry_result: Optional[str] = None,
-        literature_result: Optional[str] = None
+        literature_result: Optional[str] = None,
+        research_direction: str = "",
     ) -> RoundResult:
         """
         Synthesize results from all agents for a round
@@ -644,6 +1046,26 @@ IMPORTANT: agents_for_next_round controls which agents are ACTIVATED in the next
 - Only include "biochemistry" if biochemistry data needs further analysis or reinterpretation
 - Only include "literature" if new literature search is needed for newly discovered topics
 - EXCLUDE agents that have no meaningful new work to save time and resources
+"""
+
+        # Add phase-specific synthesis instructions
+        if state.analysis_phase == "exploration":
+            prompt += """
+EXPLORATION PHASE — additional synthesis requirements:
+- Summarize ALL findings comprehensively, without hypothesis bias
+- Highlight unexpected or surprising findings specifically
+- Flag data quality concerns (clusters with very few cells, poor QC metrics)
+- Note any low-confidence cell annotations
+- In next_* tasks: suggest potential research directions for the Innovation phase
+"""
+        else:
+            direction_ctx = research_direction or state.current_round_direction or "PI-selected direction"
+            prompt += f"""
+INNOVATION PHASE — focused synthesis:
+- Current research direction: {direction_ctx}
+- Focus your synthesis on findings relevant to this direction
+- Evaluate whether the hypothesis is supported or contradicted by the evidence
+- Suggest deeper follow-up analyses within this specific direction
 """
 
         # Try up to 2 times if response is empty

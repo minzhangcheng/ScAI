@@ -13,7 +13,8 @@ import json
 import operator
 
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+import aiosqlite
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -24,7 +25,8 @@ MAX_NODE_RETRIES = 3
 from .models.schemas import (
     AnalysisState, AnalysisStep, AgentType, TaskStatus, RoundResult,
     WebSocketMessage, AgentMessage, MessageRole, BiochemistryIndicator,
-    PublicationFigure, FigureReviewStatus
+    PublicationFigure, FigureReviewStatus,
+    ClusterAnnotation, AnnotationConfirmationState,
 )
 from .agents.pi_agent import PIAgent
 from .agents.pathology_agent import PathologyAgent
@@ -181,21 +183,38 @@ class SingleCellAnalysisWorkflow:
         # Workflow graph
         self.graph = None
         self.compiled_graph = None
-        self.checkpointer = MemorySaver()
+        self.checkpointer = None
+        self._db_conn = None
 
         # Current analysis state for callbacks (updated during workflow execution)
         self._current_analysis_state: Optional[AnalysisState] = None
 
         # Event for blocking between rounds (wait for user input or continue signal)
         self._continue_event = asyncio.Event()
-        
+
+        # Event for blocking during annotation confirmation (exploration phase)
+        self._annotation_event = asyncio.Event()
+
     def signal_continue(self):
         """Signal the workflow to continue from wait_for_user_input"""
         self._continue_event.set()
 
+    def signal_annotation_confirmed(self):
+        """Signal that user has confirmed cell type annotations"""
+        self._annotation_event.set()
+
     async def initialize(self):
         """Initialize all components"""
         logger.info(f"[{self.session_id}] Initializing workflow components")
+        
+        # Initialize checkpointer if not exists
+        if self._db_conn is None:
+            db_path = str(get_session_states(self.session_id) / "checkpoints.sqlite")
+            self._db_conn = await aiosqlite.connect(db_path)
+            self.checkpointer = AsyncSqliteSaver(self._db_conn)
+            # Make sure tables are created
+            await self.checkpointer.setup()
+            
         # Initialize LLM manager with session context
         self.llm_manager = LLMManager(
             api_key=self.config.api.api_key,
@@ -335,8 +354,15 @@ class SingleCellAnalysisWorkflow:
         self.graph.add_node("generate_graphic_abstract", self._generate_graphic_abstract)
         self.graph.add_node("generate_detailed_report", self._generate_detailed_report)
 
-        # Add edges - sequential execution
-        self.graph.add_edge("initialize_round", "pi_planning")
+        # Add edges - sequential execution (with early-stop check after init)
+        self.graph.add_conditional_edges(
+            "initialize_round",
+            self._should_continue_after_init,
+            {
+                "continue": "pi_planning",
+                "stop": "generate_final_report"
+            }
+        )
 
         # Sequential analysis: biochemistry -> pathology -> bioinformatics -> literature
         self.graph.add_edge("pi_planning", "biochemistry_analysis")
@@ -413,6 +439,7 @@ class SingleCellAnalysisWorkflow:
                     "version": analysis_state.state_version,
                     "status": analysis_state.status.value,
                     "current_round": analysis_state.current_round,
+                    "analysis_phase": analysis_state.analysis_phase,
                     "timestamp": analysis_state.last_sync_timestamp.isoformat(),
                     "unresolved_errors": len(analysis_state.get_unresolved_errors())
                 }
@@ -469,7 +496,12 @@ Be specific and actionable in your response."""
         tissue: str,
         organism: str
     ) -> Dict[str, Any]:
-        """Callback for bioinformatics agent to annotate all clusters via literature."""
+        """Callback for bioinformatics agent to annotate all clusters via literature.
+
+        In the exploration phase, this callback additionally:
+        1. Has PI Agent review annotations and assign confidence scores
+        2. Blocks execution until the user confirms annotations via frontend
+        """
         n_clusters = len(cluster_markers)
         await self._send_message(
             "status",
@@ -497,6 +529,108 @@ Be specific and actionable in your response."""
                 f"Cluster annotation complete: {n_annotated}/{n_clusters} clusters identified",
                 AgentType.LITERATURE
             )
+
+            # --- PI review + user confirmation (exploration phase only) ---
+            if state.analysis_phase == "exploration":
+                # Step 1: PI Agent reviews annotations and assigns confidence
+                await self._send_message(
+                    "status",
+                    "PI is reviewing cluster annotations and assigning confidence scores...",
+                    AgentType.PI
+                )
+                try:
+                    pi_review = await self.pi_agent.review_cluster_annotations(
+                        state, annotations, tissue, organism
+                    )
+                    for cid, review in pi_review.items():
+                        if cid in annotations and isinstance(review, dict):
+                            annotations[cid].update(review)
+                    result["annotations"] = annotations
+                except Exception as e:
+                    logger.warning(f"[{self.session_id}] PI annotation review failed: {e}")
+                    # Continue with original annotations if PI review fails
+
+                # Step 2: Build AnnotationConfirmationState
+                cluster_anns = []
+                for cid, info in annotations.items():
+                    if isinstance(info, dict):
+                        cluster_anns.append(ClusterAnnotation(
+                            cluster_id=cid,
+                            cell_type=info.get("cell_type", "Unknown"),
+                            subtypes=info.get("subtypes", []),
+                            key_markers=info.get("key_markers", []),
+                            confidence=info.get("confidence", "low"),
+                            evidence=info.get("evidence", ""),
+                        ))
+
+                # Guard: if annotations were already confirmed (e.g. backend restart),
+                # apply overrides directly without re-blocking for user confirmation
+                if state.annotation_state and state.annotation_state.confirmed:
+                    logger.info(f"[{self.session_id}] Annotation already confirmed, applying overrides directly")
+                    for ca in state.annotation_state.cluster_annotations:
+                        if ca.user_override and ca.cluster_id in annotations:
+                            annotations[ca.cluster_id]["cell_type"] = ca.user_override
+                            logger.info(
+                                f"[{self.session_id}] User override (restored): cluster {ca.cluster_id} "
+                                f"→ {ca.user_override}"
+                            )
+                    result["annotations"] = annotations
+                    await self._send_message(
+                        "status",
+                        "Annotation confirmed (restored), continuing analysis...",
+                        AgentType.LITERATURE
+                    )
+                    return result
+
+                ann_state = AnnotationConfirmationState(
+                    cluster_annotations=cluster_anns,
+                    tissue=tissue,
+                    organism=organism,
+                    tissue_summary=result.get("tissue_summary", ""),
+                    pending=True,
+                )
+                state.annotation_state = ann_state
+
+                # Step 3: Send annotation confirmation request to frontend and block
+                # Clear event BEFORE sending message to prevent race condition:
+                # if frontend confirms between send and clear, the set() would be lost.
+                self._annotation_event.clear()
+
+                await self._send_message("annotation_confirmation", {
+                    "annotations": [a.model_dump() for a in cluster_anns],
+                    "tissue": tissue,
+                    "organism": organism,
+                    "tissue_summary": result.get("tissue_summary", ""),
+                }, AgentType.LITERATURE)
+
+                original_status = state.status
+                state.status = TaskStatus.WAITING_ANNOTATION
+                await self._send_state_sync(state, "annotation_confirmation")
+
+                logger.info(f"[{self.session_id}] Waiting for user annotation confirmation...")
+                await self._annotation_event.wait()
+                logger.info(f"[{self.session_id}] Annotation confirmation received")
+
+                state.status = original_status
+                await self._send_state_sync(state, "annotation_resumed")
+
+                # Step 4: Apply user overrides
+                confirmed = state.annotation_state
+                if confirmed and confirmed.confirmed:
+                    for ca in confirmed.cluster_annotations:
+                        if ca.user_override and ca.cluster_id in annotations:
+                            annotations[ca.cluster_id]["cell_type"] = ca.user_override
+                            logger.info(
+                                f"[{self.session_id}] User override: cluster {ca.cluster_id} "
+                                f"→ {ca.user_override}"
+                            )
+                    result["annotations"] = annotations
+
+                await self._send_message(
+                    "status",
+                    "Annotation confirmed, continuing analysis...",
+                    AgentType.LITERATURE
+                )
 
             return result
         except Exception as e:
@@ -838,41 +972,67 @@ Be specific and actionable in your response."""
         # Normal planning without pre-processed instructions
         skip_nodes = []  # Empty for round 1; populated for round 2+
         if analysis_state.current_round == 1:
-            # First round - generate initial instructions
-            instructions = await self.pi_agent.initial_instruction(
+            # Round 1: Exploration phase — unbiased comprehensive exploration
+            instructions = await self.pi_agent.initial_exploration_instruction(
                 analysis_state,
                 analysis_state.initial_instruction
             )
         else:
-            # Subsequent rounds - based on previous results
+            # Round 2+: Innovation phase — hypothesis-driven targeted analysis
+            if analysis_state.analysis_phase != "innovation":
+                analysis_state.analysis_phase = "innovation"
+
+            # Check if user specified a direction or wants PI to decide
+            user_direction = analysis_state.user_chosen_direction
+            if user_direction and user_direction not in ("", "[PI_DECIDE]"):
+                logger.info(f"[{self.session_id}] Innovation phase: user-directed → {user_direction[:100]}")
+                instructions = await self.pi_agent.innovation_instruction(
+                    analysis_state, user_direction
+                )
+                # Preserve direction for bio agent phase_instruction and synthesis prompt
+                analysis_state.current_round_direction = user_direction
+                # Consume the direction to avoid reusing in next round
+                analysis_state.user_chosen_direction = None
+            elif user_direction == "[PI_DECIDE]" or (not user_direction and analysis_state.current_round == 2):
+                # PI autonomously selects direction using 3-dimension evaluation
+                logger.info(f"[{self.session_id}] Innovation phase: PI-directed")
+                instructions = await self.pi_agent.innovation_instruction_pi_directed(
+                    analysis_state
+                )
+                # Preserve direction selected by PI for downstream context
+                analysis_state.current_round_direction = instructions.get("_chosen_direction", "")
+                analysis_state.user_chosen_direction = None
+            else:
+                # Subsequent innovation rounds (3+): use previous round's next_steps
+                last_round = analysis_state.get_latest_round()
+                instructions = {
+                    "pathology_tasks": [],
+                    "bioinformatics_tasks": [],
+                    "biochemistry_tasks": [],
+                    "literature_topics": []
+                }
+
+                # Extract tasks for each agent
+                prefix_map = {
+                    "[Pathology]": "pathology_tasks",
+                    "[Bioinformatics]": "bioinformatics_tasks",
+                    "[Biochemistry]": "biochemistry_tasks",
+                    "[Literature]": "literature_topics",
+                }
+                for step in (last_round.next_steps if last_round else []):
+                    for prefix, key in prefix_map.items():
+                        if step.startswith(prefix):
+                            instructions[key].append(step.split("] ", 1)[1].strip() if "] " in step else step[len(prefix):].strip())
+                            break
+
+                # Add overview for round 3+ so PI dynamic planning has strategic context
+                if last_round:
+                    summary = last_round.pi_summary or "Continue analysis based on previous round findings."
+                    instructions["overview"] = summary[:500]
+
             last_round = analysis_state.get_latest_round()
-            instructions = {
-                "pathology_tasks": [],
-                "bioinformatics_tasks": [],
-                "biochemistry_tasks": [],
-                "literature_topics": []
-            }
-
-            # Extract tasks for each agent
-            prefix_map = {
-                "[Pathology]": "pathology_tasks",
-                "[Bioinformatics]": "bioinformatics_tasks",
-                "[Biochemistry]": "biochemistry_tasks",
-                "[Literature]": "literature_topics",
-            }
-            for step in (last_round.next_steps if last_round else []):
-                for prefix, key in prefix_map.items():
-                    if step.startswith(prefix):
-                        instructions[key].append(step.split("] ", 1)[1].strip() if "] " in step else step[len(prefix):].strip())
-                        break
-
-            # Add overview for round 2+ so PI dynamic planning has strategic context
-            if last_round:
-                summary = last_round.pi_summary or "Continue analysis based on previous round findings."
-                instructions["overview"] = summary[:500]
 
             # Fallback: if prefix matching extracted no tasks at all, use PI summary
-            fallback_all_agents = False
             if not any([
                 instructions["pathology_tasks"],
                 instructions["bioinformatics_tasks"],
@@ -882,22 +1042,15 @@ Be specific and actionable in your response."""
                 fallback_context = last_round.pi_summary[:500]
                 fallback = f"Continue analysis based on previous round findings. Context: {fallback_context}"
                 instructions["bioinformatics_tasks"] = [fallback]
-                instructions["pathology_tasks"] = [fallback]
-                instructions["biochemistry_tasks"] = [fallback]
                 instructions["literature_topics"] = [f"Literature search related to: {fallback_context[:200]}"]
-                # When fallback assigns tasks to all agents, activate them all
-                # to avoid the mismatch where tasks are assigned but agents are skipped
-                fallback_all_agents = True
+                
                 logger.warning(
                     f"[{self.session_id}] No prefixed tasks found in next_steps, "
-                    f"using PI summary as fallback (activating all agents)"
+                    f"using PI summary as fallback for bioinformatics and literature"
                 )
 
             # Build skip_nodes from PI's agent activation decision
-            if fallback_all_agents:
-                agents_to_activate = {"bioinformatics", "pathology", "biochemistry", "literature"}
-            else:
-                agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
+            agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
             agents_to_activate.add("bioinformatics")  # Always activate bioinformatics
 
             # Reconcile: if prefix parsing found tasks for an agent, ensure it's activated
@@ -995,6 +1148,7 @@ Be specific and actionable in your response."""
                     completed_results=completed,
                     overall_strategy=overview,
                     research_objective=analysis_state.initial_instruction,
+                    state=analysis_state,
                 )
 
         # Enrich instruction with previous findings for round 2+
@@ -1093,6 +1247,7 @@ Be specific and actionable in your response."""
                     completed_results=completed,
                     overall_strategy=overview,
                     research_objective=analysis_state.initial_instruction,
+                    state=analysis_state,
                 )
 
         # Build previous findings and code history context for round 2+
@@ -1122,9 +1277,34 @@ Be specific and actionable in your response."""
             )
 
         # Build comprehensive instruction for bioinformatics agent
+        # Phase-aware instruction for bioinformatics agent
+        phase_instruction = ""
+        if analysis_state.analysis_phase == "exploration":
+            phase_instruction = """
+## EXPLORATION PHASE INSTRUCTIONS
+This is Round 1 — comprehensive, unbiased exploration. You MUST:
+1. Complete the FULL standard pipeline (QC → normalization → clustering → annotation)
+2. After annotation: perform condition-level DEG for ALL clusters (treatment vs control)
+3. Run GO/KEGG pathway enrichment on ALL DEG results
+4. Keep analyses simple and high-throughput (DEG + GO/KEGG)
+5. Do NOT skip any cluster — analyze everything comprehensively
+6. Complete cell communication analysis (CellChat or similar)
+"""
+        else:
+            direction_ctx = analysis_state.current_round_direction or "PI-directed"
+            phase_instruction = f"""
+## INNOVATION PHASE INSTRUCTIONS
+This is a targeted, hypothesis-driven round.
+Research direction: {direction_ctx}
+Focus your analysis on the specific direction above.
+You may skip irrelevant cell populations and focus on those relevant to the hypothesis.
+Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc.).
+"""
+
         instruction = f"""Analyze single-cell RNA-seq data for project: {analysis_state.name}
 
 Research context: {analysis_state.initial_instruction}
+{phase_instruction}
 
 PI's analysis goals for this round:
 {chr(10).join(f"- {task}" for task in bioinf_tasks) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
@@ -1178,12 +1358,16 @@ Report key findings when you complete each major analysis phase."""
         all_findings = result.get("findings", [])
         all_figures = result.get("figures", [])
 
-        # Store code executions (dedup by id to handle node retries)
+        # Store code executions (dedup by id AND code content hash to handle
+        # both node retries and session restores that assign new UUIDs)
         existing_code_ids = {c.id for c in analysis_state.code_history}
+        existing_code_hashes = {hash(c.code) for c in analysis_state.code_history}
         for code_exec in result.get("code_history", []):
-            if code_exec.id not in existing_code_ids:
+            code_hash = hash(code_exec.code)
+            if code_exec.id not in existing_code_ids and code_hash not in existing_code_hashes:
                 analysis_state.code_history.append(code_exec)
                 existing_code_ids.add(code_exec.id)
+                existing_code_hashes.add(code_hash)
 
         # Store analysis log (dedup by step id to handle node retries)
         existing_step_ids = {s.id for s in analysis_state.analysis_log}
@@ -1321,6 +1505,7 @@ Report key findings when you complete each major analysis phase."""
                     completed_results=completed,
                     overall_strategy=overview,
                     research_objective=analysis_state.initial_instruction,
+                    state=analysis_state,
                 )
 
         if not topics:
@@ -1524,12 +1709,42 @@ Return ONLY the JSON array, nothing else."""
             bioinformatics_result=agent_results["bioinformatics"],
             biochemistry_result=agent_results["biochemistry"],
             literature_result=agent_results["literature"],
+            research_direction=analysis_state.current_round_direction,
         )
 
         logger.info(f"[{self.session_id}] Round {round_result.round_number} synthesis complete: new_findings={round_result.new_findings}, {len(round_result.next_steps)} next steps")
 
+        # Tag round with current phase
+        round_result.phase = analysis_state.analysis_phase
+
+        # Exploration phase: generate structured Report A and transition to innovation
+        if analysis_state.analysis_phase == "exploration":
+            await self._send_message(
+                "status",
+                "Generating exploration report (Report A)...",
+                AgentType.PI
+            )
+            try:
+                exploration_report = await self.pi_agent.generate_exploration_report(
+                    analysis_state, round_result
+                )
+                analysis_state.exploration_report = exploration_report
+                round_result.exploration_report = exploration_report
+
+                await self._send_message("exploration_report", {
+                    "report_a": exploration_report.model_dump(),
+                    "round": round_result.round_number,
+                    "summary": round_result.pi_summary,
+                }, AgentType.PI)
+            except Exception as e:
+                logger.error(f"[{self.session_id}] Exploration report generation failed: {e}")
+
+            # Transition to innovation phase for next round
+            analysis_state.analysis_phase = "innovation"
+            logger.info(f"[{self.session_id}] Transitioning to innovation phase")
+
         analysis_state.round_results.append(round_result)
-        
+
         # Save state after each round
         if self.state_callback:
             try:
@@ -1631,6 +1846,11 @@ Return ONLY the JSON array, nothing else."""
 
         wait_seconds = analysis_state.round_wait_seconds  # -1=manual, 0=no wait, >0=countdown
 
+        # After exploration phase (Round 1), force manual wait so user must choose direction
+        if analysis_state.current_round == 1 and analysis_state.analysis_phase == "innovation":
+            wait_seconds = -1
+            logger.info(f"[{self.session_id}] Exploration phase complete, forcing manual wait for direction selection")
+
         if wait_seconds == 0:
             # No-wait mode: proceed immediately
             logger.info(f"[{self.session_id}] No-wait mode, proceeding immediately (round {analysis_state.current_round})")
@@ -1661,6 +1881,16 @@ Return ONLY the JSON array, nothing else."""
             logger.info(f"[{self.session_id}] User input on last round (text={has_real_text}, files={has_uploaded_files}), extending max_rounds to {analysis_state.max_rounds}")
 
         return {**state, "analysis_state": analysis_state}
+
+    def _should_continue_after_init(self, state: WorkflowState) -> str:
+        """Route to report generation if user requested stop during round initialization."""
+        if state.get("human_stop_requested", False):
+            logger.info(f"[{self.session_id}] Stop requested during init, routing to final report")
+            return "stop"
+        if state.get("should_continue") is False:
+            logger.info(f"[{self.session_id}] should_continue=False after init, routing to final report")
+            return "stop"
+        return "continue"
 
     def _should_continue(self, state: WorkflowState) -> str:
         """Determine if analysis should continue"""
@@ -2229,19 +2459,41 @@ Return ONLY the JSON array, nothing else."""
             return initial_state
 
         # Create workflow state with existing analysis data
-        workflow_state: WorkflowState = {
-            "analysis_state": initial_state,
-            "current_round": initial_state.current_round,
-            "pi_instructions": {},
-            "pathology_result": None,
-            "bioinformatics_result": None,
-            "biochemistry_result": None,
-            "literature_result": None,
-            "round_result": None,
-            "should_continue": False,
-            "error": None,
-            "messages": []
-        }
+        config = {"configurable": {"thread_id": thread_id}}
+        if self.compiled_graph is None:
+            self._build_graph()
+
+        workflow_state = None
+        try:
+            # We must initialize so the checkpointer is available
+            await self.initialize()
+            if self.compiled_graph is None:
+                self._build_graph()
+                
+            snapshot = await self.compiled_graph.aget_state(config)
+            if snapshot and snapshot.values:
+                workflow_state = snapshot.values
+                workflow_state["analysis_state"] = initial_state
+                if initial_state.current_round > len(initial_state.round_results):
+                    logger.info(f"[{self.session_id}] Found incomplete round {initial_state.current_round}, running pi_synthesis before report")
+                    workflow_state = await self._pi_synthesis(workflow_state)
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] Could not load state from checkpointer: {e}")
+
+        if workflow_state is None:
+            workflow_state = {
+                "analysis_state": initial_state,
+                "current_round": initial_state.current_round,
+                "pi_instructions": {},
+                "pathology_result": None,
+                "bioinformatics_result": None,
+                "biochemistry_result": None,
+                "literature_result": None,
+                "round_result": None,
+                "should_continue": False,
+                "error": None,
+                "messages": []
+            }
 
         try:
             logger.info(f"[{self.session_id}] Running report generation only (skipping analysis)")
@@ -2290,6 +2542,12 @@ Return ONLY the JSON array, nothing else."""
         if state and state.values:
             # Restore _current_analysis_state for callbacks
             self._current_analysis_state = state.values.get("analysis_state")
+            
+            # Inject latest analysis_state if provided (so user changes during pause are picked up)
+            if analysis_state:
+                await self.compiled_graph.aupdate_state(config, {"analysis_state": analysis_state})
+                self._current_analysis_state = analysis_state
+
             # Resume from checkpoint
             logger.info(f"[{self.session_id}] Found saved state, resuming execution")
             final_state = await self.compiled_graph.ainvoke(
@@ -2331,6 +2589,13 @@ Return ONLY the JSON array, nothing else."""
                 logger.info(f"[{self.session_id}] Sandbox stopped")
             except Exception as e:
                 logger.error(f"[{self.session_id}] Error stopping sandbox: {e}")
+                
+        if hasattr(self, '_db_conn') and self._db_conn:
+            try:
+                await self._db_conn.close()
+            except Exception as e:
+                logger.error(f"[{self.session_id}] Error closing sqlite connection: {e}")
+                
         if self.llm_manager:
             try:
                 await self.llm_manager.close()

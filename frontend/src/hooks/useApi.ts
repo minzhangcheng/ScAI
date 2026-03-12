@@ -591,8 +591,14 @@ export function useSession() {
   const resumeAnalysis = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
 
-    await apiFetch(`/session/${currentSession.id}/resume`, { method: 'POST' })
+    const resp = await apiFetch<any>(`/session/${currentSession.id}/resume`, { method: 'POST' })
     updateSession({ status: 'running' })
+    // If workflow doesn't exist (e.g., after backend restart), trigger WebSocket
+    // reconnect which will create a new workflow instance on the server
+    if (resp?.data?.needs_reconnect) {
+      const { wsConnect: connectWs } = useAppStore.getState()
+      if (connectWs) setTimeout(() => connectWs(), 100)
+    }
   }, [currentSession, updateSession])
 
   const continueRound = useCallback(async () => {
@@ -762,7 +768,7 @@ export function useWebSocket() {
               const createMsgKey = (m: Message) => {
                 const contentStr = typeof m.content === 'string'
                   ? m.content.slice(0, 80)
-                  : JSON.stringify(m.content).slice(0, 80)
+                  : JSON.stringify(m.content ?? null).slice(0, 80)
                 return `${m.agent || 'system'}-${m.type}-${m.timestamp}-${contentStr}`
               }
               const serverMsgKeySet = new Set(serverMessages.map(createMsgKey))
@@ -868,7 +874,8 @@ export function useWebSocket() {
             setStateVersion(syncContent.version)
             updateSession({
               status: syncContent.status,
-              currentRound: syncContent.current_round
+              currentRound: syncContent.current_round,
+              ...(syncContent.analysis_phase ? { analysisPhase: syncContent.analysis_phase } : {}),
             })
           }
           return  // Don't add state_sync to message stream
@@ -1066,7 +1073,7 @@ export function useWebSocket() {
       // Auto-reconnect if session is still running (not manually disconnected)
       const latestSession = useAppStore.getState().currentSession
       if (latestSession &&
-          (latestSession.status === 'running' || latestSession.status === 'waiting_input') &&
+          (latestSession.status === 'running' || latestSession.status === 'waiting_input' || latestSession.status === 'waiting_annotation') &&
           event.code !== 1000) {  // Not a normal close
         if (reconnectCountRef.current < 5) {  // Max 5 reconnect attempts
           const delay = Math.min(1000 * Math.pow(2, reconnectCountRef.current - 1), 10000)  // Exponential backoff, max 10s

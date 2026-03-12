@@ -4,12 +4,12 @@ import { Language, getDefaultPrompts } from '../i18n/translations'
 
 // Types
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor'
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'generating_report'
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'waiting_annotation' | 'generating_report'
 export type FigureReviewStatus = 'pending' | 'approved' | 'revision_requested'
 
 export interface Message {
   id: string
-  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint'
+  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report'
   agent?: AgentType
   content: any
   timestamp: string
@@ -106,6 +106,7 @@ export interface Session {
   currentRound: number
   createdAt: string
   instruction: string
+  analysisPhase?: 'exploration' | 'innovation'
   treatmentGroups: TreatmentGroup[]
   dataFiles: DataFile[]
   biochemistryIndicators: BiochemistryIndicator[]
@@ -327,10 +328,11 @@ export const useAppStore = create<AppState>()(
       messages: [],
       addMessage: (message) => set((state) => {
         if (message.type === 'progress') {
-          // Replace the last progress message instead of appending (avoids stacked spinners)
+          // Replace the last progress message from the SAME agent (avoids stacked spinners
+          // while preserving independent progress from different agents)
           let lastProgressIdx = -1;
           for (let i = state.messages.length - 1; i >= 0; i--) {
-            if (state.messages[i].type === 'progress') { lastProgressIdx = i; break; }
+            if (state.messages[i].type === 'progress' && state.messages[i].agent === message.agent) { lastProgressIdx = i; break; }
           }
           if (lastProgressIdx !== -1) {
             const updated = [...state.messages];

@@ -31,8 +31,14 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     WAITING_INPUT = "waiting_input"
+    WAITING_ANNOTATION = "waiting_annotation"  # Paused for user annotation confirmation
     PAUSED = "paused"
     GENERATING_REPORT = "generating_report"
+
+class AnalysisPhase(str, Enum):
+    """Two-phase workflow: exploration (Round 1) then innovation (Round 2+)"""
+    EXPLORATION = "exploration"
+    INNOVATION = "innovation"
 
 class FigureReviewStatus(str, Enum):
     """Status of figure review by PI Agent"""
@@ -205,6 +211,38 @@ class LiteratureReport(BaseModel):
     references: List[Dict[str, str]] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
 
+class ClusterAnnotation(BaseModel):
+    """Single cluster annotation for user review during exploration phase"""
+    cluster_id: str
+    cell_type: str
+    subtypes: List[str] = Field(default_factory=list)
+    key_markers: List[str] = Field(default_factory=list)
+    confidence: str = "low"  # "high" / "medium" / "low"
+    evidence: str = ""
+    user_confirmed: bool = False
+    user_override: Optional[str] = None  # User-provided cell type override
+
+class AnnotationConfirmationState(BaseModel):
+    """State for cell annotation confirmation pause during exploration phase"""
+    cluster_annotations: List[ClusterAnnotation] = Field(default_factory=list)
+    tissue: str = ""
+    organism: str = ""
+    tissue_summary: str = ""
+    pending: bool = False
+    confirmed: bool = False
+
+class ExplorationReport(BaseModel):
+    """Structured exploration report (Report A) generated after Phase 1"""
+    cluster_overview: str = ""
+    data_quality_warnings: List[str] = Field(default_factory=list)
+    strongest_heterogeneity: List[str] = Field(default_factory=list)
+    key_pathway_changes: List[str] = Field(default_factory=list)
+    abnormal_markers: List[str] = Field(default_factory=list)
+    low_confidence_annotations: List[str] = Field(default_factory=list)
+    pi_direction_assessment: str = ""
+    research_direction_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    # Each candidate: {"direction": str, "rationale": str, "expected_innovation": str, "expected_novelty": str, "data_reliability": str}
+
 class RoundResult(BaseModel):
     """Result from one analysis round"""
     round_number: int
@@ -219,6 +257,8 @@ class RoundResult(BaseModel):
     agents_for_next_round: List[str] = Field(
         default_factory=lambda: ["bioinformatics", "pathology", "biochemistry", "literature"]
     )
+    phase: str = "exploration"  # "exploration" or "innovation"
+    exploration_report: Optional[ExplorationReport] = None  # Only for Phase 1
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class PublicationFigure(BaseModel):
@@ -277,7 +317,14 @@ class AnalysisState(BaseModel):
     current_round: int = 0
     max_rounds: int = 3  # User-configurable maximum rounds
     round_wait_seconds: int = 300  # Countdown seconds between rounds (-1=manual, 0=no wait)
-    
+
+    # Two-phase workflow state
+    analysis_phase: str = "exploration"  # "exploration" (Round 1) / "innovation" (Round 2+)
+    annotation_state: Optional[AnnotationConfirmationState] = None
+    exploration_report: Optional[ExplorationReport] = None
+    user_chosen_direction: Optional[str] = None  # User's chosen direction for innovation phase
+    current_round_direction: str = ""  # Active direction for current innovation round (preserved after user_chosen_direction is consumed)
+
     # Initial inputs
     initial_instruction: str = ""
     
@@ -534,7 +581,9 @@ class WebSocketMessage(BaseModel):
         # WebSocket reconnection recovery
         "message_history",
         # Cluster annotation
-        "annotation_result",
+        "annotation_result", "annotation_confirmation",
+        # Exploration report
+        "exploration_report",
         # Chat delegation
         "chat_delegation", "chat_result", "chat_error",
         # Supervisor monitoring

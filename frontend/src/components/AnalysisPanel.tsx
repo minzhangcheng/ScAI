@@ -4,6 +4,8 @@ import { useSession, useConfig, generateId } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
+import { AnnotationConfirmationDialog } from './AnnotationConfirmationDialog'
+import { ExplorationReportDialog } from './ExplorationReportDialog'
 import {
   Play,
   AlertCircle,
@@ -53,6 +55,16 @@ export function AnalysisPanel() {
   const [showFeedbackDialog, setShowFeedbackDialog] = useState(false)
   const [feedbackRoundData, setFeedbackRoundData] = useState<RoundSummary | null>(null)
   const lastDialogRoundRef = useRef<number>(-1)
+
+  // Annotation confirmation dialog state
+  const [showAnnotationDialog, setShowAnnotationDialog] = useState(false)
+  const [annotationData, setAnnotationData] = useState<any>(null)
+  const lastAnnotationMsgRef = useRef<string>('')
+
+  // Exploration report dialog state
+  const [showExplorationDialog, setShowExplorationDialog] = useState(false)
+  const [explorationReportData, setExplorationReportData] = useState<any>(null)
+  const lastExplorationMsgRef = useRef<string>('')
 
   // Stop dialog state
   const [showStopDialog, setShowStopDialog] = useState(false)
@@ -194,6 +206,62 @@ export function AnalysisPanel() {
     })
   }
 
+  // Annotation confirmation handler
+  const handleConfirmAnnotations = useCallback(async (
+    annotations: Array<{ cluster_id: string; user_override?: string; user_confirmed: boolean }>
+  ) => {
+    if (!currentSession) return
+    try {
+      await fetch(`${API_BASE}/session/${currentSession.id}/confirm-annotations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ annotations }),
+      })
+      setShowAnnotationDialog(false)
+      if (!wsConnected) {
+        setTimeout(() => wsConnect?.(), 100)
+      }
+    } catch (e) {
+      console.error('Failed to confirm annotations:', e)
+    }
+  }, [currentSession, wsConnected, wsConnect])
+
+  // Direction choice handler
+  const handleChooseDirection = useCallback(async (direction: string) => {
+    if (!currentSession) return
+    try {
+      await fetch(`${API_BASE}/session/${currentSession.id}/choose-direction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ direction, let_pi_decide: false }),
+      })
+      setShowExplorationDialog(false)
+      if (!wsConnected) {
+        setTimeout(() => wsConnect?.(), 100)
+      }
+    } catch (e) {
+      console.error('Failed to choose direction:', e)
+    }
+  }, [currentSession, wsConnected, wsConnect])
+
+  // Let PI decide handler
+  const handleLetPiDecide = useCallback(async () => {
+    if (!currentSession) return
+    try {
+      await fetch(`${API_BASE}/session/${currentSession.id}/choose-direction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ direction: '', let_pi_decide: true }),
+      })
+      setShowExplorationDialog(false)
+      if (!wsConnected) {
+        setTimeout(() => wsConnect?.(), 100)
+      }
+    } catch (e) {
+      console.error('Failed to let PI decide:', e)
+    }
+  }, [currentSession, wsConnected, wsConnect])
+
   const handleStart = async () => {
     // Block in read mode
     if (readMode) {
@@ -228,9 +296,15 @@ export function AnalysisPanel() {
         setValidationUncertain(validation.uncertain || false)
         setShowValidationDialog(true)
       }
-    } catch (e) {
+    } catch (e: any) {
       setValidating(false)
       console.error('Failed to start analysis:', e)
+      addMessage({
+        id: generateId(),
+        type: 'error',
+        content: `Failed to start analysis: ${e?.message || String(e)}`,
+        timestamp: new Date().toISOString(),
+      })
     }
   }
 
@@ -240,8 +314,14 @@ export function AnalysisPanel() {
       const failures = await startAnalysis()
       if (failures) notifySyncFailures(failures)
       setTimeout(() => wsConnect?.(), 100)
-    } catch (e) {
+    } catch (e: any) {
       console.error('Failed to start analysis:', e)
+      addMessage({
+        id: generateId(),
+        type: 'error',
+        content: `Failed to start analysis: ${e?.message || String(e)}`,
+        timestamp: new Date().toISOString(),
+      })
     }
   }
 
@@ -361,7 +441,7 @@ export function AnalysisPanel() {
   // Uses wsConnect from the store (managed by App.tsx) to avoid duplicate WebSocket instances
   useEffect(() => {
     if (currentSession &&
-        (currentSession.status === 'running' || currentSession.status === 'waiting_input') &&
+        (currentSession.status === 'running' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation') &&
         !wsConnected && wsConnect) {
       console.log('AnalysisPanel: Auto-connecting WebSocket for running session')
       wsConnect()
@@ -392,6 +472,37 @@ export function AnalysisPanel() {
     }
   }, [currentSession?.status, showFeedbackDialog])
 
+  // Detect annotation_confirmation messages and show dialog
+  useEffect(() => {
+    if (currentSession?.status !== 'waiting_annotation') return
+    const annMsg = [...messages].reverse().find(m => m.type === 'annotation_confirmation')
+    if (annMsg && annMsg.id !== lastAnnotationMsgRef.current) {
+      lastAnnotationMsgRef.current = annMsg.id
+      setAnnotationData(annMsg.content)
+      setShowAnnotationDialog(true)
+    }
+  }, [messages, currentSession?.status])
+
+  // Detect exploration_report messages and show dialog
+  useEffect(() => {
+    const expMsg = [...messages].reverse().find(m => m.type === 'exploration_report')
+    if (expMsg && expMsg.id !== lastExplorationMsgRef.current && currentSession?.status === 'waiting_input') {
+      lastExplorationMsgRef.current = expMsg.id
+      setExplorationReportData(expMsg.content)
+      setShowExplorationDialog(true)
+      // Hide the normal feedback dialog if it's showing
+      setShowFeedbackDialog(false)
+    }
+  }, [messages, currentSession?.status])
+
+  // Auto-dismiss annotation/exploration dialogs when analysis resumes
+  useEffect(() => {
+    if (currentSession?.status === 'running') {
+      if (showAnnotationDialog) setShowAnnotationDialog(false)
+      if (showExplorationDialog) setShowExplorationDialog(false)
+    }
+  }, [currentSession?.status, showAnnotationDialog, showExplorationDialog])
+
   if (!currentSession) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center">
@@ -408,7 +519,7 @@ export function AnalysisPanel() {
     )
   }
 
-  const isWaitingInput = currentSession.status === 'paused' || currentSession.status === 'waiting_input'
+  const isWaitingInput = currentSession.status === 'paused' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation'
   const isRunning = currentSession.status === 'running'
   const isCompleted = currentSession.status === 'completed'
 
@@ -517,10 +628,16 @@ export function AnalysisPanel() {
 
           {isWaitingInput && (
             <div className="flex items-center gap-2">
-              <div className="flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-700 rounded-xl">
+              <div className={`flex items-center gap-2 px-4 py-2 rounded-xl ${
+                currentSession.status === 'waiting_annotation'
+                  ? 'bg-violet-100 text-violet-700'
+                  : 'bg-amber-100 text-amber-700'
+              }`}>
                 <AlertCircle className="w-4 h-4" />
                 <span className="font-medium">
-                  {language === 'zh' ? '等待输入' : 'Waiting for Input'}
+                  {currentSession.status === 'waiting_annotation'
+                    ? (language === 'zh' ? '等待注释确认' : 'Waiting for Annotation')
+                    : (language === 'zh' ? '等待输入' : 'Waiting for Input')}
                 </span>
               </div>
               <button
@@ -705,7 +822,7 @@ export function AnalysisPanel() {
                         {language === 'zh' ? '本轮总结' : 'Round Summary'}
                       </h4>
                       <p className="text-sm text-slate-600 bg-slate-50 p-3 rounded-lg">
-                        {round.summary}
+                        {round.summary || ''}
                       </p>
                     </div>
 
@@ -806,8 +923,34 @@ export function AnalysisPanel() {
         )}
       </div>
 
-      {/* Round Feedback Dialog — shown after each round completes */}
-      {showFeedbackDialog && feedbackRoundData && currentSession && (
+      {/* Annotation Confirmation Dialog — shown during exploration when annotations need review */}
+      {showAnnotationDialog && annotationData && currentSession && (
+        <AnnotationConfirmationDialog
+          annotations={annotationData.annotations || []}
+          tissue={annotationData.tissue || ''}
+          organism={annotationData.organism || ''}
+          tissueSummary={annotationData.tissue_summary || ''}
+          language={language}
+          countdownSeconds={30}
+          onConfirm={handleConfirmAnnotations}
+          onClose={() => setShowAnnotationDialog(false)}
+        />
+      )}
+
+      {/* Exploration Report Dialog — shown after Round 1 exploration completes */}
+      {showExplorationDialog && explorationReportData && currentSession && (
+        <ExplorationReportDialog
+          report={explorationReportData.report_a || explorationReportData}
+          roundSummary={explorationReportData.round_summary?.summary || ''}
+          language={language}
+          onChooseDirection={handleChooseDirection}
+          onLetPiDecide={handleLetPiDecide}
+          onClose={() => setShowExplorationDialog(false)}
+        />
+      )}
+
+      {/* Round Feedback Dialog — shown after each round completes (not during exploration report) */}
+      {showFeedbackDialog && !showExplorationDialog && feedbackRoundData && currentSession && (
         <RoundFeedbackDialog
           roundNumber={feedbackRoundData.round}
           maxRounds={useAppStore.getState().maxRounds}

@@ -1,0 +1,1881 @@
+diff --git a/backend/agents/pi_agent.py b/backend/agents/pi_agent.py
+index 8d66871..311e82f 100644
+--- a/backend/agents/pi_agent.py
++++ b/backend/agents/pi_agent.py
+@@ -12,7 +12,7 @@ from .base import BaseAgent
+ # Configure logger
+ logger = logging.getLogger(__name__)
+ from ..models.schemas import (
+-    AgentType, AnalysisState, MessageRole, RoundResult,
++    AgentType, AnalysisState, MessageRole, RoundResult, ExplorationReport,
+     PublicationFigure, FigureReviewStatus, GraphicAbstract
+ )
+ from ..utils.llm_client import OpenAICompatibleClient
+@@ -106,14 +106,25 @@ Reply in JSON format with the following fields:
+ Project Name: {state.name}
+ Research Objective: {user_instruction}
+ 
+-You need to develop the first round analysis plan for the team. Please assign specific tasks for each direction (listed in execution order):
++## Available Data
++{state.build_experimental_design_summary()}
++
++You need to develop the first round analysis plan for the team.
++
++IMPORTANT: You must assign tasks based ONLY on the data that is actually available (listed above).
++- Do NOT instruct agents to perform experiments or staining that are not in the available data.
++- Each agent should analyze the data types listed for their section.
++- If a section has no data files, assign minimal or no tasks for that agent.
++- You MAY include a brief "recommended_future_experiments" list suggesting additional experiments/staining that would strengthen the analysis, but the primary tasks must use only available data.
+ 
+-1. Biochemistry analysis: What indicators need attention?
+-2. Pathology analysis: What types of sections need to be analyzed? What should be the focus?
+-3. Bioinformatics analysis: Basic single-cell sequencing analysis workflow, cell types and pathways to focus on
++Please assign specific tasks for each direction (listed in execution order):
++
++1. Biochemistry analysis: Analyze the available biochemistry data/indicators. What patterns and abnormalities should be assessed?
++2. Pathology analysis: Analyze the available histology images. What morphological features and pathological changes should be evaluated?
++3. Bioinformatics analysis: Analyze the available sequencing data. Standard workflow plus cell types and pathways to focus on.
+ 4. Literature research: What specific topics should be searched in PubMed?
+    - Each topic should be a focused research question (e.g., "Role of TGF-beta signaling in liver fibrosis progression")
+-   - Avoid overly broad topics (e.g., "liver disease") or overly specific gene lists
++   - Avoid overly broad or overly specific topics
+    - Include 2-4 topics covering different aspects (mechanism, phenotype, therapeutic relevance)
+ 
+ Reply in JSON format as follows:
+@@ -122,7 +133,8 @@ Reply in JSON format as follows:
+     "biochemistry_tasks": ["task1", "task2", ...],
+     "pathology_tasks": ["task1", "task2", ...],
+     "bioinformatics_tasks": ["task1", "task2", ...],
+-    "literature_topics": ["topic1", "topic2", ...]
++    "literature_topics": ["topic1", "topic2", ...],
++    "recommended_future_experiments": ["experiment1", "experiment2", ...]
+ }}
+ """
+         
+@@ -144,6 +156,385 @@ Reply in JSON format as follows:
+             "literature_topics": ["Literature related to the research topic and phenotype"]
+         }
+     
++    async def initial_exploration_instruction(
++        self,
++        state: AnalysisState,
++        user_instruction: str
++    ) -> Dict[str, Any]:
++        """
++        Generate exploration-phase instructions (Round 1) — unbiased, comprehensive.
++
++        The PI is constrained to plan without hypothesis-driven bias,
++        focusing on broad data extraction rather than targeted investigation.
++        """
++        logger.info(f"[PI] Generating exploration-phase instructions for project: {state.name}")
++        prompt = f"""
++## Project Information
++Project Name: {state.name}
++Research Objective: {user_instruction}
++
++## Available Data
++{state.build_experimental_design_summary()}
++
++You are generating the EXPLORATION PHASE plan (Round 1). This round performs comprehensive, unbiased data exploration.
++
++CRITICAL CONSTRAINTS:
++- Do NOT let the research objective bias your exploration tasks.
++- The goal is to discover what the data shows, NOT to confirm pre-existing hypotheses.
++- Prioritize broad, efficient, high-information analyses (e.g., DEG + GO/KEGG) over targeted deep analyses.
++- Do NOT instruct agents to perform experiments or staining that are not in the available data.
++
++## Fixed Mandatory Pipeline (MUST be included in bioinformatics_tasks)
++1. Quality Control (QC) and filtering
++2. Doublet removal assessment (if data quality suggests it is needed)
++3. Batch effect assessment and correction (if multiple samples/batches exist)
++4. Normalization, HVG selection, PCA, UMAP
++5. Clustering (leiden/louvain)
++6. Cell type annotation via annotate_clusters tool
++7. ALL clusters: condition-level DEG (treatment vs control per cluster) + GO/KEGG enrichment
++8. Cell-cell communication analysis (CellChat or NicheNet)
++
++## Your Additional Planning (UNBIASED exploration)
++Beyond the fixed pipeline, plan these additional analyses:
++1. Decide which cluster comparisons are biologically meaningful for cross-cluster DEG
++   - Do NOT compare unrelated cell types (e.g., T cells vs B cells)
++   - Focus on: same cell type across conditions, related subtypes within a lineage
++2. Decide which subtypes should be merged for additional condition-level comparisons
++   (e.g., merge all macrophage subtypes into one group for condition comparison)
++3. Keep all analyses simple and high-throughput
++
++IMPORTANT: You must assign tasks based ONLY on the data that is actually available.
++You MAY include a brief "recommended_future_experiments" list, but primary tasks must use only available data.
++
++Please assign specific tasks for each direction (listed in execution order):
++
++1. Biochemistry analysis: Analyze available biochemistry data/indicators
++2. Pathology analysis: Analyze available histology images
++3. Bioinformatics analysis: The fixed pipeline above PLUS your additional unbiased exploration tasks
++4. Literature research: Broad topics covering expected cell types and pathways in this tissue/disease context
++
++Reply in JSON format:
++{{
++    "overview": "Exploration strategy overview (unbiased, comprehensive)",
++    "biochemistry_tasks": ["task1", "task2", ...],
++    "pathology_tasks": ["task1", "task2", ...],
++    "bioinformatics_tasks": ["task1", "task2", ...],
++    "literature_topics": ["topic1", "topic2", ...],
++    "cluster_comparison_strategy": "Which clusters to compare and why (brief)",
++    "merge_strategy": "Which subtypes to merge for condition comparison (brief)",
++    "recommended_future_experiments": ["experiment1", ...]
++}}
++"""
++
++        response = await self.chat(prompt, temperature=0.3)
++        result = self._safe_parse_json(response, default={})
++
++        if result and "overview" in result:
++            return result
++
++        return {
++            "overview": response or "Failed to generate exploration instructions",
++            "pathology_tasks": ["Analyze tissue sections, assess overall morphological changes"],
++            "bioinformatics_tasks": [
++                "Execute standard scRNA-seq analysis: QC, normalization, clustering, annotation, "
++                "then condition-level DEG + GO/KEGG for ALL clusters, cell communication analysis"
++            ],
++            "biochemistry_tasks": ["Summarize existing biochemical indicators"],
++            "literature_topics": ["Cell types and pathways relevant to the tissue and disease context"]
++        }
++
++    async def review_cluster_annotations(
++        self,
++        state: AnalysisState,
++        annotations: Dict[str, Any],
++        tissue: str,
++        organism: str
++    ) -> Dict[str, Dict[str, str]]:
++        """
++        PI reviews Literature Agent's cluster annotations and assigns confidence scores.
++
++        Returns dict mapping cluster_id to adjusted annotation fields.
++        """
++        logger.info(f"[PI] Reviewing cluster annotations for {organism} {tissue}")
++
++        # Build compact annotation summary for PI review
++        ann_lines = []
++        for cid, info in annotations.items():
++            if isinstance(info, dict):
++                ct = info.get("cell_type", "Unknown")
++                markers = ", ".join(info.get("key_markers", [])[:5])
++                evidence = (info.get("evidence", ""))[:200]
++                ann_lines.append(
++                    f"- Cluster {cid}: {ct} | Markers: {markers} | Evidence: {evidence}"
++                )
++        ann_text = "\n".join(ann_lines) if ann_lines else "No annotations available"
++
++        prompt = f"""You are reviewing cell type annotations generated by a literature search for {organism} {tissue}.
++
++## Cluster Annotations from Literature Search
++{ann_text}
++
++For EACH cluster, evaluate:
++1. Is the cell type annotation correct given the marker genes and tissue context?
++2. Assign a confidence level:
++   - "high": Markers strongly and specifically match the annotated cell type in this tissue
++   - "medium": Markers partially match or could belong to a related cell type
++   - "low": Markers are ambiguous, contradictory, or insufficient for confident annotation
++
++Reply in JSON format (include ALL clusters):
++{{
++    "<cluster_id>": {{
++        "cell_type": "confirmed or corrected cell type",
++        "confidence": "high/medium/low"
++    }},
++    ...
++}}
++"""
++
++        response = await self.chat(prompt, temperature=0.2)
++        result = self._safe_parse_json(response, default={})
++
++        if not result or not isinstance(result, dict):
++            return {}
++
++        return result
++
++    async def generate_exploration_report(
++        self,
++        state: AnalysisState,
++        round_result: RoundResult
++    ) -> ExplorationReport:
++        """
++        Generate structured exploration report (Report A) after Phase 1.
++
++        Summarizes all findings into a structured format for PI decision-making
++        in the Innovation phase and for user review.
++        """
++        logger.info(f"[PI] Generating exploration report")
++        self.reset_history()
++
++        # Build annotation context
++        ann_summary = "No annotation data"
++        if state.annotation_state and state.annotation_state.cluster_annotations:
++            ann_lines = []
++            for ca in state.annotation_state.cluster_annotations:
++                override_note = f" (user override: {ca.user_override})" if ca.user_override else ""
++                ann_lines.append(
++                    f"- Cluster {ca.cluster_id}: {ca.cell_type}{override_note} "
++                    f"[confidence: {ca.confidence}] markers: {', '.join(ca.key_markers[:5])}"
++                )
++            ann_summary = "\n".join(ann_lines)
++
++        prompt = f"""Based on the Round 1 exploration results, generate a structured exploration report.
++
++## Round 1 Results
++**Bioinformatics findings**: {json.dumps(round_result.bioinformatics_findings[:15], ensure_ascii=False)}
++**Pathology findings**: {json.dumps(round_result.pathology_findings[:5], ensure_ascii=False)}
++**Biochemistry findings**: {json.dumps(round_result.biochemistry_findings[:5], ensure_ascii=False)}
++**Literature findings**: {json.dumps(round_result.literature_findings[:5], ensure_ascii=False)}
++**PI Summary**: {round_result.pi_summary[:1000]}
++
++## Cell Annotations
++{ann_summary}
++
++Generate a comprehensive structured report in JSON:
++{{
++    "cluster_overview": "Summary of all clusters: count, major cell type categories, proportions, condition distribution",
++    "data_quality_warnings": ["Warning about clusters with very few cells (<50)", "Warning about poor QC metrics", ...],
++    "strongest_heterogeneity": ["Which clusters/cell types show the strongest changes between conditions", ...],
++    "key_pathway_changes": ["Significant pathway enrichment results across clusters", ...],
++    "abnormal_markers": ["Clusters with unexpected marker expression patterns", ...],
++    "low_confidence_annotations": ["Clusters with uncertain cell type identity", ...],
++    "pi_direction_assessment": "Your overall assessment of the most promising research directions based on ALL the data",
++    "research_direction_candidates": [
++        {{
++            "direction": "A specific research question, e.g., 'Macrophage polarization shift in disease group'",
++            "rationale": "Why this is interesting based on the data (cite specific findings)"
++        }},
++        ...
++    ]
++}}
++
++IMPORTANT:
++- Include 3-5 research direction candidates
++- Each candidate should be a specific, actionable research question (not vague)
++- Base all assessments on actual data findings, not assumptions
++"""
++
++        response = await self.chat(prompt, temperature=0.3)
++        data = self._safe_parse_json(response, default={})
++
++        # Build ExplorationReport from parsed data
++        valid_fields = {k: v for k, v in data.items() if k in ExplorationReport.model_fields}
++        report = ExplorationReport(**valid_fields)
++
++        return report
++
++    async def innovation_instruction(
++        self,
++        state: AnalysisState,
++        user_direction: str
++    ) -> Dict[str, Any]:
++        """
++        Generate innovation-phase instructions based on user's chosen direction.
++
++        The PI generates targeted, hypothesis-driven tasks focused on the selected direction.
++        """
++        logger.info(f"[PI] Generating innovation-phase instructions for direction: {user_direction[:100]}")
++
++        # Build exploration context
++        exploration_context = ""
++        if state.exploration_report:
++            exploration_context = f"""
++## Exploration Phase Summary
++Cluster Overview: {state.exploration_report.cluster_overview[:500]}
++Key Pathway Changes: {json.dumps(state.exploration_report.key_pathway_changes[:5], ensure_ascii=False)}
++Data Quality Warnings: {json.dumps(state.exploration_report.data_quality_warnings[:3], ensure_ascii=False)}
++PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]}
++"""
++
++        prompt = f"""
++## Project: {state.name}
++## Research Objective: {state.initial_instruction}
++## User's Chosen Research Direction: {user_direction}
++{exploration_context}
++
++## Available Data
++{state.build_experimental_design_summary()}
++
++You are now in the INNOVATION PHASE. Generate TARGETED, HYPOTHESIS-DRIVEN analysis tasks.
++Focus specifically on: {user_direction}
++
++Design specific analyses to deeply investigate this direction:
++- Targeted DEG analysis on relevant cell populations
++- Specific pathway analysis (beyond basic GO/KEGG if needed, e.g., GSEA, ssGSEA)
++- Trajectory/pseudotime analysis (if differentiation is relevant)
++- Transcription factor activity analysis (pySCENIC, decoupleR)
++- Subpopulation-specific comparisons within the relevant cell types
++- Cell communication focused on relevant cell types
++
++IMPORTANT:
++- Do NOT repeat analyses already completed in Round 1 (basic pipeline, annotation, etc.)
++- The Jupyter kernel retains all Round 1 variables — build upon existing results
++- Focus on depth over breadth
++
++Reply in JSON format:
++{{
++    "overview": "Innovation strategy for: {user_direction}",
++    "biochemistry_tasks": [...],
++    "pathology_tasks": [...],
++    "bioinformatics_tasks": [...],
++    "literature_topics": [...]
++}}
++"""
++
++        response = await self.chat(prompt, temperature=0.4)
++        result = self._safe_parse_json(response, default={})
++
++        if result and "overview" in result:
++            return result
++
++        return {
++            "overview": f"Innovation phase: {user_direction}",
++            "bioinformatics_tasks": [f"Perform targeted analysis on: {user_direction}"],
++            "pathology_tasks": [],
++            "biochemistry_tasks": [],
++            "literature_topics": [f"Literature review on: {user_direction}"]
++        }
++
++    async def innovation_instruction_pi_directed(
++        self,
++        state: AnalysisState
++    ) -> Dict[str, Any]:
++        """
++        PI autonomously selects a research direction using 3-dimension evaluation,
++        then generates innovation-phase instructions.
++
++        Dimensions:
++        1. Innovation — is this well-studied or emerging? (Literature search)
++        2. Novelty — is this expected or surprising? (PI reasoning)
++        3. Reliability — is the supporting data reliable? (Data quality)
++        """
++        logger.info(f"[PI] PI-directed innovation: evaluating research directions")
++
++        # Get candidates from exploration report
++        candidates = []
++        if state.exploration_report and state.exploration_report.research_direction_candidates:
++            candidates = state.exploration_report.research_direction_candidates
++
++        if not candidates:
++            # Fallback: generate candidates from round results
++            candidates = [{"direction": "Continue analysis based on Round 1 findings", "rationale": "No candidates available"}]
++
++        # Build exploration context
++        exploration_context = ""
++        if state.exploration_report:
++            exploration_context = f"""
++Cluster Overview: {state.exploration_report.cluster_overview[:500]}
++Key Pathway Changes: {json.dumps(state.exploration_report.key_pathway_changes[:5], ensure_ascii=False)}
++Strongest Heterogeneity: {json.dumps(state.exploration_report.strongest_heterogeneity[:5], ensure_ascii=False)}
++Data Quality Warnings: {json.dumps(state.exploration_report.data_quality_warnings[:3], ensure_ascii=False)}
++"""
++
++        prompt = f"""Evaluate the following research direction candidates for the innovation phase.
++
++## Exploration Report
++{exploration_context}
++
++## Candidates
++{json.dumps(candidates, ensure_ascii=False, indent=2)}
++
++For EACH candidate, evaluate on 3 dimensions:
++
++1. **Innovation**: Based on your knowledge of the biomedical literature, is this a well-studied area (low innovation) or an emerging/under-explored area (high innovation)?
++   - Score: high / medium / low
++   - Provide brief evidence for your assessment
++
++2. **Novelty**: Given the experimental design and tissue context, is this finding expected (low novelty) or surprising/counter-intuitive (high novelty)?
++   - Score: high / medium / low
++   - IMPORTANT: You MUST explain WHY this is novel or expected
++
++3. **Reliability**: Based on the data quality (sample sizes, statistical significance, effect sizes from the exploration report), how reliable is the supporting evidence?
++   - Score: high / medium / low
++   - Provide evidence from the data
++
++DECISION RULE:
++- Reliability is the BASELINE: low-reliability directions are NOT recommended regardless of other scores
++- Among reliable directions: Innovation + Novelty together determine priority
++- If multiple directions are equally ranked, prefer the one with higher novelty
++
++Return JSON:
++{{
++    "evaluations": [
++        {{
++            "direction": "...",
++            "innovation_score": "high/medium/low",
++            "innovation_evidence": "...",
++            "novelty_score": "high/medium/low",
++            "novelty_reasoning": "WHY this is novel or expected",
++            "reliability_score": "high/medium/low",
++            "reliability_evidence": "...",
++            "overall_priority": "high/medium/low"
++        }}
++    ],
++    "selected_direction": "The highest-priority direction to pursue",
++    "rationale": "Why this direction was selected over others"
++}}
++"""
++
++        response = await self.chat(prompt, temperature=0.4)
++        data = self._safe_parse_json(response, default={})
++
++        selected = data.get("selected_direction", "")
++
++        if not selected and candidates:
++            selected = candidates[0].get("direction", "Continue analysis based on Round 1 findings")
++
++        logger.info(f"[PI] Selected direction: {selected}")
++
++        # Generate tasks for the selected direction
++        return await self.innovation_instruction(state, selected)
++
+     async def plan_agent_tasks(
+         self,
+         agent_name: str,
+@@ -151,6 +542,7 @@ Reply in JSON format as follows:
+         completed_results: Dict[str, List[str]],
+         overall_strategy: str = "",
+         research_objective: str = "",
++        state: Optional[AnalysisState] = None,
+     ) -> List[str]:
+         """Dynamically refine tasks for an agent based on already-completed results.
+ 
+@@ -163,6 +555,7 @@ Reply in JSON format as follows:
+             completed_results: Dict of findings from already-completed agents
+             overall_strategy: Overview/strategy string for context
+             research_objective: The project's research objective
++            state: Optional AnalysisState for data availability context
+ 
+         Returns:
+             Refined list of task strings. Falls back to original_tasks on error.
+@@ -181,11 +574,16 @@ Reply in JSON format as follows:
+             )
+         results_summary = "\n\n".join(results_parts)
+ 
++        data_summary = state.build_experimental_design_summary() if state else "Not available"
++
+         prompt = f"""You are the PI coordinating a multi-agent analysis.
+ 
+ ## Research Objective
+ {research_objective}
+ 
++## Available Data
++{data_summary}
++
+ ## Overall Strategy
+ {overall_strategy or "Not available"}
+ 
+@@ -198,6 +596,7 @@ Reply in JSON format as follows:
+ Based on the completed results, refine the tasks for the {agent_name} agent.
+ You may: keep tasks unchanged, add specific focus areas, modify tasks to leverage
+ insights, or add cross-referencing instructions.
++Ensure refined tasks are grounded in the available data. Do NOT add tasks requiring data that is not available.
+ 
+ Return a JSON object:
+ {{
+@@ -644,6 +1043,26 @@ IMPORTANT: agents_for_next_round controls which agents are ACTIVATED in the next
+ - Only include "biochemistry" if biochemistry data needs further analysis or reinterpretation
+ - Only include "literature" if new literature search is needed for newly discovered topics
+ - EXCLUDE agents that have no meaningful new work to save time and resources
++"""
++
++        # Add phase-specific synthesis instructions
++        if state.analysis_phase == "exploration":
++            prompt += """
++EXPLORATION PHASE — additional synthesis requirements:
++- Summarize ALL findings comprehensively, without hypothesis bias
++- Highlight unexpected or surprising findings specifically
++- Flag data quality concerns (clusters with very few cells, poor QC metrics)
++- Note any low-confidence cell annotations
++- In next_* tasks: suggest potential research directions for the Innovation phase
++"""
++        else:
++            direction_ctx = state.user_chosen_direction or "PI-selected direction"
++            prompt += f"""
++INNOVATION PHASE — focused synthesis:
++- Current research direction: {direction_ctx}
++- Focus your synthesis on findings relevant to this direction
++- Evaluate whether the hypothesis is supported or contradicted by the evidence
++- Suggest deeper follow-up analyses within this specific direction
+ """
+ 
+         # Try up to 2 times if response is empty
+diff --git a/backend/main.py b/backend/main.py
+index 8999f03..708b969 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -1508,6 +1508,18 @@ async def resume_analysis(session_id: str):
+             success=True,
+             message="Continuing analysis"
+         )
++    elif state.status == TaskStatus.WAITING_ANNOTATION:
++        # Continue from annotation confirmation wait
++        state.status = TaskStatus.RUNNING
++        await async_save_session(session_id, state)
++        async with _state_lock:
++            workflow = workflows.get(session_id)
++        if workflow:
++            workflow.signal_annotation_confirmed()
++        return APIResponse(
++            success=True,
++            message="Annotation confirmed, continuing analysis"
++        )
+     elif state.status == TaskStatus.PAUSED:
+         state.status = TaskStatus.RUNNING
+         await async_save_session(session_id, state)
+@@ -1539,7 +1551,7 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
+     if state is None:
+         raise HTTPException(status_code=404, detail="Session not found")
+ 
+-    if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT):
++    if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION):
+         raise HTTPException(status_code=400, detail=f"Cannot stop: {state.status.value}")
+ 
+     if req.action == "immediate":
+@@ -1652,7 +1664,7 @@ async def get_human_input_status(session_id: str):
+     state = await ensure_session_loaded(session_id)
+     if state is None:
+         raise HTTPException(status_code=404, detail="Session not found")
+-    
++
+     return {
+         "waiting_for_input": state.human_input_requested,
+         "pending_input": state.pending_human_input,
+@@ -1660,6 +1672,90 @@ async def get_human_input_status(session_id: str):
+     }
+ 
+ 
++class AnnotationConfirmation(BaseModel):
++    """Request body for confirming cluster annotations"""
++    annotations: List[Dict[str, Any]] = Field(default_factory=list)
++    # Each item: {"cluster_id": str, "user_override": Optional[str], "user_confirmed": bool}
++
++
++@app.post("/api/session/{session_id}/confirm-annotations")
++async def confirm_annotations(session_id: str, request: AnnotationConfirmation):
++    """User confirms or modifies cell type annotations during exploration phase"""
++    validate_session_id(session_id)
++    state = await ensure_session_loaded(session_id)
++    if state is None:
++        raise HTTPException(status_code=404, detail="Session not found")
++
++    if state.status != TaskStatus.WAITING_ANNOTATION:
++        raise HTTPException(status_code=400, detail="Session is not waiting for annotation confirmation")
++
++    # Apply user modifications to annotation state
++    if state.annotation_state:
++        for ua in request.annotations:
++            cid = ua.get("cluster_id", "")
++            for ca in state.annotation_state.cluster_annotations:
++                if ca.cluster_id == cid:
++                    if ua.get("user_override"):
++                        ca.user_override = ua["user_override"]
++                    ca.user_confirmed = True
++                    break
++        state.annotation_state.confirmed = True
++        state.annotation_state.pending = False
++
++    sessions[session_id] = state
++    await async_save_session(session_id, state)
++
++    # Signal the workflow to continue from annotation wait
++    async with _state_lock:
++        workflow = workflows.get(session_id)
++    if workflow:
++        workflow.signal_annotation_confirmed()
++
++    return APIResponse(
++        success=True,
++        message="Annotations confirmed"
++    )
++
++
++class DirectionChoice(BaseModel):
++    """Request body for choosing innovation phase direction"""
++    direction: str = ""
++    let_pi_decide: bool = False
++
++
++@app.post("/api/session/{session_id}/choose-direction")
++async def choose_direction(session_id: str, request: DirectionChoice):
++    """User chooses research direction for innovation phase after exploration report"""
++    validate_session_id(session_id)
++    state = await ensure_session_loaded(session_id)
++    if state is None:
++        raise HTTPException(status_code=404, detail="Session not found")
++
++    if state.status != TaskStatus.WAITING_INPUT:
++        raise HTTPException(status_code=400, detail="Session is not waiting for input")
++
++    if request.let_pi_decide:
++        state.user_chosen_direction = "[PI_DECIDE]"
++        state.pending_human_input = "[PI_DECIDE]"
++    else:
++        state.user_chosen_direction = request.direction
++        state.pending_human_input = request.direction
++
++    sessions[session_id] = state
++    await async_save_session(session_id, state)
++
++    # Signal the workflow to continue from wait_for_user_input
++    async with _state_lock:
++        workflow = workflows.get(session_id)
++    if workflow:
++        workflow.signal_continue()
++
++    return APIResponse(
++        success=True,
++        message=f"Direction selected: {'PI decides' if request.let_pi_decide else request.direction[:100]}"
++    )
++
++
+ @app.post("/api/session/{session_id}/request-input")
+ async def request_human_input(session_id: str):
+     """Request human input (called by workflow when needing guidance)"""
+diff --git a/backend/models/schemas.py b/backend/models/schemas.py
+index 863eeaf..4db3e95 100644
+--- a/backend/models/schemas.py
++++ b/backend/models/schemas.py
+@@ -31,9 +31,15 @@ class TaskStatus(str, Enum):
+     COMPLETED = "completed"
+     FAILED = "failed"
+     WAITING_INPUT = "waiting_input"
++    WAITING_ANNOTATION = "waiting_annotation"  # Paused for user annotation confirmation
+     PAUSED = "paused"
+     GENERATING_REPORT = "generating_report"
+ 
++class AnalysisPhase(str, Enum):
++    """Two-phase workflow: exploration (Round 1) then innovation (Round 2+)"""
++    EXPLORATION = "exploration"
++    INNOVATION = "innovation"
++
+ class FigureReviewStatus(str, Enum):
+     """Status of figure review by PI Agent"""
+     PENDING = "pending"
+@@ -205,6 +211,38 @@ class LiteratureReport(BaseModel):
+     references: List[Dict[str, str]] = Field(default_factory=list)
+     timestamp: datetime = Field(default_factory=datetime.now)
+ 
++class ClusterAnnotation(BaseModel):
++    """Single cluster annotation for user review during exploration phase"""
++    cluster_id: str
++    cell_type: str
++    subtypes: List[str] = Field(default_factory=list)
++    key_markers: List[str] = Field(default_factory=list)
++    confidence: str = "low"  # "high" / "medium" / "low"
++    evidence: str = ""
++    user_confirmed: bool = False
++    user_override: Optional[str] = None  # User-provided cell type override
++
++class AnnotationConfirmationState(BaseModel):
++    """State for cell annotation confirmation pause during exploration phase"""
++    cluster_annotations: List[ClusterAnnotation] = Field(default_factory=list)
++    tissue: str = ""
++    organism: str = ""
++    tissue_summary: str = ""
++    pending: bool = False
++    confirmed: bool = False
++
++class ExplorationReport(BaseModel):
++    """Structured exploration report (Report A) generated after Phase 1"""
++    cluster_overview: str = ""
++    data_quality_warnings: List[str] = Field(default_factory=list)
++    strongest_heterogeneity: List[str] = Field(default_factory=list)
++    key_pathway_changes: List[str] = Field(default_factory=list)
++    abnormal_markers: List[str] = Field(default_factory=list)
++    low_confidence_annotations: List[str] = Field(default_factory=list)
++    pi_direction_assessment: str = ""
++    research_direction_candidates: List[Dict[str, Any]] = Field(default_factory=list)
++    # Each candidate: {"direction": str, "rationale": str, "expected_innovation": str, "expected_novelty": str, "data_reliability": str}
++
+ class RoundResult(BaseModel):
+     """Result from one analysis round"""
+     round_number: int
+@@ -219,6 +257,8 @@ class RoundResult(BaseModel):
+     agents_for_next_round: List[str] = Field(
+         default_factory=lambda: ["bioinformatics", "pathology", "biochemistry", "literature"]
+     )
++    phase: str = "exploration"  # "exploration" or "innovation"
++    exploration_report: Optional[ExplorationReport] = None  # Only for Phase 1
+     timestamp: datetime = Field(default_factory=datetime.now)
+ 
+ class PublicationFigure(BaseModel):
+@@ -277,7 +317,13 @@ class AnalysisState(BaseModel):
+     current_round: int = 0
+     max_rounds: int = 3  # User-configurable maximum rounds
+     round_wait_seconds: int = 300  # Countdown seconds between rounds (-1=manual, 0=no wait)
+-    
++
++    # Two-phase workflow state
++    analysis_phase: str = "exploration"  # "exploration" (Round 1) / "innovation" (Round 2+)
++    annotation_state: Optional[AnnotationConfirmationState] = None
++    exploration_report: Optional[ExplorationReport] = None
++    user_chosen_direction: Optional[str] = None  # User's chosen direction for innovation phase
++
+     # Initial inputs
+     initial_instruction: str = ""
+     
+diff --git a/backend/workflow.py b/backend/workflow.py
+index 6c9908c..4cf93c8 100644
+--- a/backend/workflow.py
++++ b/backend/workflow.py
+@@ -24,7 +24,8 @@ MAX_NODE_RETRIES = 3
+ from .models.schemas import (
+     AnalysisState, AnalysisStep, AgentType, TaskStatus, RoundResult,
+     WebSocketMessage, AgentMessage, MessageRole, BiochemistryIndicator,
+-    PublicationFigure, FigureReviewStatus
++    PublicationFigure, FigureReviewStatus,
++    ClusterAnnotation, AnnotationConfirmationState,
+ )
+ from .agents.pi_agent import PIAgent
+ from .agents.pathology_agent import PathologyAgent
+@@ -188,11 +189,18 @@ class SingleCellAnalysisWorkflow:
+ 
+         # Event for blocking between rounds (wait for user input or continue signal)
+         self._continue_event = asyncio.Event()
+-        
++
++        # Event for blocking during annotation confirmation (exploration phase)
++        self._annotation_event = asyncio.Event()
++
+     def signal_continue(self):
+         """Signal the workflow to continue from wait_for_user_input"""
+         self._continue_event.set()
+ 
++    def signal_annotation_confirmed(self):
++        """Signal that user has confirmed cell type annotations"""
++        self._annotation_event.set()
++
+     async def initialize(self):
+         """Initialize all components"""
+         logger.info(f"[{self.session_id}] Initializing workflow components")
+@@ -413,6 +421,7 @@ class SingleCellAnalysisWorkflow:
+                     "version": analysis_state.state_version,
+                     "status": analysis_state.status.value,
+                     "current_round": analysis_state.current_round,
++                    "analysis_phase": analysis_state.analysis_phase,
+                     "timestamp": analysis_state.last_sync_timestamp.isoformat(),
+                     "unresolved_errors": len(analysis_state.get_unresolved_errors())
+                 }
+@@ -469,7 +478,12 @@ Be specific and actionable in your response."""
+         tissue: str,
+         organism: str
+     ) -> Dict[str, Any]:
+-        """Callback for bioinformatics agent to annotate all clusters via literature."""
++        """Callback for bioinformatics agent to annotate all clusters via literature.
++
++        In the exploration phase, this callback additionally:
++        1. Has PI Agent review annotations and assign confidence scores
++        2. Blocks execution until the user confirms annotations via frontend
++        """
+         n_clusters = len(cluster_markers)
+         await self._send_message(
+             "status",
+@@ -498,6 +512,85 @@ Be specific and actionable in your response."""
+                 AgentType.LITERATURE
+             )
+ 
++            # --- PI review + user confirmation (exploration phase only) ---
++            if state.analysis_phase == "exploration":
++                # Step 1: PI Agent reviews annotations and assigns confidence
++                await self._send_message(
++                    "status",
++                    "PI is reviewing cluster annotations and assigning confidence scores...",
++                    AgentType.PI
++                )
++                try:
++                    pi_review = await self.pi_agent.review_cluster_annotations(
++                        state, annotations, tissue, organism
++                    )
++                    for cid, review in pi_review.items():
++                        if cid in annotations and isinstance(review, dict):
++                            annotations[cid].update(review)
++                    result["annotations"] = annotations
++                except Exception as e:
++                    logger.warning(f"[{self.session_id}] PI annotation review failed: {e}")
++                    # Continue with original annotations if PI review fails
++
++                # Step 2: Build AnnotationConfirmationState
++                cluster_anns = []
++                for cid, info in annotations.items():
++                    if isinstance(info, dict):
++                        cluster_anns.append(ClusterAnnotation(
++                            cluster_id=cid,
++                            cell_type=info.get("cell_type", "Unknown"),
++                            subtypes=info.get("subtypes", []),
++                            key_markers=info.get("key_markers", []),
++                            confidence=info.get("confidence", "low"),
++                            evidence=info.get("evidence", ""),
++                        ))
++
++                ann_state = AnnotationConfirmationState(
++                    cluster_annotations=cluster_anns,
++                    tissue=tissue,
++                    organism=organism,
++                    tissue_summary=result.get("tissue_summary", ""),
++                    pending=True,
++                )
++                state.annotation_state = ann_state
++
++                # Step 3: Send annotation confirmation request to frontend and block
++                await self._send_message("annotation_confirmation", {
++                    "annotations": [a.model_dump() for a in cluster_anns],
++                    "tissue": tissue,
++                    "organism": organism,
++                    "tissue_summary": result.get("tissue_summary", ""),
++                }, AgentType.LITERATURE)
++
++                original_status = state.status
++                state.status = TaskStatus.WAITING_ANNOTATION
++                await self._send_state_sync(state, "annotation_confirmation")
++
++                logger.info(f"[{self.session_id}] Waiting for user annotation confirmation...")
++                self._annotation_event.clear()
++                await self._annotation_event.wait()
++                logger.info(f"[{self.session_id}] Annotation confirmation received")
++
++                state.status = original_status
++
++                # Step 4: Apply user overrides
++                confirmed = state.annotation_state
++                if confirmed and confirmed.confirmed:
++                    for ca in confirmed.cluster_annotations:
++                        if ca.user_override and ca.cluster_id in annotations:
++                            annotations[ca.cluster_id]["cell_type"] = ca.user_override
++                            logger.info(
++                                f"[{self.session_id}] User override: cluster {ca.cluster_id} "
++                                f"→ {ca.user_override}"
++                            )
++                    result["annotations"] = annotations
++
++                await self._send_message(
++                    "status",
++                    "Annotation confirmed, continuing analysis...",
++                    AgentType.LITERATURE
++                )
++
+             return result
+         except Exception as e:
+             error_msg = f"Cluster annotation failed: {str(e)}"
+@@ -838,38 +931,61 @@ Be specific and actionable in your response."""
+         # Normal planning without pre-processed instructions
+         skip_nodes = []  # Empty for round 1; populated for round 2+
+         if analysis_state.current_round == 1:
+-            # First round - generate initial instructions
+-            instructions = await self.pi_agent.initial_instruction(
++            # Round 1: Exploration phase — unbiased comprehensive exploration
++            instructions = await self.pi_agent.initial_exploration_instruction(
+                 analysis_state,
+                 analysis_state.initial_instruction
+             )
+         else:
+-            # Subsequent rounds - based on previous results
+-            last_round = analysis_state.get_latest_round()
+-            instructions = {
+-                "pathology_tasks": [],
+-                "bioinformatics_tasks": [],
+-                "biochemistry_tasks": [],
+-                "literature_topics": []
+-            }
++            # Round 2+: Innovation phase — hypothesis-driven targeted analysis
++            if analysis_state.analysis_phase != "innovation":
++                analysis_state.analysis_phase = "innovation"
++
++            # Check if user specified a direction or wants PI to decide
++            user_direction = analysis_state.user_chosen_direction
++            if user_direction and user_direction not in ("", "[PI_DECIDE]"):
++                logger.info(f"[{self.session_id}] Innovation phase: user-directed → {user_direction[:100]}")
++                instructions = await self.pi_agent.innovation_instruction(
++                    analysis_state, user_direction
++                )
++                # Consume the direction to avoid reusing in next round
++                analysis_state.user_chosen_direction = None
++            elif user_direction == "[PI_DECIDE]" or (not user_direction and analysis_state.current_round == 2):
++                # PI autonomously selects direction using 3-dimension evaluation
++                logger.info(f"[{self.session_id}] Innovation phase: PI-directed")
++                instructions = await self.pi_agent.innovation_instruction_pi_directed(
++                    analysis_state
++                )
++                analysis_state.user_chosen_direction = None
++            else:
++                # Subsequent innovation rounds (3+): use previous round's next_steps
++                last_round = analysis_state.get_latest_round()
++                instructions = {
++                    "pathology_tasks": [],
++                    "bioinformatics_tasks": [],
++                    "biochemistry_tasks": [],
++                    "literature_topics": []
++                }
+ 
+-            # Extract tasks for each agent
+-            prefix_map = {
+-                "[Pathology]": "pathology_tasks",
+-                "[Bioinformatics]": "bioinformatics_tasks",
+-                "[Biochemistry]": "biochemistry_tasks",
+-                "[Literature]": "literature_topics",
+-            }
+-            for step in (last_round.next_steps if last_round else []):
+-                for prefix, key in prefix_map.items():
+-                    if step.startswith(prefix):
+-                        instructions[key].append(step.split("] ", 1)[1].strip() if "] " in step else step[len(prefix):].strip())
+-                        break
++                # Extract tasks for each agent
++                prefix_map = {
++                    "[Pathology]": "pathology_tasks",
++                    "[Bioinformatics]": "bioinformatics_tasks",
++                    "[Biochemistry]": "biochemistry_tasks",
++                    "[Literature]": "literature_topics",
++                }
++                for step in (last_round.next_steps if last_round else []):
++                    for prefix, key in prefix_map.items():
++                        if step.startswith(prefix):
++                            instructions[key].append(step.split("] ", 1)[1].strip() if "] " in step else step[len(prefix):].strip())
++                            break
++
++                # Add overview for round 3+ so PI dynamic planning has strategic context
++                if last_round:
++                    summary = last_round.pi_summary or "Continue analysis based on previous round findings."
++                    instructions["overview"] = summary[:500]
+ 
+-            # Add overview for round 2+ so PI dynamic planning has strategic context
+-            if last_round:
+-                summary = last_round.pi_summary or "Continue analysis based on previous round findings."
+-                instructions["overview"] = summary[:500]
++            last_round = analysis_state.get_latest_round()
+ 
+             # Fallback: if prefix matching extracted no tasks at all, use PI summary
+             fallback_all_agents = False
+@@ -995,6 +1111,7 @@ Be specific and actionable in your response."""
+                     completed_results=completed,
+                     overall_strategy=overview,
+                     research_objective=analysis_state.initial_instruction,
++                    state=analysis_state,
+                 )
+ 
+         # Enrich instruction with previous findings for round 2+
+@@ -1093,6 +1210,7 @@ Be specific and actionable in your response."""
+                     completed_results=completed,
+                     overall_strategy=overview,
+                     research_objective=analysis_state.initial_instruction,
++                    state=analysis_state,
+                 )
+ 
+         # Build previous findings and code history context for round 2+
+@@ -1122,9 +1240,34 @@ Be specific and actionable in your response."""
+             )
+ 
+         # Build comprehensive instruction for bioinformatics agent
++        # Phase-aware instruction for bioinformatics agent
++        phase_instruction = ""
++        if analysis_state.analysis_phase == "exploration":
++            phase_instruction = """
++## EXPLORATION PHASE INSTRUCTIONS
++This is Round 1 — comprehensive, unbiased exploration. You MUST:
++1. Complete the FULL standard pipeline (QC → normalization → clustering → annotation)
++2. After annotation: perform condition-level DEG for ALL clusters (treatment vs control)
++3. Run GO/KEGG pathway enrichment on ALL DEG results
++4. Keep analyses simple and high-throughput (DEG + GO/KEGG)
++5. Do NOT skip any cluster — analyze everything comprehensively
++6. Complete cell communication analysis (CellChat or similar)
++"""
++        else:
++            direction_ctx = analysis_state.user_chosen_direction or "PI-directed"
++            phase_instruction = f"""
++## INNOVATION PHASE INSTRUCTIONS
++This is a targeted, hypothesis-driven round.
++Research direction: {direction_ctx}
++Focus your analysis on the specific direction above.
++You may skip irrelevant cell populations and focus on those relevant to the hypothesis.
++Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc.).
++"""
++
+         instruction = f"""Analyze single-cell RNA-seq data for project: {analysis_state.name}
+ 
+ Research context: {analysis_state.initial_instruction}
++{phase_instruction}
+ 
+ PI's analysis goals for this round:
+ {chr(10).join(f"- {task}" for task in bioinf_tasks) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
+@@ -1321,6 +1464,7 @@ Report key findings when you complete each major analysis phase."""
+                     completed_results=completed,
+                     overall_strategy=overview,
+                     research_objective=analysis_state.initial_instruction,
++                    state=analysis_state,
+                 )
+ 
+         if not topics:
+@@ -1528,8 +1672,37 @@ Return ONLY the JSON array, nothing else."""
+ 
+         logger.info(f"[{self.session_id}] Round {round_result.round_number} synthesis complete: new_findings={round_result.new_findings}, {len(round_result.next_steps)} next steps")
+ 
++        # Tag round with current phase
++        round_result.phase = analysis_state.analysis_phase
++
++        # Exploration phase: generate structured Report A and transition to innovation
++        if analysis_state.analysis_phase == "exploration":
++            await self._send_message(
++                "status",
++                "Generating exploration report (Report A)...",
++                AgentType.PI
++            )
++            try:
++                exploration_report = await self.pi_agent.generate_exploration_report(
++                    analysis_state, round_result
++                )
++                analysis_state.exploration_report = exploration_report
++                round_result.exploration_report = exploration_report
++
++                await self._send_message("exploration_report", {
++                    "report_a": exploration_report.model_dump(),
++                    "round": round_result.round_number,
++                    "summary": round_result.pi_summary,
++                }, AgentType.PI)
++            except Exception as e:
++                logger.error(f"[{self.session_id}] Exploration report generation failed: {e}")
++
++            # Transition to innovation phase for next round
++            analysis_state.analysis_phase = "innovation"
++            logger.info(f"[{self.session_id}] Transitioning to innovation phase")
++
+         analysis_state.round_results.append(round_result)
+-        
++
+         # Save state after each round
+         if self.state_callback:
+             try:
+@@ -1631,6 +1804,11 @@ Return ONLY the JSON array, nothing else."""
+ 
+         wait_seconds = analysis_state.round_wait_seconds  # -1=manual, 0=no wait, >0=countdown
+ 
++        # After exploration phase (Round 1), force manual wait so user must choose direction
++        if analysis_state.current_round == 1 and analysis_state.analysis_phase == "innovation":
++            wait_seconds = -1
++            logger.info(f"[{self.session_id}] Exploration phase complete, forcing manual wait for direction selection")
++
+         if wait_seconds == 0:
+             # No-wait mode: proceed immediately
+             logger.info(f"[{self.session_id}] No-wait mode, proceeding immediately (round {analysis_state.current_round})")
+diff --git a/frontend/src/components/AnalysisPanel.tsx b/frontend/src/components/AnalysisPanel.tsx
+index 702172b..1093e75 100644
+--- a/frontend/src/components/AnalysisPanel.tsx
++++ b/frontend/src/components/AnalysisPanel.tsx
+@@ -4,6 +4,8 @@ import { useSession, useConfig, generateId } from '../hooks/useApi'
+ import { useTranslation } from '../i18n/translations'
+ import ReactMarkdown from 'react-markdown'
+ import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
++import { AnnotationConfirmationDialog } from './AnnotationConfirmationDialog'
++import { ExplorationReportDialog } from './ExplorationReportDialog'
+ import {
+   Play,
+   AlertCircle,
+@@ -54,6 +56,16 @@ export function AnalysisPanel() {
+   const [feedbackRoundData, setFeedbackRoundData] = useState<RoundSummary | null>(null)
+   const lastDialogRoundRef = useRef<number>(-1)
+ 
++  // Annotation confirmation dialog state
++  const [showAnnotationDialog, setShowAnnotationDialog] = useState(false)
++  const [annotationData, setAnnotationData] = useState<any>(null)
++  const lastAnnotationMsgRef = useRef<string>('')
++
++  // Exploration report dialog state
++  const [showExplorationDialog, setShowExplorationDialog] = useState(false)
++  const [explorationReportData, setExplorationReportData] = useState<any>(null)
++  const lastExplorationMsgRef = useRef<string>('')
++
+   // Stop dialog state
+   const [showStopDialog, setShowStopDialog] = useState(false)
+   const [stopping, setStopping] = useState(false)
+@@ -194,6 +206,62 @@ export function AnalysisPanel() {
+     })
+   }
+ 
++  // Annotation confirmation handler
++  const handleConfirmAnnotations = useCallback(async (
++    annotations: Array<{ cluster_id: string; user_override?: string; user_confirmed: boolean }>
++  ) => {
++    if (!currentSession) return
++    try {
++      await fetch(`${API_BASE}/session/${currentSession.id}/confirm-annotations`, {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ annotations }),
++      })
++      setShowAnnotationDialog(false)
++      if (!wsConnected) {
++        setTimeout(() => wsConnect?.(), 100)
++      }
++    } catch (e) {
++      console.error('Failed to confirm annotations:', e)
++    }
++  }, [currentSession, wsConnected, wsConnect])
++
++  // Direction choice handler
++  const handleChooseDirection = useCallback(async (direction: string) => {
++    if (!currentSession) return
++    try {
++      await fetch(`${API_BASE}/session/${currentSession.id}/choose-direction`, {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ direction, let_pi_decide: false }),
++      })
++      setShowExplorationDialog(false)
++      if (!wsConnected) {
++        setTimeout(() => wsConnect?.(), 100)
++      }
++    } catch (e) {
++      console.error('Failed to choose direction:', e)
++    }
++  }, [currentSession, wsConnected, wsConnect])
++
++  // Let PI decide handler
++  const handleLetPiDecide = useCallback(async () => {
++    if (!currentSession) return
++    try {
++      await fetch(`${API_BASE}/session/${currentSession.id}/choose-direction`, {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ direction: '', let_pi_decide: true }),
++      })
++      setShowExplorationDialog(false)
++      if (!wsConnected) {
++        setTimeout(() => wsConnect?.(), 100)
++      }
++    } catch (e) {
++      console.error('Failed to let PI decide:', e)
++    }
++  }, [currentSession, wsConnected, wsConnect])
++
+   const handleStart = async () => {
+     // Block in read mode
+     if (readMode) {
+@@ -361,7 +429,7 @@ export function AnalysisPanel() {
+   // Uses wsConnect from the store (managed by App.tsx) to avoid duplicate WebSocket instances
+   useEffect(() => {
+     if (currentSession &&
+-        (currentSession.status === 'running' || currentSession.status === 'waiting_input') &&
++        (currentSession.status === 'running' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation') &&
+         !wsConnected && wsConnect) {
+       console.log('AnalysisPanel: Auto-connecting WebSocket for running session')
+       wsConnect()
+@@ -392,6 +460,37 @@ export function AnalysisPanel() {
+     }
+   }, [currentSession?.status, showFeedbackDialog])
+ 
++  // Detect annotation_confirmation messages and show dialog
++  useEffect(() => {
++    if (currentSession?.status !== 'waiting_annotation') return
++    const annMsg = [...messages].reverse().find(m => m.type === 'annotation_confirmation')
++    if (annMsg && annMsg.id !== lastAnnotationMsgRef.current) {
++      lastAnnotationMsgRef.current = annMsg.id
++      setAnnotationData(annMsg.content)
++      setShowAnnotationDialog(true)
++    }
++  }, [messages, currentSession?.status])
++
++  // Detect exploration_report messages and show dialog
++  useEffect(() => {
++    const expMsg = [...messages].reverse().find(m => m.type === 'exploration_report')
++    if (expMsg && expMsg.id !== lastExplorationMsgRef.current && currentSession?.status === 'waiting_input') {
++      lastExplorationMsgRef.current = expMsg.id
++      setExplorationReportData(expMsg.content)
++      setShowExplorationDialog(true)
++      // Hide the normal feedback dialog if it's showing
++      setShowFeedbackDialog(false)
++    }
++  }, [messages, currentSession?.status])
++
++  // Auto-dismiss annotation/exploration dialogs when analysis resumes
++  useEffect(() => {
++    if (currentSession?.status === 'running') {
++      if (showAnnotationDialog) setShowAnnotationDialog(false)
++      if (showExplorationDialog) setShowExplorationDialog(false)
++    }
++  }, [currentSession?.status, showAnnotationDialog, showExplorationDialog])
++
+   if (!currentSession) {
+     return (
+       <div className="flex flex-col items-center justify-center h-full text-center">
+@@ -408,7 +507,7 @@ export function AnalysisPanel() {
+     )
+   }
+ 
+-  const isWaitingInput = currentSession.status === 'paused' || currentSession.status === 'waiting_input'
++  const isWaitingInput = currentSession.status === 'paused' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation'
+   const isRunning = currentSession.status === 'running'
+   const isCompleted = currentSession.status === 'completed'
+ 
+@@ -517,10 +616,16 @@ export function AnalysisPanel() {
+ 
+           {isWaitingInput && (
+             <div className="flex items-center gap-2">
+-              <div className="flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-700 rounded-xl">
++              <div className={`flex items-center gap-2 px-4 py-2 rounded-xl ${
++                currentSession.status === 'waiting_annotation'
++                  ? 'bg-violet-100 text-violet-700'
++                  : 'bg-amber-100 text-amber-700'
++              }`}>
+                 <AlertCircle className="w-4 h-4" />
+                 <span className="font-medium">
+-                  {language === 'zh' ? '等待输入' : 'Waiting for Input'}
++                  {currentSession.status === 'waiting_annotation'
++                    ? (language === 'zh' ? '等待注释确认' : 'Waiting for Annotation')
++                    : (language === 'zh' ? '等待输入' : 'Waiting for Input')}
+                 </span>
+               </div>
+               <button
+@@ -806,8 +911,34 @@ export function AnalysisPanel() {
+         )}
+       </div>
+ 
+-      {/* Round Feedback Dialog — shown after each round completes */}
+-      {showFeedbackDialog && feedbackRoundData && currentSession && (
++      {/* Annotation Confirmation Dialog — shown during exploration when annotations need review */}
++      {showAnnotationDialog && annotationData && currentSession && (
++        <AnnotationConfirmationDialog
++          annotations={annotationData.annotations || []}
++          tissue={annotationData.tissue || ''}
++          organism={annotationData.organism || ''}
++          tissueSummary={annotationData.tissue_summary || ''}
++          language={language}
++          countdownSeconds={30}
++          onConfirm={handleConfirmAnnotations}
++          onClose={() => setShowAnnotationDialog(false)}
++        />
++      )}
++
++      {/* Exploration Report Dialog — shown after Round 1 exploration completes */}
++      {showExplorationDialog && explorationReportData && currentSession && (
++        <ExplorationReportDialog
++          report={explorationReportData.report_a || explorationReportData}
++          roundSummary={explorationReportData.round_summary?.summary || ''}
++          language={language}
++          onChooseDirection={handleChooseDirection}
++          onLetPiDecide={handleLetPiDecide}
++          onClose={() => setShowExplorationDialog(false)}
++        />
++      )}
++
++      {/* Round Feedback Dialog — shown after each round completes (not during exploration report) */}
++      {showFeedbackDialog && !showExplorationDialog && feedbackRoundData && currentSession && (
+         <RoundFeedbackDialog
+           roundNumber={feedbackRoundData.round}
+           maxRounds={useAppStore.getState().maxRounds}
+diff --git a/frontend/src/components/AnnotationConfirmationDialog.tsx b/frontend/src/components/AnnotationConfirmationDialog.tsx
+new file mode 100644
+index 0000000..1a51939
+--- /dev/null
++++ b/frontend/src/components/AnnotationConfirmationDialog.tsx
+@@ -0,0 +1,297 @@
++import { useState, useEffect, useRef, useCallback } from 'react'
++import {
++  X,
++  CheckCircle2,
++  AlertTriangle,
++  Clock,
++  Edit3,
++  Check
++} from 'lucide-react'
++import { Language } from '../i18n/translations'
++
++interface ClusterAnnotation {
++  cluster_id: string
++  cell_type: string
++  subtypes: string[]
++  key_markers: string[]
++  confidence: string  // "high" / "medium" / "low"
++  evidence: string
++  user_confirmed: boolean
++  user_override: string | null
++}
++
++interface AnnotationConfirmationDialogProps {
++  annotations: ClusterAnnotation[]
++  tissue: string
++  organism: string
++  tissueSummary: string
++  language: Language
++  countdownSeconds: number  // countdown for high-confidence auto-confirm
++  onConfirm: (annotations: Array<{ cluster_id: string; user_override?: string; user_confirmed: boolean }>) => Promise<void>
++  onClose: () => void
++}
++
++export function AnnotationConfirmationDialog({
++  annotations: initialAnnotations,
++  tissue,
++  organism,
++  tissueSummary,
++  language,
++  countdownSeconds,
++  onConfirm,
++  onClose
++}: AnnotationConfirmationDialogProps) {
++  const [annotations, setAnnotations] = useState(initialAnnotations)
++  const [editingCluster, setEditingCluster] = useState<string | null>(null)
++  const [editValue, setEditValue] = useState('')
++  const [countdown, setCountdown] = useState(countdownSeconds > 0 ? countdownSeconds : 0)
++  const [submitting, setSubmitting] = useState(false)
++  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
++
++  const lowConfidenceClusters = annotations.filter(a => a.confidence === 'low')
++  const allLowConfidenceConfirmed = lowConfidenceClusters.every(a => a.user_confirmed)
++  const hasLowConfidence = lowConfidenceClusters.length > 0
++
++  // Countdown timer for auto-confirm (only when no low-confidence clusters need manual review)
++  useEffect(() => {
++    if (countdownSeconds <= 0 || hasLowConfidence) return
++
++    intervalRef.current = setInterval(() => {
++      setCountdown(prev => {
++        if (prev <= 1) {
++          if (intervalRef.current) clearInterval(intervalRef.current)
++          // Auto-confirm all
++          handleConfirmAll()
++          return 0
++        }
++        return prev - 1
++      })
++    }, 1000)
++
++    return () => {
++      if (intervalRef.current) clearInterval(intervalRef.current)
++    }
++  }, [countdownSeconds, hasLowConfidence])
++
++  const handleEdit = (clusterId: string, currentType: string) => {
++    setEditingCluster(clusterId)
++    setEditValue(currentType)
++  }
++
++  const handleSaveEdit = (clusterId: string) => {
++    setAnnotations(prev => prev.map(a =>
++      a.cluster_id === clusterId
++        ? { ...a, user_override: editValue, user_confirmed: true, cell_type: editValue }
++        : a
++    ))
++    setEditingCluster(null)
++  }
++
++  const handleConfirmCluster = (clusterId: string) => {
++    setAnnotations(prev => prev.map(a =>
++      a.cluster_id === clusterId ? { ...a, user_confirmed: true } : a
++    ))
++  }
++
++  const handleConfirmAll = useCallback(async () => {
++    setSubmitting(true)
++    try {
++      const payload = annotations.map(a => ({
++        cluster_id: a.cluster_id,
++        user_override: a.user_override || undefined,
++        user_confirmed: true
++      }))
++      await onConfirm(payload)
++    } finally {
++      setSubmitting(false)
++    }
++  }, [annotations, onConfirm])
++
++  const confidenceColor = (conf: string) => {
++    switch (conf) {
++      case 'high': return 'bg-green-100 text-green-800'
++      case 'medium': return 'bg-amber-100 text-amber-800'
++      case 'low': return 'bg-red-100 text-red-800'
++      default: return 'bg-slate-100 text-slate-800'
++    }
++  }
++
++  const confidenceIcon = (conf: string) => {
++    switch (conf) {
++      case 'high': return <CheckCircle2 className="w-4 h-4 text-green-600" />
++      case 'medium': return <Clock className="w-4 h-4 text-amber-600" />
++      case 'low': return <AlertTriangle className="w-4 h-4 text-red-600" />
++      default: return null
++    }
++  }
++
++  return (
++    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
++      <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 max-h-[85vh] flex flex-col">
++        {/* Header */}
++        <div className="flex items-center justify-between px-6 py-4 border-b">
++          <div>
++            <h2 className="text-lg font-semibold text-slate-800">
++              {language === 'zh' ? '细胞注释确认' : 'Cell Annotation Confirmation'}
++            </h2>
++            <p className="text-sm text-slate-500 mt-1">
++              {organism} — {tissue}
++              {tissueSummary && ` | ${tissueSummary.substring(0, 100)}`}
++            </p>
++          </div>
++          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg">
++            <X className="w-5 h-5 text-slate-400" />
++          </button>
++        </div>
++
++        {/* Warning banner for low confidence */}
++        {hasLowConfidence && (
++          <div className="mx-6 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
++            <AlertTriangle className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
++            <div className="text-sm text-red-700">
++              {language === 'zh'
++                ? `${lowConfidenceClusters.length} 个亚群的注释置信度较低，需要手动确认后才能继续分析。`
++                : `${lowConfidenceClusters.length} cluster(s) have low confidence annotations and require manual confirmation.`}
++            </div>
++          </div>
++        )}
++
++        {/* Countdown for auto-confirm (only when no low confidence) */}
++        {!hasLowConfidence && countdown > 0 && (
++          <div className="mx-6 mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center gap-2">
++            <Clock className="w-5 h-5 text-blue-500" />
++            <span className="text-sm text-blue-700">
++              {language === 'zh'
++                ? `所有注释置信度较高，${countdown} 秒后自动确认...`
++                : `All annotations have high/medium confidence. Auto-confirming in ${countdown}s...`}
++            </span>
++          </div>
++        )}
++
++        {/* Annotations table */}
++        <div className="flex-1 overflow-y-auto px-6 py-4">
++          <table className="w-full text-sm">
++            <thead className="sticky top-0 bg-white">
++              <tr className="border-b text-left text-slate-500">
++                <th className="py-2 pr-3 w-20">Cluster</th>
++                <th className="py-2 pr-3 w-40">
++                  {language === 'zh' ? '细胞类型' : 'Cell Type'}
++                </th>
++                <th className="py-2 pr-3 w-24">
++                  {language === 'zh' ? '置信度' : 'Confidence'}
++                </th>
++                <th className="py-2 pr-3">
++                  {language === 'zh' ? '标记基因' : 'Key Markers'}
++                </th>
++                <th className="py-2 w-24 text-right">
++                  {language === 'zh' ? '操作' : 'Action'}
++                </th>
++              </tr>
++            </thead>
++            <tbody>
++              {annotations.map(ann => (
++                <tr
++                  key={ann.cluster_id}
++                  className={`border-b last:border-0 ${
++                    ann.confidence === 'low' && !ann.user_confirmed
++                      ? 'bg-red-50'
++                      : ann.user_confirmed
++                      ? 'bg-green-50'
++                      : ''
++                  }`}
++                >
++                  <td className="py-3 pr-3 font-mono text-slate-700">{ann.cluster_id}</td>
++                  <td className="py-3 pr-3">
++                    {editingCluster === ann.cluster_id ? (
++                      <div className="flex items-center gap-1">
++                        <input
++                          type="text"
++                          value={editValue}
++                          onChange={e => setEditValue(e.target.value)}
++                          className="border rounded px-2 py-1 text-sm w-full"
++                          autoFocus
++                          onKeyDown={e => e.key === 'Enter' && handleSaveEdit(ann.cluster_id)}
++                        />
++                        <button
++                          onClick={() => handleSaveEdit(ann.cluster_id)}
++                          className="p-1 text-green-600 hover:bg-green-100 rounded"
++                        >
++                          <Check className="w-4 h-4" />
++                        </button>
++                      </div>
++                    ) : (
++                      <div className="flex items-center gap-2">
++                        <span className={ann.user_override ? 'font-medium text-violet-700' : 'text-slate-800'}>
++                          {ann.user_override || ann.cell_type}
++                        </span>
++                        {ann.user_override && (
++                          <span className="text-xs text-slate-400 line-through">{initialAnnotations.find(a => a.cluster_id === ann.cluster_id)?.cell_type}</span>
++                        )}
++                      </div>
++                    )}
++                  </td>
++                  <td className="py-3 pr-3">
++                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${confidenceColor(ann.confidence)}`}>
++                      {confidenceIcon(ann.confidence)}
++                      {ann.confidence}
++                    </span>
++                  </td>
++                  <td className="py-3 pr-3 text-slate-600 text-xs">
++                    {ann.key_markers.slice(0, 5).join(', ')}
++                    {ann.key_markers.length > 5 && ` (+${ann.key_markers.length - 5})`}
++                  </td>
++                  <td className="py-3 text-right">
++                    <div className="flex items-center justify-end gap-1">
++                      {!ann.user_confirmed && (
++                        <button
++                          onClick={() => handleConfirmCluster(ann.cluster_id)}
++                          className="p-1.5 text-green-600 hover:bg-green-100 rounded-lg"
++                          title={language === 'zh' ? '确认' : 'Confirm'}
++                        >
++                          <Check className="w-4 h-4" />
++                        </button>
++                      )}
++                      <button
++                        onClick={() => handleEdit(ann.cluster_id, ann.user_override || ann.cell_type)}
++                        className="p-1.5 text-slate-500 hover:bg-slate-100 rounded-lg"
++                        title={language === 'zh' ? '修改' : 'Edit'}
++                      >
++                        <Edit3 className="w-4 h-4" />
++                      </button>
++                      {ann.user_confirmed && (
++                        <CheckCircle2 className="w-4 h-4 text-green-500" />
++                      )}
++                    </div>
++                  </td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++
++        {/* Footer */}
++        <div className="flex items-center justify-between px-6 py-4 border-t bg-slate-50 rounded-b-2xl">
++          <div className="text-sm text-slate-500">
++            {annotations.filter(a => a.user_confirmed).length} / {annotations.length}{' '}
++            {language === 'zh' ? '已确认' : 'confirmed'}
++          </div>
++          <button
++            onClick={handleConfirmAll}
++            disabled={submitting || (hasLowConfidence && !allLowConfidenceConfirmed)}
++            className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all ${
++              submitting || (hasLowConfidence && !allLowConfidenceConfirmed)
++                ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
++                : 'bg-violet-600 text-white hover:bg-violet-700 shadow-md'
++            }`}
++          >
++            {submitting
++              ? (language === 'zh' ? '提交中...' : 'Submitting...')
++              : hasLowConfidence && !allLowConfidenceConfirmed
++              ? (language === 'zh' ? '请先确认低置信度亚群' : 'Confirm low-confidence clusters first')
++              : (language === 'zh' ? '确认全部注释' : 'Confirm All Annotations')}
++          </button>
++        </div>
++      </div>
++    </div>
++  )
++}
+diff --git a/frontend/src/components/ExplorationReportDialog.tsx b/frontend/src/components/ExplorationReportDialog.tsx
+new file mode 100644
+index 0000000..c84039a
+--- /dev/null
++++ b/frontend/src/components/ExplorationReportDialog.tsx
+@@ -0,0 +1,263 @@
++import { useState } from 'react'
++import {
++  X,
++  Send,
++  Brain,
++  AlertTriangle,
++  TrendingUp,
++  Dna,
++  ChevronDown,
++  ChevronUp
++} from 'lucide-react'
++import { Language } from '../i18n/translations'
++
++interface ExplorationReport {
++  cluster_overview: string
++  data_quality_warnings: string[]
++  strongest_heterogeneity: string[]
++  key_pathway_changes: string[]
++  abnormal_markers: string[]
++  low_confidence_annotations: string[]
++  pi_direction_assessment: string
++  research_direction_candidates: Array<{
++    direction: string
++    rationale: string
++    expected_innovation?: string
++    expected_novelty?: string
++    data_reliability?: string
++  }>
++}
++
++interface ExplorationReportDialogProps {
++  report: ExplorationReport
++  roundSummary: string
++  language: Language
++  onChooseDirection: (direction: string) => Promise<void>
++  onLetPiDecide: () => Promise<void>
++  onClose: () => void
++}
++
++export function ExplorationReportDialog({
++  report,
++  roundSummary,
++  language,
++  onChooseDirection,
++  onLetPiDecide,
++  onClose
++}: ExplorationReportDialogProps) {
++  const [customDirection, setCustomDirection] = useState('')
++  const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null)
++  const [submitting, setSubmitting] = useState(false)
++  const [showFullReport, setShowFullReport] = useState(false)
++
++  const handleSubmitDirection = async () => {
++    setSubmitting(true)
++    try {
++      const direction = selectedCandidate !== null
++        ? report.research_direction_candidates[selectedCandidate].direction
++        : customDirection
++      await onChooseDirection(direction)
++    } finally {
++      setSubmitting(false)
++    }
++  }
++
++  const handlePiDecide = async () => {
++    setSubmitting(true)
++    try {
++      await onLetPiDecide()
++    } finally {
++      setSubmitting(false)
++    }
++  }
++
++  const isZh = language === 'zh'
++
++  return (
++    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
++      <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col">
++        {/* Header */}
++        <div className="flex items-center justify-between px-6 py-4 border-b bg-gradient-to-r from-violet-50 to-blue-50 rounded-t-2xl">
++          <div>
++            <h2 className="text-lg font-semibold text-slate-800">
++              {isZh ? '探索期分析完成 — 选择研究方向' : 'Exploration Complete — Choose Research Direction'}
++            </h2>
++            <p className="text-sm text-slate-500 mt-1">
++              {roundSummary
++                ? roundSummary.substring(0, 120) + (roundSummary.length > 120 ? '...' : '')
++                : (isZh ? 'Round 1 全面探索已完成，请查看报告并选择 Round 2 的研究方向' : 'Round 1 exploration is complete. Review the report and choose a direction for Round 2.')}
++            </p>
++          </div>
++          <button onClick={onClose} className="p-2 hover:bg-white/60 rounded-lg">
++            <X className="w-5 h-5 text-slate-400" />
++          </button>
++        </div>
++
++        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
++          {/* Cluster Overview */}
++          {report.cluster_overview && (
++            <div className="p-4 bg-slate-50 rounded-xl">
++              <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2 mb-2">
++                <Dna className="w-4 h-4 text-violet-500" />
++                {isZh ? '亚群概况' : 'Cluster Overview'}
++              </h3>
++              <p className="text-sm text-slate-600 whitespace-pre-wrap">{report.cluster_overview}</p>
++            </div>
++          )}
++
++          {/* Data Quality Warnings */}
++          {report.data_quality_warnings.length > 0 && (
++            <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
++              <h3 className="text-sm font-semibold text-amber-800 flex items-center gap-2 mb-2">
++                <AlertTriangle className="w-4 h-4" />
++                {isZh ? '数据质量警告' : 'Data Quality Warnings'}
++              </h3>
++              <ul className="text-sm text-amber-700 space-y-1">
++                {report.data_quality_warnings.map((w, i) => (
++                  <li key={i} className="flex items-start gap-2">
++                    <span className="text-amber-400 mt-0.5">•</span>
++                    {w}
++                  </li>
++                ))}
++              </ul>
++            </div>
++          )}
++
++          {/* Key Findings (collapsible) */}
++          <div>
++            <button
++              onClick={() => setShowFullReport(!showFullReport)}
++              className="flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800"
++            >
++              {showFullReport ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
++              {isZh ? '查看完整分析结果' : 'View Full Analysis Results'}
++            </button>
++
++            {showFullReport && (
++              <div className="mt-3 space-y-3">
++                {report.strongest_heterogeneity.length > 0 && (
++                  <div className="p-3 bg-blue-50 rounded-lg">
++                    <h4 className="text-xs font-semibold text-blue-700 mb-1">
++                      {isZh ? '最强异质性' : 'Strongest Heterogeneity'}
++                    </h4>
++                    <ul className="text-xs text-blue-600 space-y-0.5">
++                      {report.strongest_heterogeneity.map((h, i) => <li key={i}>• {h}</li>)}
++                    </ul>
++                  </div>
++                )}
++
++                {report.key_pathway_changes.length > 0 && (
++                  <div className="p-3 bg-green-50 rounded-lg">
++                    <h4 className="text-xs font-semibold text-green-700 mb-1">
++                      {isZh ? '关键通路变化' : 'Key Pathway Changes'}
++                    </h4>
++                    <ul className="text-xs text-green-600 space-y-0.5">
++                      {report.key_pathway_changes.map((p, i) => <li key={i}>• {p}</li>)}
++                    </ul>
++                  </div>
++                )}
++
++                {report.abnormal_markers.length > 0 && (
++                  <div className="p-3 bg-red-50 rounded-lg">
++                    <h4 className="text-xs font-semibold text-red-700 mb-1">
++                      {isZh ? '异常 Marker' : 'Abnormal Markers'}
++                    </h4>
++                    <ul className="text-xs text-red-600 space-y-0.5">
++                      {report.abnormal_markers.map((m, i) => <li key={i}>• {m}</li>)}
++                    </ul>
++                  </div>
++                )}
++              </div>
++            )}
++          </div>
++
++          {/* PI Direction Assessment */}
++          {report.pi_direction_assessment && (
++            <div className="p-4 bg-violet-50 border border-violet-200 rounded-xl">
++              <h3 className="text-sm font-semibold text-violet-800 flex items-center gap-2 mb-2">
++                <Brain className="w-4 h-4" />
++                {isZh ? 'PI 研究方向评估' : 'PI Direction Assessment'}
++              </h3>
++              <p className="text-sm text-violet-700 whitespace-pre-wrap">{report.pi_direction_assessment}</p>
++            </div>
++          )}
++
++          {/* Research Direction Candidates */}
++          {report.research_direction_candidates.length > 0 && (
++            <div>
++              <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2 mb-3">
++                <TrendingUp className="w-4 h-4 text-violet-500" />
++                {isZh ? '推荐研究方向（点击选择）' : 'Recommended Directions (click to select)'}
++              </h3>
++              <div className="space-y-2">
++                {report.research_direction_candidates.map((c, i) => (
++                  <button
++                    key={i}
++                    onClick={() => {
++                      setSelectedCandidate(selectedCandidate === i ? null : i)
++                      setCustomDirection('')
++                    }}
++                    className={`w-full text-left p-4 rounded-xl border-2 transition-all ${
++                      selectedCandidate === i
++                        ? 'border-violet-400 bg-violet-50'
++                        : 'border-slate-200 hover:border-violet-200 hover:bg-slate-50'
++                    }`}
++                  >
++                    <div className="font-medium text-sm text-slate-800">{c.direction}</div>
++                    <div className="text-xs text-slate-500 mt-1">{c.rationale}</div>
++                  </button>
++                ))}
++              </div>
++            </div>
++          )}
++
++          {/* Custom direction input */}
++          <div>
++            <h3 className="text-sm font-semibold text-slate-700 mb-2">
++              {isZh ? '或自定义研究方向' : 'Or specify a custom direction'}
++            </h3>
++            <textarea
++              value={customDirection}
++              onChange={e => {
++                setCustomDirection(e.target.value)
++                if (e.target.value) setSelectedCandidate(null)
++              }}
++              placeholder={isZh ? '例如：重点分析巨噬细胞的极化状态...' : 'e.g., Focus on macrophage polarization state...'}
++              className="w-full border rounded-xl px-4 py-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-violet-300"
++              rows={2}
++            />
++          </div>
++        </div>
++
++        {/* Footer */}
++        <div className="flex items-center justify-between px-6 py-4 border-t bg-slate-50 rounded-b-2xl">
++          <button
++            onClick={handlePiDecide}
++            disabled={submitting}
++            className="px-5 py-2.5 rounded-xl text-sm font-medium border border-violet-300 text-violet-700 hover:bg-violet-50 transition-all disabled:opacity-50"
++          >
++            <div className="flex items-center gap-2">
++              <Brain className="w-4 h-4" />
++              {isZh ? '让 PI 决定' : 'Let PI Decide'}
++            </div>
++          </button>
++
++          <button
++            onClick={handleSubmitDirection}
++            disabled={submitting || (selectedCandidate === null && !customDirection.trim())}
++            className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
++              submitting || (selectedCandidate === null && !customDirection.trim())
++                ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
++                : 'bg-violet-600 text-white hover:bg-violet-700 shadow-md'
++            }`}
++          >
++            <Send className="w-4 h-4" />
++            {submitting
++              ? (isZh ? '提交中...' : 'Submitting...')
++              : (isZh ? '确认方向，开始分析' : 'Start Innovation Analysis')}
++          </button>
++        </div>
++      </div>
++    </div>
++  )
++}
+diff --git a/frontend/src/hooks/useApi.ts b/frontend/src/hooks/useApi.ts
+index 5faa56f..ccc2105 100644
+--- a/frontend/src/hooks/useApi.ts
++++ b/frontend/src/hooks/useApi.ts
+@@ -868,7 +868,8 @@ export function useWebSocket() {
+             setStateVersion(syncContent.version)
+             updateSession({
+               status: syncContent.status,
+-              currentRound: syncContent.current_round
++              currentRound: syncContent.current_round,
++              ...(syncContent.analysis_phase ? { analysisPhase: syncContent.analysis_phase } : {}),
+             })
+           }
+           return  // Don't add state_sync to message stream
+diff --git a/frontend/src/stores/appStore.ts b/frontend/src/stores/appStore.ts
+index 8746e9b..be57923 100644
+--- a/frontend/src/stores/appStore.ts
++++ b/frontend/src/stores/appStore.ts
+@@ -4,12 +4,12 @@ import { Language, getDefaultPrompts } from '../i18n/translations'
+ 
+ // Types
+ export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor'
+-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'generating_report'
++export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'waiting_annotation' | 'generating_report'
+ export type FigureReviewStatus = 'pending' | 'approved' | 'revision_requested'
+ 
+ export interface Message {
+   id: string
+-  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint'
++  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report'
+   agent?: AgentType
+   content: any
+   timestamp: string
+@@ -106,6 +106,7 @@ export interface Session {
+   currentRound: number
+   createdAt: string
+   instruction: string
++  analysisPhase?: 'exploration' | 'innovation'
+   treatmentGroups: TreatmentGroup[]
+   dataFiles: DataFile[]
+   biochemistryIndicators: BiochemistryIndicator[]

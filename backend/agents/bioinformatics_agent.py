@@ -609,6 +609,10 @@ Before running sc.tl.pca() or any dimensionality reduction:
             max_steps = step_count + original_total
             self.analysis_context = checkpoint.get('analysis_context', {})
             analysis_log = [AnalysisStep(**s) for s in checkpoint.get('analysis_log', [])]
+            restored_code_history = checkpoint.get('code_history', [])
+            if restored_code_history:
+                self.code_history = [CodeExecution(**ce) for ce in restored_code_history]
+                logger.info(f"[Bioinformatics] Restored {len(self.code_history)} code_history entries from checkpoint")
             logger.info(f"[Bioinformatics] Restored state: step={step_count}, findings={len(all_findings)}, figures={len(all_figures)}, new max_steps={max_steps}")
         else:
             messages = [

@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.12.4
-**Last Updated**: 2026-03-11
+**Version**: 0.13.0
+**Last Updated**: 2026-03-12
 
 ## Project Overview
 
@@ -157,6 +157,8 @@ intesc/                         # Code directory
 │   │   ├── components/         # React components
 │   │   │   ├── ChatPanel.tsx   # PI Agent free-form chat + delegation (~657 lines)
 │   │   │   ├── AboutDialog.tsx # About dialog (project info, author, contact)
+│   │   │   ├── AnnotationConfirmationDialog.tsx  # Cell annotation review dialog (Phase 1 pause, ~314 lines)
+│   │   │   ├── ExplorationReportDialog.tsx       # Phase 1 exploration report & research direction selection (~264 lines)
 │   │   │   └── ...             # Other panels (Analysis, Data, Prompts, Results, Report)
 │   │   ├── stores/             # Zustand state (+ chatMessages, chatDelegation, generating_report status)
 │   │   ├── hooks/              # API Hooks
@@ -309,6 +311,8 @@ initialize_round ◄────────────────────
 | `human_input_requested` | Workflow waiting for user input (round feedback) |
 | `human_input_received` | User input received, continuing workflow |
 | `annotation_result` | Literature-based cluster annotation result |
+| `annotation_confirmation` | Phase 1 pause — sends cluster annotations for user review and confirmation |
+| `exploration_report` | Phase 1 completion — sends exploration report and requests research direction selection |
 | `data_request` | Agent requesting additional data |
 | `chat_delegation` | Chat delegation progress (started/agent_complete/agent_error/synthesizing) |
 | `chat_result` | Final chat delegation result |
@@ -716,7 +720,9 @@ type MessageType =
   | 'figure_approved'   // Figure approved
   | 'figure_revision'   // Revision requested
   // Cluster annotation
-  | 'annotation_result' // Literature-based cluster annotation result
+  | 'annotation_result'       // Literature-based cluster annotation result
+  | 'annotation_confirmation' // Phase 1 pause — cluster annotations for user review
+  | 'exploration_report'      // Phase 1 completion — exploration report + direction selection
   // Chat delegation
   | 'chat_delegation'   // Delegation progress (started/agent_complete/agent_error/synthesizing)
   | 'chat_result'       // Final delegation result
@@ -773,7 +779,7 @@ type MessageType =
 class AnalysisState(BaseModel):
     id: str
     name: str
-    status: TaskStatus  # pending, running, completed, failed, paused, waiting_input, generating_report
+    status: TaskStatus  # pending, running, completed, failed, paused, waiting_input, waiting_annotation, generating_report
     initial_instruction: str
 
     # Version control
@@ -805,6 +811,13 @@ class AnalysisState(BaseModel):
     pending_uploaded_files: List[Dict]
     max_rounds: int = 0
     round_wait_seconds: int = 300
+
+    # Two-phase workflow state (v0.13.0)
+    analysis_phase: str = "exploration"  # "exploration" (Round 1) / "innovation" (Round 2+)
+    annotation_state: Optional[AnnotationConfirmationState] = None  # Cell annotation confirmation state
+    exploration_report: Optional[ExplorationReport] = None  # Phase 1 structured report
+    user_chosen_direction: Optional[str] = None  # User's chosen research direction for innovation phase
+    current_round_direction: str = ""  # Active direction for current innovation round
 
     # Literature config (per-session)
     literature_config: Dict[str, Any]
@@ -893,6 +906,8 @@ class AgentError(BaseModel):
 ```python
 class RoundResult(BaseModel):
     round_number: int
+    phase: str = "exploration"  # "exploration" or "innovation" (v0.13.0)
+    exploration_report: Optional[ExplorationReport] = None  # Only present for Phase 1 round result
     pathology_findings: List[str]
     bioinformatics_findings: List[str]
     biochemistry_findings: List[str]
@@ -917,6 +932,43 @@ class GraphicAbstract(BaseModel):
     all_candidates: List[str] = []     # All candidate images (base64)
     selected_index: int = 0            # Index of PI-selected best candidate
     created_at: datetime
+```
+
+### Two-Phase Workflow Models (v0.13.0)
+
+```python
+class ClusterAnnotation(BaseModel):
+    """Single cluster annotation for user review during exploration phase"""
+    cluster_id: str
+    cell_type: str
+    subtypes: List[str]
+    key_markers: List[str]
+    confidence: str        # "high" / "medium" / "low"
+    evidence: str
+    user_confirmed: bool = False
+    user_override: Optional[str] = None  # User-provided cell type override
+
+class AnnotationConfirmationState(BaseModel):
+    """State for cell annotation confirmation pause during exploration phase"""
+    cluster_annotations: List[ClusterAnnotation]
+    tissue: str
+    organism: str
+    tissue_summary: str
+    pending: bool = False
+    confirmed: bool = False
+
+class ExplorationReport(BaseModel):
+    """Structured exploration report generated after Phase 1 (Round 1)"""
+    cluster_overview: str
+    data_quality_warnings: List[str]
+    strongest_heterogeneity: List[str]
+    key_pathway_changes: List[str]
+    abnormal_markers: List[str]
+    low_confidence_annotations: List[str]
+    pi_direction_assessment: str
+    research_direction_candidates: List[Dict[str, Any]]
+    # Each candidate: {"direction": str, "rationale": str, "expected_innovation": str,
+    #                  "expected_novelty": str, "data_reliability": str}
 ```
 
 ## Development Guide
@@ -1221,6 +1273,8 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 | Round results + publication outputs | `ResultsPanel.tsx` | ~359 lines |
 | Main application (+ About dialog) | `App.tsx` | ~313 lines |
 | About dialog (project info) | `AboutDialog.tsx` | ~135 lines |
+| Cell annotation confirmation dialog (Phase 1) | `AnnotationConfirmationDialog.tsx` | ~314 lines |
+| Exploration report & direction selection dialog | `ExplorationReportDialog.tsx` | ~264 lines |
 | API + literature configuration + DR warning | `ConfigPanel.tsx` | ~261 lines |
 
 ## Known Issues
@@ -1275,6 +1329,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.13.0 | 2026-03-12 | Two-phase workflow (Exploration Phase + Innovation Phase), cell annotation confirmation dialog (WAITING_ANNOTATION status), exploration report with research direction selection, new data models (ClusterAnnotation, AnnotationConfirmationState, ExplorationReport) |
 | 0.12.4 | 2026-03-11 | Session-centric data directory restructure, backward-compatible path resolution, data migration script |
 | 0.12.3 | 2026-03-10 | Report markdown rendering fix (headers/lists in HTML), conclusions formatting cleanup, frontend ReactMarkdown rendering, frontend appendix display, supervisor agent HTML appendix |
 | 0.12.2 | 2026-03-10 | Analysis stop/pause support, publication figure checklist, figure revision auto-retry, progressive figure review leniency, WebSocket reconnection improvements |
@@ -1315,6 +1370,15 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.13.0 (2026-03-12)
+
+- **Two-Phase Analysis Workflow**: Restructured the analysis workflow into two distinct phases. Round 1 is the "Exploration Phase" — a comprehensive full-landscape analysis. Round 2+ is the "Innovation Phase" — focused, hypothesis-driven analysis guided by a user-selected or AI-determined research direction. New `AnalysisPhase` enum (`"exploration"` / `"innovation"`); `AnalysisState.analysis_phase` tracks current phase.
+- **Cell Annotation Confirmation (WAITING_ANNOTATION)**: After the Bioinformatics Agent completes cluster annotation in Phase 1, the workflow pauses with a new `TaskStatus.WAITING_ANNOTATION` status. A WebSocket `annotation_confirmation` message is sent to the frontend, containing the full list of `ClusterAnnotation` objects (cluster_id, cell_type, confidence, key_markers, evidence). Frontend displays `AnnotationConfirmationDialog` where users can confirm, edit, or override low-confidence annotations. The `_annotation_event` asyncio event in `workflow.py` blocks the workflow until confirmation is received. Low-confidence clusters block auto-confirm; high/medium-only results auto-confirm after a countdown.
+- **Exploration Report & Direction Selection**: At the end of Phase 1, `pi_agent.generate_exploration_report()` produces a structured `ExplorationReport` (cluster_overview, data_quality_warnings, strongest_heterogeneity, key_pathway_changes, abnormal_markers, pi_direction_assessment, research_direction_candidates). A WebSocket `exploration_report` message sends this to the frontend, which displays `ExplorationReportDialog`. Users choose a research direction (from AI candidates or custom text) or let PI decide. The chosen direction is stored in `AnalysisState.user_chosen_direction` and consumed at the start of Round 2.
+- **New Data Models** (`schemas.py`): `ClusterAnnotation` (cluster annotation with confidence + user override), `AnnotationConfirmationState` (annotation pause state tracker), `ExplorationReport` (structured Phase 1 output with direction candidates). `RoundResult` gains `phase` and `exploration_report` fields.
+- **New Frontend Components**: `AnnotationConfirmationDialog.tsx` (cell annotation review with editable cell types, confidence badges, auto-countdown); `ExplorationReportDialog.tsx` (exploration findings display, direction candidate selection, custom direction input, "Let PI Decide" option).
+- **Backend Wiring**: `bioinformatics_agent.py` calls `annotate_clusters_callback()` which routes through `workflow.py`'s `_request_annotation_confirmation()` to pause and await user input. `main.py` adds `WAITING_ANNOTATION` to valid resumable statuses and provides the annotation confirmation submit endpoint.
 
 #### v0.12.4 (2026-03-11)
 
