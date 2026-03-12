@@ -322,8 +322,18 @@ class AnalysisState(BaseModel):
     analysis_phase: str = "exploration"  # "exploration" (Round 1) / "innovation" (Round 2+)
     annotation_state: Optional[AnnotationConfirmationState] = None
     exploration_report: Optional[ExplorationReport] = None
-    user_chosen_direction: Optional[str] = None  # User's chosen direction for innovation phase
+    user_chosen_direction: Optional[str] = None  # User's chosen direction for innovation phase (backward compat)
     current_round_direction: str = ""  # Active direction for current innovation round (preserved after user_chosen_direction is consumed)
+
+    # Multi-direction workflow
+    user_chosen_directions: List[Dict[str, str]] = Field(default_factory=list)
+    # Each dict: {"direction": str, "notes": str}
+    directions_queue: List[Dict[str, str]] = Field(default_factory=list)
+    # Remaining directions to process (popped one by one)
+    multi_direction_correlation: Optional[str] = None
+    # Correlation analysis result for multi-direction mode
+    exploration_report_html_path: Optional[str] = None
+    # Path to exploration report HTML file
 
     # Initial inputs
     initial_instruction: str = ""
@@ -584,6 +594,8 @@ class WebSocketMessage(BaseModel):
         "annotation_result", "annotation_confirmation",
         # Exploration report
         "exploration_report",
+        # Multi-direction correlation analysis
+        "direction_correlation",
         # Chat delegation
         "chat_delegation", "chat_result", "chat_error",
         # Supervisor monitoring

@@ -172,16 +172,8 @@ async def cleanup_stale_sessions():
                         state_to_save = sessions[session_id]
                     else:
                         state_to_save = None
-                    # Grab workflow reference (if any) for cleanup outside lock
-                    workflow_to_close = workflows.pop(session_id, None)
-
-                # Stop Jupyter kernel via workflow.close() to prevent zombie kernels
-                if workflow_to_close:
-                    try:
-                        await workflow_to_close.close()
-                        logger.info(f"Closed workflow/kernel for evicted session {session_id}")
-                    except Exception as close_error:
-                        logger.error(f"Failed to close workflow for session {session_id}: {close_error}")
+                    # Record access time at capture to detect concurrent modifications
+                    access_time_at_capture = _session_access_times.get(session_id, 0)
 
                 # Save state outside lock
                 if state_to_save:
@@ -195,6 +187,11 @@ async def cleanup_stale_sessions():
                 async with _state_lock:
                     if session_id in _initializing_sessions or session_id in workflows:
                         # Re-activated while saving
+                        continue
+                    # Abort eviction if session was accessed during I/O (concurrent modification)
+                    current_access = _session_access_times.get(session_id, 0)
+                    if current_access != access_time_at_capture:
+                        logger.info(f"Session {session_id} was modified during eviction I/O, aborting eviction")
                         continue
                     if session_id in sessions:
                         del sessions[session_id]
@@ -214,13 +211,6 @@ async def cleanup_stale_sessions():
                 async with _message_buffer_lock:
                     if session_id in _message_buffers:
                         del _message_buffers[session_id]
-
-                # Save to disk outside the lock using thread pool to avoid blocking
-                if state_to_save:
-                    try:
-                        await async_save_session(session_id, state_to_save)
-                    except Exception as save_error:
-                        logger.error(f"Failed to save session {session_id} during eviction: {save_error}")
 
             if sessions_to_evict:
                 logger.info(f"Evicted {len(sessions_to_evict)} stale sessions from memory")
@@ -1761,13 +1751,16 @@ async def confirm_annotations(session_id: str, request: AnnotationConfirmation):
 
 class DirectionChoice(BaseModel):
     """Request body for choosing innovation phase direction"""
-    direction: str = ""
+    direction: str = ""  # backward compat: single direction
     let_pi_decide: bool = False
+    # Multi-direction support
+    directions: List[Dict[str, str]] = Field(default_factory=list)
+    # Each dict: {"direction": str, "notes": str}
 
 
 @app.post("/api/session/{session_id}/choose-direction")
 async def choose_direction(session_id: str, request: DirectionChoice):
-    """User chooses research direction for innovation phase after exploration report"""
+    """User chooses research direction(s) for innovation phase after exploration report"""
     validate_session_id(session_id)
     state = await ensure_session_loaded(session_id)
     if state is None:
@@ -1777,9 +1770,24 @@ async def choose_direction(session_id: str, request: DirectionChoice):
         raise HTTPException(status_code=400, detail="Session is not waiting for input")
 
     if request.let_pi_decide:
+        # PI will select 2 best directions in _pi_planning
         state.user_chosen_direction = "[PI_DECIDE]"
         state.pending_human_input = "[PI_DECIDE]"
-    else:
+    elif request.directions:
+        # Multi-direction mode
+        state.user_chosen_directions = request.directions
+        state.directions_queue = [d.copy() for d in request.directions]
+        state.max_rounds = len(request.directions) + 1  # Round 1 (exploration) + N direction rounds
+        state.user_chosen_direction = None  # clear single direction
+        state.pending_human_input = json.dumps(
+            [d.get("direction", "") for d in request.directions], ensure_ascii=False
+        )
+        logger.info(f"[{session_id}] Multi-direction mode: {len(request.directions)} directions, max_rounds={state.max_rounds}")
+    elif request.direction:
+        # Backward compat: single direction → wrap as list
+        state.user_chosen_directions = [{"direction": request.direction, "notes": ""}]
+        state.directions_queue = [{"direction": request.direction, "notes": ""}]
+        state.max_rounds = 2  # Round 1 + 1 direction round
         state.user_chosen_direction = request.direction
         state.pending_human_input = request.direction
 
@@ -1792,10 +1800,26 @@ async def choose_direction(session_id: str, request: DirectionChoice):
     if workflow:
         workflow.signal_continue()
 
+    direction_count = len(request.directions) if request.directions else (1 if request.direction else 0)
     return APIResponse(
         success=True,
-        message=f"Direction selected: {'PI decides' if request.let_pi_decide else request.direction[:100]}"
+        message=f"Direction selected: {'PI decides' if request.let_pi_decide else f'{direction_count} direction(s)'}"
     )
+
+
+@app.get("/api/session/{session_id}/exploration-report/html")
+async def get_exploration_report_html(session_id: str):
+    """Serve the exploration report HTML file"""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    html_path = state.exploration_report_html_path
+    if not html_path or not Path(html_path).exists():
+        raise HTTPException(status_code=404, detail="Exploration report HTML not found")
+
+    return FileResponse(html_path, media_type="text/html", filename="exploration_report.html")
 
 
 @app.post("/api/session/{session_id}/request-input")

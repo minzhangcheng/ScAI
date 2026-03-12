@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.13.0
+**Version**: 0.13.1
 **Last Updated**: 2026-03-12
 
 ## Project Overview
@@ -158,7 +158,7 @@ intesc/                         # Code directory
 │   │   │   ├── ChatPanel.tsx   # PI Agent free-form chat + delegation (~657 lines)
 │   │   │   ├── AboutDialog.tsx # About dialog (project info, author, contact)
 │   │   │   ├── AnnotationConfirmationDialog.tsx  # Cell annotation review dialog (Phase 1 pause, ~314 lines)
-│   │   │   ├── ExplorationReportDialog.tsx       # Phase 1 exploration report & research direction selection (~264 lines)
+│   │   │   ├── ExplorationReportDialog.tsx       # Phase 1 exploration report & multi-direction selection (multi-select, notes, score badges, countdown)
 │   │   │   └── ...             # Other panels (Analysis, Data, Prompts, Results, Report)
 │   │   ├── stores/             # Zustand state (+ chatMessages, chatDelegation, generating_report status)
 │   │   ├── hooks/              # API Hooks
@@ -320,6 +320,7 @@ initialize_round ◄────────────────────
 | `supervisor_feedback` | Supervisor Agent monitoring feedback |
 | `supervisor_checkpoint` | Supervisor biological checkpoint notification |
 | `supervisor_summary` | Supervisor round summary |
+| `direction_correlation` | Multi-direction correlation analysis result (v0.13.1) |
 
 ### 1.1 Biochemistry Agent (v2 - 3-Step Workflow)
 
@@ -812,12 +813,18 @@ class AnalysisState(BaseModel):
     max_rounds: int = 0
     round_wait_seconds: int = 300
 
-    # Two-phase workflow state (v0.13.0)
+    # Two-phase workflow state (v0.13.0+)
     analysis_phase: str = "exploration"  # "exploration" (Round 1) / "innovation" (Round 2+)
     annotation_state: Optional[AnnotationConfirmationState] = None  # Cell annotation confirmation state
     exploration_report: Optional[ExplorationReport] = None  # Phase 1 structured report
-    user_chosen_direction: Optional[str] = None  # User's chosen research direction for innovation phase
+    exploration_report_html_path: Optional[str] = None  # Path to exploration report HTML (v0.13.1)
+    user_chosen_direction: Optional[str] = None  # User's chosen research direction (backward compat)
     current_round_direction: str = ""  # Active direction for current innovation round
+
+    # Multi-direction workflow (v0.13.1)
+    user_chosen_directions: List[Dict[str, str]] = []  # All selected directions: [{"direction": str, "notes": str}]
+    directions_queue: List[Dict[str, str]] = []         # Remaining directions to process (FIFO)
+    multi_direction_correlation: Optional[str] = None   # Correlation analysis result (after all directions complete)
 
     # Literature config (per-session)
     literature_config: Dict[str, Any]
@@ -1329,6 +1336,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.13.1 | 2026-03-12 | Multi-direction research workflow (directions_queue, auto-continue between directions), enhanced direction candidate evaluation (innovation/novelty/reliability scores), exploration report HTML export, PI select_best_directions(), bioinformatics LLM error status, session eviction race fix, sidebar max-rounds removed |
 | 0.13.0 | 2026-03-12 | Two-phase workflow (Exploration Phase + Innovation Phase), cell annotation confirmation dialog (WAITING_ANNOTATION status), exploration report with research direction selection, new data models (ClusterAnnotation, AnnotationConfirmationState, ExplorationReport) |
 | 0.12.4 | 2026-03-11 | Session-centric data directory restructure, backward-compatible path resolution, data migration script |
 | 0.12.3 | 2026-03-10 | Report markdown rendering fix (headers/lists in HTML), conclusions formatting cleanup, frontend ReactMarkdown rendering, frontend appendix display, supervisor agent HTML appendix |
@@ -1370,6 +1378,19 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.13.1 (2026-03-12)
+
+- **Multi-Direction Research Workflow**: `AnalysisState` gains `user_chosen_directions` (list of `{"direction", "notes"}` dicts), `directions_queue` (FIFO queue popped one-by-one by `_pi_planning()`), and `multi_direction_correlation`. When PI decides or user selects multiple directions, `select_best_directions()` (replaces `innovation_instruction_pi_directed()`) returns 2 best directions; these are enqueued and processed in sequential innovation rounds. `wait_for_user_input` auto-continues (skips countdown) while `directions_queue` is non-empty. After the queue is exhausted and `multi_direction_correlation is None`, the workflow triggers `pi_agent.analyze_direction_correlations()` and broadcasts a `direction_correlation` WebSocket message.
+- **Enhanced Exploration Report Direction Candidates**: `research_direction_candidates` entries now require five fields: `direction`, `rationale`, `expected_innovation` (High/Medium/Low + evidence), `expected_novelty` (High/Medium/Low + explanation), `data_reliability` (High/Medium/Low + data citations). PI prompt enforces all 5 fields.
+- **Innovation Instruction Notes**: `pi_agent.innovation_instruction()` accepts optional `notes: str` parameter; notes are injected as a "User Notes for This Direction" section in the planning prompt.
+- **Multi-Direction API** (`main.py`): `POST /api/session/{id}/choose-direction` now accepts `directions: List[Dict[str, str]]` (multi-direction) in addition to the original `direction: str` (single direction, backward compat). Single direction is normalized to multi-direction format internally. `max_rounds` is set to `len(directions) + 1`.
+- **Exploration Report HTML** (`report_generator.py`): Added `generate_exploration_report_html()` — a pure-Python (no LLM) HTML renderer for the Phase 1 Exploration Report. Called at end of Round 1; path stored in `state.exploration_report_html_path`. New endpoint `GET /api/session/{id}/exploration-report/html` serves the file. URL passed via `exploration_report` WebSocket message as `html_url`.
+- **Redesigned ExplorationReportDialog** (`frontend/`): Multi-select checkboxes for direction candidates with per-direction notes fields. Score badges (`ScoreBadge` component) for innovation/novelty/reliability. Custom direction entries (add/remove). Built-in countdown timer (wall-clock based, same as RoundFeedbackDialog). Link to standalone exploration report HTML. Submits `SelectedDirection[]` to `onChooseDirections()`.
+- **Bioinformatics LLM Error Status**: LLM failures are captured in `llm_error: Optional[str]` and result in `status = "error"` (not `"max_steps_reached"`), `success: False`, and error string in result dict for upstream error handling.
+- **Session Eviction Race Fix** (`main.py`): `cleanup_stale_sessions()` now snapshots `access_time_at_capture` before I/O. After saving, if the access time changed (session was re-activated concurrently), eviction is aborted. Removes a window where recently-resumed sessions could be incorrectly deleted from memory.
+- **Sidebar Max Rounds Removed**: Removed the "Analysis Rounds" input/slider from the sidebar. `max_rounds` is now dynamically managed by the multi-direction queue system and is no longer user-editable directly.
+- **New WebSocket Type**: `direction_correlation` rendered in MessageStream with direction tags and a formatted pre-block for the correlation narrative.
 
 #### v0.13.0 (2026-03-12)
 

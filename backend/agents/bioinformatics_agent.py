@@ -630,6 +630,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
             self.last_result = None
 
         completed = False
+        llm_error: Optional[str] = None
         text_response_count = 0
         MAX_TEXT_RESPONSES = 2
         figure_iteration_count = 0
@@ -667,7 +668,8 @@ Before running sc.tl.pca() or any dimensionality reduction:
                     max_tokens=32768
                 )
             except Exception as e:
-                await self._notify("error", f"LLM call failed: {str(e)}")
+                llm_error = str(e)
+                await self._notify("error", f"LLM call failed: {llm_error}")
                 break
 
             # Capture agent reasoning from response content (before tool calls)
@@ -1127,7 +1129,10 @@ plt.close('all')
                 else:
                     logger.warning(f"[Bioinformatics] Figure iteration budget ({MAX_FIGURE_ITERATIONS}) exhausted, accepting last version and moving on")
 
-        status = "completed" if completed else "max_steps_reached"
+        if llm_error:
+            status = "error"
+        else:
+            status = "completed" if completed else "max_steps_reached"
 
         # Fallback: extract findings from last assistant text if report_findings was never called
         if not all_findings and not completed:
@@ -1156,7 +1161,8 @@ plt.close('all')
             "steps_executed": step_count,
             "code_history": self.code_history,
             "analysis_log": analysis_log,
-            "success": True
+            "success": status != "error",
+            **({"error": llm_error} if llm_error else {}),
         }
 
     async def execute_step(self, state: AnalysisState, instruction: str) -> Dict[str, Any]:

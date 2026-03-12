@@ -982,9 +982,21 @@ Be specific and actionable in your response."""
             if analysis_state.analysis_phase != "innovation":
                 analysis_state.analysis_phase = "innovation"
 
-            # Check if user specified a direction or wants PI to decide
+            # Check directions_queue first (multi-direction mode), then single direction
             user_direction = analysis_state.user_chosen_direction
-            if user_direction and user_direction not in ("", "[PI_DECIDE]"):
+            if analysis_state.directions_queue:
+                # Multi-direction mode: pop next direction from queue
+                current_dir = analysis_state.directions_queue.pop(0)
+                dir_text = current_dir.get("direction", "")
+                dir_notes = current_dir.get("notes", "")
+                logger.info(f"[{self.session_id}] Innovation phase: direction from queue → {dir_text[:100]} (remaining: {len(analysis_state.directions_queue)})")
+                instructions = await self.pi_agent.innovation_instruction(
+                    analysis_state, dir_text, notes=dir_notes
+                )
+                analysis_state.current_round_direction = dir_text
+                # Clear single direction field
+                analysis_state.user_chosen_direction = None
+            elif user_direction and user_direction not in ("", "[PI_DECIDE]"):
                 logger.info(f"[{self.session_id}] Innovation phase: user-directed → {user_direction[:100]}")
                 instructions = await self.pi_agent.innovation_instruction(
                     analysis_state, user_direction
@@ -994,13 +1006,21 @@ Be specific and actionable in your response."""
                 # Consume the direction to avoid reusing in next round
                 analysis_state.user_chosen_direction = None
             elif user_direction == "[PI_DECIDE]" or (not user_direction and analysis_state.current_round == 2):
-                # PI autonomously selects direction using 3-dimension evaluation
-                logger.info(f"[{self.session_id}] Innovation phase: PI-directed")
-                instructions = await self.pi_agent.innovation_instruction_pi_directed(
-                    analysis_state
+                # PI autonomously selects 2 best directions
+                logger.info(f"[{self.session_id}] Innovation phase: PI selecting best directions")
+                selected_dirs = await self.pi_agent.select_best_directions(analysis_state)
+                # Set up multi-direction queue
+                analysis_state.user_chosen_directions = selected_dirs
+                # Pop first direction, rest goes to queue
+                first_dir = selected_dirs[0] if selected_dirs else {"direction": "Continue analysis", "notes": ""}
+                analysis_state.directions_queue = selected_dirs[1:] if len(selected_dirs) > 1 else []
+                analysis_state.max_rounds = len(selected_dirs) + 1  # Round 1 + N direction rounds
+                dir_text = first_dir.get("direction", "")
+                dir_notes = first_dir.get("notes", "")
+                instructions = await self.pi_agent.innovation_instruction(
+                    analysis_state, dir_text, notes=dir_notes
                 )
-                # Preserve direction selected by PI for downstream context
-                analysis_state.current_round_direction = instructions.get("_chosen_direction", "")
+                analysis_state.current_round_direction = dir_text
                 analysis_state.user_chosen_direction = None
             else:
                 # Subsequent innovation rounds (3+): use previous round's next_steps
@@ -1731,10 +1751,23 @@ Return ONLY the JSON array, nothing else."""
                 analysis_state.exploration_report = exploration_report
                 round_result.exploration_report = exploration_report
 
+                # Generate exploration report HTML
+                try:
+                    from .report_generator import generate_exploration_report_html
+                    html_path = generate_exploration_report_html(
+                        analysis_state, exploration_report, round_result
+                    )
+                    analysis_state.exploration_report_html_path = html_path
+                    logger.info(f"[{self.session_id}] Exploration report HTML saved to: {html_path}")
+                except Exception as html_err:
+                    logger.error(f"[{self.session_id}] Exploration report HTML generation failed: {html_err}")
+
+                html_url = f"/api/session/{self.session_id}/exploration-report/html" if analysis_state.exploration_report_html_path else None
                 await self._send_message("exploration_report", {
                     "report_a": exploration_report.model_dump(),
                     "round": round_result.round_number,
                     "summary": round_result.pi_summary,
+                    "html_url": html_url,
                 }, AgentType.PI)
             except Exception as e:
                 logger.error(f"[{self.session_id}] Exploration report generation failed: {e}")
@@ -1744,6 +1777,37 @@ Return ONLY the JSON array, nothing else."""
             logger.info(f"[{self.session_id}] Transitioning to innovation phase")
 
         analysis_state.round_results.append(round_result)
+
+        # Multi-direction correlation analysis: trigger when queue is empty and multiple directions were selected
+        if (
+            not analysis_state.directions_queue
+            and len(analysis_state.user_chosen_directions) > 1
+            and analysis_state.analysis_phase == "innovation"
+            and analysis_state.multi_direction_correlation is None
+        ):
+            try:
+                await self._send_message("status", "Analyzing correlations between research directions...", AgentType.PI)
+                # Build directions_with_results from round_results (skip round 1 which is exploration)
+                directions_with_results = []
+                innovation_rounds = [r for r in analysis_state.round_results if r.phase == "innovation"]
+                for i, chosen_dir in enumerate(analysis_state.user_chosen_directions):
+                    round_summary = innovation_rounds[i].pi_summary if i < len(innovation_rounds) else ""
+                    directions_with_results.append({
+                        "direction": chosen_dir.get("direction", ""),
+                        "notes": chosen_dir.get("notes", ""),
+                        "round_summary": round_summary
+                    })
+                correlation = await self.pi_agent.analyze_direction_correlations(
+                    analysis_state, directions_with_results
+                )
+                analysis_state.multi_direction_correlation = correlation
+                await self._send_message("direction_correlation", {
+                    "correlation": correlation,
+                    "directions": [d.get("direction", "") for d in analysis_state.user_chosen_directions]
+                }, AgentType.PI)
+                logger.info(f"[{self.session_id}] Multi-direction correlation analysis complete")
+            except Exception as e:
+                logger.error(f"[{self.session_id}] Direction correlation analysis failed: {e}")
 
         # Save state after each round
         if self.state_callback:
@@ -1845,6 +1909,11 @@ Return ONLY the JSON array, nothing else."""
         # status is announced, to prevent a race condition with signal_continue().
 
         wait_seconds = analysis_state.round_wait_seconds  # -1=manual, 0=no wait, >0=countdown
+
+        # Multi-direction mode: auto-skip wait if more directions remain in queue
+        if analysis_state.directions_queue:
+            logger.info(f"[{self.session_id}] Directions queue has {len(analysis_state.directions_queue)} remaining, auto-continuing")
+            return {**state, "analysis_state": analysis_state}
 
         # After exploration phase (Round 1), force manual wait so user must choose direction
         if analysis_state.current_round == 1 and analysis_state.analysis_phase == "innovation":

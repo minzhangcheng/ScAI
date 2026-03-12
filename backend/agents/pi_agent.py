@@ -349,7 +349,10 @@ Generate a comprehensive structured report in JSON:
     "research_direction_candidates": [
         {{
             "direction": "A specific research question, e.g., 'Macrophage polarization shift in disease group'",
-            "rationale": "Why this is interesting based on the data (cite specific findings)"
+            "rationale": "Why this is interesting based on the data (cite specific findings)",
+            "expected_innovation": "High/Medium/Low — Is this a well-studied area (Low) or an emerging/under-explored area (High)? Provide brief evidence.",
+            "expected_novelty": "High/Medium/Low — Is this finding expected (Low) or surprising/counter-intuitive (High)? Explain WHY.",
+            "data_reliability": "High/Medium/Low — Based on sample sizes, statistical significance, and effect sizes, how reliable is the supporting evidence? Cite specific data."
         }},
         ...
     ]
@@ -359,6 +362,8 @@ IMPORTANT:
 - Include 3-5 research direction candidates
 - Each candidate should be a specific, actionable research question (not vague)
 - Base all assessments on actual data findings, not assumptions
+- For EACH candidate, you MUST provide all 5 fields: direction, rationale, expected_innovation, expected_novelty, data_reliability
+- Each evaluation field should start with the score (High/Medium/Low) followed by a brief explanation
 """
 
         response = await self.chat(prompt, temperature=0.3)
@@ -373,7 +378,8 @@ IMPORTANT:
     async def innovation_instruction(
         self,
         state: AnalysisState,
-        user_direction: str
+        user_direction: str,
+        notes: str = ""
     ) -> Dict[str, Any]:
         """
         Generate innovation-phase instructions based on user's chosen direction.
@@ -393,12 +399,17 @@ Data Quality Warnings: {json.dumps(state.exploration_report.data_quality_warning
 PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]}
 """
 
+        # Build user notes section
+        notes_section = ""
+        if notes and notes.strip():
+            notes_section = f"\n## User Notes for This Direction\n{notes.strip()}\n"
+
         prompt = f"""
 ## Project: {state.name}
 ## Research Objective: {state.initial_instruction}
 ## User's Chosen Research Direction: {user_direction}
 {exploration_context}
-
+{notes_section}
 ## Available Data
 {state.build_experimental_design_summary()}
 
@@ -536,6 +547,137 @@ Return JSON:
         result = await self.innovation_instruction(state, selected)
         result["_chosen_direction"] = selected
         return result
+
+    async def select_best_directions(
+        self,
+        state: AnalysisState
+    ) -> List[Dict[str, str]]:
+        """
+        PI autonomously selects 2 best research directions from exploration report candidates.
+        Used when user clicks 'Let PI Decide' or countdown expires.
+
+        Returns:
+            List of dicts, each with 'direction' and 'notes' keys.
+        """
+        logger.info(f"[PI] Selecting 2 best research directions")
+
+        candidates = []
+        if state.exploration_report and state.exploration_report.research_direction_candidates:
+            candidates = state.exploration_report.research_direction_candidates
+
+        if not candidates:
+            return [{"direction": "Continue analysis based on Round 1 findings", "notes": ""}]
+
+        exploration_context = ""
+        if state.exploration_report:
+            exploration_context = f"""
+Cluster Overview: {state.exploration_report.cluster_overview[:500]}
+Key Pathway Changes: {json.dumps(state.exploration_report.key_pathway_changes[:5], ensure_ascii=False)}
+Strongest Heterogeneity: {json.dumps(state.exploration_report.strongest_heterogeneity[:5], ensure_ascii=False)}
+Data Quality Warnings: {json.dumps(state.exploration_report.data_quality_warnings[:3], ensure_ascii=False)}
+PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]}
+"""
+
+        prompt = f"""You are the PI selecting the 2 BEST research directions for the innovation phase.
+
+## Exploration Report
+{exploration_context}
+
+## Candidates
+{json.dumps(candidates, ensure_ascii=False, indent=2)}
+
+Select exactly 2 directions that together will provide the most comprehensive and impactful research outcomes.
+
+SELECTION CRITERIA:
+1. **Reliability** is the baseline: low-reliability directions should be avoided
+2. **Innovation + Novelty** together determine priority
+3. The 2 selected directions should ideally be complementary (not redundant)
+
+Return JSON:
+{{
+    "selected_directions": [
+        {{
+            "direction": "The exact direction text from candidates",
+            "notes": "Brief PI notes on why this was selected and what to focus on"
+        }},
+        {{
+            "direction": "The exact direction text from candidates",
+            "notes": "Brief PI notes on why this was selected and what to focus on"
+        }}
+    ],
+    "rationale": "Why these 2 directions were chosen over others"
+}}
+"""
+
+        response = await self.chat(prompt, temperature=0.3)
+        data = self._safe_parse_json(response, default={})
+
+        selected = data.get("selected_directions", [])
+        if not selected or len(selected) < 1:
+            # Fallback: pick first 2 candidates
+            selected = [
+                {"direction": c.get("direction", ""), "notes": ""}
+                for c in candidates[:2]
+            ]
+
+        # Ensure at least 1 direction
+        if not selected:
+            selected = [{"direction": "Continue analysis based on Round 1 findings", "notes": ""}]
+
+        logger.info(f"[PI] Selected {len(selected)} directions: {[d['direction'][:50] for d in selected]}")
+        return selected
+
+    async def analyze_direction_correlations(
+        self,
+        state: AnalysisState,
+        directions_with_results: List[Dict]
+    ) -> str:
+        """
+        Analyze correlations and complementarity between multiple research directions.
+        Called after all selected directions have been analyzed.
+
+        Args:
+            state: Current analysis state
+            directions_with_results: List of dicts with keys:
+                - direction: str
+                - notes: str
+                - round_summary: str (PI summary from that direction's round)
+
+        Returns:
+            Correlation analysis text (markdown formatted)
+        """
+        logger.info(f"[PI] Analyzing correlations between {len(directions_with_results)} directions")
+        self.reset_history()
+
+        directions_text = ""
+        for i, d in enumerate(directions_with_results, 1):
+            directions_text += f"""
+### Direction {i}: {d.get('direction', 'Unknown')}
+**User Notes**: {d.get('notes', 'None')}
+**Analysis Summary**: {d.get('round_summary', 'No summary available')[:800]}
+"""
+
+        prompt = f"""You are the PI analyzing the relationships between multiple research directions that were independently investigated.
+
+## Project: {state.name}
+## Research Objective: {state.initial_instruction}
+
+## Directions Analyzed
+{directions_text}
+
+Analyze the correlations, complementarity, and potential synergies between these research directions:
+
+1. **Shared Mechanisms**: Do any directions share underlying molecular mechanisms or pathways?
+2. **Complementary Evidence**: Do findings from one direction support or strengthen conclusions from another?
+3. **Contradictions**: Are there any contradictory findings between directions that need resolution?
+4. **Integrated Hypothesis**: Can you formulate an integrated hypothesis that connects the key findings from all directions?
+5. **Recommended Next Steps**: Based on the combined findings, what would you recommend as the most impactful follow-up studies?
+
+Provide your analysis in a clear, structured markdown format.
+"""
+
+        response = await self.chat(prompt, temperature=0.3)
+        return response
 
     async def plan_agent_tasks(
         self,

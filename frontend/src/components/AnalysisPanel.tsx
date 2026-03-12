@@ -226,21 +226,26 @@ export function AnalysisPanel() {
     }
   }, [currentSession, wsConnected, wsConnect])
 
-  // Direction choice handler
-  const handleChooseDirection = useCallback(async (direction: string) => {
+  // Direction choice handler (multi-direction)
+  const handleChooseDirections = useCallback(async (directions: Array<{ direction: string; notes: string; isCustom: boolean }>) => {
     if (!currentSession) return
     try {
       await fetch(`${API_BASE}/session/${currentSession.id}/choose-direction`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ direction, let_pi_decide: false }),
+        body: JSON.stringify({
+          directions: directions.map(d => ({
+            direction: d.direction,
+            notes: d.notes
+          }))
+        }),
       })
       setShowExplorationDialog(false)
       if (!wsConnected) {
         setTimeout(() => wsConnect?.(), 100)
       }
     } catch (e) {
-      console.error('Failed to choose direction:', e)
+      console.error('Failed to choose directions:', e)
     }
   }, [currentSession, wsConnected, wsConnect])
 
@@ -942,8 +947,10 @@ export function AnalysisPanel() {
         <ExplorationReportDialog
           report={explorationReportData.report_a || explorationReportData}
           roundSummary={explorationReportData.round_summary?.summary || ''}
+          explorationReportUrl={explorationReportData.html_url || undefined}
           language={language}
-          onChooseDirection={handleChooseDirection}
+          countdownSeconds={useAppStore.getState().roundWaitSeconds}
+          onChooseDirections={handleChooseDirections}
           onLetPiDecide={handleLetPiDecide}
           onClose={() => setShowExplorationDialog(false)}
         />

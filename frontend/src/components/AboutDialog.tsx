@@ -49,7 +49,7 @@ export function AboutDialog() {
                     : 'Integrated & Intelligent Single Cell Analysis'}
                 </p>
                 <div className="mt-2 inline-block px-3 py-1 bg-violet-100 text-violet-700 text-xs font-medium rounded-full">
-                  v0.13.0
+                  v0.13.1
                 </div>
               </div>
 

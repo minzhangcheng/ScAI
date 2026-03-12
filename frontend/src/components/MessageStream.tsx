@@ -25,7 +25,8 @@ import {
   FileText,
   Clock,
   Loader2,
-  Eye
+  Eye,
+  TrendingUp
 } from 'lucide-react'
 
 // Type interfaces for message content
@@ -461,6 +462,30 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           )
         }
         
+        if (message.type === 'direction_correlation') {
+          const data = typeof message.content === 'object' ? message.content : {}
+          const correlation = data.correlation || (typeof message.content === 'string' ? message.content : '')
+          const directions = data.directions || []
+          return (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs text-violet-600">
+                <TrendingUp className="w-3 h-3" />
+                <span>{language === 'zh' ? '多方向相关性分析' : 'Multi-Direction Correlation Analysis'}</span>
+              </div>
+              {directions.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-1">
+                  {directions.map((d: string, i: number) => (
+                    <span key={i} className="px-2 py-0.5 bg-violet-100 text-violet-700 text-xs rounded-full">{d}</span>
+                  ))}
+                </div>
+              )}
+              <div className="bg-violet-50 border border-violet-200 rounded-lg p-3 text-sm text-violet-800">
+                <pre className="whitespace-pre-wrap text-xs">{correlation}</pre>
+              </div>
+            </div>
+          )
+        }
+
         if (message.type === 'supervisor_feedback') {
           return (
             <div className="space-y-2">

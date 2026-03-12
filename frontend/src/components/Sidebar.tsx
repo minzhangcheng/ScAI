@@ -11,7 +11,6 @@ import {
   FolderOpen,
   Clock,
   X,
-  Repeat,
   Download,
   Upload,
   Loader2,
@@ -26,7 +25,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
-  const { currentSession, setCurrentSession, clearMessages, language, maxRounds, setMaxRounds, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback } = useAppStore()
+  const { currentSession, setCurrentSession, clearMessages, language, maxRounds, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback } = useAppStore()
   const { createSession, loadSession, listSessions, deleteSession, updateSessionInfo } = useSession()
   const { t } = useTranslation(language)
   const [showNewSession, setShowNewSession] = useState(false)
@@ -559,46 +558,6 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
               className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-violet-500 resize-y min-h-[200px]"
             />
             
-            {/* Max Rounds Setting */}
-            <div className="p-3 bg-indigo-50 rounded-lg border border-indigo-100">
-              <div className="flex items-center gap-2 mb-2">
-                <Repeat className="w-4 h-4 text-indigo-500" />
-                <label className="text-sm font-medium text-indigo-700">
-                  {language === 'zh' ? '分析轮次' : 'Analysis Rounds'}
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="30"
-                  value={maxRounds}
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value)
-                    if (!isNaN(val) && val >= 1 && val <= 30) setMaxRounds(val)
-                  }}
-                  className="ml-auto w-16 text-sm font-mono text-indigo-600 bg-white px-2 py-0.5 rounded border border-indigo-200 text-center focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                />
-              </div>
-              <input
-                type="range"
-                min="1"
-                max="30"
-                step="1"
-                value={maxRounds}
-                onChange={(e) => setMaxRounds(parseInt(e.target.value))}
-                className="w-full h-2 bg-indigo-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
-              />
-              <div className="flex justify-between text-xs text-indigo-400 mt-1">
-                <span>1</span>
-                <span>{language === 'zh' ? '默认: 3' : 'Default: 3'}</span>
-                <span>30</span>
-              </div>
-              <p className="text-xs text-indigo-500 mt-2 leading-relaxed">
-                {language === 'zh'
-                  ? '💡 建议先设较小值，完成后可通过对话框要求继续分析'
-                  : '💡 Start small - you can request more rounds via chat later'}
-              </p>
-            </div>
-
             {/* Round Wait Time Setting */}
             <div className="p-3 bg-indigo-50 rounded-lg border border-indigo-100">
               <div className="flex items-center gap-2 mb-2">

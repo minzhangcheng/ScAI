@@ -5099,3 +5099,553 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         logger.info(f"HTML report saved to: {html_path}")
 
         return html_path
+
+
+def generate_exploration_report_html(
+    state: AnalysisState,
+    exploration_report,
+    round_result
+) -> str:
+    """
+    Generate a static HTML report for the exploration phase (Report A).
+    No LLM calls — data is already structured.
+
+    Args:
+        state: AnalysisState with session info
+        exploration_report: ExplorationReport model
+        round_result: RoundResult from Round 1
+
+    Returns:
+        Path to the saved HTML file
+    """
+    from .config import get_session_reports
+
+    # Prepare data
+    project_name = html_module.escape(state.name or "Untitled Analysis")
+    exp_design = html_module.escape(state.build_experimental_design_summary())
+    cluster_overview = html_module.escape(exploration_report.cluster_overview or "N/A")
+    pi_assessment = markdown_to_html(exploration_report.pi_direction_assessment or "N/A")
+
+    # Data quality warnings
+    dq_items = ""
+    for w in (exploration_report.data_quality_warnings or []):
+        dq_items += f"<li>{html_module.escape(w)}</li>\n"
+    if not dq_items:
+        dq_items = "<li>No data quality warnings</li>"
+
+    # Key findings sections
+    def build_list(items, empty_msg="None identified"):
+        if not items:
+            return f"<li>{empty_msg}</li>"
+        return "\n".join(f"<li>{html_module.escape(str(i))}</li>" for i in items)
+
+    heterogeneity_items = build_list(exploration_report.strongest_heterogeneity)
+    pathway_items = build_list(exploration_report.key_pathway_changes)
+    abnormal_items = build_list(exploration_report.abnormal_markers)
+    low_conf_items = build_list(exploration_report.low_confidence_annotations)
+
+    # Round 1 findings
+    bio_findings = build_list(round_result.bioinformatics_findings[:10], "No bioinformatics findings")
+    path_findings = build_list(round_result.pathology_findings[:5], "No pathology findings")
+    biochem_findings = build_list(round_result.biochemistry_findings[:5], "No biochemistry findings")
+    lit_findings = build_list(round_result.literature_findings[:5], "No literature findings")
+
+    # Direction candidates table
+    candidates = exploration_report.research_direction_candidates or []
+    direction_rows = ""
+    for i, c in enumerate(candidates, 1):
+        direction = html_module.escape(str(c.get("direction", "")))
+        rationale = html_module.escape(str(c.get("rationale", "")))
+        innovation = html_module.escape(str(c.get("expected_innovation", "N/A")))
+        novelty = html_module.escape(str(c.get("expected_novelty", "N/A")))
+        reliability = html_module.escape(str(c.get("data_reliability", "N/A")))
+
+        def score_badge(text):
+            t = text.lower()
+            if t.startswith("high"):
+                return '<span class="badge-high">High</span>'
+            elif t.startswith("medium"):
+                return '<span class="badge-medium">Medium</span>'
+            elif t.startswith("low"):
+                return '<span class="badge-low">Low</span>'
+            return f'<span class="badge-medium">{html_module.escape(text[:20])}</span>'
+
+        def score_detail(text):
+            # Extract detail after "High/Medium/Low — " or "High/Medium/Low: "
+            for sep in [" — ", " - ", ": ", " "]:
+                parts = text.split(sep, 1)
+                if len(parts) > 1 and parts[0].lower() in ("high", "medium", "low"):
+                    return html_module.escape(parts[1])
+            return html_module.escape(text)
+
+        direction_rows += f"""
+        <tr>
+            <td class="dir-number">{i}</td>
+            <td>
+                <div class="dir-title">{direction}</div>
+                <div class="dir-rationale">{rationale}</div>
+            </td>
+            <td class="score-cell">
+                {score_badge(innovation)}
+                <div class="score-detail">{score_detail(innovation)}</div>
+            </td>
+            <td class="score-cell">
+                {score_badge(novelty)}
+                <div class="score-detail">{score_detail(novelty)}</div>
+            </td>
+            <td class="score-cell">
+                {score_badge(reliability)}
+                <div class="score-detail">{score_detail(reliability)}</div>
+            </td>
+        </tr>
+        """
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Exploration Report - {project_name}</title>
+<style>
+    :root {{
+        --primary-color: #4f46e5;
+        --primary-light: #eef2ff;
+        --text-color: #1e293b;
+        --text-secondary: #64748b;
+        --border-color: #e2e8f0;
+        --bg-color: #f8fafc;
+        --white: #ffffff;
+        --success: #059669;
+        --warning: #d97706;
+        --danger: #dc2626;
+    }}
+
+    * {{
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+    }}
+
+    body {{
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        line-height: 1.6;
+        color: var(--text-color);
+        background: var(--bg-color);
+        padding: 20px;
+    }}
+
+    .container {{
+        max-width: 1100px;
+        margin: 0 auto;
+        background: var(--white);
+        border-radius: 16px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        overflow: hidden;
+    }}
+
+    .header {{
+        background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+        color: white;
+        padding: 40px;
+        text-align: center;
+    }}
+
+    .header h1 {{
+        font-size: 2rem;
+        margin-bottom: 10px;
+    }}
+
+    .header .meta {{
+        opacity: 0.9;
+        font-size: 0.9rem;
+    }}
+
+    .content {{
+        padding: 40px;
+    }}
+
+    .section {{
+        margin-bottom: 40px;
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        overflow: hidden;
+    }}
+
+    .section-header {{
+        background: var(--primary-light);
+        padding: 16px 24px;
+        border-bottom: 1px solid var(--border-color);
+    }}
+
+    .section-header h2 {{
+        font-size: 1.25rem;
+        color: var(--primary-color);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }}
+
+    .section-content {{
+        padding: 24px;
+    }}
+
+    .section-content p {{
+        margin-bottom: 16px;
+        text-align: justify;
+    }}
+
+    .section-content ul {{
+        list-style: none;
+        padding: 0;
+    }}
+
+    .section-content ul li {{
+        padding: 8px 0 8px 20px;
+        position: relative;
+        border-bottom: 1px solid #f1f5f9;
+    }}
+
+    .section-content ul li:last-child {{
+        border-bottom: none;
+    }}
+
+    .section-content ul li::before {{
+        content: '▸';
+        position: absolute;
+        left: 0;
+        color: var(--primary-color);
+        font-weight: bold;
+    }}
+
+    .warning-list li::before {{
+        content: '⚠' !important;
+        color: var(--warning) !important;
+    }}
+
+    /* Direction evaluation table */
+    .direction-table {{
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 16px;
+    }}
+
+    .direction-table th {{
+        background: var(--primary-light);
+        padding: 12px 16px;
+        text-align: left;
+        font-size: 0.85rem;
+        color: var(--primary-color);
+        border-bottom: 2px solid var(--border-color);
+        white-space: nowrap;
+    }}
+
+    .direction-table td {{
+        padding: 16px;
+        border-bottom: 1px solid var(--border-color);
+        vertical-align: top;
+    }}
+
+    .direction-table tr:last-child td {{
+        border-bottom: none;
+    }}
+
+    .dir-number {{
+        font-weight: 700;
+        color: var(--primary-color);
+        font-size: 1.1rem;
+        width: 40px;
+        text-align: center;
+    }}
+
+    .dir-title {{
+        font-weight: 600;
+        color: var(--text-color);
+        margin-bottom: 6px;
+    }}
+
+    .dir-rationale {{
+        font-size: 0.88rem;
+        color: var(--text-secondary);
+        line-height: 1.5;
+    }}
+
+    .score-cell {{
+        text-align: center;
+        min-width: 120px;
+    }}
+
+    .score-detail {{
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        margin-top: 6px;
+        text-align: left;
+    }}
+
+    .badge-high {{
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        background: #dcfce7;
+        color: #166534;
+    }}
+
+    .badge-medium {{
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        background: #fef3c7;
+        color: #92400e;
+    }}
+
+    .badge-low {{
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        background: #fee2e2;
+        color: #991b1b;
+    }}
+
+    .findings-grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+    }}
+
+    .findings-card {{
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        overflow: hidden;
+    }}
+
+    .findings-card-header {{
+        padding: 10px 16px;
+        font-weight: 600;
+        font-size: 0.9rem;
+        border-bottom: 1px solid var(--border-color);
+    }}
+
+    .findings-card-header.bio {{
+        background: #eff6ff;
+        color: #1e40af;
+    }}
+
+    .findings-card-header.path {{
+        background: #fef3c7;
+        color: #92400e;
+    }}
+
+    .findings-card-header.biochem {{
+        background: #ecfdf5;
+        color: #065f46;
+    }}
+
+    .findings-card-header.lit {{
+        background: #f5f3ff;
+        color: #5b21b6;
+    }}
+
+    .findings-card-content {{
+        padding: 12px 16px;
+        font-size: 0.88rem;
+    }}
+
+    .findings-card-content ul li {{
+        padding: 4px 0 4px 16px;
+        font-size: 0.85rem;
+    }}
+
+    .pi-assessment {{
+        background: linear-gradient(135deg, #fdf2f8 0%, #fce7f3 100%);
+        border-left: 4px solid #ec4899;
+        border-radius: 0 8px 8px 0;
+        padding: 20px 24px;
+        margin-top: 16px;
+    }}
+
+    .pi-assessment h3 {{
+        color: #be185d;
+        margin-bottom: 12px;
+    }}
+
+    .footer {{
+        text-align: center;
+        padding: 20px;
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+        border-top: 1px solid var(--border-color);
+    }}
+
+    @media (max-width: 768px) {{
+        .findings-grid {{
+            grid-template-columns: 1fr;
+        }}
+        .direction-table {{
+            font-size: 0.85rem;
+        }}
+        .content {{
+            padding: 20px;
+        }}
+    }}
+
+    @media print {{
+        body {{
+            background: white;
+            padding: 0;
+        }}
+        .container {{
+            box-shadow: none;
+            border-radius: 0;
+        }}
+    }}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>📊 Exploration Report</h1>
+        <div class="meta">{project_name} | Round 1 Analysis | {timestamp}</div>
+    </div>
+
+    <div class="content">
+        <!-- Project Overview -->
+        <div class="section">
+            <div class="section-header">
+                <h2>1. Project Overview</h2>
+            </div>
+            <div class="section-content">
+                <p><strong>Project:</strong> {project_name}</p>
+                <p><strong>Research Objective:</strong> {html_module.escape(state.initial_instruction or 'N/A')}</p>
+                <pre style="background: #f1f5f9; padding: 12px; border-radius: 8px; font-size: 0.85rem; white-space: pre-wrap; margin-top: 8px;">{exp_design}</pre>
+            </div>
+        </div>
+
+        <!-- Cluster Overview -->
+        <div class="section">
+            <div class="section-header">
+                <h2>2. Cluster Overview</h2>
+            </div>
+            <div class="section-content">
+                <p>{cluster_overview}</p>
+            </div>
+        </div>
+
+        <!-- Data Quality -->
+        <div class="section">
+            <div class="section-header">
+                <h2>3. Data Quality Assessment</h2>
+            </div>
+            <div class="section-content">
+                <ul class="warning-list">
+                    {dq_items}
+                </ul>
+            </div>
+        </div>
+
+        <!-- Round 1 Findings -->
+        <div class="section">
+            <div class="section-header">
+                <h2>4. Round 1 Analysis Summary</h2>
+            </div>
+            <div class="section-content">
+                <div class="findings-grid">
+                    <div class="findings-card">
+                        <div class="findings-card-header bio">🧬 Bioinformatics</div>
+                        <div class="findings-card-content"><ul>{bio_findings}</ul></div>
+                    </div>
+                    <div class="findings-card">
+                        <div class="findings-card-header path">🔬 Pathology</div>
+                        <div class="findings-card-content"><ul>{path_findings}</ul></div>
+                    </div>
+                    <div class="findings-card">
+                        <div class="findings-card-header biochem">🧪 Biochemistry</div>
+                        <div class="findings-card-content"><ul>{biochem_findings}</ul></div>
+                    </div>
+                    <div class="findings-card">
+                        <div class="findings-card-header lit">📚 Literature</div>
+                        <div class="findings-card-content"><ul>{lit_findings}</ul></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Key Findings -->
+        <div class="section">
+            <div class="section-header">
+                <h2>5. Key Findings</h2>
+            </div>
+            <div class="section-content">
+                <h3 style="margin-bottom: 8px; color: var(--primary-color);">Strongest Heterogeneity</h3>
+                <ul>{heterogeneity_items}</ul>
+
+                <h3 style="margin: 16px 0 8px; color: var(--primary-color);">Key Pathway Changes</h3>
+                <ul>{pathway_items}</ul>
+
+                <h3 style="margin: 16px 0 8px; color: var(--primary-color);">Abnormal Markers</h3>
+                <ul>{abnormal_items}</ul>
+
+                <h3 style="margin: 16px 0 8px; color: var(--primary-color);">Low Confidence Annotations</h3>
+                <ul>{low_conf_items}</ul>
+            </div>
+        </div>
+
+        <!-- Direction Candidates -->
+        <div class="section">
+            <div class="section-header">
+                <h2>6. Research Direction Candidates</h2>
+            </div>
+            <div class="section-content">
+                <table class="direction-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Direction & Rationale</th>
+                            <th>Innovation</th>
+                            <th>Novelty</th>
+                            <th>Reliability</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {direction_rows}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- PI Assessment -->
+        <div class="section">
+            <div class="section-header">
+                <h2>7. PI Overall Assessment</h2>
+            </div>
+            <div class="section-content">
+                <div class="pi-assessment">
+                    <h3>🎯 PI Direction Assessment</h3>
+                    {pi_assessment}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        Generated by InteSc Multi-Agent Analysis System | {timestamp}
+    </div>
+</div>
+</body>
+</html>"""
+
+    # Save HTML file
+    reports_dir = get_session_reports(state.id)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    html_path = reports_dir / "exploration_report.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    logger.info(f"Exploration report HTML saved to: {html_path}")
+    return str(html_path)

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   X,
   Send,
@@ -7,7 +7,13 @@ import {
   TrendingUp,
   Dna,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Plus,
+  Trash2,
+  ExternalLink,
+  Clock,
+  CheckSquare,
+  Square,
 } from 'lucide-react'
 import { Language } from '../i18n/translations'
 
@@ -28,69 +34,208 @@ interface ExplorationReport {
   }>
 }
 
+export interface SelectedDirection {
+  direction: string
+  notes: string
+  isCustom: boolean
+}
+
 interface ExplorationReportDialogProps {
   report: ExplorationReport
   roundSummary: string
+  explorationReportUrl?: string
   language: Language
-  onChooseDirection: (direction: string) => Promise<void>
+  countdownSeconds: number  // -1=manual, 0=no wait, >0=countdown
+  onChooseDirections: (directions: SelectedDirection[]) => Promise<void>
   onLetPiDecide: () => Promise<void>
   onClose: () => void
+}
+
+function ScoreBadge({ text }: { text?: string }) {
+  if (!text) return <span className="text-xs text-slate-400">N/A</span>
+  const lower = text.toLowerCase()
+  let score = ''
+  let colorClasses = ''
+  if (lower.startsWith('high')) {
+    score = 'High'
+    colorClasses = 'bg-emerald-100 text-emerald-700'
+  } else if (lower.startsWith('medium')) {
+    score = 'Medium'
+    colorClasses = 'bg-amber-100 text-amber-700'
+  } else if (lower.startsWith('low')) {
+    score = 'Low'
+    colorClasses = 'bg-red-100 text-red-700'
+  } else {
+    score = text.substring(0, 15)
+    colorClasses = 'bg-slate-100 text-slate-600'
+  }
+  return (
+    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${colorClasses}`}>
+      {score}
+    </span>
+  )
 }
 
 export function ExplorationReportDialog({
   report,
   roundSummary,
+  explorationReportUrl,
   language,
-  onChooseDirection,
+  countdownSeconds,
+  onChooseDirections,
   onLetPiDecide,
   onClose
 }: ExplorationReportDialogProps) {
-  const [customDirection, setCustomDirection] = useState('')
-  const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null)
+  const isZh = language === 'zh'
+
+  // Multi-select state: set of selected candidate indices
+  const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set())
+  // Notes per candidate direction (keyed by index)
+  const [candidateNotes, setCandidateNotes] = useState<Record<number, string>>({})
+  // Custom directions
+  const [customDirections, setCustomDirections] = useState<Array<{ direction: string; notes: string }>>([])
+
   const [submitting, setSubmitting] = useState(false)
   const [showFullReport, setShowFullReport] = useState(false)
 
-  const handleSubmitDirection = async () => {
+  // Timer state — wall-clock based (same pattern as RoundFeedbackDialog)
+  const hasCountdown = countdownSeconds > 0
+  const [timeRemaining, setTimeRemaining] = useState(hasCountdown ? countdownSeconds : 0)
+  const deadlineRef = useRef(hasCountdown ? Date.now() + countdownSeconds * 1000 : 0)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Countdown timer
+  useEffect(() => {
+    if (!hasCountdown) return
+    intervalRef.current = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((deadlineRef.current - Date.now()) / 1000))
+      setTimeRemaining(remaining)
+    }, 250)
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current)
+    }
+  }, [hasCountdown])
+
+  // Auto-trigger PI decide when countdown reaches 0
+  useEffect(() => {
+    if (hasCountdown && timeRemaining === 0 && !submitting) {
+      handlePiDecide()
+    }
+  }, [hasCountdown, timeRemaining, submitting])
+
+  const toggleCandidate = (index: number) => {
+    setSelectedIndices(prev => {
+      const next = new Set(prev)
+      if (next.has(index)) {
+        next.delete(index)
+      } else {
+        next.add(index)
+      }
+      return next
+    })
+  }
+
+  const updateCandidateNote = (index: number, note: string) => {
+    setCandidateNotes(prev => ({ ...prev, [index]: note }))
+  }
+
+  const addCustomDirection = () => {
+    setCustomDirections(prev => [...prev, { direction: '', notes: '' }])
+  }
+
+  const updateCustomDirection = (index: number, field: 'direction' | 'notes', value: string) => {
+    setCustomDirections(prev => prev.map((d, i) => i === index ? { ...d, [field]: value } : d))
+  }
+
+  const removeCustomDirection = (index: number) => {
+    setCustomDirections(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const totalSelected = selectedIndices.size + customDirections.filter(d => d.direction.trim()).length
+  const canSubmit = totalSelected > 0 && !submitting
+
+  const handleSubmit = useCallback(async () => {
     setSubmitting(true)
     try {
-      const direction = selectedCandidate !== null
-        ? report.research_direction_candidates[selectedCandidate].direction
-        : customDirection
-      await onChooseDirection(direction)
+      const directions: SelectedDirection[] = []
+
+      // Add selected candidate directions
+      for (const idx of selectedIndices) {
+        const c = report.research_direction_candidates[idx]
+        if (c) {
+          directions.push({
+            direction: c.direction,
+            notes: candidateNotes[idx] || '',
+            isCustom: false,
+          })
+        }
+      }
+
+      // Add custom directions (filter empty)
+      for (const d of customDirections) {
+        if (d.direction.trim()) {
+          directions.push({
+            direction: d.direction.trim(),
+            notes: d.notes.trim(),
+            isCustom: true,
+          })
+        }
+      }
+
+      if (directions.length > 0) {
+        await onChooseDirections(directions)
+      }
     } finally {
       setSubmitting(false)
     }
-  }
+  }, [selectedIndices, candidateNotes, customDirections, report, onChooseDirections])
 
-  const handlePiDecide = async () => {
+  const handlePiDecide = useCallback(async () => {
     setSubmitting(true)
     try {
       await onLetPiDecide()
     } finally {
       setSubmitting(false)
     }
-  }
+  }, [onLetPiDecide])
 
-  const isZh = language === 'zh'
+  const formatTime = (s: number) => {
+    const m = Math.floor(s / 60)
+    const sec = s % 60
+    return `${m}:${sec.toString().padStart(2, '0')}`
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
       <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b bg-gradient-to-r from-violet-50 to-blue-50 rounded-t-2xl">
-          <div>
+          <div className="flex-1">
             <h2 className="text-lg font-semibold text-slate-800">
-              {isZh ? '探索期分析完成 — 选择研究方向' : 'Exploration Complete — Choose Research Direction'}
+              {isZh ? '探索期分析完成 — 选择研究方向' : 'Exploration Complete — Choose Research Directions'}
             </h2>
             <p className="text-sm text-slate-500 mt-1">
               {roundSummary
                 ? roundSummary.substring(0, 120) + (roundSummary.length > 120 ? '...' : '')
-                : (isZh ? 'Round 1 全面探索已完成，请查看报告并选择 Round 2 的研究方向' : 'Round 1 exploration is complete. Review the report and choose a direction for Round 2.')}
+                : (isZh ? 'Round 1 全面探索已完成，请查看报告并选择研究方向（可多选）' : 'Round 1 exploration is complete. Review the report and choose direction(s) (multi-select).')}
             </p>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-white/60 rounded-lg">
-            <X className="w-5 h-5 text-slate-400" />
-          </button>
+          <div className="flex items-center gap-2">
+            {explorationReportUrl && (
+              <a
+                href={explorationReportUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-violet-700 bg-violet-100 hover:bg-violet-200 rounded-lg transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                {isZh ? '查看详细报告' : 'View Detailed Report'}
+              </a>
+            )}
+            <button onClick={onClose} className="p-2 hover:bg-white/60 rounded-lg">
+              <X className="w-5 h-5 text-slate-400" />
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
@@ -182,80 +327,158 @@ export function ExplorationReportDialog({
             </div>
           )}
 
-          {/* Research Direction Candidates */}
+          {/* Research Direction Candidates — multi-select checkboxes */}
           {(report.research_direction_candidates || []).length > 0 && (
             <div>
               <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2 mb-3">
                 <TrendingUp className="w-4 h-4 text-violet-500" />
-                {isZh ? '推荐研究方向（点击选择）' : 'Recommended Directions (click to select)'}
+                {isZh ? '推荐研究方向（可多选）' : 'Recommended Directions (multi-select)'}
               </h3>
               <div className="space-y-2">
-                {(report.research_direction_candidates || []).map((c, i) => (
-                  <button
-                    key={i}
-                    onClick={() => {
-                      setSelectedCandidate(selectedCandidate === i ? null : i)
-                      setCustomDirection('')
-                    }}
-                    className={`w-full text-left p-4 rounded-xl border-2 transition-all ${
-                      selectedCandidate === i
-                        ? 'border-violet-400 bg-violet-50'
-                        : 'border-slate-200 hover:border-violet-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="font-medium text-sm text-slate-800">{c.direction}</div>
-                    <div className="text-xs text-slate-500 mt-1">{c.rationale}</div>
-                  </button>
-                ))}
+                {(report.research_direction_candidates || []).map((c, i) => {
+                  const isSelected = selectedIndices.has(i)
+                  return (
+                    <div key={i} className={`rounded-xl border-2 transition-all ${
+                      isSelected
+                        ? 'border-violet-400 bg-violet-50/50'
+                        : 'border-slate-200 hover:border-violet-200'
+                    }`}>
+                      {/* Checkbox + direction header */}
+                      <button
+                        onClick={() => toggleCandidate(i)}
+                        className="w-full text-left p-4 flex items-start gap-3"
+                      >
+                        <div className="mt-0.5 flex-shrink-0">
+                          {isSelected
+                            ? <CheckSquare className="w-5 h-5 text-violet-600" />
+                            : <Square className="w-5 h-5 text-slate-300" />
+                          }
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium text-sm text-slate-800">{c.direction}</div>
+                          {/* Score badges */}
+                          <div className="flex flex-wrap gap-2 mt-1.5">
+                            <span className="text-xs text-slate-500">{isZh ? '创新性' : 'Innovation'}:</span>
+                            <ScoreBadge text={c.expected_innovation} />
+                            <span className="text-xs text-slate-500 ml-1">{isZh ? '新颖性' : 'Novelty'}:</span>
+                            <ScoreBadge text={c.expected_novelty} />
+                            <span className="text-xs text-slate-500 ml-1">{isZh ? '可靠性' : 'Reliability'}:</span>
+                            <ScoreBadge text={c.data_reliability} />
+                          </div>
+                          {/* Show rationale when selected */}
+                          {isSelected && (
+                            <div className="text-xs text-slate-500 mt-2 leading-relaxed">{c.rationale}</div>
+                          )}
+                        </div>
+                      </button>
+                      {/* Notes input when selected */}
+                      {isSelected && (
+                        <div className="px-4 pb-4 pl-12">
+                          <textarea
+                            value={candidateNotes[i] || ''}
+                            onChange={e => updateCandidateNote(i, e.target.value)}
+                            placeholder={isZh ? '备注（可选）：提示 PI 需注意或调整的地方...' : 'Notes (optional): Tips for PI to focus on or adjust...'}
+                            className="w-full border border-violet-200 rounded-lg px-3 py-2 text-xs resize-none focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white"
+                            rows={2}
+                            onClick={e => e.stopPropagation()}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )}
 
-          {/* Custom direction input */}
+          {/* Custom Directions */}
           <div>
             <h3 className="text-sm font-semibold text-slate-700 mb-2">
-              {isZh ? '或自定义研究方向' : 'Or specify a custom direction'}
+              {isZh ? '自定义研究方向' : 'Custom Research Directions'}
             </h3>
-            <textarea
-              value={customDirection}
-              onChange={e => {
-                setCustomDirection(e.target.value)
-                if (e.target.value) setSelectedCandidate(null)
-              }}
-              placeholder={isZh ? '例如：重点分析巨噬细胞的极化状态...' : 'e.g., Focus on macrophage polarization state...'}
-              className="w-full border rounded-xl px-4 py-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-violet-300"
-              rows={2}
-            />
+            <div className="space-y-2">
+              {customDirections.map((d, i) => (
+                <div key={i} className="flex gap-2 items-start p-3 border border-slate-200 rounded-xl bg-slate-50/50">
+                  <div className="flex-1 space-y-2">
+                    <input
+                      type="text"
+                      value={d.direction}
+                      onChange={e => updateCustomDirection(i, 'direction', e.target.value)}
+                      placeholder={isZh ? '研究方向...' : 'Research direction...'}
+                      className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300"
+                    />
+                    <textarea
+                      value={d.notes}
+                      onChange={e => updateCustomDirection(i, 'notes', e.target.value)}
+                      placeholder={isZh ? '备注（可选）...' : 'Notes (optional)...'}
+                      className="w-full border rounded-lg px-3 py-2 text-xs resize-none focus:outline-none focus:ring-2 focus:ring-violet-300"
+                      rows={1}
+                    />
+                  </div>
+                  <button
+                    onClick={() => removeCustomDirection(i)}
+                    className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors mt-1"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+              <button
+                onClick={addCustomDirection}
+                className="flex items-center gap-2 px-3 py-2 text-sm text-violet-600 hover:bg-violet-50 rounded-lg transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                {isZh ? '添加研究方向' : 'Add Direction'}
+              </button>
+            </div>
           </div>
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-between px-6 py-4 border-t bg-slate-50 rounded-b-2xl">
-          <button
-            onClick={handlePiDecide}
-            disabled={submitting}
-            className="px-5 py-2.5 rounded-xl text-sm font-medium border border-violet-300 text-violet-700 hover:bg-violet-50 transition-all disabled:opacity-50"
-          >
-            <div className="flex items-center gap-2">
-              <Brain className="w-4 h-4" />
-              {isZh ? '让 PI 决定' : 'Let PI Decide'}
-            </div>
-          </button>
+          <div className="flex items-center gap-3">
+            {/* Countdown timer */}
+            {hasCountdown && (
+              <div className="flex items-center gap-1.5 text-sm text-slate-500">
+                <Clock className="w-4 h-4" />
+                <span className={timeRemaining <= 30 ? 'text-amber-600 font-medium' : ''}>
+                  {formatTime(timeRemaining)}
+                </span>
+              </div>
+            )}
+            <button
+              onClick={handlePiDecide}
+              disabled={submitting}
+              className="px-5 py-2.5 rounded-xl text-sm font-medium border border-violet-300 text-violet-700 hover:bg-violet-50 transition-all disabled:opacity-50"
+            >
+              <div className="flex items-center gap-2">
+                <Brain className="w-4 h-4" />
+                {isZh ? '让 PI 决定' : 'Let PI Decide'}
+              </div>
+            </button>
+          </div>
 
-          <button
-            onClick={handleSubmitDirection}
-            disabled={submitting || (selectedCandidate === null && !customDirection.trim())}
-            className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
-              submitting || (selectedCandidate === null && !customDirection.trim())
-                ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                : 'bg-violet-600 text-white hover:bg-violet-700 shadow-md'
-            }`}
-          >
-            <Send className="w-4 h-4" />
-            {submitting
-              ? (isZh ? '提交中...' : 'Submitting...')
-              : (isZh ? '确认方向，开始分析' : 'Start Innovation Analysis')}
-          </button>
+          <div className="flex items-center gap-3">
+            {totalSelected > 0 && (
+              <span className="text-xs text-slate-500">
+                {isZh ? `已选 ${totalSelected} 个研究方向` : `${totalSelected} direction(s) selected`}
+              </span>
+            )}
+            <button
+              onClick={handleSubmit}
+              disabled={!canSubmit}
+              className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
+                !canSubmit
+                  ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                  : 'bg-violet-600 text-white hover:bg-violet-700 shadow-md'
+              }`}
+            >
+              <Send className="w-4 h-4" />
+              {submitting
+                ? (isZh ? '提交中...' : 'Submitting...')
+                : (isZh ? '开始创新分析' : 'Start Innovation Analysis')}
+            </button>
+          </div>
         </div>
       </div>
     </div>

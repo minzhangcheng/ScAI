@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.13.0
+**Version**: 0.13.1
 
 ## Core Features
 
@@ -317,6 +317,19 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.13.1 (2026-03-12)
+
+- **Multi-Direction Research Workflow**: Users can now select multiple research directions from the Exploration Report. Each direction is processed in a dedicated innovation round sequentially (auto-continuing between rounds without waiting for user input). After all direction rounds complete, PI automatically performs a **Multi-Direction Correlation Analysis** that synthesizes findings across all directions.
+- **Enhanced Direction Candidate Evaluation**: Exploration report direction candidates now include three scored evaluation fields: `expected_innovation` (how unexplored the area is), `expected_novelty` (how surprising the finding is), and `data_reliability` (confidence in supporting evidence) — each with a High/Medium/Low rating and brief explanation.
+- **Redesigned Exploration Report Dialog**: The direction selection UI now supports multi-select of AI-suggested candidates (with per-direction notes), custom direction entries (with notes), score badges for innovation/novelty/reliability, and a built-in countdown timer that auto-triggers PI selection on expiry. A link to the standalone Exploration Report HTML is included.
+- **Exploration Report HTML Export**: Added `generate_exploration_report_html()` in `report_generator.py` to produce a standalone HTML exploration report (Report A) with no LLM calls. Accessible via new endpoint `GET /api/session/{id}/exploration-report/html`.
+- **PI Direction Selection Revamp**: Replaced `innovation_instruction_pi_directed()` with `select_best_directions()` — PI now autonomously picks 2 best directions (with notes and rationale) using the multi-direction queue, so 2 sequential innovation rounds run when PI decides.
+- **Innovation Instruction Notes**: `innovation_instruction()` now accepts an optional `notes` parameter, allowing user-provided annotations to be injected into the PI's innovation planning prompt.
+- **Bioinformatics Agent LLM Error Propagation**: LLM call failures are now tracked separately (`llm_error` field) and result in `status = "error"` (distinct from `"max_steps_reached"`), with `success: false` and the error string propagated to the workflow.
+- **Session Eviction Race Fix**: Fixed a race condition in `cleanup_stale_sessions()` where a session accessed during eviction I/O could be incorrectly evicted. Added access-time snapshot comparison to abort eviction if the session was modified concurrently.
+- **Sidebar Max Rounds Control Removed**: Removed the manual "Analysis Rounds" slider/input from the sidebar. Max rounds is now set dynamically based on the number of selected research directions (1 exploration round + N direction rounds).
+- **New WebSocket Message Type**: Added `direction_correlation` message type, rendered in the message stream with direction badges and a formatted correlation analysis block.
 
 ### v0.13.0 (2026-03-12)
 

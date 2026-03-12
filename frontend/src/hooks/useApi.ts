@@ -235,10 +235,8 @@ export function useSession() {
 
       setCurrentSession(session)
 
-      // Restore state version
-      if (data.state_version !== undefined) {
-        useAppStore.getState().setStateVersion(data.state_version)
-      }
+      // Restore state version (always reset to avoid cross-session version collision)
+      useAppStore.getState().setStateVersion(data.state_version ?? 0)
 
       // Restore agent errors
       useAppStore.getState().clearAgentErrors()
@@ -550,16 +548,11 @@ export function useSession() {
       ),
     ])
 
-    // Sync remaining settings in parallel
-    const maxRounds = useAppStore.getState().maxRounds
+    // Sync remaining settings in parallel (max_rounds is now dynamically set by direction selection)
     const roundWaitSeconds = useAppStore.getState().roundWaitSeconds
     const { literatureMode, googleApiKey, pubmedEmail, literatureMaxSearchRounds, deepResearchModel } = useAppStore.getState()
 
     await Promise.allSettled([
-      apiFetch(`/session/${currentSession.id}/max-rounds`, {
-        method: 'POST',
-        body: JSON.stringify({ session_id: currentSession.id, max_rounds: maxRounds }),
-      }).catch(e => { syncFailures.push('max_rounds'); throw e }),
       apiFetch(`/session/${currentSession.id}/round-wait`, {
         method: 'POST',
         body: JSON.stringify({ round_wait_seconds: roundWaitSeconds }),
