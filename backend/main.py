@@ -704,6 +704,7 @@ async def load_session(session_id: str):
             for r in state.round_results
         ],
         "final_summary": state.final_summary,
+        "exploration_report_url": f"/api/session/{session_id}/exploration-report/html" if getattr(state, 'exploration_report_html_path', None) else None,
         # Messages history (realtime WebSocket messages for UI restoration)
         # Strip large base64 image data from messages to reduce response size
         "messages": [

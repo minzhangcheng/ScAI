@@ -228,6 +228,7 @@ class AnnotationConfirmationState(BaseModel):
     tissue: str = ""
     organism: str = ""
     tissue_summary: str = ""
+    analysis_summary: str = ""
     pending: bool = False
     confirmed: bool = False
 

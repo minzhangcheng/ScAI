@@ -231,6 +231,7 @@ export function useSession() {
           createdAt: data.graphic_abstract.created_at || data.graphic_abstract.createdAt || '',
         } : undefined,
         integratedReport: data.integrated_report || undefined,
+        explorationReportUrl: data.exploration_report_url || data.explorationReportUrl,
       }
 
       setCurrentSession(session)

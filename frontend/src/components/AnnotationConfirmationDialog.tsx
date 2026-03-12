@@ -5,9 +5,11 @@ import {
   AlertTriangle,
   Clock,
   Edit3,
-  Check
+  Check,
+  Info
 } from 'lucide-react'
 import { Language } from '../i18n/translations'
+import ReactMarkdown from 'react-markdown'
 
 interface ClusterAnnotation {
   cluster_id: string
@@ -25,6 +27,7 @@ interface AnnotationConfirmationDialogProps {
   tissue: string
   organism: string
   tissueSummary: string
+  analysisSummary?: string
   language: Language
   countdownSeconds: number  // countdown for high-confidence auto-confirm
   onConfirm: (annotations: Array<{ cluster_id: string; user_override?: string; user_confirmed: boolean }>) => Promise<void>
@@ -36,6 +39,7 @@ export function AnnotationConfirmationDialog({
   tissue,
   organism,
   tissueSummary,
+  analysisSummary,
   language,
   countdownSeconds,
   onConfirm,
@@ -143,7 +147,7 @@ export function AnnotationConfirmationDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 max-h-[85vh] flex flex-col">
+      <div className="bg-white rounded-2xl shadow-xl max-w-[90vw] w-[1200px] mx-4 max-h-[85vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
           <div>
@@ -160,33 +164,49 @@ export function AnnotationConfirmationDialog({
           </button>
         </div>
 
-        {/* Warning banner for low confidence */}
-        {hasLowConfidence && (
-          <div className="mx-6 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
-            <AlertTriangle className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
-            <div className="text-sm text-red-700">
-              {language === 'zh'
-                ? `${lowConfidenceClusters.length} 个亚群的注释置信度较低，需要手动确认后才能继续分析。`
-                : `${lowConfidenceClusters.length} cluster(s) have low confidence annotations and require manual confirmation.`}
+        <div className="flex-1 flex overflow-hidden">
+          {/* Left panel: Context Report */}
+          {analysisSummary && (
+            <div className="w-[400px] flex-shrink-0 border-r border-slate-200 overflow-y-auto bg-slate-50/50 p-6">
+              <div className="flex items-center gap-2 mb-4 text-slate-700 font-medium pb-2 border-b border-slate-200">
+                <Info className="w-4 h-4" />
+                {language === 'zh' ? '分析上下文' : 'Analysis Context'}
+              </div>
+              <div className="prose prose-sm prose-slate max-w-none">
+                <ReactMarkdown>{analysisSummary}</ReactMarkdown>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Countdown for auto-confirm (only when no low confidence) */}
-        {!hasLowConfidence && countdown > 0 && (
-          <div className="mx-6 mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center gap-2">
-            <Clock className="w-5 h-5 text-blue-500" />
-            <span className="text-sm text-blue-700">
-              {language === 'zh'
-                ? `所有注释置信度较高，${countdown} 秒后自动确认...`
-                : `All annotations have high/medium confidence. Auto-confirming in ${countdown}s...`}
-            </span>
-          </div>
-        )}
+          {/* Right panel: Annotations */}
+          <div className="flex-1 flex flex-col overflow-hidden relative">
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              {/* Warning banner for low confidence */}
+              {hasLowConfidence && (
+                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+                  <AlertTriangle className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
+                  <div className="text-sm text-red-700">
+                    {language === 'zh'
+                      ? `${lowConfidenceClusters.length} 个亚群的注释置信度较低，需要手动确认后才能继续分析。`
+                      : `${lowConfidenceClusters.length} cluster(s) have low confidence annotations and require manual confirmation.`}
+                  </div>
+                </div>
+              )}
 
-        {/* Annotations table */}
-        <div className="flex-1 overflow-y-auto px-6 py-4">
-          <table className="w-full text-sm">
+              {/* Countdown for auto-confirm (only when no low confidence) */}
+              {!hasLowConfidence && countdown > 0 && (
+                <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-blue-500" />
+                  <span className="text-sm text-blue-700">
+                    {language === 'zh'
+                      ? `所有注释置信度较高，${countdown} 秒后自动确认...`
+                      : `All annotations have high/medium confidence. Auto-confirming in ${countdown}s...`}
+                  </span>
+                </div>
+              )}
+
+              {/* Annotations table */}
+              <table className="w-full text-sm">
             <thead className="sticky top-0 bg-white">
               <tr className="border-b text-left text-slate-500">
                 <th className="py-2 pr-3 w-20">Cluster</th>
@@ -253,8 +273,8 @@ export function AnnotationConfirmationDialog({
                     </span>
                   </td>
                   <td className="py-3 pr-3 text-slate-600 text-xs">
-                    {ann.key_markers.slice(0, 5).join(', ')}
-                    {ann.key_markers.length > 5 && ` (+${ann.key_markers.length - 5})`}
+                    {ann.key_markers.slice(0, 10).join(', ')}
+                    {ann.key_markers.length > 10 && ` (+${ann.key_markers.length - 10})`}
                   </td>
                   <td className="py-3 text-right">
                     <div className="flex items-center justify-end gap-1">
@@ -283,29 +303,30 @@ export function AnnotationConfirmationDialog({
               ))}
             </tbody>
           </table>
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-between px-6 py-4 border-t bg-slate-50 rounded-b-2xl">
-          <div className="text-sm text-slate-500">
-            {annotations.filter(a => a.user_confirmed).length} / {annotations.length}{' '}
-            {language === 'zh' ? '已确认' : 'confirmed'}
+            </div>
+            {/* Footer */}
+            <div className="flex items-center justify-between px-6 py-4 border-t bg-slate-50">
+              <div className="text-sm text-slate-500">
+                {annotations.filter(a => a.user_confirmed).length} / {annotations.length}{' '}
+                {language === 'zh' ? '已确认' : 'confirmed'}
+              </div>
+              <button
+                onClick={handleConfirmAll}
+                disabled={submitting || (hasLowConfidence && !allLowConfidenceConfirmed)}
+                className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                  submitting || (hasLowConfidence && !allLowConfidenceConfirmed)
+                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                    : 'bg-violet-600 text-white hover:bg-violet-700 shadow-md'
+                }`}
+              >
+                {submitting
+                  ? (language === 'zh' ? '提交中...' : 'Submitting...')
+                  : hasLowConfidence && !allLowConfidenceConfirmed
+                  ? (language === 'zh' ? '请先确认低置信度亚群' : 'Confirm low-confidence clusters first')
+                  : (language === 'zh' ? '确认全部注释' : 'Confirm All Annotations')}
+              </button>
+            </div>
           </div>
-          <button
-            onClick={handleConfirmAll}
-            disabled={submitting || (hasLowConfidence && !allLowConfidenceConfirmed)}
-            className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all ${
-              submitting || (hasLowConfidence && !allLowConfidenceConfirmed)
-                ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                : 'bg-violet-600 text-white hover:bg-violet-700 shadow-md'
-            }`}
-          >
-            {submitting
-              ? (language === 'zh' ? '提交中...' : 'Submitting...')
-              : hasLowConfidence && !allLowConfidenceConfirmed
-              ? (language === 'zh' ? '请先确认低置信度亚群' : 'Confirm low-confidence clusters first')
-              : (language === 'zh' ? '确认全部注释' : 'Confirm All Annotations')}
-          </button>
         </div>
       </div>
     </div>

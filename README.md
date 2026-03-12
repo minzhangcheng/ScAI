@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.13.2
+**Version**: 0.13.3
 
 ## Core Features
 
@@ -317,6 +317,15 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.13.3 (2026-03-12)
+
+- **Annotation Context Panel**: The cell annotation confirmation dialog now shows a left-side "Analysis Context" panel with a structured markdown summary covering experimental design, biochemistry/pathology findings, previous round highlights, and recent literature searches — giving context for reviewing cluster annotations.
+- **`analysis_summary` in Annotation State**: Added `analysis_summary` field to `AnnotationConfirmationState`; populated by new `_build_annotation_context_report()` in `SingleCellAnalysisWorkflow`; stored in `_current_graph_state` (updated at round initialization and bioinformatics agent entry).
+- **Exploration Report Link in Results Panel**: Results panel now shows a "View Exploration Report" button linking to the standalone exploration report HTML when available.
+- **`exploration_report_url` in Session Load API**: `/api/session/{id}` now returns `exploration_report_url` when an exploration report HTML exists; `useApi.ts` maps it to `explorationReportUrl` in session state.
+- **Exploration Context in Report Prompts**: Both the bioinformatics summary and the full report generation prompts in `report_generator.py` now include Phase 1 exploration direction candidates and user-chosen directions, so LLM-generated report sections properly reference the two-phase analysis flow.
+- **Annotation Dialog Wider & More Markers**: Dialog widened to `w-[1200px] max-w-[90vw]`; key markers shown per cluster increased from 5 to 10.
 
 ### v0.13.2 (2026-03-12)
 

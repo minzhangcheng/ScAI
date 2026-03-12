@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.13.2
+**Version**: 0.13.3
 **Last Updated**: 2026-03-12
 
 ## Project Overview
@@ -1683,4 +1683,4 @@ For issues, please contact the project maintainers.
 ---
 
 *Document updated: 2026-03-12*
-*Version: 0.13.2*
+*Version: 0.13.3*

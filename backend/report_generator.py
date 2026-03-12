@@ -2699,6 +2699,22 @@ IMPORTANT:
             "Write all content in English. analysis_approach 300-500 words, analysis_results 300-500 words."
         )
 
+        exploration_context = ""
+        if state.exploration_report and hasattr(state.exploration_report, "research_direction_candidates") and state.exploration_report.research_direction_candidates:
+            exploration_context += "### Initial Exploration Report (Possible Directions):\n"
+            for idx, c in enumerate(state.exploration_report.research_direction_candidates):
+                exploration_context += f"{idx+1}. {c.get('direction', '')}\n   Rationale: {c.get('rationale', '')}\n"
+
+        if state.user_chosen_directions:
+            exploration_context += "\n### User Selected Directions (Modifications):\n"
+            for d in state.user_chosen_directions:
+                exploration_context += f"- {d.get('direction', '')} (Notes: {d.get('notes', '')})\n"
+        elif getattr(state, "user_chosen_direction", None):
+            exploration_context += f"\n### User Selected Direction:\n- {state.user_chosen_direction}\n"
+            
+        if exploration_context:
+            exploration_context = f"\n## Phase 1 Exploration & User Directions\n{exploration_context}\n"
+
         prompt = f"""You are a Principal Investigator. Your bioinformatics team has completed a single-cell RNA sequencing analysis. Below is the complete analysis notebook (all code and outputs in chronological order), along with all result figures and table data.
 
 Your task: Read through the analysis code carefully from beginning to end, examine every attached figure, and review the table data. Then write a comprehensive summary FROM SCRATCH that demonstrates your deep understanding of the entire analysis.
@@ -2706,7 +2722,7 @@ Your task: Read through the analysis code carefully from beginning to end, exami
 ## Research Project
 Title: {state.name}
 Objective: {state.initial_instruction}
-
+{exploration_context}
 ## Complete Analysis Notebook (Code + Outputs)
 {code_digest}
 
@@ -3519,6 +3535,22 @@ Return JSON with this EXACT structure:
         if params:
             params_text = "## Key Analysis Parameters\n" + "\n".join(f"- {k}: {v}" for k, v in params.items())
 
+        exploration_context = ""
+        if state.exploration_report and hasattr(state.exploration_report, "research_direction_candidates") and state.exploration_report.research_direction_candidates:
+            exploration_context += "### Initial Exploration Report (Possible Directions):\n"
+            for idx, c in enumerate(state.exploration_report.research_direction_candidates):
+                exploration_context += f"{idx+1}. {c.get('direction', '')}\n   Rationale: {c.get('rationale', '')}\n"
+
+        if state.user_chosen_directions:
+            exploration_context += "\n### User Selected Directions (Modifications):\n"
+            for d in state.user_chosen_directions:
+                exploration_context += f"- {d.get('direction', '')} (Notes: {d.get('notes', '')})\n"
+        elif getattr(state, "user_chosen_direction", None):
+            exploration_context += f"\n### User Selected Direction:\n- {state.user_chosen_direction}\n"
+            
+        if exploration_context:
+            exploration_context = f"\n## Phase 1 Exploration & User Directions\n{exploration_context}\nNote: Make sure to allocate a dedicated section near the beginning to discuss the exploration phase, the possible directions, and the user's chosen direction.\n"
+
         prompt = f"""You are a Principal Investigator writing a comprehensive scientific research report.
 
 ## CRITICAL INSTRUCTION
@@ -3532,7 +3564,7 @@ You must organize the report to walk through the COMPLETE ANALYSIS FLOW chronolo
 ## Research Project
 Title: {state.name}
 Objective: {state.initial_instruction}
-
+{exploration_context}
 {analysis_context}
 
 {params_text}

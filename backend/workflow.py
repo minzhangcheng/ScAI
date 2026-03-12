@@ -188,6 +188,7 @@ class SingleCellAnalysisWorkflow:
 
         # Current analysis state for callbacks (updated during workflow execution)
         self._current_analysis_state: Optional[AnalysisState] = None
+        self._current_graph_state: Optional[WorkflowState] = None
 
         # Event for blocking between rounds (wait for user input or continue signal)
         self._continue_event = asyncio.Event()
@@ -492,6 +493,51 @@ Be specific and actionable in your response."""
             await self._send_message("error", error_msg, AgentType.PI)
             return "Unable to get PI guidance. Please proceed with standard bioinformatics practices."
 
+    def _build_annotation_context_report(self, state: AnalysisState, graph_state: Optional[WorkflowState]) -> str:
+        """Build a comprehensive markdown summary of current analysis context for cell annotation."""
+        parts = ["### Analysis Context Report\n"]
+        
+        # 1. Experimental Design
+        parts.append("#### Experimental Design")
+        parts.append(state.build_experimental_design_summary())
+        parts.append("")
+
+        # 2. Biochemistry & Pathology findings (from graph state if available)
+        if graph_state:
+            biochem = graph_state.get("biochemistry_result")
+            if biochem and biochem.get("findings"):
+                parts.append("#### Biochemistry Findings")
+                for f in biochem["findings"]:
+                    parts.append(f"- {f}")
+                parts.append("")
+
+            patho = graph_state.get("pathology_result")
+            if patho and patho.get("findings"):
+                parts.append("#### Pathology Findings")
+                for f in patho["findings"]:
+                    parts.append(f"- {f}")
+                parts.append("")
+        
+        # 3. Previous Rounds' Key Findings
+        if state.round_results and len(state.round_results) > 0:
+            parts.append("#### Previous Analysis Highlights")
+            last_round = state.round_results[-1]
+            if last_round.pi_summary:
+                parts.append(last_round.pi_summary)
+            parts.append("")
+
+        # 4. Literature Searches (current round)
+        lit_steps = [step for step in state.analysis_log if step.step_type == "search_literature"]
+        if lit_steps:
+            parts.append("#### Recent Literature Research")
+            for step in lit_steps[-3:]:  # Last 3 searches
+                topic = step.literature_topic or "Unknown topic"
+                result = step.literature_result or "No findings recorded"
+                parts.append(f"**Topic:** {topic}")
+                parts.append(f"**Findings:** {result[:300]}...\n")
+
+        return "\n".join(parts)
+
     async def _annotate_clusters_callback(
         self,
         cluster_markers: Dict,
@@ -584,11 +630,15 @@ Be specific and actionable in your response."""
                     )
                     return result
 
+                # Generate the context summary report
+                analysis_summary = self._build_annotation_context_report(state, self._current_graph_state)
+
                 ann_state = AnnotationConfirmationState(
                     cluster_annotations=cluster_anns,
                     tissue=tissue,
                     organism=organism,
                     tissue_summary=result.get("tissue_summary", ""),
+                    analysis_summary=analysis_summary,
                     pending=True,
                 )
                 state.annotation_state = ann_state
@@ -603,6 +653,7 @@ Be specific and actionable in your response."""
                     "tissue": tissue,
                     "organism": organism,
                     "tissue_summary": result.get("tissue_summary", ""),
+                    "analysis_summary": analysis_summary,
                 }, AgentType.LITERATURE)
 
                 original_status = state.status
@@ -811,6 +862,7 @@ Be specific and actionable in your response."""
         analysis_state = state["analysis_state"]
         # Update current analysis state for callbacks (e.g., literature_callback)
         self._current_analysis_state = analysis_state
+        self._current_graph_state = state
         logger.info(f"[{self.session_id}] Initializing round {analysis_state.current_round + 1}")
         
         # Process pending human input (if any)
@@ -1224,6 +1276,7 @@ Be specific and actionable in your response."""
         3. Agent consults PI only for biological decisions
         4. Agent reports findings when analysis phase is complete
         """
+        self._current_graph_state = state
         analysis_state = state["analysis_state"]
 
         logger.info(f"[{self.session_id}] Starting bioinformatics analysis")
@@ -2613,9 +2666,9 @@ Return ONLY the JSON array, nothing else."""
         if state and state.values:
             # Restore _current_analysis_state for callbacks
             self._current_analysis_state = state.values.get("analysis_state")
-            
-            # Inject latest analysis_state if provided (so user changes during pause are picked up)
-            if analysis_state:
+            self._current_graph_state = state.values
+
+            # Inject latest analysis_state if provided (so user changes during pause are picked up)            if analysis_state:
                 await self.compiled_graph.aupdate_state(config, {"analysis_state": analysis_state})
                 self._current_analysis_state = analysis_state
 

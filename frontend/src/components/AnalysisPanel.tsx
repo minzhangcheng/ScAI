@@ -935,6 +935,7 @@ export function AnalysisPanel() {
           tissue={annotationData.tissue || ''}
           organism={annotationData.organism || ''}
           tissueSummary={annotationData.tissue_summary || ''}
+          analysisSummary={annotationData.analysis_summary || ''}
           language={language}
           countdownSeconds={30}
           onConfirm={handleConfirmAnnotations}

@@ -195,18 +195,31 @@ export function ResultsPanel() {
             {t('completedRounds', { n: currentSession.roundResults?.length || 0 })}
           </p>
         </div>
-        
-        {currentSession.finalSummary && (
-          <button
-            onClick={downloadReport}
-            className="flex items-center gap-2 px-4 py-2 bg-violet-600 text-white rounded-xl font-medium hover:bg-violet-700 transition-colors"
-          >
-            <Download className="w-4 h-4" />
-            {t('downloadReport')}
-          </button>
-        )}
-      </div>
 
+        <div className="flex items-center gap-3">
+          {currentSession.explorationReportUrl && (
+            <a
+              href={currentSession.explorationReportUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-700 rounded-xl font-medium hover:bg-indigo-100 transition-colors"
+            >
+              <FileText className="w-4 h-4" />
+              {language === 'zh' ? '查看探索报告' : 'View Exploration Report'}
+            </a>
+          )}
+
+          {currentSession.finalSummary && (
+            <button
+              onClick={downloadReport}
+              className="flex items-center gap-2 px-4 py-2 bg-violet-600 text-white rounded-xl font-medium hover:bg-violet-700 transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              {t('downloadReport')}
+            </button>
+          )}
+        </div>
+      </div>
       {/* Publication Outputs */}
       {(currentSession.status === 'completed' || publicationFigures.length > 0) && (
         <div className="space-y-4">
