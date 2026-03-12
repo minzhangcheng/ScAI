@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.13.1
+**Version**: 0.13.2
 
 ## Core Features
 
@@ -317,6 +317,10 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.13.2 (2026-03-12)
+
+- **Checkpoint Directory Auto-Creation**: Fixed a crash when the session states directory does not exist — `states_dir.mkdir(parents=True, exist_ok=True)` is now called before creating the SQLite checkpoint file in `SingleCellAnalysisWorkflow`.
 
 ### v0.13.1 (2026-03-12)
 

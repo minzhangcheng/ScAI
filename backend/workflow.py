@@ -209,7 +209,9 @@ class SingleCellAnalysisWorkflow:
         
         # Initialize checkpointer if not exists
         if self._db_conn is None:
-            db_path = str(get_session_states(self.session_id) / "checkpoints.sqlite")
+            states_dir = get_session_states(self.session_id)
+            states_dir.mkdir(parents=True, exist_ok=True)
+            db_path = str(states_dir / "checkpoints.sqlite")
             self._db_conn = await aiosqlite.connect(db_path)
             self.checkpointer = AsyncSqliteSaver(self._db_conn)
             # Make sure tables are created
