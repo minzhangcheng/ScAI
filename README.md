@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.13.3
+**Version**: 0.13.4
 
 ## Core Features
 
@@ -215,15 +215,28 @@ Click **"Start Analysis"** in the Analysis panel. The system runs a **two-phase 
 
 **Phase 1 — Exploration (Round 1)**
 
-1. **PI Planning** — PI Agent reviews your data and creates an analysis plan, assigning specific tasks to each agent
-2. **Agent Execution** — Biochemistry, Pathology, Bioinformatics, and Literature agents run their analyses sequentially
-3. **Cell Annotation Confirmation** — After the Bioinformatics Agent completes cluster annotation, analysis pauses and a dialog appears showing each cluster's cell type, confidence level (high/medium/low), and key markers. Low-confidence clusters require manual confirmation or correction before analysis continues. High-confidence results auto-confirm after a countdown
-4. **PI Synthesis** — PI Agent synthesizes findings from all agents
-5. **Exploration Report** — At the end of Round 1, PI generates a structured Exploration Report summarizing cluster overview, data quality warnings, heterogeneity findings, pathway changes, and research direction candidates. A dialog allows you to select a direction for Phase 2 (from AI-suggested candidates, a custom direction, or let PI decide automatically)
+Seven steps run sequentially to build a complete, unbiased picture of your data:
+
+1. **Round Initialization** — Pending user inputs are processed, round counter increments, status sets to RUNNING
+2. **PI Planning** — PI Agent generates an unbiased, comprehensive analysis plan with specific tasks for each agent
+3. **Biochemistry Analysis** — Extracts and interprets biochemical indicators from structured data and uploaded images
+4. **Pathology Analysis** — Tiles histology images, runs visual analysis, synthesizes findings cross-referenced with biochemistry results
+5. **Bioinformatics Analysis** — Autonomous Jupyter-based single-cell analysis (up to 200 steps):
+   - QC → Normalization → Clustering → Cell Annotation
+   - **Cell Annotation Confirmation** — Analysis pauses here. A dialog shows each cluster's cell type, confidence level (high/medium/low), and key marker genes. Low-confidence clusters require manual confirmation or correction. High-confidence results auto-confirm after a countdown
+   - DEG → GO/KEGG Pathway Enrichment → Cell-Cell Communication
+6. **Literature Research** — Searches and synthesizes scientific literature (Deep Research, PubMed+LLM, or quick search mode)
+7. **PI Synthesis** — PI Agent synthesizes findings from all agents, generates a structured **Exploration Report** covering cluster overview, data quality warnings, heterogeneity findings, pathway changes, and research direction candidates. A dialog appears for you to select a direction for Phase 2 (AI-suggested candidates with innovation/novelty/reliability scores, a custom direction, or let PI decide automatically)
 
 **Phase 2 — Innovation (Round 2+)**
 
-Following rounds use your chosen research direction as the focal point for deeper, hypothesis-driven analysis. PI Agent and specialized agents conduct in-depth investigation of the selected direction. From round 2 onwards, PI intelligently decides which agents need to run, saving time and API costs.
+Following rounds focus on the selected research direction for deeper, hypothesis-driven analysis:
+
+- **Direction Modes**: Single direction, multiple directions (processed sequentially via an automatic queue), or PI-selected best directions
+- **Selective Agent Activation**: PI decides which agents run each round — saving time and API costs. Bioinformatics always runs
+- **Multi-Direction Correlation**: After all direction rounds complete, PI automatically synthesizes findings across directions
+- **Convergence Detection**: Analysis stops automatically after 2 consecutive rounds with no new findings
+- **Feedback Loop**: After each round, provide text guidance, upload new data, or let the countdown auto-continue
 
 The Bioinformatics Agent runs code in a local Jupyter kernel — you can see the code and outputs in real-time. All figures are automatically saved as both PNG and high-resolution PDF.
 
@@ -317,6 +330,18 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.13.4 (2026-03-13)
+
+- **Pause/Resume Deadlock Fix**: `_wait_for_user_input` now checks and force-syncs `WAITING_INPUT` status before blocking (both manual and countdown modes), preventing a deadlock where Resume restored status to `RUNNING` but the frontend had no visible "waiting for input" UI.
+- **Multi-Direction max_rounds Guard**: Extending `max_rounds` on user input is now skipped when multi-direction mode has already completed all directions (queue empty + directions selected), preventing a spurious extra round after correlation analysis.
+- **Retry Status Field**: `@with_retry` exhaustion now returns `"status": "failed"` alongside the error, allowing PI synthesis to distinguish agent failures from skipped agents.
+- **Round 3+ Task Fallback**: When prefix-tagged tasks (`[Bioinformatics]`, etc.) are absent from `next_steps`, the workflow now falls back to assigning raw `next_steps` to bioinformatics first, then `pi_summary` as a secondary fallback, instead of silently producing empty task lists.
+- **Bioinformatics Message History Cap**: Message history is trimmed to 80 entries (preserving the system message) before each LLM call, preventing unbounded context growth during 200-step analyses.
+- **Supervisor LLM Evaluation Sampling**: Supervisor Agent's LLM evaluation is now called only on steps with errors, figure outputs, `annotate_clusters` calls, or every 5th step — reducing API cost while keeping full rule-based checks on every step.
+- **Report Generator Dead Code Removal**: Removed ~700 lines of unreachable code — `_setup_environment()`, `_auto_load_processed_data()`, `_extract_cluster_annotations()` (sandbox version), and `_generate_section_autonomous_legacy()`, along with the now-unused `self.sandbox` field and `LocalJupyterSandbox` import.
+- **Pre-existing Syntax Fix**: Fixed a merged comment+`if` statement in `workflow.py` (resume path) that caused an `IndentationError` under Python 3.13.
+- **Documentation**: Updated README and HANDOVER with accurate two-phase analysis flow, detailed workflow graph, and corrected key feature descriptions.
 
 ### v0.13.3 (2026-03-12)
 

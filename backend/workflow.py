@@ -115,7 +115,7 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
             return {
                 **state,
                 "failed_node": node_name,
-                result_key: {"error": str(last_error), "findings": []}
+                result_key: {"error": str(last_error), "findings": [], "status": "failed"}
             }
         return wrapper
     return decorator
@@ -1106,22 +1106,31 @@ Be specific and actionable in your response."""
 
             last_round = analysis_state.get_latest_round()
 
-            # Fallback: if prefix matching extracted no tasks at all, use PI summary
-            if not any([
+            # Fallback: if prefix matching extracted no tasks at all
+            all_empty = not any([
                 instructions["pathology_tasks"],
                 instructions["bioinformatics_tasks"],
                 instructions["biochemistry_tasks"],
                 instructions["literature_topics"]
-            ]) and last_round and last_round.pi_summary:
-                fallback_context = last_round.pi_summary[:500]
-                fallback = f"Continue analysis based on previous round findings. Context: {fallback_context}"
-                instructions["bioinformatics_tasks"] = [fallback]
-                instructions["literature_topics"] = [f"Literature search related to: {fallback_context[:200]}"]
-                
-                logger.warning(
-                    f"[{self.session_id}] No prefixed tasks found in next_steps, "
-                    f"using PI summary as fallback for bioinformatics and literature"
-                )
+            ])
+            if all_empty and last_round:
+                if last_round.next_steps:
+                    # First fallback: assign unprefixed next_steps to bioinformatics
+                    instructions["bioinformatics_tasks"] = last_round.next_steps
+                    logger.warning(
+                        f"[{self.session_id}] No prefixed tasks found in next_steps, "
+                        f"falling back to bioinformatics-only with raw next_steps"
+                    )
+                elif last_round.pi_summary:
+                    # Second fallback: use PI summary
+                    fallback_context = last_round.pi_summary[:500]
+                    fallback = f"Continue analysis based on previous round findings. Context: {fallback_context}"
+                    instructions["bioinformatics_tasks"] = [fallback]
+                    instructions["literature_topics"] = [f"Literature search related to: {fallback_context[:200]}"]
+                    logger.warning(
+                        f"[{self.session_id}] No next_steps available, "
+                        f"using PI summary as fallback for bioinformatics and literature"
+                    )
 
             # Build skip_nodes from PI's agent activation decision
             agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
@@ -1980,11 +1989,20 @@ Return ONLY the JSON array, nothing else."""
             logger.info(f"[{self.session_id}] No-wait mode, proceeding immediately (round {analysis_state.current_round})")
         elif wait_seconds == -1:
             # Manual mode: wait indefinitely for user signal
+            # Guard: ensure WAITING_INPUT status is synced before blocking
+            # (prevents deadlock when Resume restores status to RUNNING)
+            if analysis_state.status != TaskStatus.WAITING_INPUT:
+                analysis_state.status = TaskStatus.WAITING_INPUT
+                await self._send_state_sync(analysis_state, "waiting_input")
             logger.info(f"[{self.session_id}] Manual mode, waiting indefinitely for user input (round {analysis_state.current_round})")
             await self._continue_event.wait()
             logger.info(f"[{self.session_id}] Continue signal received")
         else:
             # Countdown mode: backend safety timeout = frontend countdown + 60s buffer
+            # Guard: ensure WAITING_INPUT status is synced before blocking
+            if analysis_state.status != TaskStatus.WAITING_INPUT:
+                analysis_state.status = TaskStatus.WAITING_INPUT
+                await self._send_state_sync(analysis_state, "waiting_input")
             backend_timeout = wait_seconds + 60
             logger.info(f"[{self.session_id}] Waiting for user input (round {analysis_state.current_round}, timeout={backend_timeout}s)")
             try:
@@ -2001,8 +2019,17 @@ Return ONLY the JSON array, nothing else."""
         has_uploaded_files = bool(analysis_state.pending_uploaded_files)
         max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
         if (has_real_text or has_uploaded_files) and analysis_state.current_round >= max_rounds:
-            analysis_state.max_rounds = analysis_state.current_round + 1
-            logger.info(f"[{self.session_id}] User input on last round (text={has_real_text}, files={has_uploaded_files}), extending max_rounds to {analysis_state.max_rounds}")
+            # Don't extend if multi-direction mode has completed all directions
+            # (queue empty + directions were selected → correlation analysis already done)
+            multi_dir_completed = (
+                not analysis_state.directions_queue
+                and analysis_state.user_chosen_directions
+            )
+            if multi_dir_completed:
+                logger.info(f"[{self.session_id}] Multi-direction completed, not extending max_rounds")
+            else:
+                analysis_state.max_rounds = analysis_state.current_round + 1
+                logger.info(f"[{self.session_id}] User input on last round (text={has_real_text}, files={has_uploaded_files}), extending max_rounds to {analysis_state.max_rounds}")
 
         return {**state, "analysis_state": analysis_state}
 
@@ -2668,7 +2695,8 @@ Return ONLY the JSON array, nothing else."""
             self._current_analysis_state = state.values.get("analysis_state")
             self._current_graph_state = state.values
 
-            # Inject latest analysis_state if provided (so user changes during pause are picked up)            if analysis_state:
+            # Inject latest analysis_state if provided (so user changes during pause are picked up)
+            if analysis_state:
                 await self.compiled_graph.aupdate_state(config, {"analysis_state": analysis_state})
                 self._current_analysis_state = analysis_state
 

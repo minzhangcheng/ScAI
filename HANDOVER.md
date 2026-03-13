@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.13.3
-**Last Updated**: 2026-03-12
+**Version**: 0.13.4
+**Last Updated**: 2026-03-13
 
 ## Project Overview
 
@@ -94,7 +94,7 @@ intesc/                         # Code directory
 │   │                           # - Analysis log propagation and deduplication (by step ID)
 │   │                           # - Graphic abstract revision loop (PI review + Painter revision + best selection)
 │   │
-│   ├── report_generator.py     # Report generator (~5100 lines)
+│   ├── report_generator.py     # Report generator (~4400 lines)
 │   │                           # - No-sandbox report compilation (v0.7.3 rewrite)
 │   │                           # - PI analysis review pre-step (reads notebook, views figures via vision API)
 │   │                           # - Builds analysis record from code_history
@@ -124,7 +124,7 @@ intesc/                         # Code directory
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2, ~785 lines)
 │   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~1060 lines)
 │   │   ├── painter_agent.py    # Painter Agent (graphic abstract + revision support)
-│   │   └── supervisor_agent.py # Supervisor Agent (real-time bioinformatics step monitoring, PI escalation, custom system_prompt)
+│   │   └── supervisor_agent.py # Supervisor Agent (real-time bioinformatics step monitoring, sampled LLM evaluation, PI escalation, custom system_prompt)
 │   │
 │   ├── models/
 │   │   └── schemas.py          # Pydantic data models (~540 lines)
@@ -220,73 +220,91 @@ class SingleCellAnalysisWorkflow:
 **Workflow Graph Structure:**
 
 ```
-initialize_round ◄────────────────────────┐
-      │                                   │
-      ▼                                   │
-  pi_planning                             │
-      │                                   │
-      ▼ (sequential)                      │
-  biochemistry_analysis                   │
-      │                                   │
-      ▼  (PI refines tasks)               │
-  pathology_analysis                      │
-      │                                   │
-      ▼  (PI refines tasks)               │
-  bioinformatics_analysis                 │
-      │                                   │
-      ▼  (PI refines tasks)               │
-  literature_research                     │
-      │                                   │
-      ▼                                   │
-  pi_synthesis                            │
-      │                                   │
-      ▼                                   │
-  wait_for_user_input  ◄── configurable   │
-      │                    (default 5min) │
-  ┌───┴───┐                               │
-  │       │                               │
-(continue) (stop)                         │
-  │       │                               │
-  │       ▼                               │
-  │  generate_final_report                │
-  │       │                               │
-  │       ▼                               │
-  │  generate_graphic_abstract            │
-  │       │                               │
-  │       ▼                               │
-  │  generate_detailed_report             │
-  │       │                               │
-  │       ▼                               │
-  │      END                              │
-  │                                       │
-  └───► check_convergence ────────────────┘
+用户创建Session → 上传数据 → WebSocket连接 → 启动分析
+                                                 │
+  ┌──────────────────────────────────────────────┘
+  ▼
+Phase 1: Exploration (Round 1)
+  │
+  ├─ initialize_round       处理pending输入, current_round++, status=RUNNING
+  ├─ pi_planning            initial_exploration_instruction() 无偏全面分析计划
+  ├─ biochemistry_analysis  提取指标 → 图像分析 → 综合解读
+  ├─ pathology_analysis     瓦片化 → 视觉API → 综合(依赖biochemistry结论)
+  ├─ bioinformatics_analysis Jupyter自主执行(200步预算)
+  │    ├── QC → 标准化 → 聚类 → 细胞注释
+  │    │       └── [BLOCKING] annotation_confirmation → 用户确认/修正
+  │    └── DEG → GO/KEGG → 细胞通信
+  ├─ literature_research    Deep Research / PubMed+LLM / 快速搜索
+  └─ pi_synthesis           综合发现 → Exploration Report → phase切换 → WAITING_INPUT
+                                │
+                  [exploration_report dialog: 用户选择方向]
+                                │
+Phase 2: Innovation (Round 2+)
+  │
+  ├─ 方向调度
+  │    ├── 单方向: user_chosen_direction
+  │    ├── 多方向: directions_queue (轮次间自动推进, 跳过wait)
+  │    └── PI自选: [PI_DECIDE] → select_best_directions() → directions_queue
+  │
+  ├─ initialize_round       (同Phase 1)
+  ├─ pi_planning            innovation_instruction() + 选择性agent激活
+  ├─ [biochemistry/pathology/bioinformatics/literature] 按PI指令运行(可skip)
+  ├─ pi_synthesis
+  │    └── directions_queue空时: 触发多方向correlation分析
+  │
+  ├─ wait_for_user_input  ◄── configurable (-1=manual, 0=no-wait, >0=countdown+60s)
+  │    │   directions_queue非空时: 自动跳过wait
+  │    │
+  ┌───┴───┐
+  │       │
+(continue) (stop)
+  │       │
+  │       ▼
+  │  generate_final_report
+  │       │
+  │       ▼
+  │  generate_graphic_abstract  (PI review + Painter revision × 2 + best selection)
+  │       │
+  │       ▼
+  │  generate_detailed_report   (9章 HTML报告, checkpoint续写)
+  │       │
+  │       ▼
+  │      END
+  │
+  └───► check_convergence ──────────────────► initialize_round (下一轮)
+           │  连续2轮无新发现 → stop
+           └─ max_rounds达到 → stop (除非用户输入扩展)
 ```
 
 **Key Features:**
 
-1. **Sequential Execution**: Biochemistry → Pathology → Bioinformatics Agents run sequentially, with Bioinformatics consulting PI and Literature via callbacks. Biochemistry runs first so its results inform downstream agents.
-2. **Retry Mechanism**: `@with_retry(max_retries=3)` decorator with exponential backoff
-3. **Structured Error Tracking**: Errors captured in `AgentError` model with agent, type, message, details
-4. **State Version Control**: `_send_state_sync()` method ensures atomic version updates
-5. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval (up to 3 revisions). PI review includes experimental design context with a Data Fidelity criterion to catch fabricated groups. Revision uses `chat_with_vision()` so the bioinformatics agent can see its own figure alongside PI feedback. Full cumulative revision history is tracked in `PublicationFigure.revision_history` and passed to the code reviser to prevent re-introducing fixed issues.
-18. **AI-Curated Brief Figures**: After all analysis rounds complete, PI Agent's `select_brief_figures()` curates the figure set shown in the Results tab — filters out QC/diagnostic plots (e.g. qc_violin, pca_variance, hvg_plot) and superseded intermediate versions, keeping only key result figures. Falls back to all publication figures if AI selection returns empty. Workspace figures (workspace root + figures/) are scanned and compressed (`compress_image_to_base64`) for inclusion alongside existing publication figures.
-6. **Figure Step Budget**: Figure-only iterations (using `generate_publication_figure` tool) are excluded from the bioinformatics agent's step count. Safety cap of `MAX_FIGURE_ITERATIONS=5` prevents infinite figure generation loops — after exhaustion, agent refuses new figures and redirects to analysis. `max_tokens=32000` for figure revision code generation prevents truncation.
-19. **Tool Message History Consistency**: Bioinformatics Agent appends exactly one assistant message per LLM response (using `raw_assistant_message` if available) before iterating over tool calls. Eliminates duplicate or missing assistant messages that previously caused API errors with Gemini's `thought_signature` requirement.
-17. **Figure Data Fidelity**: All figure generation and revision prompts include explicit experimental design constraints (`CRITICAL DATA CONSTRAINT`) with actual group names from `state.treatment_groups`. This prevents LLM hallucination of non-existent treatment groups. Constraint is injected in: `_build_data_context()`, `generate_publication_figure` tool description, `_revise_figure_code()` prompt, and PI `review_figure()` prompt.
-7. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
-8. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with configurable countdown (default 300s; -1=manual-only, 0=no-wait auto-continue, stored in `round_wait_seconds`). Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend respects `round_wait_seconds`: manual mode waits indefinitely, no-wait proceeds immediately, countdown mode uses frontend timer + 60s buffer as backend safety timeout. User input or file uploads on the last round extends `max_rounds` by 1.
-9. **File Upload During Pause**: Users can upload pathology images while workflow is in `waiting_input` or `completed` state. Files are tracked in `pending_uploaded_files` and processed in the next round.
-10. **Round Context Enrichment**: `_build_previous_findings_context()` and `_build_code_history_summary()` methods provide each agent with previous round findings and code execution history, preventing redundant analyses in multi-round workflows.
-11. **Literature-based Cluster Annotation**: `_annotate_clusters_callback()` routes bioinformatics agent's `annotate_clusters` tool calls to the literature agent for efficient batch cluster annotation.
-12. **Deep Research Topic Merging**: When using Gemini Deep Research mode, multiple topics are merged into a single comprehensive query (one DR call instead of N). After the DR call, `_evaluate_dr_coverage()` checks which topics were insufficiently covered and falls back to PubMed+LLM for gaps.
-13. **Report-Only Resume**: `generate_report()` method runs only the report generation phase (final report → graphic abstract → detailed report), bypassing analysis rounds. Used when a session completed all analysis but was interrupted during report generation. WebSocket handler detects this condition automatically.
-14. **GENERATING_REPORT Status**: New `TaskStatus.GENERATING_REPORT` marks sessions in report generation phase, enabling detection of interrupted report generation on resume.
-15. **Selective Agent Activation**: From round 2 onwards, PI Agent decides which agents to activate via `RoundResult.agents_for_next_round`. Bioinformatics Agent always runs. `_pi_planning()` builds `skip_nodes` from the previous round's `agents_for_next_round`, and `@with_retry` skips deactivated nodes with WebSocket notification. Each round's `skip_nodes` is rebuilt fresh (not accumulated), so previously skipped agents can be re-activated. **Auto-activation**: If PI's `next_steps` contains tasks prefixed with an agent name (e.g., `[Pathology] ...`) but that agent is not in `agents_for_next_round`, the workflow auto-activates it.
-21. **Analysis Log Propagation**: `_post_bioinformatics()` collects `analysis_log` from the bioinformatics agent result, deduplicates by step ID, and appends to `AnalysisState.analysis_log`. Code history is similarly deduped by `CodeExecution.id`.
-22. **Cross-Agent Context Sharing**: Biochemistry findings are injected into pathology and bioinformatics agent prompts. Pathology findings are injected into bioinformatics agent prompts. `_collect_current_round_results()` collects findings from already-completed agents for dynamic PI planning. Each agent benefits from the accumulated results of all preceding agents in the same round.
-23. **Dynamic PI Planning**: PI Agent's `plan_agent_tasks()` method refines each downstream agent's tasks based on already-completed results within the round. Uses `self.chat()` to accumulate context across successive planning calls, building a coherent chain of thought. PI history is reset at the start of each round's planning phase. For round 2+, previous round PI summary is passed as strategic overview context.
-16. **Docker Pip Install**: Bioinformatics Agent's `_validate_code()` allows `subprocess` calls when all usages are pip/pip3 install commands (safe in Docker environments). System prompt includes package installation guidelines.
-20. **Graphic Abstract Revision Loop**: The graphic abstract generation now uses a 3-phase revision process: (1) initial generation by Painter Agent; (2) up to 2 rounds of PI review via vision API (`review_graphic_abstract()`) + Painter revision with accumulated feedback history (`revise_graphic_abstract()`); (3) PI selects the best candidate from all versions using side-by-side vision comparison (`select_best_graphic_abstract()`). Metadata stored on `GraphicAbstract`: `revision_count`, `revision_history`, `all_candidates`, `selected_index`.
+1. **Two-Phase Workflow**: Phase 1 (Exploration, Round 1) runs all agents for unbiased discovery; Phase 2 (Innovation, Round 2+) focuses on user-selected directions with selective agent activation.
+2. **Sequential Execution**: Biochemistry → Pathology → Bioinformatics → Literature run sequentially within each round. Biochemistry runs first so its results inform downstream agents. PI dynamically refines each agent's tasks based on already-completed results.
+3. **Annotation Confirmation Blocking**: After Bioinformatics Agent completes cluster annotation, workflow pauses (`WAITING_ANNOTATION` status), sends `annotation_confirmation` WebSocket message, and blocks on `_annotation_event`. Resumes when user confirms/corrects annotations via the dialog.
+4. **Multi-Direction Queue**: When user selects multiple directions or PI decides (`[PI_DECIDE]`), directions are queued in `directions_queue`. Each direction gets its own innovation round. `wait_for_user_input` auto-skips when the queue is non-empty. `max_rounds = len(selected_dirs) + 1`. After the queue empties, PI synthesizes a multi-direction correlation analysis.
+5. **Retry Mechanism**: `@with_retry(max_retries=3)` decorator with exponential backoff. On exhaustion, returns `{"error": ..., "findings": [], "status": "failed"}` so PI synthesis can distinguish agent failures from skipped agents.
+6. **Structured Error Tracking**: Errors captured in `AgentError` model with agent, type, message, details
+7. **State Version Control**: `_send_state_sync()` method ensures atomic version updates; status guard in `_wait_for_user_input` ensures `WAITING_INPUT` is synced before blocking (prevents pause/resume deadlock)
+8. **Figure Review Loop**: Bioinformatics Agent's figures are reviewed by PI before approval (up to 3 revisions). PI review includes experimental design context with a Data Fidelity criterion to catch fabricated groups. Revision uses `chat_with_vision()` so the bioinformatics agent can see its own figure alongside PI feedback. Full cumulative revision history is tracked in `PublicationFigure.revision_history` and passed to the code reviser to prevent re-introducing fixed issues.
+9. **AI-Curated Brief Figures**: After all analysis rounds complete, PI Agent's `select_brief_figures()` curates the figure set shown in the Results tab — filters out QC/diagnostic plots (e.g. qc_violin, pca_variance, hvg_plot) and superseded intermediate versions, keeping only key result figures. Falls back to all publication figures if AI selection returns empty. Workspace figures (workspace root + figures/) are scanned and compressed (`compress_image_to_base64`) for inclusion alongside existing publication figures.
+10. **Figure Step Budget**: Figure-only iterations (using `generate_publication_figure` tool) are excluded from the bioinformatics agent's step count. Safety cap of `MAX_FIGURE_ITERATIONS=5` prevents infinite figure generation loops — after exhaustion, agent refuses new figures and redirects to analysis. `max_tokens=32000` for figure revision code generation prevents truncation.
+11. **Message History Trimming**: Bioinformatics Agent trims its message history to the last 80 messages (preserving the system message) before each `chat_with_tools()` call to prevent unbounded context growth during 200-step analyses.
+12. **Tool Message History Consistency**: Bioinformatics Agent appends exactly one assistant message per LLM response (using `raw_assistant_message` if available) before iterating over tool calls. Eliminates duplicate or missing assistant messages that previously caused API errors with Gemini's `thought_signature` requirement.
+13. **Figure Data Fidelity**: All figure generation and revision prompts include explicit experimental design constraints (`CRITICAL DATA CONSTRAINT`) with actual group names from `state.treatment_groups`. This prevents LLM hallucination of non-existent treatment groups. Constraint is injected in: `_build_data_context()`, `generate_publication_figure` tool description, `_revise_figure_code()` prompt, and PI `review_figure()` prompt.
+14. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
+15. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with configurable countdown (default 300s; -1=manual-only, 0=no-wait auto-continue, stored in `round_wait_seconds`). Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend respects `round_wait_seconds`: manual mode waits indefinitely, no-wait proceeds immediately, countdown mode uses frontend timer + 60s buffer as backend safety timeout. User input or file uploads on the last round extends `max_rounds` by 1 (unless multi-direction mode has completed all directions).
+16. **File Upload During Pause**: Users can upload pathology images while workflow is in `waiting_input` or `completed` state. Files are tracked in `pending_uploaded_files` and processed in the next round.
+17. **Round Context Enrichment**: `_build_previous_findings_context()` and `_build_code_history_summary()` methods provide each agent with previous round findings and code execution history, preventing redundant analyses in multi-round workflows.
+18. **Literature-based Cluster Annotation**: `_annotate_clusters_callback()` routes bioinformatics agent's `annotate_clusters` tool calls to the literature agent for efficient batch cluster annotation.
+19. **Deep Research Topic Merging**: When using Gemini Deep Research mode, multiple topics are merged into a single comprehensive query (one DR call instead of N). After the DR call, `_evaluate_dr_coverage()` checks which topics were insufficiently covered and falls back to PubMed+LLM for gaps.
+20. **Report-Only Resume**: `generate_report()` method runs only the report generation phase (final report → graphic abstract → detailed report), bypassing analysis rounds. Used when a session completed all analysis but was interrupted during report generation. WebSocket handler detects this condition automatically.
+21. **GENERATING_REPORT Status**: `TaskStatus.GENERATING_REPORT` marks sessions in report generation phase, enabling detection of interrupted report generation on resume.
+22. **Selective Agent Activation**: From round 2 onwards, PI Agent decides which agents to activate via `RoundResult.agents_for_next_round`. Bioinformatics Agent always runs. `_pi_planning()` builds `skip_nodes` from the previous round's `agents_for_next_round`, and `@with_retry` skips deactivated nodes with WebSocket notification. Each round's `skip_nodes` is rebuilt fresh (not accumulated), so previously skipped agents can be re-activated. **Auto-activation**: If PI's `next_steps` contains tasks prefixed with an agent name (e.g., `[Pathology] ...`) but that agent is not in `agents_for_next_round`, the workflow auto-activates it.
+23. **Analysis Log Propagation**: `_post_bioinformatics()` collects `analysis_log` from the bioinformatics agent result, deduplicates by step ID, and appends to `AnalysisState.analysis_log`. Code history is similarly deduped by `CodeExecution.id`.
+24. **Cross-Agent Context Sharing**: Biochemistry findings are injected into pathology and bioinformatics agent prompts. Pathology findings are injected into bioinformatics agent prompts. `_collect_current_round_results()` collects findings from already-completed agents for dynamic PI planning. Each agent benefits from the accumulated results of all preceding agents in the same round.
+25. **Dynamic PI Planning**: PI Agent's `plan_agent_tasks()` method refines each downstream agent's tasks based on already-completed results within the round. Uses `self.chat()` to accumulate context across successive planning calls, building a coherent chain of thought. PI history is reset at the start of each round's planning phase. For round 2+, previous round PI summary is passed as strategic overview context. Round 3+ falls back to `next_steps` → `pi_summary` if prefix-tagged tasks are not found.
+26. **Docker Pip Install**: Bioinformatics Agent's `_validate_code()` allows `subprocess` calls when all usages are pip/pip3 install commands (safe in Docker environments). System prompt includes package installation guidelines.
+27. **Graphic Abstract Revision Loop**: The graphic abstract generation uses a 3-phase revision process: (1) initial generation by Painter Agent; (2) up to 2 rounds of PI review via vision API (`review_graphic_abstract()`) + Painter revision with accumulated feedback history (`revise_graphic_abstract()`); (3) PI selects the best candidate from all versions using side-by-side vision comparison (`select_best_graphic_abstract()`). Metadata stored on `GraphicAbstract`: `revision_count`, `revision_history`, `all_candidates`, `selected_index`.
 
 **WebSocket Message Types:**
 
@@ -513,7 +531,7 @@ class LocalJupyterSandbox:
 - **Centralized code safety**: `DANGEROUS_PATTERNS` and `validate_code_safety()` moved here from bioinformatics agent, enforced at sandbox level so all callers are protected. Internal code (kernel init, session restore/save) uses `skip_safety_check=True`
 - **Code extraction**: `extract_code_from_markdown()` shared utility for extracting code from LLM responses, replacing duplicated regex-based extraction across agents
 
-### 4. Report Generator (report_generator.py, ~4683 lines)
+### 4. Report Generator (report_generator.py, ~4400 lines)
 
 **9 Chapters + Cluster Annotation Table:**
 
@@ -1336,6 +1354,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.13.4 | 2026-03-13 | Pause/resume deadlock fix (WAITING_INPUT status guard), multi-direction max_rounds guard, retry status:failed field, Round 3+ task fallback, bioinformatics message history cap (80), supervisor sampled LLM evaluation, report_generator dead code removal (~700 lines), pre-existing IndentationError fix, docs update |
 | 0.13.1 | 2026-03-12 | Multi-direction research workflow (directions_queue, auto-continue between directions), enhanced direction candidate evaluation (innovation/novelty/reliability scores), exploration report HTML export, PI select_best_directions(), bioinformatics LLM error status, session eviction race fix, sidebar max-rounds removed |
 | 0.13.0 | 2026-03-12 | Two-phase workflow (Exploration Phase + Innovation Phase), cell annotation confirmation dialog (WAITING_ANNOTATION status), exploration report with research direction selection, new data models (ClusterAnnotation, AnnotationConfirmationState, ExplorationReport) |
 | 0.12.4 | 2026-03-11 | Session-centric data directory restructure, backward-compatible path resolution, data migration script |
@@ -1378,6 +1397,18 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.13.4 (2026-03-13)
+
+- **Pause/Resume Deadlock Fix** (`workflow.py`): `_wait_for_user_input` now checks `analysis_state.status != WAITING_INPUT` before entering the blocking `asyncio.Event.wait()` in both manual mode (`wait_seconds == -1`) and countdown mode (`wait_seconds > 0`). If status is not already `WAITING_INPUT`, it is force-set and synced via `_send_state_sync()`. Fixes a deadlock where Resume restored status to `RUNNING`, leaving the frontend with no waiting-input UI while the backend remained blocked on `_continue_event.wait()`.
+- **Multi-Direction max_rounds Guard** (`workflow.py`): The `max_rounds` extension on last-round user input now checks whether multi-direction mode has completed all directions (`not directions_queue and user_chosen_directions`). If so, the extension is skipped to prevent a spurious extra round after multi-direction correlation analysis is already done.
+- **Retry `status: "failed"` Field** (`workflow.py`): `@with_retry` decorator's exhaustion return dict now includes `"status": "failed"` alongside `"error"` and `"findings": []`. This allows PI synthesis to distinguish failed agents from skipped agents (which return `"status": "skipped"`).
+- **Round 3+ Task Extraction Fallback** (`workflow.py`): Replaced the single-fallback (pi_summary only) with a two-tier fallback: (1) if prefix-tagged tasks are absent from `next_steps`, assign the raw `next_steps` list to bioinformatics; (2) if `next_steps` is also empty, fall back to `pi_summary`. Prevents silent empty task lists when LLM does not use the `[Agent]` prefix format.
+- **Bioinformatics Message History Cap** (`bioinformatics_agent.py`): Added a `MAX_MESSAGES = 80` trim before each `chat_with_tools()` call: `messages = [messages[0]] + messages[-(MAX_MESSAGES-1):]`. Preserves the system message and the most recent 79 messages. Prevents unbounded context growth during 200-step autonomous analyses.
+- **Supervisor Sampled LLM Evaluation** (`supervisor_agent.py`): LLM evaluation in `evaluate_step()` is now gated by `should_llm_evaluate`: True only when `step.code_error` exists, `figures` is non-empty, `step.step_type == "annotate_clusters"`, or `self._step_count % 5 == 0`. All other steps receive rule-based checks only (`_rule_check()`), reducing per-step LLM calls by ~80%.
+- **Report Generator Dead Code Removal** (`report_generator.py`): Deleted ~700 lines of unreachable code: `_setup_environment()` (never called), `_auto_load_processed_data()` (only called by the above), `_extract_cluster_annotations()` sandbox version (only called by the above), and `_generate_section_autonomous_legacy()` (explicitly marked legacy, never called). Removed `self.sandbox: Optional[LocalJupyterSandbox] = None` field and the now-unused `from .utils.sandbox import LocalJupyterSandbox` and `get_session_workspace` imports.
+- **Pre-existing Syntax Fix** (`workflow.py`): Fixed a merged comment+`if` statement (`# comment            if analysis_state:`) in the Resume path (~line 2698) that caused `IndentationError` under Python 3.13's stricter parser.
+- **Documentation**: Updated README and HANDOVER with accurate two-phase analysis flow (7 sequential steps, bioinformatics sub-flow, annotation confirmation blocking, multi-direction dispatch), a new bilingual workflow graph, and renumbered/expanded Key Features list.
 
 #### v0.13.1 (2026-03-12)
 
@@ -1682,5 +1713,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-12*
-*Version: 0.13.3*
+*Document updated: 2026-03-13*
+*Version: 0.13.4*

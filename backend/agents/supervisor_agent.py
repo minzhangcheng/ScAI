@@ -175,12 +175,23 @@ class SupervisorAgent:
             record.technical_issues.extend(rule_issues)
             feedback_parts.extend(rule_issues)
 
-        # Phase 2: Cheap LLM evaluation (every step)
-        try:
-            llm_result = await self._llm_evaluate(step, figures)
-        except Exception as e:
-            logger.warning(f"[{self.session_id}] Supervisor LLM evaluation failed: {e}")
-            llm_result = None
+        # Phase 2: LLM evaluation (sampled to reduce cost)
+        # Only invoke LLM on steps that are likely to need it
+        should_llm_evaluate = (
+            bool(step.code_error) or              # Has execution error
+            bool(figures) or                       # Has figure output
+            step.step_type == "annotate_clusters" or  # Critical biological decision
+            self._step_count % 5 == 0              # Sample every 5 steps
+        )
+
+        llm_result = None
+        if not should_llm_evaluate:
+            logger.debug(f"[{self.session_id}] Skipping LLM evaluation for step {step.step_number} (sampling)")
+        else:
+            try:
+                llm_result = await self._llm_evaluate(step, figures)
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] Supervisor LLM evaluation failed: {e}")
 
         if llm_result:
             record.llm_severity = llm_result.get("severity", "none")

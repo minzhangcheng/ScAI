@@ -658,7 +658,14 @@ Before running sc.tl.pca() or any dimensionality reduction:
                 await self.sandbox.save_session()
             
             self._set_llm_context()
-            
+
+            # Trim message history to prevent unbounded growth
+            MAX_MESSAGES = 80
+            if len(messages) > MAX_MESSAGES:
+                # Preserve system message + most recent messages
+                messages = [messages[0]] + messages[-(MAX_MESSAGES - 1):]
+                logger.info(f"Trimmed message history to {len(messages)} messages")
+
             try:
                 response = await self.llm_client.chat_with_tools(
                     model=self.model,
