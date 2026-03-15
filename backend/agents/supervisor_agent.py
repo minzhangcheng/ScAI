@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Callable, Awaitable
 import json
 import logging
+import os
 import re
 import hashlib
 import uuid
@@ -355,8 +356,8 @@ class SupervisorAgent:
         # Build structured analysis narrative for the LLM
         narrative = self._build_analysis_narrative(all_records, analysis_state, workspace_path)
 
-        # Collect figure paths from workspace
-        figure_map = self._collect_figure_paths(all_records, workspace_path)
+        # Collect figure paths from workspace and publication figures
+        figure_map = self._collect_figure_paths(all_records, workspace_path, state=analysis_state)
 
         await _progress(15, "生成报告内容..." if zh else "Generating report content...")
 
@@ -732,33 +733,87 @@ class SupervisorAgent:
         lines = []
         lines.append(f"Project: {state.name}")
         lines.append(f"Instruction: {state.initial_instruction[:500]}")
+        lines.append(f"Total rounds: {len(state.round_results)}")
         lines.append(f"Total steps monitored: {len(records)}")
         lines.append("")
 
+        # Split records into per-round blocks using step number resets
+        round_blocks: List[List[Dict]] = []
+        current_block: List[Dict] = []
+        prev_step = -1
         for rec in records:
-            step_line = f"--- Step {rec['step_number']} [{rec['step_type']}] ---"
-            lines.append(step_line)
-            if rec.get("agent_reasoning"):
-                lines.append(f"Reasoning: {rec['agent_reasoning'][:300]}")
-            if rec.get("code"):
-                lines.append(f"Code:\n```python\n{rec['code'][-600:]}\n```")
-            if rec.get("code_output"):
-                lines.append(f"Output: {rec['code_output'][-400:]}")
-            if rec.get("code_error"):
-                lines.append(f"Error: {rec['code_error'][:200]}")
-            if rec.get("saved_figure_filenames"):
-                lines.append(f"Figures generated: {', '.join(rec['saved_figure_filenames'])}")
-            if rec.get("literature_topic"):
-                lines.append(f"Literature search: {rec['literature_topic']}")
-                if rec.get("literature_result"):
-                    lines.append(f"Literature findings: {rec['literature_result'][:200]}")
-            if rec.get("technical_issues"):
-                lines.append(f"Technical issues: {'; '.join(rec['technical_issues'][:3])}")
-            if rec.get("pi_escalated") and rec.get("pi_response"):
-                lines.append(f"PI guidance: {rec['pi_response'][:300]}")
+            step_num = rec.get("step_number", 0)
+            if step_num <= prev_step and current_block:
+                # Step number reset → new round
+                round_blocks.append(current_block)
+                current_block = []
+            current_block.append(rec)
+            prev_step = step_num
+        if current_block:
+            round_blocks.append(current_block)
+
+        # Build narrative with round/phase labels
+        for block_idx, block in enumerate(round_blocks):
+            round_num = block_idx + 1
+            # Determine phase from round_results
+            phase = "exploration"
+            direction = ""
+            if block_idx < len(state.round_results):
+                rr = state.round_results[block_idx]
+                phase = rr.phase or "exploration"
+            if phase == "innovation":
+                # Get direction from round result (stored at synthesis time)
+                if block_idx < len(state.round_results):
+                    direction = state.round_results[block_idx].direction or ""
+                if not direction and getattr(state, "user_chosen_direction", None):
+                    direction = state.user_chosen_direction
+
+            header = f"========== ROUND {round_num} ({phase.upper()}) =========="
+            if direction:
+                header += f"\nResearch Direction: {direction}"
+            lines.append(header)
             lines.append("")
 
-        # Also include publication figures
+            for rec in block:
+                step_line = f"--- Step {rec['step_number']} [{rec['step_type']}] ---"
+                lines.append(step_line)
+                if rec.get("agent_reasoning"):
+                    lines.append(f"Reasoning: {rec['agent_reasoning'][:300]}")
+                if rec.get("code"):
+                    lines.append(f"Code:\n```python\n{rec['code'][-600:]}\n```")
+                if rec.get("code_output"):
+                    lines.append(f"Output: {rec['code_output'][-400:]}")
+                if rec.get("code_error"):
+                    lines.append(f"Error: {rec['code_error'][:200]}")
+                if rec.get("saved_figure_filenames"):
+                    lines.append(f"Figures generated: {', '.join(rec['saved_figure_filenames'])}")
+                if rec.get("literature_topic"):
+                    lines.append(f"Literature search: {rec['literature_topic']}")
+                    if rec.get("literature_result"):
+                        lines.append(f"Literature findings: {rec['literature_result'][:200]}")
+                if rec.get("technical_issues"):
+                    lines.append(f"Technical issues: {'; '.join(rec['technical_issues'][:3])}")
+                if rec.get("pi_escalated") and rec.get("pi_response"):
+                    lines.append(f"PI guidance: {rec['pi_response'][:300]}")
+                lines.append("")
+
+        # Exploration report and user-chosen directions
+        if state.exploration_report and hasattr(state.exploration_report, "research_direction_candidates"):
+            candidates = state.exploration_report.research_direction_candidates or []
+            if candidates:
+                lines.append("=== Exploration Report: Proposed Research Directions ===")
+                for idx, c in enumerate(candidates):
+                    lines.append(f"{idx+1}. {c.get('direction', '')}")
+                    lines.append(f"   Rationale: {c.get('rationale', '')[:200]}")
+                lines.append("")
+
+        if state.user_chosen_directions:
+            lines.append("=== User-Selected Research Directions ===")
+            for d in state.user_chosen_directions:
+                lines.append(f"- {d.get('direction', '')} (Notes: {d.get('notes', '')})")
+            lines.append("")
+
+        # Publication figures
         if state.publication_figures:
             lines.append("=== Publication Figures ===")
             for pf in state.publication_figures:
@@ -768,14 +823,15 @@ class SupervisorAgent:
 
         # Truncate to fit context
         full_text = "\n".join(lines)
-        if len(full_text) > 60000:
-            full_text = full_text[:60000] + "\n\n[... truncated ...]"
+        if len(full_text) > 80000:
+            full_text = full_text[:80000] + "\n\n[... truncated ...]"
         return full_text
 
     def _collect_figure_paths(
-        self, records: List[Dict], workspace_path: Optional[Path]
+        self, records: List[Dict], workspace_path: Optional[Path],
+        state: Optional[AnalysisState] = None,
     ) -> Dict[str, Path]:
-        """Collect all figure file paths from supervision records."""
+        """Collect all figure file paths from supervision records and publication figures."""
         figure_map: Dict[str, Path] = {}
         if not workspace_path:
             return figure_map
@@ -793,6 +849,20 @@ class SupervisorAgent:
                         figure_map[fname] = candidate
                         break
 
+        # Also include publication figures (PI-reviewed, may not be in supervision records)
+        if state and state.publication_figures:
+            for pf in state.publication_figures:
+                if not pf.png_path:
+                    continue
+                fname = os.path.basename(pf.png_path)
+                if fname in figure_map:
+                    continue
+                fig_path = Path(pf.png_path)
+                if not fig_path.exists():
+                    fig_path = workspace_path / "figures" / fname
+                if fig_path.exists():
+                    figure_map[fname] = fig_path
+
         return figure_map
 
     def _build_report_prompt(
@@ -809,17 +879,78 @@ class SupervisorAgent:
             f"- {name} ({self._categorize_figure(name)})" for name in figure_map.keys()
         ) or ("无" if zh else "None")
 
-        # Collect round results
-        round_findings = []
+        # Collect per-round findings with phase labels
+        findings_parts = []
+        has_innovation = False
+        innovation_directions = []
         for rr in state.round_results:
-            all_findings = (
-                rr.bioinformatics_findings + rr.pathology_findings +
-                rr.biochemistry_findings + rr.literature_findings
-            )
-            if all_findings:
-                round_findings.extend(all_findings[:5])
+            phase_label = (rr.phase or "exploration").upper()
+            if rr.phase == "innovation":
+                has_innovation = True
+            header = f"### Round {rr.round_number} ({phase_label})"
 
-        findings_text = "\n".join(f"- {f}" for f in round_findings[:20]) or ("无" if zh else "None")
+            # Get direction for innovation rounds (stored at synthesis time)
+            direction = ""
+            if rr.phase == "innovation":
+                direction = getattr(rr, "direction", "") or ""
+                if not direction and getattr(state, "user_chosen_direction", None):
+                    direction = state.user_chosen_direction
+                if direction:
+                    header += f" — Direction: {direction}"
+                    innovation_directions.append((rr.round_number, direction))
+
+            findings_parts.append(header)
+            if rr.pi_summary:
+                findings_parts.append(f"**PI Summary**: {rr.pi_summary[:400]}")
+            for agent_name, findings_list in [
+                ("Bioinformatics", rr.bioinformatics_findings),
+                ("Pathology", rr.pathology_findings),
+                ("Biochemistry", rr.biochemistry_findings),
+                ("Literature", rr.literature_findings),
+            ]:
+                if findings_list:
+                    findings_parts.append(f"**{agent_name}**:")
+                    for f in findings_list[:8]:
+                        findings_parts.append(f"- {f[:300]}")
+            findings_parts.append("")
+
+        findings_text = "\n".join(findings_parts) or ("无" if zh else "None")
+
+        # Build dynamic section template
+        base_sections = [
+            "[abstract] - Research summary (background, methods, key findings, conclusions)",
+            "[analysis_overview] - Analysis workflow overview (steps, checkpoints, issues)",
+            "[data_qc] - Data overview and quality control",
+            "[clustering_annotation] - Clustering and cell type annotation (include PI checkpoint guidance if available)",
+            "[differential_expression] - Differential expression analysis (include PI checkpoint guidance if available)",
+        ]
+
+        if has_innovation:
+            base_sections.append(
+                "[exploration_findings] - Phase 1 exploration findings summary and proposed research directions"
+            )
+            for i, (round_num, direction) in enumerate(innovation_directions):
+                short_dir = direction[:80] if direction else f"Direction {i+1}"
+                base_sections.append(
+                    f"[innovation_{i+1}] - Innovation Phase (Round {round_num}): {short_dir} "
+                    f"(hypothesis, targeted analyses such as GSEA/ORA/gene modules, key findings, "
+                    f"biological significance). This section MUST be comprehensive and include ALL "
+                    f"findings from this research direction."
+                )
+            base_sections.append(
+                "[integrated_findings] - Integrated findings across all phases (cross-phase connections, "
+                "how innovation findings validate or extend exploration discoveries)"
+            )
+        else:
+            base_sections.append("[key_findings] - Key biological findings")
+
+        base_sections.extend([
+            "[supervisor_log] - Analysis monitoring log (technical issues, PI intervention points)",
+            "[conclusions] - Conclusions and future directions",
+            "[figure_appendix] - Figure descriptions (reference each figure by filename)",
+        ])
+
+        sections_text = "\n".join(base_sections)
 
         prompt = f"""Based on the following complete analysis records, generate a detailed research report.
 
@@ -832,7 +963,7 @@ class SupervisorAgent:
 - PI escalations: {stats['pi_escalations']}
 - Critical issues: {stats['critical_issues']}
 
-## Key Findings
+## Key Findings (Per Round)
 {findings_text}
 
 ## Available Figures
@@ -842,21 +973,18 @@ class SupervisorAgent:
 {"请用中文写报告。" if zh else "Write the report in English."}
 Generate the report with the following sections (use the exact section IDs in brackets):
 
-[abstract] - Research summary (background, methods, key findings, conclusions)
-[analysis_overview] - Analysis workflow overview (steps, checkpoints, issues)
-[data_qc] - Data overview and quality control
-[clustering_annotation] - Clustering and cell type annotation (include PI checkpoint guidance if available)
-[differential_expression] - Differential expression analysis (include PI checkpoint guidance if available)
-[key_findings] - Key biological findings
-[supervisor_log] - Analysis monitoring log (technical issues, PI intervention points)
-[conclusions] - Conclusions and future directions
-[figure_appendix] - Figure descriptions (reference each figure by filename)
+{sections_text}
 
 Format each section as:
 ## [section_id] Section Title
 Content...
 
-Make the report thorough but concise. Reference specific step numbers and figures where relevant.
+IMPORTANT:
+- Make the report thorough and comprehensive. Reference specific step numbers and figures where relevant.
+- Each section should be substantive with detailed scientific content (300-500 words minimum per section).
+- Innovation phase sections are CRITICAL — they contain the novel research findings and MUST be written in detail.
+- Reference specific genes, pathways, cell types, statistical results, and quantitative findings.
+- Include ALL available figures — assign each figure to the most relevant section.
 """
         return prompt
 

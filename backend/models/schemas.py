@@ -128,6 +128,18 @@ class AnalysisStep(BaseModel):
     # text_response fields
     text_content: Optional[str] = None
 
+class ScoreDefinition(BaseModel):
+    """Definition of a computed score for methodology transparency in the final report"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    score_name: str          # e.g., "Fibrosis_Score", "EMT_signature"
+    method: str              # e.g., "sc.tl.score_genes", "gseapy.ssgsea"
+    description: str         # What the score measures biologically
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    gene_list: List[str] = Field(default_factory=list)
+    gene_list_source: str = ""  # e.g., "MSigDB Hallmark EMT"
+    round_number: int = 0
+    timestamp: datetime = Field(default_factory=datetime.now)
+
 class BioinformaticsCheckpoint(BaseModel):
     """Checkpoint for bioinformatics analysis progress - enables step-level recovery"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -219,6 +231,8 @@ class ClusterAnnotation(BaseModel):
     key_markers: List[str] = Field(default_factory=list)
     confidence: str = "low"  # "high" / "medium" / "low"
     evidence: str = ""
+    alternative_cell_types: List[str] = Field(default_factory=list)  # Other possible cell types
+    low_confidence_reason: str = ""  # Why confidence is low/medium
     user_confirmed: bool = False
     user_override: Optional[str] = None  # User-provided cell type override
 
@@ -259,6 +273,7 @@ class RoundResult(BaseModel):
         default_factory=lambda: ["bioinformatics", "pathology", "biochemistry", "literature"]
     )
     phase: str = "exploration"  # "exploration" or "innovation"
+    direction: str = ""  # Research direction for innovation rounds
     exploration_report: Optional[ExplorationReport] = None  # Only for Phase 1
     timestamp: datetime = Field(default_factory=datetime.now)
 
@@ -335,6 +350,8 @@ class AnalysisState(BaseModel):
     # Correlation analysis result for multi-direction mode
     exploration_report_html_path: Optional[str] = None
     # Path to exploration report HTML file
+    annotation_report_html_path: Optional[str] = None
+    # Path to annotation context report HTML file
 
     # Initial inputs
     initial_instruction: str = ""
@@ -370,6 +387,9 @@ class AnalysisState(BaseModel):
     publication_tables: List[PublicationTable] = Field(default_factory=list)
     graphic_abstract: Optional[GraphicAbstract] = None
     integrated_report: Optional[str] = None  # Integrated report with figure/table references
+
+    # Score definitions (methodology tracking for report transparency)
+    score_definitions: List[ScoreDefinition] = Field(default_factory=list)
 
     # Agent prompts (can be customized per session)
     custom_prompts: Dict[str, str] = Field(default_factory=dict)

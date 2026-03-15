@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.13.4
+**Version**: 0.14.0
 
 ## Core Features
 
@@ -330,6 +330,27 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.14.0 (2026-03-15)
+
+- **Score Registration & Methodology Transparency**: New `register_score` tool in the Bioinformatics Agent allows the agent to document how each score was computed (method, gene list, source, key parameters) immediately after computation. Scores are stored as `ScoreDefinition` records in `AnalysisState.score_definitions` and surfaced in the final report's methodology section. Agent system prompt now mandates a "consult PI → compute → register" workflow for all scoring operations (sc.tl.score_genes, gseapy, decoupleR, etc.).
+- **Jupyter I/O Sandbox**: The kernel initialization now injects a runtime I/O sandbox that intercepts `open()`, `Path.mkdir()`, `Path.write_text()`, and `Path.write_bytes()` to block writes outside the session directory. Allowed roots: session workspace, `/tmp`, and standard system paths (`~/.cache`, `~/.local`, etc.). Write attempts to other locations raise a `PermissionError` with a clear message directing the agent to use the correct subdirectory.
+- **Working Directory Context in Kernel**: Kernel initialization now explicitly sets `os.chdir()` to the session workspace, creates `figures/` and `tables/` subdirectories, and configures `sc.settings.figdir` to the absolute figures path. The bioinformatics agent system prompt includes the working directory paths so the agent always saves files in the right location.
+- **Kernel Dead Detection**: Added `_kernel_dead` flag to `LocalJupyterSandbox`. When a kernel restart fails after timeout, the flag is set and subsequent `execute()` calls immediately return a clear error (`"Kernel is unavailable — restart failed"`) instead of hanging or producing cryptic failures.
+- **Annotation Dialog: Alternative Cell Types & Confidence Details**: The cell annotation confirmation dialog now displays `alternative_cell_types` and `low_confidence_reason` for medium/low confidence clusters, via expandable per-cluster detail rows. PI Agent's annotation review prompt now asks for these fields, giving users richer context when deciding whether to override a cluster's annotation. Key markers shown per cluster increased from 5 to 10 (both in PI review and dialog display), supplemented from `rank_genes_groups` output if the agent-provided list is short.
+- **Annotation Context HTML Report**: An HTML version of the annotation context report is now generated and saved during the annotation confirmation pause. A download button in the annotation dialog links to `GET /api/session/{id}/annotation-report/html`, allowing users to open the full context in a browser while reviewing cluster annotations.
+- **Per-Round Report Structure with Phase Labels**: The supervisor agent's report prompt and analysis narrative are now organized by round with phase headers (`ROUND N (EXPLORATION)` / `ROUND N (INNOVATION)`). Innovation rounds receive dedicated `[innovation_N]` sections in the report that must be written comprehensively (300–500 words minimum, including all figures, genes, pathways, and quantitative results). The exploration summary and all user-chosen directions are also included in the narrative.
+- **Publication Figures in Report Figure Map**: `_collect_figure_paths()` now also scans `state.publication_figures` (PI-reviewed figures) in addition to supervision records, ensuring all publication-quality figures are included in the generated report.
+- **Thread-Safe Session Cache**: Introduced `_update_session_cache()` helper in `main.py` that acquires `_state_lock` before updating the in-memory `sessions` dict and refreshing the LRU access time. All direct `sessions[id] = state` assignments replaced with this helper to prevent race conditions under concurrent WebSocket connections.
+- **Innovation Phase: User Guidance Merging**: In innovation rounds (round 2+), `adjusted_instructions` from user input are no longer treated as a planning replacement — they are merged as supplementary `[User guidance]` tasks appended to PI's direction-based task lists. This ensures the direction-driven analysis plan is not overridden by free-form user guidance.
+- **Direction Persistence on Pop**: After popping a direction from `directions_queue`, the state is immediately persisted via `state_callback` to prevent direction loss if the process crashes before the round completes.
+- **Message Trim: Orphan Prevention**: The bioinformatics agent's message history trim now walks the cut point backward to avoid orphaning `tool` role messages that require a preceding `assistant` message with the matching `tool_use` block.
+- **Direction Validation**: `POST /api/session/{id}/choose-direction` now returns HTTP 400 if no direction, direction list, or `let_pi_decide` flag is provided.
+- **Resume Without Direction Guard**: `POST /api/session/{id}/resume` in innovation phase without a chosen direction now defaults to `[PI_DECIDE]` instead of running a directionless round.
+- **Clear Direction Queue**: `HumanInputRequest` now accepts `clear_queue: bool`. When set, the remaining direction queue is cleared and `max_rounds` is capped, allowing users to abort the multi-direction sequence mid-run.
+- **Security: User Override Sanitization**: Cell type name overrides submitted via the annotation confirmation dialog are now sanitized (strips `{}[]\\;` `` ` ``$` `__dunder__`, `import`, `exec`, `eval` patterns) and capped at 200 characters before being embedded in generated Python code.
+- **Literature Agent: Search Mode Tracking**: Literature agent result dicts now include a `search_mode` field indicating the actual mode used (including fallback chain, e.g., `"pubmed_llm (fallback from gemini_deep_research)"`).
+- **Innovation Phase Analysis Requirements**: Bioinformatics agent innovation phase system prompt now specifies 10 concrete requirements: execute all PI-assigned tasks, generate at least one figure per task, use advanced methods (GSEA, gene scoring, trajectory, TF activity), add exploratory analyses, include volcano plots + heatmaps for DEG, bar plots for pathway results, UMAP + violin/box plots for scoring analyses, and report detailed statistics.
 
 ### v0.13.4 (2026-03-13)
 

@@ -6,10 +6,11 @@ import {
   Clock,
   Edit3,
   Check,
-  Info
+  FileDown,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react'
 import { Language } from '../i18n/translations'
-import ReactMarkdown from 'react-markdown'
 
 interface ClusterAnnotation {
   cluster_id: string
@@ -18,6 +19,8 @@ interface ClusterAnnotation {
   key_markers: string[]
   confidence: string  // "high" / "medium" / "low"
   evidence: string
+  alternative_cell_types: string[]
+  low_confidence_reason: string
   user_confirmed: boolean
   user_override: string | null
 }
@@ -27,7 +30,7 @@ interface AnnotationConfirmationDialogProps {
   tissue: string
   organism: string
   tissueSummary: string
-  analysisSummary?: string
+  reportHtmlUrl?: string
   language: Language
   countdownSeconds: number  // countdown for high-confidence auto-confirm
   onConfirm: (annotations: Array<{ cluster_id: string; user_override?: string; user_confirmed: boolean }>) => Promise<void>
@@ -39,7 +42,7 @@ export function AnnotationConfirmationDialog({
   tissue,
   organism,
   tissueSummary,
-  analysisSummary,
+  reportHtmlUrl,
   language,
   countdownSeconds,
   onConfirm,
@@ -50,6 +53,7 @@ export function AnnotationConfirmationDialog({
   const [editValue, setEditValue] = useState('')
   const [countdown, setCountdown] = useState(countdownSeconds > 0 ? countdownSeconds : 0)
   const [submitting, setSubmitting] = useState(false)
+  const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set())
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const lowConfidenceClusters = annotations.filter(a => a.confidence === 'low')
@@ -127,6 +131,18 @@ export function AnnotationConfirmationDialog({
     ))
   }
 
+  const toggleExpanded = (clusterId: string) => {
+    setExpandedClusters(prev => {
+      const next = new Set(prev)
+      if (next.has(clusterId)) {
+        next.delete(clusterId)
+      } else {
+        next.add(clusterId)
+      }
+      return next
+    })
+  }
+
   const confidenceColor = (conf: string) => {
     switch (conf) {
       case 'high': return 'bg-green-100 text-green-800'
@@ -145,19 +161,36 @@ export function AnnotationConfirmationDialog({
     }
   }
 
+  const hasDetails = (ann: ClusterAnnotation) =>
+    (ann.alternative_cell_types && ann.alternative_cell_types.length > 0) ||
+    (ann.low_confidence_reason && ann.low_confidence_reason.length > 0)
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-xl max-w-[90vw] w-[1200px] mx-4 max-h-[85vh] flex flex-col">
+      <div className="bg-white rounded-2xl shadow-xl max-w-[90vw] w-[1000px] mx-4 max-h-[85vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-800">
-              {language === 'zh' ? '细胞注释确认' : 'Cell Annotation Confirmation'}
-            </h2>
-            <p className="text-sm text-slate-500 mt-1">
-              {organism} — {tissue}
-              {tissueSummary && ` | ${tissueSummary.substring(0, 100)}`}
-            </p>
+          <div className="flex items-center gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-800">
+                {language === 'zh' ? '细胞注释确认' : 'Cell Annotation Confirmation'}
+              </h2>
+              <p className="text-sm text-slate-500 mt-1">
+                {organism} — {tissue}
+                {tissueSummary && ` | ${tissueSummary.substring(0, 100)}`}
+              </p>
+            </div>
+            {reportHtmlUrl && (
+              <a
+                href={reportHtmlUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 px-4 py-2 bg-violet-50 text-violet-700 hover:bg-violet-100 rounded-lg text-sm font-medium transition-colors border border-violet-200"
+              >
+                <FileDown className="w-4 h-4" />
+                {language === 'zh' ? '查看分析报告' : 'View Analysis Report'}
+              </a>
+            )}
           </div>
           <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg">
             <X className="w-5 h-5 text-slate-400" />
@@ -165,20 +198,7 @@ export function AnnotationConfirmationDialog({
         </div>
 
         <div className="flex-1 flex overflow-hidden">
-          {/* Left panel: Context Report */}
-          {analysisSummary && (
-            <div className="w-[400px] flex-shrink-0 border-r border-slate-200 overflow-y-auto bg-slate-50/50 p-6">
-              <div className="flex items-center gap-2 mb-4 text-slate-700 font-medium pb-2 border-b border-slate-200">
-                <Info className="w-4 h-4" />
-                {language === 'zh' ? '分析上下文' : 'Analysis Context'}
-              </div>
-              <div className="prose prose-sm prose-slate max-w-none">
-                <ReactMarkdown>{analysisSummary}</ReactMarkdown>
-              </div>
-            </div>
-          )}
-
-          {/* Right panel: Annotations */}
+          {/* Annotations panel (full width now) */}
           <div className="flex-1 flex flex-col overflow-hidden relative">
             <div className="flex-1 overflow-y-auto px-6 py-4">
               {/* Warning banner for low confidence */}
@@ -225,7 +245,11 @@ export function AnnotationConfirmationDialog({
               </tr>
             </thead>
             <tbody>
-              {annotations.map(ann => (
+              {annotations.map(ann => {
+                const isExpanded = expandedClusters.has(ann.cluster_id)
+                const showExpandButton = hasDetails(ann)
+
+                return (
                 <tr
                   key={ann.cluster_id}
                   className={`border-b last:border-0 ${
@@ -256,12 +280,40 @@ export function AnnotationConfirmationDialog({
                         </button>
                       </div>
                     ) : (
-                      <div className="flex items-center gap-2">
-                        <span className={ann.user_override ? 'font-medium text-violet-700' : 'text-slate-800'}>
-                          {ann.user_override || ann.cell_type}
-                        </span>
-                        {ann.user_override && (
-                          <span className="text-xs text-slate-400 line-through">{initialAnnotations.find(a => a.cluster_id === ann.cluster_id)?.cell_type}</span>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className={ann.user_override ? 'font-medium text-violet-700' : 'text-slate-800'}>
+                            {ann.user_override || ann.cell_type}
+                          </span>
+                          {ann.user_override && (
+                            <span className="text-xs text-slate-400 line-through">{initialAnnotations.find(a => a.cluster_id === ann.cluster_id)?.cell_type}</span>
+                          )}
+                          {showExpandButton && (
+                            <button
+                              onClick={() => toggleExpanded(ann.cluster_id)}
+                              className="p-0.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded"
+                              title={isExpanded ? 'Collapse' : 'Show details'}
+                            >
+                              {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                            </button>
+                          )}
+                        </div>
+                        {/* Expanded details for low/medium confidence */}
+                        {isExpanded && (
+                          <div className="mt-2 space-y-1.5">
+                            {ann.alternative_cell_types && ann.alternative_cell_types.length > 0 && (
+                              <div className="px-2 py-1.5 bg-amber-50 border border-amber-200 rounded text-xs text-amber-800">
+                                <span className="font-medium">{language === 'zh' ? '可能的其他类型: ' : 'Alternatives: '}</span>
+                                {ann.alternative_cell_types.join(', ')}
+                              </div>
+                            )}
+                            {ann.low_confidence_reason && (
+                              <div className="px-2 py-1.5 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+                                <span className="font-medium">{language === 'zh' ? '原因: ' : 'Reason: '}</span>
+                                {ann.low_confidence_reason}
+                              </div>
+                            )}
+                          </div>
                         )}
                       </div>
                     )}
@@ -300,7 +352,7 @@ export function AnnotationConfirmationDialog({
                     </div>
                   </td>
                 </tr>
-              ))}
+              )})}
             </tbody>
           </table>
             </div>

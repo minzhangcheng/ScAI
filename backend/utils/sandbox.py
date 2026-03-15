@@ -384,7 +384,7 @@ class LocalJupyterSandbox:
         self.session_id = session_id
         self.state_dir = state_dir
         # Caller passes session-specific working dir (e.g. sessions/{id}/workspace)
-        self.working_dir = Path(working_dir)
+        self.working_dir = Path(working_dir).absolute()
         self.working_dir.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
         
@@ -394,6 +394,7 @@ class LocalJupyterSandbox:
         self._initialized = False
         self._session_restored = False
         self._session_restore_failed = False  # Track if session restore failed
+        self._kernel_dead = False  # Set when kernel restart fails
     
     async def start(self) -> dict:
         """Start the Jupyter kernel
@@ -610,6 +611,121 @@ print(f"Environment initialized with SEED={SEED} for reproducibility")
 print("Helper functions available: get_seed(), check_and_fix_nan(adata)")
 """
         result = await self.execute(init_code, save_to_history=False, skip_safety_check=True)
+
+        # Set working directory paths and install I/O sandbox (requires f-string with self.working_dir)
+        working_dir_abs = str(self.working_dir.absolute())
+        state_dir_abs = str(self.notebook_state.state_dir)
+        # Session root is the parent of workspace (e.g. sessions/{id}/)
+        session_root_abs = str(self.working_dir.absolute().parent)
+        path_setup_code = f"""
+# === Set working directory paths ===
+import os
+from pathlib import Path
+
+_WORKSPACE_DIR = Path({repr(working_dir_abs)})
+os.chdir(_WORKSPACE_DIR)
+
+# Create standard subdirectories
+(_WORKSPACE_DIR / 'figures').mkdir(exist_ok=True)
+(_WORKSPACE_DIR / 'tables').mkdir(exist_ok=True)
+
+# Set scanpy figdir to absolute path (prevent relative path issues)
+try:
+    import scanpy as sc
+    sc.settings.figdir = str(_WORKSPACE_DIR / 'figures')
+except Exception:
+    pass
+
+# === Runtime I/O sandbox: intercept writes outside allowed directories ===
+import builtins as _builtins
+import pathlib as _pathlib
+
+_ORIGINAL_OPEN = _builtins.open
+_ORIGINAL_MKDIR = _pathlib.Path.mkdir
+
+# Directories where write operations are allowed
+_ALLOWED_WRITE_ROOTS = [
+    {repr(session_root_abs)},   # Session root (workspace/, states/, uploads/, reports/)
+    '/tmp',                     # Temporary files
+]
+
+# System paths (pip installs, font cache, etc.) — always allowed
+_SYSTEM_WRITE_PREFIXES = [
+    '/usr/', '/opt/', '/var/',
+    os.path.expanduser('~/.cache'),
+    os.path.expanduser('~/.local'),
+    os.path.expanduser('~/.config'),
+]
+
+def _is_write_allowed(filepath):
+    '''Check if writing to this path is allowed.'''
+    try:
+        resolved = str(Path(filepath).resolve())
+    except Exception:
+        return False  # Can't resolve → deny by default for safety
+    # Check allowed roots
+    for root in _ALLOWED_WRITE_ROOTS:
+        if resolved.startswith(root):
+            return True
+    # Check system paths
+    for prefix in _SYSTEM_WRITE_PREFIXES:
+        if resolved.startswith(prefix):
+            return True
+    return False
+
+def _sandboxed_open(file, mode='r', *args, **kwargs):
+    '''Sandboxed open() that blocks writes outside allowed directories.'''
+    if isinstance(mode, str) and any(m in mode for m in ('w', 'a', 'x')):
+        if not _is_write_allowed(file):
+            raise PermissionError(
+                f"\\n[Sandbox] Write blocked: {{file}}\\n"
+                f"Files must be saved within the session workspace.\\n"
+                f"  - CSV/Excel → {{_WORKSPACE_DIR}}/tables/\\n"
+                f"  - H5AD      → {{_WORKSPACE_DIR}}/\\n"
+                f"  - Figures are saved automatically by the system."
+            )
+    return _ORIGINAL_OPEN(file, mode, *args, **kwargs)
+
+def _sandboxed_mkdir(self, *args, **kwargs):
+    '''Sandboxed Path.mkdir() that blocks directory creation outside allowed areas.'''
+    if not _is_write_allowed(self):
+        raise PermissionError(
+            f"\\n[Sandbox] mkdir blocked: {{self}}\\n"
+            f"Directories must be within the session workspace: {{_WORKSPACE_DIR}}"
+        )
+    return _ORIGINAL_MKDIR(self, *args, **kwargs)
+
+_ORIGINAL_WRITE_TEXT = _pathlib.Path.write_text
+_ORIGINAL_WRITE_BYTES = _pathlib.Path.write_bytes
+
+def _sandboxed_write_text(self, *args, **kwargs):
+    '''Sandboxed Path.write_text() that blocks writes outside allowed areas.'''
+    if not _is_write_allowed(self):
+        raise PermissionError(
+            f"\\n[Sandbox] Write blocked: {{self}}\\n"
+            f"Files must be saved within the session workspace: {{_WORKSPACE_DIR}}"
+        )
+    return _ORIGINAL_WRITE_TEXT(self, *args, **kwargs)
+
+def _sandboxed_write_bytes(self, *args, **kwargs):
+    '''Sandboxed Path.write_bytes() that blocks writes outside allowed areas.'''
+    if not _is_write_allowed(self):
+        raise PermissionError(
+            f"\\n[Sandbox] Write blocked: {{self}}\\n"
+            f"Files must be saved within the session workspace: {{_WORKSPACE_DIR}}"
+        )
+    return _ORIGINAL_WRITE_BYTES(self, *args, **kwargs)
+
+_builtins.open = _sandboxed_open
+_pathlib.Path.mkdir = _sandboxed_mkdir
+_pathlib.Path.write_text = _sandboxed_write_text
+_pathlib.Path.write_bytes = _sandboxed_write_bytes
+
+print(f"Working directory set to: {{os.getcwd()}}")
+print(f"I/O sandbox active: writes restricted to session directory")
+"""
+        await self.execute(path_setup_code, save_to_history=False, skip_safety_check=True)
+
         self._initialized = True
         logger.info("Kernel initialized")
     
@@ -729,6 +845,15 @@ print(f"Session saved: {{len(_session_data)}} variables")
             skip_safety_check: If True, skip dangerous-pattern validation.
                 Only set this for trusted internal code (e.g. kernel init, session restore).
         """
+        # Check if kernel is dead (failed restart)
+        if self._kernel_dead:
+            return CodeExecutionResult(
+                success=False,
+                output="",
+                error="Kernel is unavailable (restart failed). Please restart the analysis session.",
+                figures=[]
+            )
+
         # Validate code safety before execution (unless explicitly skipped for internal code)
         if not skip_safety_check:
             is_safe, error_msg = validate_code_safety(code)
@@ -803,6 +928,7 @@ print(f"Session saved: {{len(_session_data)}} variables")
                                     logger.info(f"Kernel restarted and session restored for session {self.session_id}")
                                 except Exception as restart_error:
                                     logger.error(f"Failed to restart kernel: {restart_error}")
+                                    self._kernel_dead = True
                         except Exception as interrupt_error:
                             logger.error(f"Failed to interrupt kernel: {interrupt_error}")
                     break

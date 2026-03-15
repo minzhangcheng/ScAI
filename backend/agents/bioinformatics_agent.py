@@ -189,6 +189,44 @@ TOOLS = [
                 "required": ["cluster_markers", "tissue", "organism"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "register_score",
+            "description": "Register how a score was computed for the final report methodology section. Call this IMMEDIATELY AFTER computing any score (gene signature scores, pathway enrichment, TF activity, etc.).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "score_name": {
+                        "type": "string",
+                        "description": "Name of the score as stored in adata (e.g., 'Fibrosis_Score', 'EMT_signature')"
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "Computation method (e.g., 'sc.tl.score_genes', 'gseapy.ssgsea', 'decoupleR.run_mlm')"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "What this score measures biologically (1-2 sentences)"
+                    },
+                    "parameters": {
+                        "type": "object",
+                        "description": "Key parameters used (e.g., {\"ctrl_size\": 50, \"n_bins\": 25})"
+                    },
+                    "gene_list": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Gene names used for the score (if applicable, top 50)"
+                    },
+                    "gene_list_source": {
+                        "type": "string",
+                        "description": "Source of the gene list (e.g., 'MSigDB Hallmark EMT', 'top 50 DEGs', 'PMID:12345678')"
+                    }
+                },
+                "required": ["score_name", "method", "description"]
+            }
+        }
     }
 ]
 
@@ -483,6 +521,7 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
 4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
 5. report_findings - Report conclusions when analysis phase is complete
 6. generate_publication_figure - Generate publication-quality figures with PI review
+7. register_score - Register a computed score's methodology for the final report
    IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
    NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
    Do NOT include plt.close(), plt.show(), or plt.savefig() in the figure code - the system handles saving automatically.
@@ -544,6 +583,17 @@ WORKFLOW GUIDELINES:
   * Whether to do trajectory/velocity analysis?
   * Interpretation of results
   * Which comparisons matter biologically?
+  * Score selection: Which scoring method to use, which gene lists, which databases
+
+SCORE COMPUTATION WORKFLOW (MANDATORY):
+When you need to compute ANY score (gene signature, pathway enrichment, TF activity, custom score):
+1. FIRST call consult_pi to confirm the scoring approach:
+   - Question: "I plan to compute [score name] using [method]. Gene list source: [source]. Is this appropriate?"
+   - Context: Include why this score is relevant to the current analysis
+   - Options: List alternative methods if applicable
+2. After PI confirms/modifies, execute the computation via execute_code
+3. IMMEDIATELY after, call register_score to record the methodology
+This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrichr, decoupleR, custom scoring functions.
 
 CELL TYPE ANNOTATION WORKFLOW:
 1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')
@@ -558,6 +608,17 @@ CELL TYPE ANNOTATION WORKFLOW:
 6. Generate UMAP colored by cell_type
 
 {self._build_data_context(state)}
+
+=== Working Directory ===
+Your Jupyter kernel is running in: {self.sandbox.working_dir}
+All output files MUST be saved within this directory or its subdirectories.
+- Figures: saved automatically by the system to {self.sandbox.working_dir}/figures/
+- Tables/CSV results: save to {self.sandbox.working_dir}/tables/  (create if needed)
+- H5AD files: save to {self.sandbox.working_dir}/
+NEVER use absolute paths outside the working directory (e.g., /workspace/results/) for saving files.
+When saving CSV/Excel files, use:
+  Path('{self.sandbox.working_dir}/tables').mkdir(exist_ok=True)
+  df.to_csv('{self.sandbox.working_dir}/tables/filename.csv')
 
 {self._build_notebook_context()}
 
@@ -593,9 +654,14 @@ Before running sc.tl.pca() or any dimensionality reduction:
         # Initialize or restore state from checkpoint
         if checkpoint and checkpoint_valid:
             messages = checkpoint.get('messages', [])
-            # Ensure messages have valid structure (at minimum system and user message)
-            if len(messages) < 2:
-                logger.warning("[Bioinformatics] Checkpoint messages invalid, using fresh messages")
+            # Validate message structure: each must have role and content
+            valid_messages = all(
+                isinstance(m, dict) and "role" in m and ("content" in m or "tool_calls" in m)
+                for m in messages
+            ) if messages else False
+            if len(messages) < 2 or not valid_messages:
+                logger.warning("[Bioinformatics] Checkpoint messages invalid (len=%d, valid=%s), using fresh messages",
+                               len(messages), valid_messages)
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Analysis instruction: {initial_instruction}"}
@@ -662,8 +728,17 @@ Before running sc.tl.pca() or any dimensionality reduction:
             # Trim message history to prevent unbounded growth
             MAX_MESSAGES = 80
             if len(messages) > MAX_MESSAGES:
-                # Preserve system message + most recent messages
-                messages = [messages[0]] + messages[-(MAX_MESSAGES - 1):]
+                system_msg = messages[0]
+                # Find the cut index: keep roughly MAX_MESSAGES-1 tail messages
+                cut = len(messages) - (MAX_MESSAGES - 1)
+                # Walk the cut point backward to avoid orphaning tool_result messages.
+                # A "tool" role message requires its preceding assistant message
+                # that contains the corresponding tool_use block.
+                while cut < len(messages) and messages[cut].get("role") == "tool":
+                    cut -= 1
+                if cut < 1:
+                    cut = 1
+                messages = [system_msg] + messages[cut:]
                 logger.info(f"Trimmed message history to {len(messages)} messages")
 
             try:
@@ -983,13 +1058,15 @@ plt.close('all')
                     result_lines.append(f"\nTotal clusters annotated: {len(annotations)}")
 
                     # Provide ready-to-use Python code snippet
-                    mapping_items = ", ".join(
-                        f'"{cid}": "{info.get("cell_type", "Unknown") if isinstance(info, dict) else "Unknown"}"'
+                    # Use json.dumps for safe serialization (prevents code injection via cell type names)
+                    cell_type_dict = {
+                        str(cid): (info.get("cell_type", "Unknown") if isinstance(info, dict) else "Unknown")
                         for cid, info in annotations.items()
-                    )
+                    }
+                    dict_str = json.dumps(cell_type_dict, ensure_ascii=False)
                     result_lines.append(
                         "\nYou can now assign these annotations to adata.obs['cell_type'] using:\n"
-                        f"cluster_to_celltype = {{{mapping_items}}}\n"
+                        f"cluster_to_celltype = {dict_str}\n"
                         "adata.obs['cell_type'] = adata.obs['leiden'].map(cluster_to_celltype)"
                     )
 
@@ -1051,6 +1128,46 @@ plt.close('all')
 
                     completed = True
                     break
+
+                elif tool_name == "register_score":
+                    figure_only_iteration = False
+                    from ..models.schemas import ScoreDefinition
+                    score_def = ScoreDefinition(
+                        score_name=args.get("score_name", ""),
+                        method=args.get("method", ""),
+                        description=args.get("description", ""),
+                        parameters=args.get("parameters", {}),
+                        gene_list=args.get("gene_list", []),
+                        gene_list_source=args.get("gene_list_source", ""),
+                        round_number=state.current_round,
+                    )
+                    # Deduplicate: update existing score with same name, or append new
+                    existing_idx = next(
+                        (i for i, sd in enumerate(state.score_definitions) if sd.score_name == score_def.score_name),
+                        None
+                    )
+                    if existing_idx is not None:
+                        state.score_definitions[existing_idx] = score_def
+                        await self._notify("status", f"Updated score: {score_def.score_name} ({score_def.method})")
+                    else:
+                        state.score_definitions.append(score_def)
+                        await self._notify("status", f"Registered score: {score_def.score_name} ({score_def.method})")
+
+                    action_word = "updated" if existing_idx is not None else "registered"
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": f"Score '{score_def.score_name}' {action_word}. Method: {score_def.method}. This will appear in the report methodology."
+                    })
+
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count, step_type="register_score",
+                        agent_reasoning=agent_reasoning,
+                        code_description=f"Score: {score_def.score_name} via {score_def.method}",
+                    ))
+                    agent_reasoning = None
+                    # Don't consume a step for metadata registration
+                    step_count -= 1
 
                 elif tool_name == "generate_publication_figure":
                     code = args.get("code", "")

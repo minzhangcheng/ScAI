@@ -580,6 +580,22 @@ Be specific and actionable in your response."""
 
             # --- PI review + user confirmation (exploration phase only) ---
             if state.analysis_phase == "exploration":
+                # Supplement key_markers with top markers from rank_genes_groups
+                # so PI and user can judge cell types with at least 10 genes
+                for cid, info in annotations.items():
+                    if isinstance(info, dict) and cid in cluster_markers:
+                        existing = info.get("key_markers", [])
+                        if len(existing) < 10:
+                            seen = set(existing)
+                            supplemented = list(existing)
+                            for gene in cluster_markers[cid]:
+                                if gene not in seen:
+                                    supplemented.append(gene)
+                                    seen.add(gene)
+                                if len(supplemented) >= 10:
+                                    break
+                            info["key_markers"] = supplemented
+
                 # Step 1: PI Agent reviews annotations and assigns confidence
                 await self._send_message(
                     "status",
@@ -609,6 +625,8 @@ Be specific and actionable in your response."""
                             key_markers=info.get("key_markers", []),
                             confidence=info.get("confidence", "low"),
                             evidence=info.get("evidence", ""),
+                            alternative_cell_types=info.get("alternative_cell_types", []),
+                            low_confidence_reason=info.get("low_confidence_reason", ""),
                         ))
 
                 # Guard: if annotations were already confirmed (e.g. backend restart),
@@ -633,6 +651,16 @@ Be specific and actionable in your response."""
                 # Generate the context summary report
                 analysis_summary = self._build_annotation_context_report(state, self._current_graph_state)
 
+                # Generate downloadable HTML annotation context report
+                from .report_generator import generate_annotation_context_report_html
+                try:
+                    html_path = generate_annotation_context_report_html(state, self._current_graph_state, cluster_anns)
+                    state.annotation_report_html_path = html_path
+                    report_html_url = f"/api/session/{self.session_id}/annotation-report/html"
+                except Exception as e:
+                    logger.warning(f"[{self.session_id}] Annotation context report generation failed: {e}")
+                    report_html_url = None
+
                 ann_state = AnnotationConfirmationState(
                     cluster_annotations=cluster_anns,
                     tissue=tissue,
@@ -654,6 +682,7 @@ Be specific and actionable in your response."""
                     "organism": organism,
                     "tissue_summary": result.get("tissue_summary", ""),
                     "analysis_summary": analysis_summary,
+                    "report_html_url": report_html_url,
                 }, AgentType.LITERATURE)
 
                 original_status = state.status
@@ -1010,7 +1039,9 @@ Be specific and actionable in your response."""
         await self._send_message("status", "PI is creating analysis plan...", AgentType.PI)
         
         # If we already have adjusted instructions from user input processing, use them
-        if adjusted_instructions:
+        # BUT: in innovation phase (round 2+), don't short-circuit direction selection —
+        # treat adjusted_instructions as supplementary guidance alongside the direction
+        if adjusted_instructions and analysis_state.current_round <= 1:
             await self._send_message(
                 "message",
                 f"Using adjusted instructions from user input:\n{json.dumps(adjusted_instructions, ensure_ascii=False, indent=2)}",
@@ -1044,6 +1075,12 @@ Be specific and actionable in your response."""
                 dir_text = current_dir.get("direction", "")
                 dir_notes = current_dir.get("notes", "")
                 logger.info(f"[{self.session_id}] Innovation phase: direction from queue → {dir_text[:100]} (remaining: {len(analysis_state.directions_queue)})")
+                # Persist state immediately after pop to prevent direction loss on crash
+                if self.state_callback:
+                    try:
+                        await self.state_callback(analysis_state)
+                    except Exception as e:
+                        logger.error(f"[{self.session_id}] Failed to persist state after direction pop: {e}")
                 instructions = await self.pi_agent.innovation_instruction(
                     analysis_state, dir_text, notes=dir_notes
                 )
@@ -1169,6 +1206,16 @@ Be specific and actionable in your response."""
                     f"skipping: {skip_nodes}"
                 )
 
+        # In innovation phase, merge adjusted_instructions as supplementary human guidance
+        # (not replacing direction-based planning, but augmenting it)
+        if adjusted_instructions and analysis_state.current_round > 1:
+            for key in ("bioinformatics_tasks", "pathology_tasks", "biochemistry_tasks", "literature_topics"):
+                extra = adjusted_instructions.get(key, [])
+                if extra:
+                    existing = instructions.get(key, [])
+                    instructions[key] = existing + [f"[User guidance] {t}" for t in extra]
+            logger.info(f"[{self.session_id}] Merged adjusted_instructions into innovation planning")
+
         await self._send_message(
             "message",
             json.dumps(instructions, ensure_ascii=False, indent=2),
@@ -1179,6 +1226,7 @@ Be specific and actionable in your response."""
             **state,
             "pi_instructions": instructions,
             "skip_nodes": skip_nodes,
+            "human_guidance_processed": True,
         }
     
     @with_retry("pathology_analysis")
@@ -1380,7 +1428,19 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
 ## INNOVATION PHASE INSTRUCTIONS
 This is a targeted, hypothesis-driven round.
 Research direction: {direction_ctx}
-Focus your analysis on the specific direction above.
+
+ANALYSIS REQUIREMENTS:
+1. Execute ALL tasks assigned by PI below — do not skip any
+2. For each task, generate at least one publication-quality figure
+3. Use advanced analysis methods as specified (GSEA, gene scoring, trajectory, TF activity, etc.)
+4. After completing PI's tasks, if you identify additional relevant analyses, execute them
+5. When performing DEG, always include volcano plots and heatmaps of top genes
+6. When performing pathway analysis, include bar plots of top enriched terms
+7. For any scoring analysis (gene signatures, TF activity), show UMAP feature plots AND violin/box plots by condition
+8. Report detailed statistical results (p-values, effect sizes, gene counts) — not just summaries
+9. Before computing any score, consult PI about scoring method and gene list source
+10. After computing any score, call register_score to document methodology for the report
+
 You may skip irrelevant cell populations and focus on those relevant to the hypothesis.
 Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc.).
 """
@@ -1798,8 +1858,9 @@ Return ONLY the JSON array, nothing else."""
 
         logger.info(f"[{self.session_id}] Round {round_result.round_number} synthesis complete: new_findings={round_result.new_findings}, {len(round_result.next_steps)} next steps")
 
-        # Tag round with current phase
+        # Tag round with current phase and direction
         round_result.phase = analysis_state.analysis_phase
+        round_result.direction = analysis_state.current_round_direction or ""
 
         # Exploration phase: generate structured Report A and transition to innovation
         if analysis_state.analysis_phase == "exploration":

@@ -262,7 +262,7 @@ Reply in JSON format:
         for cid, info in annotations.items():
             if isinstance(info, dict):
                 ct = info.get("cell_type", "Unknown")
-                markers = ", ".join(info.get("key_markers", [])[:5])
+                markers = ", ".join(info.get("key_markers", [])[:10])
                 evidence = (info.get("evidence", ""))[:200]
                 ann_lines.append(
                     f"- Cluster {cid}: {ct} | Markers: {markers} | Evidence: {evidence}"
@@ -280,12 +280,17 @@ For EACH cluster, evaluate:
    - "high": Markers strongly and specifically match the annotated cell type in this tissue
    - "medium": Markers partially match or could belong to a related cell type
    - "low": Markers are ambiguous, contradictory, or insufficient for confident annotation
+3. For clusters with "medium" or "low" confidence, provide:
+   - alternative_cell_types: other possible cell types these markers could indicate
+   - low_confidence_reason: explanation of why confidence is not high (e.g. shared markers with other types, insufficient marker specificity, tissue-atypical expression)
 
 Reply in JSON format (include ALL clusters):
 {{
     "<cluster_id>": {{
         "cell_type": "confirmed or corrected cell type",
-        "confidence": "high/medium/low"
+        "confidence": "high/medium/low",
+        "alternative_cell_types": ["Alternative Type 1", "Alternative Type 2"],
+        "low_confidence_reason": "Reason for low/medium confidence (empty string if high)"
     }},
     ...
 }}
@@ -321,7 +326,7 @@ Reply in JSON format (include ALL clusters):
                 override_note = f" (user override: {ca.user_override})" if ca.user_override else ""
                 ann_lines.append(
                     f"- Cluster {ca.cluster_id}: {ca.cell_type}{override_note} "
-                    f"[confidence: {ca.confidence}] markers: {', '.join(ca.key_markers[:5])}"
+                    f"[confidence: {ca.confidence}] markers: {', '.join(ca.key_markers[:10])}"
                 )
             ann_summary = "\n".join(ann_lines)
 
@@ -416,18 +421,28 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
 You are now in the INNOVATION PHASE. Generate TARGETED, HYPOTHESIS-DRIVEN analysis tasks.
 Focus specifically on: {user_direction}
 
-Design specific analyses to deeply investigate this direction:
-- Targeted DEG analysis on relevant cell populations
-- Specific pathway analysis (beyond basic GO/KEGG if needed, e.g., GSEA, ssGSEA)
-- Trajectory/pseudotime analysis (if differentiation is relevant)
-- Transcription factor activity analysis (pySCENIC, decoupleR)
-- Subpopulation-specific comparisons within the relevant cell types
-- Cell communication focused on relevant cell types
+Design specific analyses to deeply investigate this direction.
+
+For each bioinformatics task, specify the CONCRETE analysis method and target:
+
+Available analysis toolkit (use as many as relevant):
+- **Targeted DEG**: Specify which cell populations to compare, which contrasts, and threshold strategy
+- **Pathway enrichment**: GO/KEGG for broad screening; GSEA/ssGSEA for quantitative pathway scoring; MSigDB hallmark gene sets for cancer/metabolism
+- **Gene signature scoring**: Score cells for specific gene signatures (e.g., ferroptosis, autophagy, EMT) using sc.tl.score_genes
+- **Trajectory/pseudotime**: Diffusion pseudotime (DPT), PAGA for lineage inference — specify root cell type
+- **Transcription factor activity**: decoupleR / pySCENIC to infer TF activity from expression
+- **Cell-cell communication**: CellChat or CellPhoneDB focused on relevant cell types and signaling pathways
+- **Subpopulation re-clustering**: Re-cluster specific cell types at higher resolution to find subtypes
+- **Correlation analysis**: Gene-gene correlation, module scoring, or regression analysis within cell populations
+- **Compositional analysis**: Compare cell type proportions between conditions with statistical testing
+- **Marker gene visualization**: Dot plots, violin plots, feature plots for key genes across conditions
 
 IMPORTANT:
+- Generate AT LEAST 4-6 bioinformatics tasks to ensure comprehensive analysis
+- Each task should specify: what to analyze, which method to use, and which cell types to focus on
+- Include both hypothesis-confirming AND exploratory analyses
 - Do NOT repeat analyses already completed in Round 1 (basic pipeline, annotation, etc.)
 - The Jupyter kernel retains all Round 1 variables — build upon existing results
-- Focus on depth over breadth
 
 Reply in JSON format:
 {{

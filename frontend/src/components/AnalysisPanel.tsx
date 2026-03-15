@@ -935,9 +935,9 @@ export function AnalysisPanel() {
           tissue={annotationData.tissue || ''}
           organism={annotationData.organism || ''}
           tissueSummary={annotationData.tissue_summary || ''}
-          analysisSummary={annotationData.analysis_summary || ''}
+          reportHtmlUrl={annotationData.report_html_url || undefined}
           language={language}
-          countdownSeconds={30}
+          countdownSeconds={useAppStore.getState().roundWaitSeconds}
           onConfirm={handleConfirmAnnotations}
           onClose={() => setShowAnnotationDialog(false)}
         />

@@ -133,20 +133,24 @@ class LiteratureAgent(BaseAgent):
             current_round_findings: Findings from current round's other agents
         """
         mode = self.literature_mode
+        actual_mode = mode  # Track which mode actually produced results
 
         try:
             if mode == "deep_research":
-                return await self._deep_research_via_chat(topic, state, current_round_findings=current_round_findings)
+                result = await self._deep_research_via_chat(topic, state, current_round_findings=current_round_findings)
             elif mode == "gemini_deep_research":
-                return await self._multi_round_gemini(topic, state)
+                result = await self._multi_round_gemini(topic, state)
             elif mode == "pubmed_llm":
-                return await self._multi_round_pubmed(
+                result = await self._multi_round_pubmed(
                     topic, state, pubmed_max_results=pubmed_max_results,
                     current_round_findings=current_round_findings
                 )
             else:
                 logger.warning(f"[Literature] Unknown mode: {mode}, using quick search")
-                return await self._quick_search(topic, state)
+                actual_mode = "quick_search"
+                result = await self._quick_search(topic, state)
+            result["search_mode"] = actual_mode
+            return result
         except Exception as e:
             logger.warning(f"[Literature] Mode {mode} failed: {e}")
 
@@ -154,16 +158,20 @@ class LiteratureAgent(BaseAgent):
             if mode in ("gemini_deep_research", "deep_research"):
                 logger.info("[Literature] Falling back to PubMed + LLM mode")
                 try:
-                    return await self._multi_round_pubmed(
+                    result = await self._multi_round_pubmed(
                         topic, state, pubmed_max_results=pubmed_max_results,
                         current_round_findings=current_round_findings
                     )
+                    result["search_mode"] = f"pubmed_llm (fallback from {mode})"
+                    return result
                 except Exception as e2:
                     logger.warning(f"[Literature] PubMed fallback also failed: {e2}")
 
             # Final fallback: quick search (LLM knowledge only)
             logger.info("[Literature] Falling back to quick search (LLM knowledge only)")
-            return await self._quick_search(topic, state)
+            result = await self._quick_search(topic, state)
+            result["search_mode"] = f"quick_search (fallback from {mode})"
+            return result
 
     # ===================================================================
     # Mode 1: Gemini Deep Research (single call — DR handles rounds internally)

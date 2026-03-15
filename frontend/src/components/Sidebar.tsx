@@ -25,7 +25,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
-  const { currentSession, setCurrentSession, clearMessages, language, maxRounds, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback } = useAppStore()
+  const { currentSession, setCurrentSession, clearMessages, language, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback } = useAppStore()
   const { createSession, loadSession, listSessions, deleteSession, updateSessionInfo } = useSession()
   const { t } = useTranslation(language)
   const [showNewSession, setShowNewSession] = useState(false)
@@ -683,7 +683,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                   : currentSession.status}
               </span>
               <span className="text-xs text-violet-500">
-                Round {currentSession.currentRound} / {maxRounds}
+                Round {currentSession.currentRound}
               </span>
             </div>
           </div>

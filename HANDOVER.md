@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.13.4
-**Last Updated**: 2026-03-13
+**Version**: 0.14.0
+**Last Updated**: 2026-03-15
 
 ## Project Overview
 
@@ -60,10 +60,11 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~4423 lines)
+│   ├── main.py                 # FastAPI entry point (~4600 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
+│   │                           # - _update_session_cache(): thread-safe session dict update (acquires _state_lock)
 │   │                           # - Unified data upload (/upload/data) + treatment group CRUD
 │   │                           # - Chunked file upload (10GB support)
 │   │                           # - Report generation task scheduling
@@ -74,8 +75,12 @@ intesc/                         # Code directory
 │   │                           # - Two-phase export (prepare + download)
 │   │                           # - In-place session info editing (name + instruction)
 │   │                           # - File download (/api/download with path containment)
+│   │                           # - GET /api/session/{id}/annotation-report/html endpoint
+│   │                           # - Direction validation + resume-without-direction guard
+│   │                           # - HumanInputRequest.clear_queue: abort multi-direction queue mid-run
+│   │                           # - User override sanitization (injection prevention)
 │   │
-│   ├── workflow.py             # LangGraph workflow (~2265 lines)
+│   ├── workflow.py             # LangGraph workflow (~2330 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
@@ -93,8 +98,12 @@ intesc/                         # Code directory
 │   │                           # - Cross-agent context: biochemistry → pathology → bioinformatics findings sharing
 │   │                           # - Analysis log propagation and deduplication (by step ID)
 │   │                           # - Graphic abstract revision loop (PI review + Painter revision + best selection)
+│   │                           # - Annotation HTML report generation at annotation pause
+│   │                           # - Innovation phase: user guidance merged as supplementary tasks (not direction override)
+│   │                           # - Direction pop persistence: state saved immediately after queue pop
+│   │                           # - key_markers supplemented to 10 genes from rank_genes_groups before PI review
 │   │
-│   ├── report_generator.py     # Report generator (~4400 lines)
+│   ├── report_generator.py     # Report generator (~4900 lines)
 │   │                           # - No-sandbox report compilation (v0.7.3 rewrite)
 │   │                           # - PI analysis review pre-step (reads notebook, views figures via vision API)
 │   │                           # - Builds analysis record from code_history
@@ -104,6 +113,8 @@ intesc/                         # Code directory
 │   │                           # - Report appendix (project info, agent config, data summary, round history)
 │   │                           # - Full analysis log timeline (chronological steps with code/figures/reasoning)
 │   │                           # - Figure/table scientific interpretation rendering
+│   │                           # - generate_annotation_context_report_html(): standalone HTML annotation context report
+│   │                           # - Per-round narrative with phase/direction labels; innovation sections required 300-500+ words
 │   │
 │   ├── regenerate_report_html.py # Report HTML regeneration utility (~1479 lines, appendix + analysis log support)
 │   │
@@ -119,23 +130,36 @@ intesc/                         # Code directory
 │   ├── agents/
 │   │   ├── base.py             # Agent base class (rollback_last_turn for safe history cleanup)
 │   │   ├── pi_agent.py         # PI Agent (coordinator + figure reviewer + graphic abstract reviewer + dynamic task planner)
+│   │   │                       #   annotation review: returns alternative_cell_types + low_confidence_reason; 10 markers shown
+│   │   │                       #   innovation planning: mandates 4-6 tasks with concrete method/target specification
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install, cumulative revision history, analysis log)
+│   │   │                       #   register_score tool: documents score methodology (method, gene list, source, parameters)
+│   │   │                       #   mandatory score workflow: consult PI → compute → register_score
+│   │   │                       #   working directory context in system prompt (absolute paths for figures/tables/h5ad)
+│   │   │                       #   message trim: walks cut point backward to avoid orphaning tool_result messages
+│   │   │                       #   cell type dict uses json.dumps for safe serialization (injection prevention)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2, ~785 lines)
 │   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~1060 lines)
+│   │   │                       #   result dict includes search_mode field (actual mode used, including fallback chain)
 │   │   ├── painter_agent.py    # Painter Agent (graphic abstract + revision support)
 │   │   └── supervisor_agent.py # Supervisor Agent (real-time bioinformatics step monitoring, sampled LLM evaluation, PI escalation, custom system_prompt)
+│   │                           #   per-round narrative with phase/direction headers; publication figures in figure map
+│   │                           #   dynamic report sections: [innovation_N] per direction, [exploration_findings] if multi-phase
 │   │
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models (~540 lines)
+│   │   └── schemas.py          # Pydantic data models (~570 lines)
 │   │                           # - AnalysisState: Core state with version control + treatment_groups + data_files + biochemistry_indicators + analysis_log
+│   │                           #   + score_definitions (List[ScoreDefinition]) + annotation_report_html_path
+│   │                           # - ScoreDefinition: Score methodology record (score_name, method, description, parameters, gene_list, gene_list_source, round_number)
 │   │                           # - AnalysisStep: Comprehensive step log (code/PI/literature/annotation/findings/figure/text)
 │   │                           # - TreatmentGroup: Experimental group definition (name, sample_count)
 │   │                           # - DataFile: Universal file record (section: pathology/sequencing/biochemistry, group_id, sample_number)
 │   │                           # - BiochemistryIndicator: Manual biochemistry entry with group/sample
 │   │                           # - TaskStatus: GENERATING_REPORT status
 │   │                           # - AgentError: Structured error tracking
-│   │                           # - RoundResult: agents_for_next_round for selective activation
+│   │                           # - RoundResult: agents_for_next_round for selective activation + direction field
+│   │                           # - ClusterAnnotation: + alternative_cell_types + low_confidence_reason fields
 │   │                           # - PublicationFigure/Table: Publication outputs (+ interpretation field)
 │   │                           # - GraphicAbstract: Painter agent output
 │   │                           # - BioinformaticsCheckpoint: Step-level recovery (+ analysis_log)
@@ -143,7 +167,10 @@ intesc/                         # Code directory
 │   │
 │   ├── utils/
 │   │   ├── llm_client.py       # LLM client (~872 lines, OpenRouter + Google DR, precise retry with InternalServerError)
-│   │   ├── sandbox.py          # Jupyter execution environment (~946 lines, auto PDF, code safety validation, extract_code_from_markdown)
+│   │   ├── sandbox.py          # Jupyter execution environment (~1060 lines, auto PDF, code safety validation, extract_code_from_markdown)
+│   │   │                       #   working_dir set to absolute path; kernel init sets os.chdir + creates figures/tables subdirs
+│   │   │                       #   I/O sandbox: intercepts open()/Path.mkdir()/write_text()/write_bytes() to block writes outside session dir
+│   │   │                       #   _kernel_dead flag: tracks failed restart, subsequent execute() calls return error immediately
 │   │   ├── checkpoint.py       # Generic checkpoint manager (analysis + report resumption)
 │   │   ├── image_utils.py      # Image processing
 │   │   ├── upload.py           # Chunked upload manager (~398 lines)
@@ -157,7 +184,9 @@ intesc/                         # Code directory
 │   │   ├── components/         # React components
 │   │   │   ├── ChatPanel.tsx   # PI Agent free-form chat + delegation (~657 lines)
 │   │   │   ├── AboutDialog.tsx # About dialog (project info, author, contact)
-│   │   │   ├── AnnotationConfirmationDialog.tsx  # Cell annotation review dialog (Phase 1 pause, ~314 lines)
+│   │   │   ├── AnnotationConfirmationDialog.tsx  # Cell annotation review dialog (Phase 1 pause, ~400 lines)
+│   │   │   │                                    # - expandable cluster rows: alternative_cell_types + low_confidence_reason
+│   │   │   │                                    # - download button linking to annotation context HTML report
 │   │   │   ├── ExplorationReportDialog.tsx       # Phase 1 exploration report & multi-direction selection (multi-select, notes, score badges, countdown)
 │   │   │   └── ...             # Other panels (Analysis, Data, Prompts, Results, Report)
 │   │   ├── stores/             # Zustand state (+ chatMessages, chatDelegation, generating_report status)
@@ -305,6 +334,13 @@ Phase 2: Innovation (Round 2+)
 25. **Dynamic PI Planning**: PI Agent's `plan_agent_tasks()` method refines each downstream agent's tasks based on already-completed results within the round. Uses `self.chat()` to accumulate context across successive planning calls, building a coherent chain of thought. PI history is reset at the start of each round's planning phase. For round 2+, previous round PI summary is passed as strategic overview context. Round 3+ falls back to `next_steps` → `pi_summary` if prefix-tagged tasks are not found.
 26. **Docker Pip Install**: Bioinformatics Agent's `_validate_code()` allows `subprocess` calls when all usages are pip/pip3 install commands (safe in Docker environments). System prompt includes package installation guidelines.
 27. **Graphic Abstract Revision Loop**: The graphic abstract generation uses a 3-phase revision process: (1) initial generation by Painter Agent; (2) up to 2 rounds of PI review via vision API (`review_graphic_abstract()`) + Painter revision with accumulated feedback history (`revise_graphic_abstract()`); (3) PI selects the best candidate from all versions using side-by-side vision comparison (`select_best_graphic_abstract()`). Metadata stored on `GraphicAbstract`: `revision_count`, `revision_history`, `all_candidates`, `selected_index`.
+28. **Score Registration Workflow**: Bioinformatics Agent has a `register_score` tool that records how a score was computed (method, gene list, source, key parameters) as a `ScoreDefinition` in `AnalysisState.score_definitions`. The agent is instructed to call `consult_pi → execute → register_score` for every scoring operation. Scores are deduplicated by `score_name` (update existing if same name). Score definitions surface in the final report's methodology section.
+29. **Jupyter I/O Sandbox**: Kernel initialization injects a runtime I/O sandbox that intercepts `open()`, `Path.mkdir()`, `Path.write_text()`, and `Path.write_bytes()` to block writes outside the session directory. Allowed roots: session root, `/tmp`, system paths (`~/.cache`, `~/.local`, etc.). Blocked writes raise `PermissionError` with a clear redirect message. Also sets `os.chdir()` to workspace, creates `figures/` and `tables/` subdirs, configures `sc.settings.figdir` to absolute path.
+30. **Kernel Dead Detection**: `_kernel_dead` flag on `LocalJupyterSandbox`. Set when kernel restart fails after timeout. All subsequent `execute()` calls immediately return `success=False` with a clear error message instead of hanging.
+31. **Thread-Safe Session Cache**: `_update_session_cache(session_id, state)` in `main.py` acquires `_state_lock` before updating `sessions` dict and `_session_access_times`. All direct `sessions[id] = state` assignments replaced with this helper throughout `main.py`.
+32. **Annotation Context HTML Report**: During the annotation confirmation pause, `generate_annotation_context_report_html()` generates a standalone HTML report saved to the session's reports directory. Path stored in `state.annotation_report_html_path`. Accessible via `GET /api/session/{id}/annotation-report/html`. `annotation_report_url` returned in session load API.
+33. **Innovation Phase: User Guidance Merging**: In round 2+, `adjusted_instructions` (from user input processing) are no longer allowed to replace direction-based PI planning. Instead, they are merged as supplementary `[User guidance]` tasks appended to existing task lists after direction-based planning completes.
+34. **Direction Pop Persistence**: After popping a direction from `directions_queue`, the workflow immediately calls `state_callback` to persist the updated queue, preventing direction loss on crash between direction pop and round completion.
 
 **WebSocket Message Types:**
 
@@ -329,7 +365,7 @@ Phase 2: Innovation (Round 2+)
 | `human_input_requested` | Workflow waiting for user input (round feedback) |
 | `human_input_received` | User input received, continuing workflow |
 | `annotation_result` | Literature-based cluster annotation result |
-| `annotation_confirmation` | Phase 1 pause — sends cluster annotations for user review and confirmation |
+| `annotation_confirmation` | Phase 1 pause — sends cluster annotations (incl. alternative_cell_types, low_confidence_reason) + report_html_url for review |
 | `exploration_report` | Phase 1 completion — sends exploration report and requests research direction selection |
 | `data_request` | Agent requesting additional data |
 | `chat_delegation` | Chat delegation progress (started/agent_complete/agent_error/synthesizing) |
@@ -1298,7 +1334,7 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 | Round results + publication outputs | `ResultsPanel.tsx` | ~359 lines |
 | Main application (+ About dialog) | `App.tsx` | ~313 lines |
 | About dialog (project info) | `AboutDialog.tsx` | ~135 lines |
-| Cell annotation confirmation dialog (Phase 1) | `AnnotationConfirmationDialog.tsx` | ~314 lines |
+| Cell annotation confirmation dialog (Phase 1) | `AnnotationConfirmationDialog.tsx` | ~400 lines |
 | Exploration report & direction selection dialog | `ExplorationReportDialog.tsx` | ~264 lines |
 | API + literature configuration + DR warning | `ConfigPanel.tsx` | ~261 lines |
 
@@ -1354,6 +1390,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.14.0 | 2026-03-15 | register_score tool (ScoreDefinition model, consult PI → compute → register workflow), Jupyter I/O sandbox (intercepts open/mkdir/write_text/write_bytes), kernel dead detection (_kernel_dead flag), working directory context in kernel init (os.chdir + figures/tables subdirs + sc.settings.figdir), annotation dialog: alternative_cell_types + low_confidence_reason + expandable rows + HTML report download, annotation context HTML report endpoint, per-round report structure with phase/direction labels + innovation sections, publication figures in report figure map, thread-safe session cache (_update_session_cache), innovation phase user guidance merging (supplementary, not override), direction pop persistence, message trim orphan prevention, direction validation + resume guard, clear_queue in HumanInputRequest, user override sanitization, literature search_mode tracking |
 | 0.13.4 | 2026-03-13 | Pause/resume deadlock fix (WAITING_INPUT status guard), multi-direction max_rounds guard, retry status:failed field, Round 3+ task fallback, bioinformatics message history cap (80), supervisor sampled LLM evaluation, report_generator dead code removal (~700 lines), pre-existing IndentationError fix, docs update |
 | 0.13.1 | 2026-03-12 | Multi-direction research workflow (directions_queue, auto-continue between directions), enhanced direction candidate evaluation (innovation/novelty/reliability scores), exploration report HTML export, PI select_best_directions(), bioinformatics LLM error status, session eviction race fix, sidebar max-rounds removed |
 | 0.13.0 | 2026-03-12 | Two-phase workflow (Exploration Phase + Innovation Phase), cell annotation confirmation dialog (WAITING_ANNOTATION status), exploration report with research direction selection, new data models (ClusterAnnotation, AnnotationConfirmationState, ExplorationReport) |
@@ -1397,6 +1434,29 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.14.0 (2026-03-15)
+
+- **`register_score` Tool** (`bioinformatics_agent.py`, `schemas.py`): New tool for the Bioinformatics Agent to register how a score was computed. Tool arguments: `score_name`, `method`, `description`, `parameters`, `gene_list`, `gene_list_source`. Creates a `ScoreDefinition` Pydantic model, deduplicates by `score_name` in `AnalysisState.score_definitions`. Agent system prompt mandates a `consult PI → execute → register_score` workflow for all scoring operations (sc.tl.score_genes, gseapy, decoupleR, custom scoring). Score-only `register_score` calls do not consume a bioinformatics step (`step_count -= 1`).
+- **Jupyter I/O Sandbox** (`sandbox.py`): Kernel `_initialize_environment()` now injects a second setup block that: (1) sets `os.chdir()` to the absolute workspace path; (2) creates `figures/` and `tables/` subdirectories; (3) configures `sc.settings.figdir`; (4) monkey-patches `builtins.open`, `pathlib.Path.mkdir`, `Path.write_text`, and `Path.write_bytes` to block writes outside allowed roots (session root, `/tmp`, system paths). Blocked writes raise `PermissionError` with a redirect message listing correct subdirectories.
+- **Kernel Dead Detection** (`sandbox.py`): Added `_kernel_dead: bool = False` to `LocalJupyterSandbox`. Set to `True` when `restart_kernel()` raises an exception after a timeout. All subsequent `execute()` calls check this flag first and return `CodeExecutionResult(success=False, error="Kernel is unavailable — restart failed")` immediately.
+- **Working Directory as Absolute Path** (`sandbox.py`): `self.working_dir = Path(working_dir).absolute()` — prevents relative-path issues when the kernel changes cwd internally.
+- **Annotation Dialog: Alternative Cell Types & Low Confidence Reason** (`pi_agent.py`, `schemas.py`, `workflow.py`, `AnnotationConfirmationDialog.tsx`): PI Agent's `review_annotations()` prompt now requests `alternative_cell_types` (list) and `low_confidence_reason` (str) for medium/low confidence clusters. These fields are stored in `ClusterAnnotation` and propagated to the frontend via `annotation_confirmation` WebSocket message. The dialog shows expandable rows per cluster with this information, using chevron toggle icons.
+- **Annotation Marker Supplementation** (`workflow.py`): Before sending annotations to PI for review, `key_markers` lists shorter than 10 genes are supplemented from `cluster_markers` (rank_genes_groups top genes), ensuring PI and user always see at least 10 genes per cluster.
+- **Annotation Context HTML Report** (`workflow.py`, `report_generator.py`, `main.py`): `generate_annotation_context_report_html()` produces a standalone HTML annotation context report during the annotation pause. Saved to `reports/{session_id}/annotation_context_report.html`; path stored in `state.annotation_report_html_path`. New endpoint `GET /api/session/{id}/annotation-report/html` serves it. `annotation_report_url` included in session load API response. Annotation dialog shows a download button linking to this report.
+- **Per-Round Report Narrative** (`supervisor_agent.py`): `_build_analysis_narrative()` now groups records into per-round blocks by detecting step number resets, emitting `ROUND N (PHASE)` headers with the research direction for innovation rounds. Exploration report direction candidates and user-chosen directions are appended to the narrative. Context limit raised from 60k to 80k characters.
+- **Dynamic Report Sections** (`supervisor_agent.py`): `_build_report_prompt()` now builds section templates dynamically. If any innovation round exists, the template includes `[exploration_findings]`, one `[innovation_N]` section per direction (replacing `[key_findings]`), and `[integrated_findings]`. Innovation sections are marked as CRITICAL with 300-500 word minimum and requirement to include all figures, genes, pathways, and quantitative statistics. Publication figures are included in `_collect_figure_paths()` alongside supervision records.
+- **Thread-Safe Session Cache** (`main.py`): `_update_session_cache(session_id, state)` acquires `_state_lock` before updating `sessions[session_id]` and `_session_access_times[session_id]`. All direct `sessions[id] = state` assignments (~15 call sites) replaced with `await _update_session_cache(session_id, state)`.
+- **Innovation Phase User Guidance Merging** (`workflow.py`): In `_pi_planning()`, `adjusted_instructions` from user input now only replaces direction-based planning in round 1 (`current_round <= 1`). In round 2+, adjusted instructions are merged as supplementary `[User guidance]` tasks appended to existing task lists after innovation-phase planning completes.
+- **Direction Pop Persistence** (`workflow.py`): After `directions_queue.popleft()`, the workflow immediately calls `await self.state_callback(analysis_state)` to persist the updated queue. Prevents direction loss if the process crashes between the pop and round completion.
+- **Message Trim Orphan Prevention** (`bioinformatics_agent.py`): The 80-message trim now walks the cut point backward until the message at `cut` is not a `tool` role message. This avoids orphaning tool result messages that require a preceding assistant message with the matching `tool_use` block, which causes API errors on some providers.
+- **Direction Validation** (`main.py`): `POST /api/session/{id}/choose-direction` now validates that at least one of `direction`, `directions` (non-empty list), or `let_pi_decide` is provided, returning HTTP 400 with a clear message if not.
+- **Resume Without Direction Guard** (`main.py`): When resuming a `WAITING_INPUT` session in innovation phase (round ≥ 1) without a `user_chosen_direction` or `directions_queue`, the handler defaults `user_chosen_direction = "[PI_DECIDE]"` so analysis does not run directionless.
+- **Clear Direction Queue** (`main.py`): `HumanInputRequest` gains `clear_queue: bool = False`. When set, `directions_queue` is cleared and `max_rounds` is capped to `current_round + 1`, allowing users to abort the multi-direction sequence and jump to report generation.
+- **User Override Sanitization** (`main.py`): Cell type name overrides in `POST /api/session/{id}/confirm-annotations` are now sanitized: strips `{}[]\\;` `` ` `` `$` `__dunder__` `import`, `exec`, `eval` patterns and caps length at 200 characters. Prevents code injection when the override value is embedded in generated Python code.
+- **Literature Search Mode Tracking** (`literature_agent.py`): All paths in `search_literature()` now set `result["search_mode"]` to the actual mode used (including fallback chain, e.g., `"pubmed_llm (fallback from gemini_deep_research)"`). Previously only the final fallback paths set this field.
+- **Innovation Phase Analysis Requirements** (`workflow.py`, `bioinformatics_agent.py`): The innovation phase bioinformatics system prompt now lists 10 concrete requirements: execute all PI tasks, ≥1 figure per task, use specified advanced methods, add exploratory analyses, include volcano + heatmap for DEG, bar plot for pathways, UMAP + violin/box for scoring, report detailed statistics, consult PI before scoring, call `register_score` after scoring.
+- **`RoundResult.direction` Field** (`schemas.py`): New `direction: str = ""` field on `RoundResult`. Set at PI synthesis time from `analysis_state.current_round_direction`. Used by supervisor agent report prompt and narrative to label which direction each innovation round investigated.
 
 #### v0.13.4 (2026-03-13)
 
@@ -1713,5 +1773,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-13*
-*Version: 0.13.4*
+*Document updated: 2026-03-15*
+*Version: 0.14.0*

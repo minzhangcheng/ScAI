@@ -100,6 +100,14 @@ _initializing_sessions: set = set()
 # Lock for protecting concurrent access to global dicts
 _state_lock = asyncio.Lock()
 
+
+async def _update_session_cache(session_id: str, state):
+    """Thread-safe update of in-memory session cache."""
+    async with _state_lock:
+        sessions[session_id] = state
+        _session_access_times[session_id] = time.time()
+
+
 # Workflow task tracking (for cancellation support)
 _run_tasks: Dict[str, asyncio.Task] = {}  # session_id -> asyncio.Task for workflow execution
 
@@ -585,8 +593,8 @@ async def start_session(request: StartRequest):
         status=TaskStatus.PENDING
     )
     
-    sessions[session_id] = state
-    
+    await _update_session_cache(session_id, state)
+
     # Save to disk for persistence
     await async_save_session(session_id, state)
     
@@ -705,6 +713,7 @@ async def load_session(session_id: str):
         ],
         "final_summary": state.final_summary,
         "exploration_report_url": f"/api/session/{session_id}/exploration-report/html" if getattr(state, 'exploration_report_html_path', None) else None,
+        "annotation_report_url": f"/api/session/{session_id}/annotation-report/html" if getattr(state, 'annotation_report_html_path', None) else None,
         # Messages history (realtime WebSocket messages for UI restoration)
         # Strip large base64 image data from messages to reduce response size
         "messages": [
@@ -859,7 +868,7 @@ async def ensure_session(session_id: str, request: StartRequest):
         status=TaskStatus.PENDING
     )
     
-    sessions[session_id] = state
+    await _update_session_cache(session_id, state)
     await async_save_session(session_id, state)
     logger.info(f"Recreated session {session_id} after server restart")
 
@@ -1502,6 +1511,16 @@ async def resume_analysis(session_id: str):
             data={"needs_reconnect": True}
         )
     elif state.status == TaskStatus.WAITING_INPUT:
+        # Guard: if in innovation phase after round 1, ensure direction is set
+        if (state.analysis_phase == "innovation"
+            and state.current_round >= 1
+            and not state.user_chosen_direction
+            and not state.directions_queue
+            and not state.pending_human_input):
+            # No direction chosen — default to PI_DECIDE so analysis doesn't run directionless
+            state.user_chosen_direction = "[PI_DECIDE]"
+            state.pending_human_input = "[PI_DECIDE]"
+            logger.info(f"[{session_id}] Resume without direction: defaulting to PI_DECIDE")
         # Continue from round-end wait (user sent input or skipped)
         state.status = TaskStatus.RUNNING
         await async_save_session(session_id, state)
@@ -1577,7 +1596,7 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
 
     if req.action == "immediate":
         state.status = TaskStatus.PAUSED
-        sessions[session_id] = state
+        await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
         task = _run_tasks.get(session_id)
         if task and not task.done():
@@ -1602,7 +1621,7 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
             # Set max_rounds = current_round so _should_continue routes to "stop" -> report gen
             state.max_rounds = state.current_round
             state.status = TaskStatus.RUNNING
-            sessions[session_id] = state
+            await _update_session_cache(session_id, state)
             await async_save_session(session_id, state)
             async with _state_lock:
                 workflow = workflows.get(session_id)
@@ -1614,7 +1633,7 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
             # Unblock it and let the round finish, then route to report gen
             state.max_rounds = state.current_round
             state.status = TaskStatus.RUNNING
-            sessions[session_id] = state
+            await _update_session_cache(session_id, state)
             await async_save_session(session_id, state)
             async with _state_lock:
                 workflow = workflows.get(session_id)
@@ -1624,7 +1643,7 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
         else:
             # RUNNING - mid-agent execution: cancel task, start report generation
             state.status = TaskStatus.GENERATING_REPORT
-            sessions[session_id] = state
+            await _update_session_cache(session_id, state)
             await async_save_session(session_id, state)
             task = _run_tasks.get(session_id)
             if task and not task.done():
@@ -1644,6 +1663,7 @@ class HumanInputRequest(BaseModel):
     message: str
     target_agent: str = "pi"  # Which agent to send the message to
     uploaded_files: List[UploadedFileInfo] = Field(default_factory=list)
+    clear_queue: bool = False  # Clear remaining direction queue (multi-direction mode)
 
 
 @app.post("/api/session/{session_id}/human-input")
@@ -1657,6 +1677,13 @@ async def send_human_input(session_id: str, request: HumanInputRequest):
     state.pending_human_input = request.message
     state.pending_uploaded_files = [f.model_dump() for f in request.uploaded_files]
     state.human_input_requested = False  # Clear request flag
+
+    # Allow user to clear remaining direction queue (multi-direction mode)
+    if request.clear_queue and state.directions_queue:
+        cleared_count = len(state.directions_queue)
+        state.directions_queue = []
+        state.max_rounds = state.current_round + 1
+        logger.info(f"[{session_id}] Direction queue cleared ({cleared_count} directions removed) by user")
     
     # Record in history
     state.human_messages.append({
@@ -1724,18 +1751,25 @@ async def confirm_annotations(session_id: str, request: AnnotationConfirmation):
 
     # Apply user modifications to annotation state
     if state.annotation_state:
+        import re
+        # Sanitize user_override to prevent code injection when used in generated code
+        _UNSAFE_PATTERN = re.compile(r'[{}\[\]\\;`$]|__\w+__|import\s|exec\s*\(|eval\s*\(')
         for ua in request.annotations:
             cid = ua.get("cluster_id", "")
             for ca in state.annotation_state.cluster_annotations:
                 if ca.cluster_id == cid:
                     if ua.get("user_override"):
-                        ca.user_override = ua["user_override"]
+                        override = ua["user_override"].strip()
+                        # Remove characters that could break string literals in generated code
+                        override = _UNSAFE_PATTERN.sub('', override)
+                        # Limit length to reasonable cell type name
+                        ca.user_override = override[:200]
                     ca.user_confirmed = True
                     break
         state.annotation_state.confirmed = True
         state.annotation_state.pending = False
 
-    sessions[session_id] = state
+    await _update_session_cache(session_id, state)
     await async_save_session(session_id, state)
 
     # Signal the workflow to continue from annotation wait
@@ -1774,7 +1808,7 @@ async def choose_direction(session_id: str, request: DirectionChoice):
         # PI will select 2 best directions in _pi_planning
         state.user_chosen_direction = "[PI_DECIDE]"
         state.pending_human_input = "[PI_DECIDE]"
-    elif request.directions:
+    elif request.directions and len(request.directions) > 0:
         # Multi-direction mode
         state.user_chosen_directions = request.directions
         state.directions_queue = [d.copy() for d in request.directions]
@@ -1791,8 +1825,10 @@ async def choose_direction(session_id: str, request: DirectionChoice):
         state.max_rounds = 2  # Round 1 + 1 direction round
         state.user_chosen_direction = request.direction
         state.pending_human_input = request.direction
+    else:
+        raise HTTPException(status_code=400, detail="No direction provided: specify direction, directions list, or let_pi_decide")
 
-    sessions[session_id] = state
+    await _update_session_cache(session_id, state)
     await async_save_session(session_id, state)
 
     # Signal the workflow to continue from wait_for_user_input
@@ -1821,6 +1857,21 @@ async def get_exploration_report_html(session_id: str):
         raise HTTPException(status_code=404, detail="Exploration report HTML not found")
 
     return FileResponse(html_path, media_type="text/html", filename="exploration_report.html")
+
+
+@app.get("/api/session/{session_id}/annotation-report/html")
+async def get_annotation_report_html(session_id: str):
+    """Serve the annotation context report HTML file"""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    html_path = state.annotation_report_html_path
+    if not html_path or not Path(html_path).exists():
+        raise HTTPException(status_code=404, detail="Annotation report not found")
+
+    return FileResponse(html_path, media_type="text/html", filename="annotation_context_report.html")
 
 
 @app.post("/api/session/{session_id}/request-input")
@@ -2131,7 +2182,7 @@ async def import_state(background_tasks: BackgroundTasks, file: UploadFile = Fil
 
     # Save state to disk and load into memory
     await async_save_session(state.id, state)
-    sessions[state.id] = state
+    await _update_session_cache(state.id, state)
 
     return APIResponse(
         success=True,
@@ -2151,7 +2202,7 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str):
             return
 
         await async_save_session(state.id, state)
-        sessions[state.id] = state
+        await _update_session_cache(state.id, state)
         _import_jobs[import_job_id] = {"status": "completed", "session_id": state.id, "name": state.name}
     except HTTPException as e:
         _import_jobs[import_job_id] = {"status": "failed", "error": e.detail}
@@ -2649,7 +2700,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     # State callback to save after each round
     async def state_callback(state: AnalysisState):
-        sessions[session_id] = state
+        await _update_session_cache(session_id, state)
         # Use thread pool for disk I/O to avoid blocking event loop
         await async_save_session(session_id, state)
 
@@ -2720,7 +2771,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 try:
                     logger.info(f"[{session_id}] Starting report generation after stop-and-summarize")
                     report_state = await workflow.generate_report(current_state, session_id)
-                    sessions[session_id] = report_state
+                    await _update_session_cache(session_id, report_state)
                     await async_save_session(session_id, report_state)
                     await safe_send({
                         "type": "completed",
@@ -2735,20 +2786,20 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     logger.error(f"[{session_id}] Report generation after stop failed: {e}")
                     logger.error(traceback.format_exc())
                     current_state.status = TaskStatus.FAILED
-                    sessions[session_id] = current_state
+                    await _update_session_cache(session_id, current_state)
                     await async_save_session(session_id, current_state)
                     final_state = current_state
             else:
                 # Immediate stop or unknown state - save as PAUSED
                 if current_state.status == TaskStatus.RUNNING:
                     current_state.status = TaskStatus.PAUSED
-                sessions[session_id] = current_state
+                await _update_session_cache(session_id, current_state)
                 await async_save_session(session_id, current_state)
                 final_state = current_state
         finally:
             _run_tasks.pop(session_id, None)
 
-        sessions[session_id] = final_state
+        await _update_session_cache(session_id, final_state)
         logger.info(f"Workflow completed for session {session_id}")
 
         # Save completed state to disk (use thread pool for I/O)
@@ -2778,7 +2829,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         # Get the latest state to avoid race condition
         current_state = sessions.get(session_id, state)
         current_state.status = TaskStatus.FAILED
-        sessions[session_id] = current_state
+        await _update_session_cache(session_id, current_state)
         await async_save_session(session_id, current_state)
 
     finally:
@@ -4485,7 +4536,7 @@ async def _run_chat_delegation(
         })
 
         # 10. Persist state
-        sessions[session_id] = state
+        await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
 
         duration = time.time() - start_time
@@ -4504,7 +4555,7 @@ async def _run_chat_delegation(
                 break
         try:
             await _send_chat_ws(session_id, "chat_cancelled", {"message": "Cancelled by user"})
-            sessions[session_id] = state
+            await _update_session_cache(session_id, state)
             await async_save_session(session_id, state)
         except Exception:
             pass
@@ -4523,7 +4574,7 @@ async def _run_chat_delegation(
                 }
                 break
         await _send_chat_ws(session_id, "chat_error", {"error": error_msg})
-        sessions[session_id] = state
+        await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
 
     finally:

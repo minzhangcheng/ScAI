@@ -1343,9 +1343,9 @@ Be specific and actionable. Include:
         completed_section_count = len(sections)
         total_sections = len(report_plan.get("sections", []))
 
-        # Restore generated_figures/tables from checkpoint BEFORE the section loop,
-        # so that new sections append to the already-recovered list and per-section
-        # checkpoint saves contain the full cumulative data.
+        # Restore generated_figures/tables/cluster_annotations from checkpoint BEFORE
+        # the section loop, so that new sections append to the already-recovered list
+        # and per-section checkpoint saves contain the full cumulative data.
         if checkpoint and last_step >= 6:
             saved_figs = checkpoint.get('generated_figures', [])
             saved_tbls = checkpoint.get('generated_tables', [])
@@ -1353,6 +1353,9 @@ Be specific and actionable. Include:
                 self.generated_figures = saved_figs
             if saved_tbls:
                 self.generated_tables = saved_tbls
+            saved_ca = checkpoint.get('cluster_annotations', {})
+            if saved_ca:
+                self.cluster_annotations = saved_ca
 
         for i, section_plan in enumerate(report_plan.get("sections", [])):
             # Skip sections already completed in checkpoint
@@ -1381,6 +1384,7 @@ Be specific and actionable. Include:
                 'analysis_summary': analysis_summary, 'report_plan': report_plan,
                 'sections': sections, 'generated_figures': self.generated_figures,
                 'generated_tables': self.generated_tables, 'language': language,
+                'cluster_annotations': self.cluster_annotations,
             })
 
         # Step 6: PI writes abstract and conclusions (expensive LLM calls)
@@ -1395,7 +1399,7 @@ Be specific and actionable. Include:
                 'analysis_summary': analysis_summary, 'report_plan': report_plan,
                 'sections': sections, 'generated_figures': self.generated_figures,
                 'generated_tables': self.generated_tables, 'abstract': abstract,
-                'language': language,
+                'language': language, 'cluster_annotations': self.cluster_annotations,
             })
 
         if last_step >= 8 and checkpoint:
@@ -1410,6 +1414,7 @@ Be specific and actionable. Include:
                 'sections': sections, 'generated_figures': self.generated_figures,
                 'generated_tables': self.generated_tables, 'abstract': abstract,
                 'conclusions': conclusions, 'language': language,
+                'cluster_annotations': self.cluster_annotations,
             })
 
         # Save graphic abstract image to figures dir if available
@@ -1472,7 +1477,7 @@ Be specific and actionable. Include:
         report = {
             "id": report_id,
             "session_id": state.id,
-            "title": report_plan.get("title", state.name),
+            "title": report_plan.get("title") or state.name,
             "abstract": abstract,
             "sections": sections,
             "conclusions": conclusions,
@@ -2340,6 +2345,20 @@ IMPORTANT:
         fallback["methodology_overview"] = all_reviews[:2000] if all_reviews else ""
         return fallback
 
+    def _build_score_definitions_context(self, state: AnalysisState) -> str:
+        """Build score definitions context string for prompts."""
+        if not state.score_definitions:
+            return ""
+        score_parts = []
+        for sd in state.score_definitions:
+            genes_str = ", ".join(sd.gene_list[:20]) if sd.gene_list else "N/A"
+            params_str = ", ".join(f"{k}={v}" for k, v in sd.parameters.items()) if sd.parameters else "default"
+            score_parts.append(
+                f"- **{sd.score_name}**: {sd.method} — {sd.description}\n"
+                f"  Parameters: {params_str} | Genes ({len(sd.gene_list)} from {sd.gene_list_source or 'unspecified'}): {genes_str}"
+            )
+        return "\n## Registered Score Definitions\n" + "\n".join(score_parts)
+
     async def _pi_comprehensive_review(
         self,
         code_digest: str,
@@ -2411,6 +2430,8 @@ Objective: {state.initial_instruction}
 ## Result Figures ({len(figure_filenames)} figures attached for visual inspection)
 {figures_list if figures_list else "(No figures available)"}
 
+{self._build_score_definitions_context(state)}
+
 ## Task
 {lang_instruction}
 
@@ -2428,7 +2449,11 @@ Return a JSON object with this exact structure:
 
     "parameters_used": {{
         "parameter_name": "value and brief rationale"
-    }}
+    }},
+
+    "score_definitions": [
+        {{"score_name": "name", "method": "computation method", "description": "what it measures", "gene_list_source": "source of genes"}}
+    ]
 }}
 
 IMPORTANT:
@@ -2438,6 +2463,7 @@ IMPORTANT:
 - For analysis_results, include ALL quantitative results you can find in the code outputs
 - For figure_descriptions, describe what you actually SEE in each attached figure
 - For parameters_used, list key analysis parameters from the code (resolution, n_neighbors, thresholds, etc.)
+- For score_definitions, identify ALL scoring/enrichment computations in the code and document what each score measures and how it was computed
 """
 
         try:
@@ -2729,25 +2755,56 @@ IMPORTANT:
 
     def _extract_cluster_annotations_from_state(self, state: AnalysisState):
         """
-        Extract cluster annotations from state data (round_results and publication_figures)
-        without requiring a Jupyter sandbox.
+        Extract cluster annotations from state data, using multiple sources in priority order:
+        1. annotation_state (confirmed by user — highest quality)
+        2. analysis_log annotate_clusters steps
+        3. bioinformatics findings (regex fallback)
         """
         import re as _re
 
-        # Try to extract from bioinformatics findings
+        # Source 1: annotation_state (confirmed annotations from human-in-the-loop dialog)
+        if state.annotation_state and state.annotation_state.cluster_annotations:
+            for ca in state.annotation_state.cluster_annotations:
+                cell_type = ca.user_override or ca.cell_type
+                self.cluster_annotations[ca.cluster_id] = {
+                    "cell_type": cell_type,
+                    "n_cells": 0,
+                    "confidence": ca.confidence,
+                    "key_markers": ca.key_markers if ca.key_markers else [],
+                    "evidence": ca.evidence or "",
+                }
+            logger.info(f"Extracted {len(self.cluster_annotations)} cluster annotations from annotation_state")
+            return
+
+        # Source 2: analysis_log annotate_clusters steps
+        for step in state.analysis_log:
+            if step.step_type == "annotate_clusters" and step.annotation_result_summary:
+                for m in _re.finditer(
+                    r'[Cc]luster\s+(\S+)\s*[:\-–]\s*(.+?)(?:\s*\(confidence:\s*(\w+)\)|\s*$)',
+                    step.annotation_result_summary,
+                ):
+                    cid, cell_type = m.group(1), m.group(2).strip().rstrip('.,;')
+                    confidence = m.group(3) or "medium"
+                    if cid not in self.cluster_annotations:
+                        self.cluster_annotations[cid] = {
+                            "cell_type": cell_type,
+                            "n_cells": 0,
+                            "confidence": confidence,
+                        }
+        if self.cluster_annotations:
+            logger.info(f"Extracted {len(self.cluster_annotations)} cluster annotations from analysis_log")
+            return
+
+        # Source 3: bioinformatics findings (regex fallback)
         for r in state.round_results:
             for finding in (r.bioinformatics_findings or []):
-                # Look for patterns like "cluster X: CellType" or "X cells of type Y"
-                # This is best-effort; cluster annotations may also come from publication_figures
-                pass
-
-        # Try to extract from publication figure descriptions
-        for fig in state.publication_figures:
-            desc = fig.description or ""
-            # Look for patterns like "11 cell types" or cluster mentions
-            matches = _re.findall(r'(\d+)\s+cell\s+types?', desc, _re.IGNORECASE)
-            if matches:
-                logger.info(f"Found cell type count reference in figure: {fig.name}")
+                for m in _re.finditer(r'[Cc]luster\s+(\d+)\s*[:\-–]\s*(\S.+?)(?:\s*\(|,|\.|;|$)', finding):
+                    cid, cell_type = m.group(1), m.group(2).strip().rstrip('.,;')
+                    if cid not in self.cluster_annotations:
+                        self.cluster_annotations[cid] = {
+                            "cell_type": cell_type,
+                            "n_cells": 0,
+                        }
 
         logger.info(f"Cluster annotations extracted from state: {len(self.cluster_annotations)} clusters")
 
@@ -3245,6 +3302,7 @@ Title: {state.name}
 Objective: {state.initial_instruction}
 {exploration_context}
 {analysis_context}
+{self._build_score_definitions_context(state)}
 
 {params_text}
 
@@ -3313,6 +3371,47 @@ Then create sections in this EXACT order.
                         section["existing_figures"] = []
                     if "existing_tables" not in section:
                         section["existing_tables"] = []
+
+                # Validate figure/table references: filter non-existent and deduplicate
+                actual_fig_names = {f.get("filename") for f in existing_figures if f.get("filename")}
+                actual_tbl_names = {t.get("filename") for t in existing_tables if t.get("filename")}
+                seen_figs = set()
+                seen_tbls = set()
+                for section in plan.get("sections", []):
+                    valid_figs = []
+                    for fig_ref in section.get("existing_figures", []):
+                        name = fig_ref if isinstance(fig_ref, str) else fig_ref.get("filename", "")
+                        if not name:
+                            continue
+                        if name not in actual_fig_names:
+                            logger.warning(f"Figure '{name}' in section '{section.get('title', '?')}' not found on disk — removing")
+                        elif name in seen_figs:
+                            logger.warning(f"Duplicate figure '{name}' in section '{section.get('title', '?')}' — skipping")
+                        else:
+                            valid_figs.append(fig_ref)
+                            seen_figs.add(name)
+                    section["existing_figures"] = valid_figs
+
+                    valid_tbls = []
+                    for tbl_ref in section.get("existing_tables", []):
+                        name = tbl_ref if isinstance(tbl_ref, str) else tbl_ref.get("filename", "")
+                        if not name:
+                            continue
+                        if name not in actual_tbl_names:
+                            logger.warning(f"Table '{name}' in section '{section.get('title', '?')}' not found — removing")
+                        elif name in seen_tbls:
+                            logger.warning(f"Duplicate table '{name}' in section '{section.get('title', '?')}' — skipping")
+                        else:
+                            valid_tbls.append(tbl_ref)
+                            seen_tbls.add(name)
+                    section["existing_tables"] = valid_tbls
+
+                unassigned_figs = actual_fig_names - seen_figs
+                if unassigned_figs:
+                    logger.warning(f"{len(unassigned_figs)} figures not assigned to any section (will appear as supplementary): {unassigned_figs}")
+                unassigned_tbls = actual_tbl_names - seen_tbls
+                if unassigned_tbls:
+                    logger.warning(f"{len(unassigned_tbls)} tables not assigned to any section: {unassigned_tbls}")
 
                 plan["_existing_figures"] = existing_figures
                 plan["_existing_tables"] = existing_tables
@@ -3636,12 +3735,22 @@ Generate a comprehensive scientific narrative for this section. Your response mu
             section_tables.append(tbl_info)
             self.generated_tables.append(tbl_info)
 
+        fallback_content = provided_narrative or section_description
+        if not fallback_content or len(fallback_content.strip()) < 20:
+            logger.warning(
+                f"Section '{section_title}' fallback has minimal content "
+                f"({len((fallback_content or '').strip())} chars). "
+                f"LLM narrative generation failed — section may appear sparse."
+            )
+            if not (fallback_content or "").strip():
+                fallback_content = f"Analysis results for {section_title}. Detailed narrative could not be generated."
+
         return {
             "id": section_id,
             "title": section_title,
             "description": section_description,
             "analysis_type": analysis_type,
-            "content": provided_narrative or section_description,
+            "content": fallback_content,
             "figures": section_figures,
             "tables": section_tables,
             "pi_iterations": 1,
@@ -4353,13 +4462,16 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         if ga_path and os.path.exists(ga_path):
             try:
                 ga_b64 = compress_image_to_base64(ga_path, max_width=1200, quality=90)
-                ga_title = "图形摘要" if zh else "Graphic Abstract"
-                ga_html = f'''
+                if ga_b64:
+                    ga_title = "图形摘要" if zh else "Graphic Abstract"
+                    ga_html = f'''
             <div class="graphic-abstract">
                 <h2>{ga_title}</h2>
                 <img src="{ga_b64}" alt="{ga_title}" />
             </div>
 '''
+                else:
+                    logger.warning(f"Graphic abstract image compression returned empty for: {ga_path}")
             except Exception as e:
                 logger.error(f"Failed to embed graphic abstract in HTML: {e}")
 
@@ -4445,6 +4557,53 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         logger.info(f"HTML report saved to: {html_path}")
 
         return html_path
+
+
+def _build_score_definitions_html_section(state: AnalysisState, section_number: str = "") -> str:
+    """Build an HTML section for score definitions. Returns empty string if no scores."""
+    if not state.score_definitions:
+        return ""
+    score_rows = ""
+    for sd in state.score_definitions:
+        genes = html_module.escape(", ".join(sd.gene_list[:10]))
+        if len(sd.gene_list) > 10:
+            genes += f" ... ({len(sd.gene_list)} total)"
+        params_str = html_module.escape(
+            ", ".join(f"{k}={v}" for k, v in sd.parameters.items()) if sd.parameters else "default"
+        )
+        score_rows += f"""<tr>
+            <td>{html_module.escape(sd.score_name)}</td>
+            <td><code>{html_module.escape(sd.method)}</code></td>
+            <td>{html_module.escape(sd.description)}</td>
+            <td style="font-size:0.85em">{params_str}</td>
+            <td style="font-size:0.85em">{genes}</td>
+            <td style="font-size:0.85em">{html_module.escape(sd.gene_list_source or "N/A")}</td>
+        </tr>"""
+    prefix = f"{section_number}. " if section_number else ""
+    return f"""
+        <div class="section">
+            <div class="section-header">
+                <h2>{prefix}Score Definitions</h2>
+            </div>
+            <div class="section-content">
+                <p>The following scores were computed during the analysis. Each score's methodology is documented for transparency and reproducibility.</p>
+                <table class="direction-table" style="font-size:0.9em">
+                    <thead>
+                        <tr>
+                            <th>Score Name</th>
+                            <th>Method</th>
+                            <th>Description</th>
+                            <th>Parameters</th>
+                            <th>Gene List</th>
+                            <th>Source</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {score_rows}
+                    </tbody>
+                </table>
+            </div>
+        </div>"""
 
 
 def generate_exploration_report_html(
@@ -4965,10 +5124,13 @@ def generate_exploration_report_html(
             </div>
         </div>
 
+        <!-- Score Definitions -->
+        {_build_score_definitions_html_section(state, "7")}
+
         <!-- PI Assessment -->
         <div class="section">
             <div class="section-header">
-                <h2>7. PI Overall Assessment</h2>
+                <h2>{"8" if state.score_definitions else "7"}. PI Overall Assessment</h2>
             </div>
             <div class="section-content">
                 <div class="pi-assessment">
@@ -4994,4 +5156,320 @@ def generate_exploration_report_html(
         f.write(html_content)
 
     logger.info(f"Exploration report HTML saved to: {html_path}")
+    return str(html_path)
+
+
+def generate_annotation_context_report_html(
+    state: AnalysisState,
+    graph_state: Optional[Dict[str, Any]],
+    cluster_annotations: list
+) -> str:
+    """
+    Generate a self-contained HTML report providing full analysis context
+    for the cell annotation confirmation step. No LLM calls.
+
+    Args:
+        state: AnalysisState with session info
+        graph_state: Current workflow graph state dict
+        cluster_annotations: List of ClusterAnnotation objects
+
+    Returns:
+        Path to the saved HTML file
+    """
+    from .config import get_session_reports, get_session_workspace
+
+    project_name = html_module.escape(state.name or "Untitled Analysis")
+    exp_design = html_module.escape(state.build_experimental_design_summary())
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # --- Biochemistry & Pathology findings ---
+    biochem_html = ""
+    patho_html = ""
+    if graph_state:
+        biochem = graph_state.get("biochemistry_result")
+        if biochem and biochem.get("findings"):
+            items = "\n".join(f"<li>{html_module.escape(str(f))}</li>" for f in biochem["findings"])
+            biochem_html = f"""
+        <div class="section">
+            <div class="section-header"><h2>2. Biochemistry Findings</h2></div>
+            <div class="section-content"><ul>{items}</ul></div>
+        </div>"""
+
+        patho = graph_state.get("pathology_result")
+        if patho and patho.get("findings"):
+            items = "\n".join(f"<li>{html_module.escape(str(f))}</li>" for f in patho["findings"])
+            patho_html = f"""
+        <div class="section">
+            <div class="section-header"><h2>3. Pathology Findings</h2></div>
+            <div class="section-content"><ul>{items}</ul></div>
+        </div>"""
+
+    # --- Key bioinformatics analysis steps ---
+    bio_steps_html = ""
+    bio_steps = [s for s in state.analysis_log if s.step_type == "execute_code"]
+    if bio_steps:
+        step_items = []
+        for s in bio_steps:
+            desc = html_module.escape(s.code_description or f"Step {s.step_number}")
+            output_preview = ""
+            if s.code_output:
+                output_preview = f'<pre class="step-output">{html_module.escape(s.code_output[:500])}</pre>'
+            step_items.append(f"<li><strong>{desc}</strong>{output_preview}</li>")
+        bio_steps_html = f"""
+        <div class="section">
+            <div class="section-header"><h2>4. Bioinformatics Analysis Steps</h2></div>
+            <div class="section-content"><ul>{"".join(step_items)}</ul></div>
+        </div>"""
+
+    # --- Figures ---
+    figures_html = ""
+    figure_blocks = []
+
+    # From publication_figures
+    for pf in (state.publication_figures or []):
+        title = html_module.escape(getattr(pf, 'title', '') or 'Figure')
+        if hasattr(pf, 'base64_data') and pf.base64_data:
+            figure_blocks.append(
+                f'<div class="figure-item"><img src="data:image/png;base64,{pf.base64_data}" alt="{title}"/>'
+                f'<div class="figure-caption">{title}</div></div>'
+            )
+
+    # From analysis_log saved_figure_filenames
+    workspace_dir = get_session_workspace(state.id) if state.id else None
+    for s in state.analysis_log:
+        for fname in (s.saved_figure_filenames or []):
+            if workspace_dir:
+                fpath = workspace_dir / fname
+                if fpath.exists():
+                    try:
+                        b64 = compress_image_to_base64(str(fpath), max_width=700, quality=80)
+                        caption = html_module.escape(s.code_description or fname)
+                        figure_blocks.append(
+                            f'<div class="figure-item"><img src="data:image/png;base64,{b64}" alt="{caption}"/>'
+                            f'<div class="figure-caption">{caption}</div></div>'
+                        )
+                    except Exception:
+                        pass
+
+    if figure_blocks:
+        figures_html = f"""
+        <div class="section">
+            <div class="section-header"><h2>5. Analysis Figures</h2></div>
+            <div class="section-content"><div class="figures-grid">{"".join(figure_blocks)}</div></div>
+        </div>"""
+
+    # --- Literature research ---
+    lit_html = ""
+    lit_steps = [s for s in state.analysis_log if s.step_type == "search_literature"]
+    if lit_steps:
+        lit_items = []
+        for s in lit_steps:
+            topic = html_module.escape(s.literature_topic or "Unknown topic")
+            result = html_module.escape((s.literature_result or "No findings")[:500])
+            lit_items.append(f"<li><strong>{topic}</strong><br/><span class=\"lit-result\">{result}</span></li>")
+        lit_html = f"""
+        <div class="section">
+            <div class="section-header"><h2>6. Literature Research</h2></div>
+            <div class="section-content"><ul>{"".join(lit_items)}</ul></div>
+        </div>"""
+
+    # --- Cluster annotation table ---
+    ann_rows = ""
+    for ca in cluster_annotations:
+        cid = html_module.escape(str(ca.cluster_id))
+        ct = html_module.escape(ca.cell_type)
+        subtypes = html_module.escape(", ".join(ca.subtypes)) if ca.subtypes else ""
+        markers = html_module.escape(", ".join(ca.key_markers[:10]))
+        conf = ca.confidence
+        evidence = html_module.escape(ca.evidence[:300]) if ca.evidence else ""
+
+        conf_class = "badge-high" if conf == "high" else ("badge-medium" if conf == "medium" else "badge-low")
+        conf_badge = f'<span class="{conf_class}">{html_module.escape(conf)}</span>'
+
+        alt_types = ""
+        if ca.alternative_cell_types:
+            alt_list = ", ".join(html_module.escape(t) for t in ca.alternative_cell_types)
+            alt_types = f'<div class="alt-types">Alternatives: {alt_list}</div>'
+
+        reason = ""
+        if ca.low_confidence_reason:
+            reason = f'<div class="low-conf-reason">{html_module.escape(ca.low_confidence_reason)}</div>'
+
+        ann_rows += f"""
+            <tr class="{'ann-low' if conf == 'low' else ('ann-medium' if conf == 'medium' else '')}">
+                <td class="cluster-id">{cid}</td>
+                <td>{ct}{f'<div class="subtypes">{subtypes}</div>' if subtypes else ''}{alt_types}{reason}</td>
+                <td class="text-center">{conf_badge}</td>
+                <td class="markers">{markers}</td>
+                <td class="evidence">{evidence}</td>
+            </tr>"""
+
+    ann_html = f"""
+        <div class="section">
+            <div class="section-header"><h2>7. Cluster Annotation Details</h2></div>
+            <div class="section-content">
+                <table class="ann-table">
+                    <thead>
+                        <tr>
+                            <th>Cluster</th>
+                            <th>Cell Type</th>
+                            <th>Confidence</th>
+                            <th>Key Markers</th>
+                            <th>Evidence</th>
+                        </tr>
+                    </thead>
+                    <tbody>{ann_rows}</tbody>
+                </table>
+            </div>
+        </div>"""
+
+    # --- Full HTML ---
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Annotation Context Report - {project_name}</title>
+<style>
+    :root {{
+        --primary-color: #4f46e5;
+        --primary-light: #eef2ff;
+        --text-color: #1e293b;
+        --text-secondary: #64748b;
+        --border-color: #e2e8f0;
+        --bg-color: #f8fafc;
+        --white: #ffffff;
+        --success: #059669;
+        --warning: #d97706;
+        --danger: #dc2626;
+    }}
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    body {{
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        line-height: 1.6; color: var(--text-color); background: var(--bg-color); padding: 20px;
+    }}
+    .container {{
+        max-width: 1200px; margin: 0 auto; background: var(--white);
+        border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); overflow: hidden;
+    }}
+    .header {{
+        background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+        color: white; padding: 40px; text-align: center;
+    }}
+    .header h1 {{ font-size: 2rem; margin-bottom: 10px; }}
+    .header .meta {{ opacity: 0.9; font-size: 0.9rem; }}
+    .content {{ padding: 40px; }}
+    .section {{ margin-bottom: 40px; border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }}
+    .section-header {{
+        background: var(--primary-light); padding: 16px 24px; border-bottom: 1px solid var(--border-color);
+    }}
+    .section-header h2 {{ font-size: 1.25rem; color: var(--primary-color); }}
+    .section-content {{ padding: 24px; }}
+    .section-content ul {{ list-style: none; padding: 0; }}
+    .section-content ul li {{
+        padding: 8px 0 8px 20px; position: relative; border-bottom: 1px solid #f1f5f9;
+    }}
+    .section-content ul li:last-child {{ border-bottom: none; }}
+    .section-content ul li::before {{
+        content: '\\25B8'; position: absolute; left: 0; color: var(--primary-color); font-weight: bold;
+    }}
+    .step-output {{
+        background: #f1f5f9; padding: 8px 12px; border-radius: 6px; font-size: 0.8rem;
+        margin-top: 4px; white-space: pre-wrap; max-height: 120px; overflow-y: auto;
+    }}
+    .figures-grid {{
+        display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px;
+    }}
+    .figure-item {{ border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }}
+    .figure-item img {{ width: 100%; height: auto; display: block; }}
+    .figure-caption {{
+        padding: 8px 12px; font-size: 0.85rem; color: var(--text-secondary);
+        background: #f8fafc; text-align: center;
+    }}
+    .lit-result {{ font-size: 0.88rem; color: var(--text-secondary); }}
+    .ann-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+    .ann-table th {{
+        background: var(--primary-light); padding: 12px 16px; text-align: left;
+        font-size: 0.85rem; color: var(--primary-color); border-bottom: 2px solid var(--border-color);
+    }}
+    .ann-table td {{ padding: 12px 16px; border-bottom: 1px solid var(--border-color); vertical-align: top; }}
+    .ann-table tr:last-child td {{ border-bottom: none; }}
+    .ann-low {{ background: #fef2f2; }}
+    .ann-medium {{ background: #fffbeb; }}
+    .cluster-id {{ font-family: monospace; font-weight: 600; color: var(--primary-color); white-space: nowrap; }}
+    .markers {{ font-size: 0.85rem; color: var(--text-secondary); }}
+    .evidence {{ font-size: 0.85rem; color: var(--text-secondary); max-width: 300px; }}
+    .subtypes {{ font-size: 0.8rem; color: var(--text-secondary); margin-top: 2px; }}
+    .alt-types {{
+        margin-top: 6px; padding: 4px 8px; background: #fef3c7; border-radius: 4px;
+        font-size: 0.8rem; color: #92400e;
+    }}
+    .low-conf-reason {{
+        margin-top: 4px; padding: 4px 8px; background: #fee2e2; border-radius: 4px;
+        font-size: 0.8rem; color: #991b1b;
+    }}
+    .text-center {{ text-align: center; }}
+    .badge-high {{
+        display: inline-block; padding: 2px 10px; border-radius: 9999px;
+        font-size: 0.75rem; font-weight: 600; background: #dcfce7; color: #166534;
+    }}
+    .badge-medium {{
+        display: inline-block; padding: 2px 10px; border-radius: 9999px;
+        font-size: 0.75rem; font-weight: 600; background: #fef3c7; color: #92400e;
+    }}
+    .badge-low {{
+        display: inline-block; padding: 2px 10px; border-radius: 9999px;
+        font-size: 0.75rem; font-weight: 600; background: #fee2e2; color: #991b1b;
+    }}
+    .footer {{
+        text-align: center; padding: 20px; color: var(--text-secondary);
+        font-size: 0.85rem; border-top: 1px solid var(--border-color);
+    }}
+    @media (max-width: 768px) {{
+        .content {{ padding: 20px; }}
+        .figures-grid {{ grid-template-columns: 1fr; }}
+        .ann-table {{ font-size: 0.8rem; }}
+    }}
+    @media print {{
+        body {{ background: white; padding: 0; }}
+        .container {{ box-shadow: none; border-radius: 0; }}
+    }}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>Annotation Context Report</h1>
+        <div class="meta">{project_name} | {timestamp}</div>
+    </div>
+    <div class="content">
+        <div class="section">
+            <div class="section-header"><h2>1. Experimental Design</h2></div>
+            <div class="section-content">
+                <pre style="background:#f1f5f9;padding:12px;border-radius:8px;font-size:0.85rem;white-space:pre-wrap;">{exp_design}</pre>
+            </div>
+        </div>
+        {biochem_html}
+        {patho_html}
+        {bio_steps_html}
+        {figures_html}
+        {lit_html}
+        {ann_html}
+        {_build_score_definitions_html_section(state)}
+    </div>
+    <div class="footer">
+        Generated by InteSc Multi-Agent Analysis System | {timestamp}
+    </div>
+</div>
+</body>
+</html>"""
+
+    # Save HTML file
+    reports_dir = get_session_reports(state.id)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    html_path = reports_dir / "annotation_context_report.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    logger.info(f"Annotation context report HTML saved to: {html_path}")
     return str(html_path)
