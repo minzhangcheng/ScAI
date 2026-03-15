@@ -60,7 +60,8 @@ DANGEROUS_PATTERNS = [
     (r'\bos\.remove\b', 'os.remove'),
     (r'\bos\.unlink\b', 'os.unlink'),
     (r'\bos\.rmdir\b', 'os.rmdir'),
-    (r'\bos\.makedirs\b', 'os.makedirs (use Path.mkdir instead)'),
+    # os.makedirs is allowed — directory creation is non-destructive (idempotent with exist_ok=True)
+    # and LLM-generated bioinformatics code commonly uses it for cache/output directories.
     (r'\bos\.rename\b', 'os.rename'),
     (r'\bos\.replace\b', 'os.replace'),
     (r'\bshutil\.move\b', 'shutil.move'),
@@ -463,12 +464,20 @@ class LocalJupyterSandbox:
         if self._initialized:
             return
         
-        init_code = """
+        init_code = f"""
 # === MANDATORY: Set ALL random seeds for reproducibility ===
 import random
 import os
+from pathlib import Path
 
 SEED = 42
+
+# === Isolate Numba cache per session to prevent concurrent cache corruption ===
+_numba_cache = Path('/tmp/numba_cache_{self.session_id}')
+_numba_cache.mkdir(parents=True, exist_ok=True)
+os.environ['NUMBA_CACHE_DIR'] = str(_numba_cache)
+# Prevent Numba from spawning extra threads that compete for cache locks
+os.environ.setdefault('NUMBA_NUM_THREADS', '1')
 
 # Python built-in random
 random.seed(SEED)

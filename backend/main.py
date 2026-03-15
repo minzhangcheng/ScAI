@@ -714,6 +714,7 @@ async def load_session(session_id: str):
         "final_summary": state.final_summary,
         "exploration_report_url": f"/api/session/{session_id}/exploration-report/html" if getattr(state, 'exploration_report_html_path', None) else None,
         "annotation_report_url": f"/api/session/{session_id}/annotation-report/html" if getattr(state, 'annotation_report_html_path', None) else None,
+        "analysis_phase": state.analysis_phase,
         # Messages history (realtime WebSocket messages for UI restoration)
         # Strip large base64 image data from messages to reduce response size
         "messages": [
@@ -1708,6 +1709,13 @@ async def send_human_input(session_id: str, request: HumanInputRequest):
         except Exception:
             pass
     
+    # Signal the workflow to continue if it's waiting for user input
+    async with _state_lock:
+        workflow = workflows.get(session_id)
+    if workflow and state.status == TaskStatus.WAITING_INPUT:
+        workflow.signal_continue()
+        logger.info(f"[{session_id}] Human input received, signalling workflow to continue")
+
     return APIResponse(
         success=True,
         message="Human input received",

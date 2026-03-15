@@ -291,31 +291,34 @@ class OpenAICompatibleClient:
         if not content and response and response.usage:
             completion_tokens = response.usage.completion_tokens or 0
             if completion_tokens > 0:
-                # Dump raw message object for debugging
-                try:
-                    if hasattr(message, "model_dump"):
-                        raw_dump = message.model_dump()
-                        logger.info(
-                            f"[{self.agent_name}] Empty content with {completion_tokens} tokens. "
-                            f"Raw message keys: {list(raw_dump.keys())}, "
-                            f"values preview: {str(raw_dump)[:2000]}"
-                        )
-                except Exception:
-                    pass
-                msg_dict = {}
-                for attr_name in ("content", "refusal", "role", "reasoning", "reasoning_content"):
-                    if hasattr(message, attr_name):
-                        val = getattr(message, attr_name)
-                        msg_dict[attr_name] = str(val)[:200] if val else None
-                try:
-                    if hasattr(message, "model_dump"):
-                        msg_dict["_all_keys"] = list(message.model_dump().keys())
-                except Exception:
-                    pass
-                logger.warning(
-                    f"[{self.agent_name}] Response has {completion_tokens} completion tokens "
-                    f"but empty content. Message fields: {msg_dict}"
-                )
+                # Skip warning when the response is a tool call — no text content is expected
+                has_tool_calls = bool(getattr(message, "tool_calls", None))
+                if not has_tool_calls:
+                    # Dump raw message object for debugging
+                    try:
+                        if hasattr(message, "model_dump"):
+                            raw_dump = message.model_dump()
+                            logger.info(
+                                f"[{self.agent_name}] Empty content with {completion_tokens} tokens. "
+                                f"Raw message keys: {list(raw_dump.keys())}, "
+                                f"values preview: {str(raw_dump)[:2000]}"
+                            )
+                    except Exception:
+                        pass
+                    msg_dict = {}
+                    for attr_name in ("content", "refusal", "role", "reasoning", "reasoning_content"):
+                        if hasattr(message, attr_name):
+                            val = getattr(message, attr_name)
+                            msg_dict[attr_name] = str(val)[:200] if val else None
+                    try:
+                        if hasattr(message, "model_dump"):
+                            msg_dict["_all_keys"] = list(message.model_dump().keys())
+                    except Exception:
+                        pass
+                    logger.warning(
+                        f"[{self.agent_name}] Response has {completion_tokens} completion tokens "
+                        f"but empty content. Message fields: {msg_dict}"
+                    )
 
         return content
 
@@ -573,17 +576,16 @@ class OpenAICompatibleClient:
         max_tokens: int = 32768
     ) -> AsyncGenerator[str, None]:
         """
-        Stream chat response from OpenAI-compatible API
+        Stream chat response from OpenAI-compatible API.
+
+        Connection establishment is retried with backoff on transient errors.
+        Mid-stream failures propagate to the caller (partial content already yielded).
 
         Yields:
             Content chunks
-
-        TODO: Add retry mechanism for stream requests. Currently, if the stream
-        connection fails mid-stream, the entire response is lost. Unlike chat()
-        and chat_with_tools(), this method has no retry_with_backoff wrapper.
         """
         logger.info(f"[{self.agent_name}] Starting stream request to {model}")
-        
+
         params: Dict[str, Any] = dict(
             model=model,
             messages=messages,
@@ -595,8 +597,15 @@ class OpenAICompatibleClient:
             params["max_tokens"] = max_tokens
         else:
             params["max_completion_tokens"] = max_tokens
-        stream = await self.client.chat.completions.create(**params)
-        
+
+        # Retry connection establishment (most common failure point)
+        stream = await retry_with_backoff(
+            lambda: self.client.chat.completions.create(**params),
+            max_retries=MAX_RETRIES,
+            agent_name=self.agent_name,
+            request_timeout=120.0,
+        )
+
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content

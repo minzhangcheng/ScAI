@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.14.0
+**Version**: 0.14.1
 **Last Updated**: 2026-03-15
 
 ## Project Overview
@@ -321,7 +321,7 @@ Phase 2: Innovation (Round 2+)
 12. **Tool Message History Consistency**: Bioinformatics Agent appends exactly one assistant message per LLM response (using `raw_assistant_message` if available) before iterating over tool calls. Eliminates duplicate or missing assistant messages that previously caused API errors with Gemini's `thought_signature` requirement.
 13. **Figure Data Fidelity**: All figure generation and revision prompts include explicit experimental design constraints (`CRITICAL DATA CONSTRAINT`) with actual group names from `state.treatment_groups`. This prevents LLM hallucination of non-existent treatment groups. Constraint is injected in: `_build_data_context()`, `generate_publication_figure` tool description, `_revise_figure_code()` prompt, and PI `review_figure()` prompt.
 14. **Convergence Detection**: Stops after 2 consecutive rounds with no new findings
-15. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with configurable countdown (default 300s; -1=manual-only, 0=no-wait auto-continue, stored in `round_wait_seconds`). Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend respects `round_wait_seconds`: manual mode waits indefinitely, no-wait proceeds immediately, countdown mode uses frontend timer + 60s buffer as backend safety timeout. User input or file uploads on the last round extends `max_rounds` by 1 (unless multi-direction mode has completed all directions).
+15. **Human-in-the-Loop**: `wait_for_user_input` node blocks between rounds via `asyncio.Event`. Frontend shows `RoundFeedbackDialog` with configurable countdown (default 300s; -1=manual-only, 0=no-wait auto-continue, stored in `round_wait_seconds`). Users can provide text guidance, upload files (targeted to specific agents), or skip. Backend respects `round_wait_seconds`: manual mode waits indefinitely, no-wait proceeds immediately, countdown mode uses frontend timer + 60s buffer as backend safety timeout. `POST /api/session/{id}/human-input` calls `signal_continue()` when status is `WAITING_INPUT` so the workflow wakes immediately on submission. User input or file uploads on the last round extends `max_rounds` by 1 (only if not true multi-direction mode, i.e., `len(user_chosen_directions) <= 1`).
 16. **File Upload During Pause**: Users can upload pathology images while workflow is in `waiting_input` or `completed` state. Files are tracked in `pending_uploaded_files` and processed in the next round.
 17. **Round Context Enrichment**: `_build_previous_findings_context()` and `_build_code_history_summary()` methods provide each agent with previous round findings and code execution history, preventing redundant analyses in multi-round workflows.
 18. **Literature-based Cluster Annotation**: `_annotate_clusters_callback()` routes bioinformatics agent's `annotate_clusters` tool calls to the literature agent for efficient batch cluster annotation.
@@ -1390,6 +1390,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.14.1 | 2026-03-15 | human-input signals workflow (signal_continue on WAITING_INPUT), stale should_continue cleared in initialize_round, current_round_direction set before PI call + cleared on failure, annotation pause respects PAUSED status, multi_dir_completed guard uses len() > 1, exploration report failure notified to frontend |
 | 0.14.0 | 2026-03-15 | register_score tool (ScoreDefinition model, consult PI → compute → register workflow), Jupyter I/O sandbox (intercepts open/mkdir/write_text/write_bytes), kernel dead detection (_kernel_dead flag), working directory context in kernel init (os.chdir + figures/tables subdirs + sc.settings.figdir), annotation dialog: alternative_cell_types + low_confidence_reason + expandable rows + HTML report download, annotation context HTML report endpoint, per-round report structure with phase/direction labels + innovation sections, publication figures in report figure map, thread-safe session cache (_update_session_cache), innovation phase user guidance merging (supplementary, not override), direction pop persistence, message trim orphan prevention, direction validation + resume guard, clear_queue in HumanInputRequest, user override sanitization, literature search_mode tracking |
 | 0.13.4 | 2026-03-13 | Pause/resume deadlock fix (WAITING_INPUT status guard), multi-direction max_rounds guard, retry status:failed field, Round 3+ task fallback, bioinformatics message history cap (80), supervisor sampled LLM evaluation, report_generator dead code removal (~700 lines), pre-existing IndentationError fix, docs update |
 | 0.13.1 | 2026-03-12 | Multi-direction research workflow (directions_queue, auto-continue between directions), enhanced direction candidate evaluation (innovation/novelty/reliability scores), exploration report HTML export, PI select_best_directions(), bioinformatics LLM error status, session eviction race fix, sidebar max-rounds removed |
@@ -1434,6 +1435,15 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.14.1 (2026-03-15)
+
+- **Human Input Wakes Workflow** (`main.py`): `POST /api/session/{id}/human-input` now calls `workflow.signal_continue()` when the session status is `WAITING_INPUT`. Previously the endpoint stored `pending_human_input` and `pending_uploaded_files` but never signalled the workflow, so the workflow would only resume after the countdown timeout. Both `/choose-direction` and `/resume` already called `signal_continue()`; `/human-input` was the only endpoint that didn't.
+- **Stale `should_continue` Cleared on Round Start** (`workflow.py`): `_initialize_round()` now resets `state["should_continue"] = True` before incrementing the round counter. Fixes a scenario where `_check_convergence` wrote `should_continue=False` in one round, `_wait_for_user_input` extended `max_rounds` on user input, but `_should_continue` in the next round read the residual `False` value and stopped the analysis prematurely.
+- **`current_round_direction` Set Before PI Instruction Call** (`workflow.py`): In multi-direction mode, `current_round_direction` is now assigned immediately after `directions_queue.pop(0)`, before calling `pi_agent.innovation_instruction()`. If the PI call raises, the direction is re-queued and `current_round_direction` is cleared to `None`. Previously, the assignment was after the try-except block, so retries saw the previous round's direction in `current_round_direction`.
+- **Annotation Confirm Respects PAUSED Status** (`workflow.py`): After `_annotation_event.wait()` completes, status is only restored to `original_status` if the current status is not `PAUSED`. If the user paused the analysis during the annotation blocking window, the pause is now preserved correctly instead of being overwritten.
+- **`multi_dir_completed` Uses `len() > 1`** (`workflow.py`): The guard preventing `max_rounds` extension after multi-direction completion now checks `len(analysis_state.user_chosen_directions) > 1` (true multi-direction mode) instead of truthiness. Single-direction mode also populates `user_chosen_directions` with a 1-element list, which was incorrectly blocking the extra-round extension when the user submitted input on the final round of a single-direction analysis.
+- **Exploration Report Failure Sent to Frontend** (`workflow.py`): If `generate_exploration_report()` raises, an `"error"` WebSocket message is now sent to inform the user, rather than silently logging and continuing. Message text: `"Exploration report generation failed: {err}. You can still select a research direction based on the analysis findings above."`.
 
 #### v0.14.0 (2026-03-15)
 

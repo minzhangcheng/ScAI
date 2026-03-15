@@ -693,7 +693,9 @@ Be specific and actionable in your response."""
                 await self._annotation_event.wait()
                 logger.info(f"[{self.session_id}] Annotation confirmation received")
 
-                state.status = original_status
+                # Restore status, but respect pause if user paused during annotation wait
+                if state.status != TaskStatus.PAUSED:
+                    state.status = original_status
                 await self._send_state_sync(state, "annotation_resumed")
 
                 # Step 4: Apply user overrides
@@ -988,6 +990,10 @@ Be specific and actionable in your response."""
         analysis_state.current_round += 1
         analysis_state.status = TaskStatus.RUNNING
 
+        # Clear residual should_continue from previous convergence check
+        # to prevent stale False value from terminating an extended round
+        state["should_continue"] = True
+
         await self._send_message(
             "status",
             f"Starting round {analysis_state.current_round} analysis"
@@ -1075,16 +1081,25 @@ Be specific and actionable in your response."""
                 dir_text = current_dir.get("direction", "")
                 dir_notes = current_dir.get("notes", "")
                 logger.info(f"[{self.session_id}] Innovation phase: direction from queue → {dir_text[:100]} (remaining: {len(analysis_state.directions_queue)})")
-                # Persist state immediately after pop to prevent direction loss on crash
+                # Set current direction immediately so retry has correct context
+                analysis_state.current_round_direction = dir_text
+                try:
+                    instructions = await self.pi_agent.innovation_instruction(
+                        analysis_state, dir_text, notes=dir_notes
+                    )
+                except Exception as e:
+                    # Re-insert direction at front of queue so it is not silently lost
+                    analysis_state.directions_queue.insert(0, current_dir)
+                    # Clear stale direction since this round's instruction failed
+                    analysis_state.current_round_direction = None
+                    logger.error(f"[{self.session_id}] innovation_instruction failed, direction re-queued: {e}")
+                    raise
+                # Persist state after instructions are successfully generated
                 if self.state_callback:
                     try:
                         await self.state_callback(analysis_state)
                     except Exception as e:
                         logger.error(f"[{self.session_id}] Failed to persist state after direction pop: {e}")
-                instructions = await self.pi_agent.innovation_instruction(
-                    analysis_state, dir_text, notes=dir_notes
-                )
-                analysis_state.current_round_direction = dir_text
                 # Clear single direction field
                 analysis_state.user_chosen_direction = None
             elif user_direction and user_direction not in ("", "[PI_DECIDE]"):
@@ -1896,6 +1911,11 @@ Return ONLY the JSON array, nothing else."""
                 }, AgentType.PI)
             except Exception as e:
                 logger.error(f"[{self.session_id}] Exploration report generation failed: {e}")
+                await self._send_message(
+                    "error",
+                    f"Exploration report generation failed: {e}. You can still select a research direction based on the analysis findings above.",
+                    AgentType.PI
+                )
 
             # Transition to innovation phase for next round
             analysis_state.analysis_phase = "innovation"
@@ -2081,10 +2101,11 @@ Return ONLY the JSON array, nothing else."""
         max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
         if (has_real_text or has_uploaded_files) and analysis_state.current_round >= max_rounds:
             # Don't extend if multi-direction mode has completed all directions
-            # (queue empty + directions were selected → correlation analysis already done)
+            # (queue empty + multiple directions were selected → correlation analysis already done)
+            # Use len() > 1 to distinguish multi-direction from single-direction mode
             multi_dir_completed = (
                 not analysis_state.directions_queue
-                and analysis_state.user_chosen_directions
+                and len(analysis_state.user_chosen_directions) > 1
             )
             if multi_dir_completed:
                 logger.info(f"[{self.session_id}] Multi-direction completed, not extending max_rounds")

@@ -44,6 +44,7 @@ class FigureReviewStatus(str, Enum):
     """Status of figure review by PI Agent"""
     PENDING = "pending"
     APPROVED = "approved"
+    ACCEPTED_WITH_RESERVATIONS = "accepted_with_reservations"
     REVISION_REQUESTED = "revision_requested"
 
 

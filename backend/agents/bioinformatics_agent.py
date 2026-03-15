@@ -204,7 +204,7 @@ TOOLS = [
                     },
                     "method": {
                         "type": "string",
-                        "description": "Computation method (e.g., 'sc.tl.score_genes', 'gseapy.ssgsea', 'decoupleR.run_mlm')"
+                        "description": "Computation method (e.g., 'sc.tl.score_genes', 'gseapy.ssgsea', 'dc.run_ulm')"
                     },
                     "description": {
                         "type": "string",
@@ -567,6 +567,12 @@ WORKFLOW GUIDELINES:
     print(f"uns keys: {{list(adata.uns.keys())}}")
     to see what's already available, then SKIP to the new analysis directly.
   * Only REDO a step if the user EXPLICITLY requests it or if a prerequisite has changed
+- **UMAP EXECUTION RULES (CRITICAL)**:
+  * ALWAYS call sc.pp.neighbors() before sc.tl.umap() — verify with `assert adata.obsp.get('connectivities') is not None`
+  * For datasets with n_obs > 5000, ALWAYS use `init_pos='random'` (e.g., `sc.tl.umap(adata, init_pos='random', random_state=42)`)
+    This avoids spectral initialization which triggers slow Numba JIT compilation and can time out on large datasets.
+    For single-cell data, 'random' and 'spectral' produce visually equivalent results (scanpy best practice).
+  * Only use `init_pos='spectral'` for n_obs <= 5000
 - **BATCH EFFECT CHECK**: When loading multiple samples/batches/conditions, assess batch effects BEFORE clustering:
   * After initial PCA/UMAP, visualize cells colored by batch/sample/condition to check for batch effects
   * If batch effects are apparent (samples cluster by batch rather than cell type), consult PI about correction strategy (Harmony, BBKNN, scVI, Combat, etc.)
@@ -595,6 +601,13 @@ When you need to compute ANY score (gene signature, pathway enrichment, TF activ
 3. IMMEDIATELY after, call register_score to record the methodology
 This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrichr, decoupleR, custom scoring functions.
 
+DECOUPLER API (CRITICAL - use current API only):
+- TF/pathway activity: `dc.run_ulm(adata, net=net, source='source', target='target', weight='weight')`
+- DO NOT use deprecated methods: dc.run_mlm, dc.run_viper, dc.run_aucell (these will throw errors)
+- Check available methods: `import decoupler as dc; [m for m in dir(dc) if m.startswith('run_')]`
+- Network format: net must be a DataFrame with columns 'source', 'target', 'weight'
+- Results stored in adata.obsm['ulm_estimate'] and adata.obsm['ulm_pvals'] by default
+
 CELL TYPE ANNOTATION WORKFLOW:
 1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')
 2. Extract top 10-20 marker genes per cluster into a dict, e.g.:
@@ -604,7 +617,7 @@ CELL TYPE ANNOTATION WORKFLOW:
        markers[cluster] = genes
 3. Determine tissue and organism from the research context or data metadata
 4. Call annotate_clusters(cluster_markers=markers, tissue="kidney", organism="mouse")
-5. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].map(cluster_to_celltype)
+5. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')
 6. Generate UMAP colored by cell_type
 
 {self._build_data_context(state)}
@@ -1067,7 +1080,7 @@ plt.close('all')
                     result_lines.append(
                         "\nYou can now assign these annotations to adata.obs['cell_type'] using:\n"
                         f"cluster_to_celltype = {dict_str}\n"
-                        "adata.obs['cell_type'] = adata.obs['leiden'].map(cluster_to_celltype)"
+                        "adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')"
                     )
 
                     tool_result = "\n".join(result_lines)
@@ -1510,17 +1523,37 @@ plt.close()
                 review = await review_callback(figure)
 
                 if review.get('approved', False):
-                    figure.review_status = FigureReviewStatus.APPROVED
+                    quality_score = review.get('quality_score', 5)
+                    # Mark figures approved under leniency (after multiple revisions with non-perfect score)
+                    if revision_count >= 2 and quality_score < 8:
+                        figure.review_status = FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
+                        logger.info(f"[Bioinformatics] Figure {figure_name} accepted with reservations (score={quality_score}, revisions={revision_count})")
+                    else:
+                        figure.review_status = FigureReviewStatus.APPROVED
+                        logger.info(f"[Bioinformatics] Figure {figure_name} approved by PI")
                     figure.revision_history = revision_history
                     self._upsert_publication_figure(state, figure)
-                    logger.info(f"[Bioinformatics] Figure {figure_name} approved by PI")
                     await self._notify("status", f"Figure {figure_name} approved by PI")
-                    return f"Figure {figure_name} has been approved by PI and saved.\nQuality score: {review.get('quality_score', 'N/A')}/10\nFeedback: {review.get('feedback', 'Approved')}"
+                    return f"Figure {figure_name} has been approved by PI and saved.\nQuality score: {quality_score}/10\nFeedback: {review.get('feedback', 'Approved')}"
 
                 # PI requested revision
                 feedback = review.get('feedback', '')
                 suggestions = review.get('suggestions', [])
                 must_fix = review.get('must_fix', [])
+
+                # If PI flagged a data/analysis issue that can't be fixed by revising plot code,
+                # break out of the revision loop and defer to the main analysis flow
+                if review.get('requires_reanalysis', False):
+                    logger.warning(f"[Bioinformatics] Figure {figure_name} requires upstream reanalysis, skipping revision loop")
+                    await self._notify("status", f"Figure {figure_name}: PI identified data-level issue, deferring to analysis")
+                    figure.review_status = FigureReviewStatus.REVISION_REQUESTED
+                    figure.pi_feedback = f"[REQUIRES REANALYSIS] {feedback}"
+                    self._upsert_publication_figure(state, figure)
+                    return (
+                        f"Figure {figure_name} has a data-level issue that cannot be fixed by revising the plot code. "
+                        f"PI feedback: {feedback}\n"
+                        f"Please address this in the analysis pipeline and regenerate the figure later."
+                    )
 
                 # Record this round's feedback in cumulative history
                 revision_history.append({

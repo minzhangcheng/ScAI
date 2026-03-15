@@ -1789,9 +1789,12 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
     "strengths": ["strength 1", "strength 2"],
     "issues": ["Specific issue with exact description, e.g., 'X-axis label font size is too small (appears ~6pt, should be >=10pt)'"],
     "suggestions": ["Actionable code-level fix, e.g., 'Add plt.xlabel(..., fontsize=12)' or 'Change colormap from viridis to tab20 for discrete clusters'"],
-    "must_fix": ["Critical issue that MUST be fixed. Be specific: what is wrong AND what it should look like instead"]
+    "must_fix": ["Critical issue that MUST be fixed. Be specific: what is wrong AND what it should look like instead"],
+    "requires_reanalysis": false
 }}
 ```
+
+**requires_reanalysis**: Set to true ONLY if the issue cannot be fixed by modifying the plotting code alone — e.g., wrong clustering results, incorrect differential expression, data needs re-processing upstream. When true, the figure revision loop will be skipped and the issue will be deferred to the next analysis step.
 
 **Critical review instructions:**
 - Your feedback will be used to automatically revise the plotting code. Every issue MUST be described precisely enough for a programmer to fix it.
@@ -1851,9 +1854,10 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
                 "strengths": data.get("strengths", []),
                 "issues": data.get("issues", []),
                 "suggestions": data.get("suggestions", []),
-                "must_fix": data.get("must_fix", [])
+                "must_fix": data.get("must_fix", []),
+                "requires_reanalysis": bool(data.get("requires_reanalysis", False))
             }
-            logger.info(f"[PI] Figure review result: approved={result['approved']}, score={result['quality_score']}")
+            logger.info(f"[PI] Figure review result: approved={result['approved']}, score={result['quality_score']}, requires_reanalysis={result['requires_reanalysis']}")
             return result
 
         # Fallback
@@ -1861,8 +1865,11 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
             "approved": False,
             "quality_score": 5,
             "feedback": "Unable to parse review response. Please regenerate the figure.",
+            "strengths": [],
+            "issues": [],
             "suggestions": ["Ensure figure meets publication standards"],
-            "must_fix": []
+            "must_fix": [],
+            "requires_reanalysis": False
         }
 
     # ============================================

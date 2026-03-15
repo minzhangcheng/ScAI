@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Clock,
   AlertCircle,
+  AlertTriangle,
   Download,
   X,
   ZoomIn,
@@ -36,6 +37,8 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
     switch (status) {
       case 'approved':
         return <CheckCircle2 className="w-4 h-4 text-green-500" />
+      case 'accepted_with_reservations':
+        return <AlertTriangle className="w-4 h-4 text-yellow-500" />
       case 'pending':
         return <Clock className="w-4 h-4 text-amber-500" />
       case 'revision_requested':
@@ -50,6 +53,8 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
     switch (status) {
       case 'approved':
         return t('figureApproved')
+      case 'accepted_with_reservations':
+        return language === 'zh' ? '有保留通过' : 'Accepted with reservations'
       case 'pending':
         return t('figurePending')
       case 'revision_requested':
@@ -64,6 +69,8 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
     switch (status) {
       case 'approved':
         return 'bg-green-100 text-green-700 border-green-200'
+      case 'accepted_with_reservations':
+        return 'bg-yellow-100 text-yellow-700 border-yellow-200'
       case 'pending':
         return 'bg-amber-100 text-amber-700 border-amber-200'
       case 'revision_requested':

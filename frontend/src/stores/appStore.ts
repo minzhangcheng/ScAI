@@ -5,7 +5,7 @@ import { Language, getDefaultPrompts } from '../i18n/translations'
 // Types
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor'
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'waiting_annotation' | 'generating_report'
-export type FigureReviewStatus = 'pending' | 'approved' | 'revision_requested'
+export type FigureReviewStatus = 'pending' | 'approved' | 'accepted_with_reservations' | 'revision_requested'
 
 export interface Message {
   id: string

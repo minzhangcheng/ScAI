@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.14.0
+**Version**: 0.14.1
 
 ## Core Features
 
@@ -330,6 +330,15 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.14.1 (2026-03-15)
+
+- **Human Input Wakes Workflow**: `POST /api/session/{id}/human-input` now calls `workflow.signal_continue()` when the session is in `WAITING_INPUT` state. Previously, user text or file feedback submitted between rounds was stored but did not wake the workflow — the system would only continue after the countdown timeout expired.
+- **Stale Convergence Flag Cleared on Round Start**: `_initialize_round()` now resets `should_continue = True` at the start of each round. This prevents a stale `should_continue = False` from a previous convergence check from silently terminating an extra round that was legitimately extended by user input.
+- **Direction State Consistency on Retry**: `current_round_direction` is now set immediately after popping a direction from `directions_queue`, before calling `innovation_instruction()`. If the PI instruction call fails and the direction is re-queued, `current_round_direction` is cleared to `None`, so subsequent retries see a clean slate instead of the previous round's direction.
+- **Annotation Pause Respects User Pause**: When the user pauses the analysis during the `WAITING_ANNOTATION` blocking point, confirming the annotation no longer overwrites the `PAUSED` status — the pause is preserved correctly.
+- **Single-Direction Mode Can Extend Rounds on Input**: The `multi_dir_completed` guard in `_wait_for_user_input` now uses `len(user_chosen_directions) > 1` to identify true multi-direction mode. Previously, single-direction mode (which also populates `user_chosen_directions` with one entry) was incorrectly treated as multi-direction-completed, preventing the extra-round extension when a user provided input on the last round.
+- **Exploration Report Failure Notified to Frontend**: If `generate_exploration_report()` raises an exception, an error message is now sent via WebSocket so users know the report is unavailable and can still select a research direction based on the analysis findings above.
 
 ### v0.14.0 (2026-03-15)
 

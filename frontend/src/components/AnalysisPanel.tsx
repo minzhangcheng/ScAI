@@ -492,13 +492,20 @@ export function AnalysisPanel() {
   useEffect(() => {
     const expMsg = [...messages].reverse().find(m => m.type === 'exploration_report')
     if (expMsg && expMsg.id !== lastExplorationMsgRef.current && currentSession?.status === 'waiting_input') {
+      // Only show exploration dialog when still in exploration phase (round 1).
+      // After innovation rounds (round 2+), the old exploration_report message from round 1
+      // may still be in the message buffer — ignore it to avoid re-showing the dialog.
+      if ((currentSession.currentRound ?? 0) > 1 || currentSession.analysisPhase === 'innovation') {
+        lastExplorationMsgRef.current = expMsg.id  // Mark as seen so it doesn't re-trigger
+        return
+      }
       lastExplorationMsgRef.current = expMsg.id
       setExplorationReportData(expMsg.content)
       setShowExplorationDialog(true)
       // Hide the normal feedback dialog if it's showing
       setShowFeedbackDialog(false)
     }
-  }, [messages, currentSession?.status])
+  }, [messages, currentSession?.status, currentSession?.currentRound, currentSession?.analysisPhase])
 
   // Auto-dismiss annotation/exploration dialogs when analysis resumes
   useEffect(() => {
