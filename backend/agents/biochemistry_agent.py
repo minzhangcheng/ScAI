@@ -566,12 +566,12 @@ Reply in JSON format:
             bio_findings = current_round_context.get("bioinformatics_findings", [])
             if path_findings:
                 context_parts.append(
-                    f"Pathology findings (current round): {', '.join(path_findings)}"
+                    f"Pathology findings (current round): {', '.join(str(f) for f in path_findings)}"
                 )
                 has_path_context = True
             if bio_findings:
                 context_parts.append(
-                    f"Bioinformatics findings (current round): {', '.join(bio_findings)}"
+                    f"Bioinformatics findings (current round): {', '.join(str(f) for f in bio_findings)}"
                 )
                 has_bio_context = True
 
@@ -580,11 +580,11 @@ Reply in JSON format:
             last_round = state.round_results[-1]
             if not has_path_context and last_round.pathology_findings:
                 context_parts.append(
-                    f"Pathology findings (previous round): {', '.join(last_round.pathology_findings)}"
+                    f"Pathology findings (previous round): {', '.join(str(f) for f in last_round.pathology_findings)}"
                 )
             if not has_bio_context and last_round.bioinformatics_findings:
                 context_parts.append(
-                    f"Bioinformatics findings (previous round): {', '.join(last_round.bioinformatics_findings)}"
+                    f"Bioinformatics findings (previous round): {', '.join(str(f) for f in last_round.bioinformatics_findings)}"
                 )
 
         return "\n".join(context_parts)

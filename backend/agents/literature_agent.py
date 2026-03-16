@@ -82,6 +82,9 @@ class LiteratureAgent(BaseAgent):
                 google_api_key, proxy_url=proxy_url
             )
 
+        # Cache for annotate_clusters results to avoid redundant Deep Research calls
+        self._annotation_cache: Dict[str, Any] = {}
+
     @property
     def is_deep_research_available(self) -> bool:
         """Check if deep research mode is available and properly configured."""
@@ -261,6 +264,7 @@ Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. ht
             f"{topic[:200]}"
         )
 
+        self._set_llm_context()
         response = await self.llm_client.chat(
             model=self.deep_research_model,
             messages=[{"role": "user", "content": prompt}],
@@ -891,9 +895,14 @@ Note: If you are not certain about specific citation information, please clearly
         finding_parts = []
         for rr in state.round_results:
             for f in rr.bioinformatics_findings[:3]:
-                finding_parts.append(f[:150])
+                finding_parts.append(str(f)[:150])
             for f in rr.pathology_findings[:2]:
-                finding_parts.append(f[:150])
+                finding_parts.append(str(f)[:150])
+
+        # Include previous literature reports so round 2+ searches avoid redundancy
+        for lr in state.literature_reports:
+            finding_parts.append(f"[Literature: {lr.topic[:80]}] {lr.report[:200]}")
+
         if finding_parts:
             context["previous_findings"] = "; ".join(finding_parts)
 
@@ -1008,7 +1017,29 @@ Please return in JSON format:
         Returns:
             Dict with annotations per cluster, literature_report, references, status
         """
+        # --- Cache check: avoid redundant Deep Research calls ---
+        all_genes_for_key: set = set()
+        for genes in cluster_markers.values():
+            all_genes_for_key.update(genes[:5])
+        cache_key = f"{organism}:{tissue}:{hash(frozenset(all_genes_for_key))}"
+        if cache_key in self._annotation_cache:
+            logger.info(f"[Literature] annotate_clusters cache HIT: {cache_key}")
+            return self._annotation_cache[cache_key]
+
         n_clusters = len(cluster_markers)
+
+        if n_clusters == 0:
+            logger.warning("[Literature] annotate_clusters called with empty cluster_markers, skipping")
+            return {
+                "status": "error",
+                "annotations": {},
+                "tissue_summary": "",
+                "literature_report": "",
+                "references": [],
+                "n_clusters": 0,
+                "organism": organism,
+                "error": "No clusters provided for annotation."
+            }
 
         # ---- Phase 1: One literature search ----
         # Sample top genes across clusters for the search query
@@ -1103,7 +1134,7 @@ Return a JSON object with this EXACT structure:
             f"{len(annotations)} clusters annotated"
         )
 
-        return {
+        result = {
             "status": "completed",
             "annotations": annotations,
             "tissue_summary": tissue_summary,
@@ -1113,6 +1144,8 @@ Return a JSON object with this EXACT structure:
             "organism": organism,
             "tissue": tissue
         }
+        self._annotation_cache[cache_key] = result
+        return result
 
     async def validate_pathway(
         self,

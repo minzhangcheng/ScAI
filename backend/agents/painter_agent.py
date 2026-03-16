@@ -15,6 +15,16 @@ from ..utils.llm_client import OpenAICompatibleClient
 
 logger = logging.getLogger(__name__)
 
+# Model limits for google/gemini-3-pro-image-preview
+_TOTAL_CONTEXT_TOKENS = 65_536
+_MAX_OUTPUT_TOKENS = 32_800
+_SAFE_INPUT_TOKEN_LIMIT = 30_000  # Conservative: 64K - 32.8K ≈ 31.2K, use 30K
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: len/3 for mixed CJK+English (conservative)."""
+    return max(1, len(text) // 3)
+
 
 class PainterAgent(BaseAgent):
     """
@@ -161,6 +171,24 @@ class PainterAgent(BaseAgent):
 - Generate an improved version of the graphic abstract
 """
 
+        # Validate text input token count (excludes image tokens which are counted separately)
+        text_input = (self.system_prompt or "") + revision_prompt
+        est_tokens = _estimate_tokens(text_input)
+        # Image tokens add overhead (~258 tokens for a 1024px image), leave extra margin
+        est_tokens += 300
+        logger.info(
+            f"[{self.session_id}][Painter] Revision input token estimate: {est_tokens} "
+            f"(limit: {_SAFE_INPUT_TOKEN_LIMIT})"
+        )
+        if est_tokens > _SAFE_INPUT_TOKEN_LIMIT:
+            excess_chars = (est_tokens - _SAFE_INPUT_TOKEN_LIMIT) * 3 + 300
+            logger.warning(
+                f"[{self.session_id}][Painter] Revision input exceeds safe limit, "
+                f"trimming {excess_chars} chars"
+            )
+            revision_prompt = revision_prompt[:len(revision_prompt) - excess_chars] + \
+                "\n... [trimmed to fit token limit]"
+
         try:
             # Build multimodal message: current image + revision instructions
             # Gemini supports image-in + image-out
@@ -187,7 +215,7 @@ class PainterAgent(BaseAgent):
                     {"role": "user", "content": user_content}
                 ],
                 temperature=self.config.temperature,
-                max_tokens=32768,
+                max_tokens=4096,
                 extra_body={
                     "modalities": ["image", "text"]
                 }
@@ -218,6 +246,16 @@ class PainterAgent(BaseAgent):
             findings.extend(round_result.pathology_findings[:2])
 
         findings_text = "\n".join(f"- {f}" for f in findings[:8]) if findings else "No specific findings available"
+
+        # Budget: ~30K input tokens total. Fixed template ≈ 500 tokens, leave rest for summary.
+        # Cap summary at ~25K tokens (~75K chars) as safety net — PI should already keep it short.
+        max_summary_chars = 75_000
+        if len(summary) > max_summary_chars:
+            logger.warning(
+                f"[{self.session_id}][Painter] Summary too long ({len(summary)} chars), "
+                f"truncating to {max_summary_chars} chars"
+            )
+            summary = summary[:max_summary_chars] + "\n... [truncated due to token limit]"
 
         prompt = f"""Create a professional scientific graphic abstract for a biomedical research paper.
 
@@ -388,6 +426,24 @@ The graphic abstract should tell the story of the research at a glance, highligh
         """
         self._set_llm_context()
 
+        # Validate input token count before calling API
+        system_text = self.system_prompt or ""
+        total_input = system_text + prompt
+        est_tokens = _estimate_tokens(total_input)
+        logger.info(
+            f"[{self.session_id}][Painter] Input token estimate: {est_tokens} "
+            f"(limit: {_SAFE_INPUT_TOKEN_LIMIT})"
+        )
+        if est_tokens > _SAFE_INPUT_TOKEN_LIMIT:
+            # Truncate prompt to fit within budget, preserving the tail (style instructions)
+            excess_chars = (est_tokens - _SAFE_INPUT_TOKEN_LIMIT) * 3 + 300  # +300 for margin
+            logger.warning(
+                f"[{self.session_id}][Painter] Input exceeds safe limit "
+                f"({est_tokens} > {_SAFE_INPUT_TOKEN_LIMIT} tokens), "
+                f"trimming {excess_chars} chars from prompt"
+            )
+            prompt = prompt[:len(prompt) - excess_chars] + "\n... [trimmed to fit token limit]"
+
         logger.debug(f"[{self.session_id}][Painter] Calling image generation via OpenRouter")
 
         try:
@@ -398,7 +454,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
                     {"role": "user", "content": prompt}
                 ],
                 temperature=self.config.temperature,
-                max_tokens=32768,
+                max_tokens=4096,
                 extra_body={
                     "modalities": ["image", "text"]
                 }

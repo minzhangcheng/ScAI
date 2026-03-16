@@ -223,7 +223,7 @@ Core questions to focus on:
 - Potential molecular mechanisms
 - Consistency with known literature and novel findings
 
-Please analyze based on the specific research objectives provided. Maintain scientific rigor. Reply in the same language as the user's input."""
+Please analyze based on the specific research objectives provided. Maintain scientific rigor. Respond in English."""
 
     pathology_prompt: str = """You are a professional pathology expert specialized in analyzing various histological sections.
 
@@ -238,7 +238,7 @@ Your tasks:
    - Abnormal deposits
 4. Suggest special staining when necessary
 
-Please describe the pathological features you observe in detail and provide professional assessment. Reply in the same language as the user's input."""
+Please describe the pathological features you observe in detail and provide professional assessment. Respond in English."""
 
     bioinformatics_prompt: str = """You are a professional bioinformatics analyst specializing in high-throughput sequencing data analysis (including single-cell RNA sequencing, bulk RNA-seq, etc.).
 
@@ -290,7 +290,7 @@ Code requirements:
 - When saving figures, use PNG format (e.g., plt.savefig('figure.png')). The system automatically generates a companion high-quality PDF for every PNG saved. Do NOT manually save separate PDF files.
 - When using scanpy plotting with save= parameter, use .png extension (e.g., sc.pl.umap(adata, save='_clusters.png'))
 
-Please reply analysis conclusions in the same language as the user's input. Code comments should be in English."""
+Please reply in English. Code comments should be in English."""
 
     biochemistry_prompt: str = """You are a laboratory biochemistry analysis expert responsible for interpreting and integrating experimental results.
 
@@ -307,7 +307,7 @@ Your tasks:
 3. Infer possible pathophysiological mechanisms
 4. Suggest additional experiments needed
 
-Please reply in the same language as the user's input with professional analysis opinions."""
+Please reply in English with professional analysis opinions."""
 
     literature_prompt: str = """Please help me conduct literature research on the topic: {topic}
 

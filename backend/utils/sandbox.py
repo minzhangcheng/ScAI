@@ -54,6 +54,10 @@ DANGEROUS_PATTERNS = [
     (r'\bvars\s*\(\s*\)', 'vars() function'),
 
     # File system operations (destructive)
+    # Note: open() writes are checked contextually in validate_code_safety()
+    # rather than blanket-blocked, because the runtime I/O sandbox (_sandboxed_open)
+    # already enforces path safety.  The static check only flags writes that do NOT
+    # reference known safe path variables.
     (r'\bopen\s*\([^)]*["\'][wa]', 'file write operations outside safe directories'),
     (r'\brm\s+-rf\b', 'rm -rf command'),
     (r'\bshutil\.rmtree\b', 'shutil.rmtree'),
@@ -115,6 +119,20 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
                     if not re.match(import_pattern, line)
                 ]
                 if not non_import_lines or all(re.search(pip_pattern, line) for line in non_import_lines):
+                    continue
+            # Allow open() writes that reference known safe path variables / directories.
+            # The runtime I/O sandbox (_sandboxed_open) enforces actual path safety,
+            # so the static check only needs to catch writes with no safe-path indication.
+            if 'file write' in description:
+                open_write_lines = [
+                    line.strip() for line in code.splitlines()
+                    if re.search(r'\bopen\s*\(', line) and re.search(r'["\'][wa]', line)
+                ]
+                safe_ref = re.compile(
+                    r'_?WORKSPACE_DIR|working_dir|figures|tables|/tmp',
+                    re.IGNORECASE,
+                )
+                if all(safe_ref.search(line) for line in open_write_lines):
                     continue
             return False, f"Dangerous pattern detected: {description}"
     return True, ""
@@ -464,7 +482,11 @@ class LocalJupyterSandbox:
         if self._initialized:
             return
         
-        init_code = f"""
+        # NOTE: This is a plain string (not f-string) because the code contains
+        # dict literals ({...}), inner f-strings, and other braces that conflict
+        # with f-string parsing.  The only dynamic value (session_id) is injected
+        # via str.replace() at the end.
+        init_code = """
 # === MANDATORY: Set ALL random seeds for reproducibility ===
 import random
 import os
@@ -473,7 +495,7 @@ from pathlib import Path
 SEED = 42
 
 # === Isolate Numba cache per session to prevent concurrent cache corruption ===
-_numba_cache = Path('/tmp/numba_cache_{self.session_id}')
+_numba_cache = Path('/tmp/numba_cache___SESSION_ID__')
 _numba_cache.mkdir(parents=True, exist_ok=True)
 os.environ['NUMBA_CACHE_DIR'] = str(_numba_cache)
 # Prevent Numba from spawning extra threads that compete for cache locks
@@ -618,7 +640,7 @@ def check_and_fix_nan(adata, fix=True):
 
 print(f"Environment initialized with SEED={SEED} for reproducibility")
 print("Helper functions available: get_seed(), check_and_fix_nan(adata)")
-"""
+""".replace('__SESSION_ID__', self.session_id)
         result = await self.execute(init_code, save_to_history=False, skip_safety_check=True)
 
         # Set working directory paths and install I/O sandbox (requires f-string with self.working_dir)
@@ -729,6 +751,27 @@ _builtins.open = _sandboxed_open
 _pathlib.Path.mkdir = _sandboxed_mkdir
 _pathlib.Path.write_text = _sandboxed_write_text
 _pathlib.Path.write_bytes = _sandboxed_write_bytes
+
+# === Redirect Figure.savefig: workspace root → figures/ subdirectory ===
+import matplotlib.figure as _mpl_figure
+_prev_savefig = _mpl_figure.Figure.savefig
+
+_FIGURES_DIR = _WORKSPACE_DIR / 'figures'
+
+def _redirected_savefig(self, fname, *args, **kwargs):
+    '''Redirect savefig calls from workspace root into figures/ subdirectory.'''
+    try:
+        _p = Path(str(fname)).resolve()
+        # Only redirect if target is directly under workspace root (not in a subdirectory)
+        if _p.parent == _WORKSPACE_DIR.resolve():
+            _new = _FIGURES_DIR / _p.name
+            print(f"[savefig-redirect] {{_p.name}} -> figures/")
+            fname = str(_new)
+    except Exception:
+        pass
+    return _prev_savefig(self, fname, *args, **kwargs)
+
+_mpl_figure.Figure.savefig = _redirected_savefig
 
 print(f"Working directory set to: {{os.getcwd()}}")
 print(f"I/O sandbox active: writes restricted to session directory")

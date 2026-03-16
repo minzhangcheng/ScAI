@@ -492,7 +492,7 @@ export function PromptsPanel() {
               selectedAgent === 'bioinformatics' ? '需要 coding 能力较强的模型，推荐: anthropic/claude-sonnet-4.6、anthropic/claude-opus-4.6、openai/gpt-5.2-codex 或 google/gemini-3.1-pro-preview' :
               selectedAgent === 'biochemistry' ? '推荐: google/gemini-3.1-pro-preview。若上传了生化结果图片，需要选择支持 Vision 的模型' :
               selectedAgent === 'literature' ? '用于 PubMed 模式文献分析的 LLM 模型，推荐: google/gemini-3.1-flash-lite-preview、google/gemini-3-flash-preview' :
-              selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3-pro-image-preview' :
+              selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3-pro-image-preview、google/gemini-3.1-flash-image-preview' :
               selectedAgent === 'supervisor' ? '使用低成本、快速的模型进行实时监控，推荐: google/gemini-3.1-flash-lite-preview' :
               '使用 OpenRouter 模型格式'
             ) : (
@@ -501,7 +501,7 @@ export function PromptsPanel() {
               selectedAgent === 'bioinformatics' ? 'Requires strong coding capability. Recommended: anthropic/claude-sonnet-4.6, anthropic/claude-opus-4.6, openai/gpt-5.2-codex, or google/gemini-3.1-pro-preview' :
               selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3.1-pro-preview. If biochemistry images are uploaded, a Vision-capable model is required' :
               selectedAgent === 'literature' ? 'LLM model for PubMed mode literature analysis. Recommended: google/gemini-3.1-flash-lite-preview, google/gemini-3-flash-preview' :
-              selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3-pro-image-preview' :
+              selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3-pro-image-preview, google/gemini-3.1-flash-image-preview' :
               selectedAgent === 'supervisor' ? 'Uses a cheap, fast model for real-time monitoring. Recommended: google/gemini-3.1-flash-lite-preview' :
               'Use OpenRouter model format'
             )}

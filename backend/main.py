@@ -1522,20 +1522,29 @@ async def resume_analysis(session_id: str):
             state.user_chosen_direction = "[PI_DECIDE]"
             state.pending_human_input = "[PI_DECIDE]"
             logger.info(f"[{session_id}] Resume without direction: defaulting to PI_DECIDE")
+            # Extend max_rounds since user explicitly requested continuation
+            effective_max = state.max_rounds if state.max_rounds > 0 else 2
+            if state.current_round >= effective_max:
+                state.max_rounds = state.current_round + 1
+                logger.info(f"[{session_id}] Extended max_rounds to {state.max_rounds} for PI_DECIDE resume")
         # Continue from round-end wait (user sent input or skipped)
-        state.status = TaskStatus.RUNNING
-        await async_save_session(session_id, state)
         # Signal the workflow to continue from _wait_for_user_input
         # Grab workflow reference under lock to avoid race with cleanup_stale_sessions
         async with _state_lock:
             workflow = workflows.get(session_id)
         if workflow:
+            state.status = TaskStatus.RUNNING
+            await async_save_session(session_id, state)
             workflow.signal_continue()
             return APIResponse(
                 success=True,
                 message="Continuing analysis"
             )
         else:
+            # No workflow in memory (e.g. after server restart).
+            # Keep status as WAITING_INPUT so the WebSocket endpoint's resume
+            # logic detects the correct state when the client reconnects.
+            await async_save_session(session_id, state)
             return APIResponse(
                 success=True,
                 message="Continuing analysis",
@@ -2517,9 +2526,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             while session_id in workflows:
                 # Keep connection alive by waiting for messages
                 try:
-                    await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+                    await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
                 except asyncio.TimeoutError:
-                    pass
+                    # Send heartbeat to keep connection alive through proxies
+                    try:
+                        await websocket.send_json({
+                            "type": "ping",
+                            "timestamp": datetime.now().isoformat()
+                        })
+                    except Exception:
+                        break
                 except Exception:
                     break
         except WebSocketDisconnect:
@@ -2642,7 +2658,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             if len(_message_buffers[session_id]) > MAX_MESSAGE_BUFFER_SIZE:
                 _message_buffers[session_id] = _message_buffers[session_id][-MAX_MESSAGE_BUFFER_SIZE:]
 
-        # Get websocket reference atomically with ws_closed check
+        # Hold ws_lock for the entire check-and-send sequence to prevent concurrent
+        # coroutines from all reading ws_closed=False and then all trying to send
+        # to an already-closed connection.
         async with ws_lock:
             current_ws = websockets.get(session_id)
             if ws_closed:
@@ -2657,21 +2675,20 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 if current_ws and current_ws != active_ws:
                     active_ws = current_ws
 
-        if not current_ws:
-            logger.warning(f"[{session_id}] No WebSocket connection, message buffered: {msg.type}")
-            return
-        try:
-            await current_ws.send_json(msg_data)
-        except Exception as e:
-            # Mark as closed to prevent further attempts
-            async with ws_lock:
+            if not current_ws:
+                logger.warning(f"[{session_id}] No WebSocket connection, message buffered: {msg.type}")
+                return
+            try:
+                await current_ws.send_json(msg_data)
+            except Exception as e:
+                # Mark as closed to prevent further attempts
                 ws_closed = True
-            logger.error(f"[{session_id}] Failed to send WS message, marking as closed: {e}")
+                logger.error(f"[{session_id}] Failed to send WS message, marking as closed: {e}")
 
     # Helper to safely send JSON
     async def safe_send(data: dict):
         nonlocal ws_closed, active_ws
-        # Get websocket reference atomically with ws_closed check
+        # Hold ws_lock for the entire check-and-send sequence (same pattern as message_callback)
         async with ws_lock:
             current_ws = websockets.get(session_id)
             if ws_closed:
@@ -2685,15 +2702,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 if current_ws and current_ws != active_ws:
                     active_ws = current_ws
 
-        if not current_ws:
-            return False
-        try:
-            await current_ws.send_json(data)
-            return True
-        except Exception:
-            async with ws_lock:
+            if not current_ws:
+                return False
+            try:
+                await current_ws.send_json(data)
+                return True
+            except Exception:
                 ws_closed = True
-            return False
+                return False
     
     # Send initial connection confirmation message
     try:
@@ -2725,11 +2741,27 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     # Background task to monitor WebSocket for client disconnect
     async def monitor_websocket():
-        """Listen for WebSocket disconnect while workflow is running"""
+        """Listen for WebSocket disconnect while workflow is running, with heartbeat"""
         nonlocal ws_closed
         try:
             while True:
-                await websocket.receive_text()
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    # Send heartbeat ping to keep connection alive through proxies
+                    async with ws_lock:
+                        if ws_closed:
+                            break
+                        current_ws = websockets.get(session_id)
+                        if current_ws:
+                            try:
+                                await current_ws.send_json({
+                                    "type": "ping",
+                                    "timestamp": datetime.now().isoformat()
+                                })
+                            except Exception:
+                                ws_closed = True
+                                break
         except (WebSocketDisconnect, asyncio.CancelledError):
             logger.info(f"[{session_id}] Client disconnected during workflow execution")
             async with ws_lock:
@@ -3006,7 +3038,8 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
             bio_model=bio_model,
             output_dir=output_dir,
             workspace_dir=workspace_dir,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            session_id=session_id
         )
 
         # Generate report (sandbox is created internally)
@@ -3527,7 +3560,13 @@ async def download_publication_figure_png(session_id: str, figure_id: str):
         if fig_data is None:
             raise HTTPException(status_code=404, detail="Figure not found")
         fig_name = fig_data.get('name', '')
-        png_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.png"
+        explicit_png = fig_data.get('png_path', '')
+        if explicit_png and Path(explicit_png).exists():
+            png_path = Path(explicit_png)
+        else:
+            png_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.png"
+            if not png_path.exists():
+                png_path = get_session_workspace(session_id) / f"{fig_name}.png"
 
     if not png_path.exists():
         raise HTTPException(status_code=404, detail="PNG file not found on disk")
@@ -4257,6 +4296,12 @@ async def _execute_chat_agent(
             return answer
 
         async def annotate_callback(cluster_markers, tissue, organism):
+            if not cluster_markers:
+                return {
+                    "status": "error",
+                    "annotations": {},
+                    "error": "cluster_markers is empty. Run rank_genes_groups and extract markers first."
+                }
             await _send_agent_msg("status", f"Annotating {len(cluster_markers)} clusters via literature...", AgentType.LITERATURE)
             return await literature_agent.annotate_clusters(cluster_markers, tissue, organism, state)
 
@@ -4557,7 +4602,7 @@ async def _run_chat_delegation(
             if state.chat_messages[i].get("delegation_active"):
                 state.chat_messages[i] = {
                     "role": "assistant",
-                    "content": "已取消",
+                    "content": "Cancelled",
                     "timestamp": datetime.now().isoformat(),
                 }
                 break

@@ -821,6 +821,9 @@ export function useWebSocket() {
       try {
         const data = JSON.parse(event.data)
 
+        // Server heartbeat ping — ignore silently
+        if (data.type === 'ping') return
+
         // Handle error messages that indicate session/config issues
         if (data.error) {
           console.error('WebSocket: Server error:', data.error)

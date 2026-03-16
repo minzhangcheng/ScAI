@@ -60,6 +60,8 @@ _CRITICAL_OUTPUT_PATTERNS = [
     re.compile(r"\bEmpty DataFrame\b"),
     re.compile(r"\bMemoryError\b"),
     re.compile(r"\bn_obs\s*[:=]\s*([0-9]+)"),
+    re.compile(r"obs_names are not unique", re.IGNORECASE),
+    re.compile(r"InvalidIndexError"),
 ]
 
 
@@ -134,6 +136,10 @@ class SupervisorAgent:
 
         # All rounds archive
         self.all_rounds_log: List[List[SupervisorRecord]] = []
+
+    def _set_llm_context(self):
+        """Set LLM client context before each call (since client is shared)"""
+        self.llm_client.set_context(self.session_id, "supervisor")
 
     # ------------------------------------------------------------------
     # Public API
@@ -292,17 +298,24 @@ class SupervisorAgent:
         total = len(all_records)
         with_issues = sum(1 for r in all_records if r.technical_issues)
         pi_escalations = sum(1 for r in all_records if r.pi_escalated)
-        checkpoints = [r for r in all_records if r.checkpoint_type]
         critical = sum(1 for r in all_records if r.llm_severity == "critical")
+
+        # Build checkpoints with round identifiers
+        checkpoints_reached = []
+        for round_idx, round_log in enumerate(self.all_rounds_log):
+            for r in round_log:
+                if r.checkpoint_type:
+                    checkpoints_reached.append({"step": r.step_number, "type": r.checkpoint_type, "round": round_idx + 1})
+        current_round = len(self.all_rounds_log) + 1
+        for r in self.supervision_log:
+            if r.checkpoint_type:
+                checkpoints_reached.append({"step": r.step_number, "type": r.checkpoint_type, "round": current_round})
 
         return {
             "total_steps_monitored": total,
             "steps_with_technical_issues": with_issues,
             "pi_escalations": pi_escalations,
-            "checkpoints_reached": [
-                {"step": r.step_number, "type": r.checkpoint_type}
-                for r in checkpoints
-            ],
+            "checkpoints_reached": checkpoints_reached,
             "critical_issues": critical,
             "rounds_completed": len(self.all_rounds_log),
         }
@@ -367,6 +380,8 @@ class SupervisorAgent:
         )
 
         try:
+            # Set LLM context for correct logging label (shared client)
+            self.llm_client.set_context(self.session_id, "report_generator")
             response = await self.llm_client.chat(
                 model=report_model,
                 messages=[
@@ -508,6 +523,10 @@ class SupervisorAgent:
                         issues.append("Empty DataFrame in output")
                     elif "MemoryError" in pat.pattern:
                         issues.append("MemoryError detected")
+                    elif "obs_names" in pat.pattern.lower():
+                        issues.append("obs_names are not unique — call adata.obs_names_make_unique()")
+                    elif "InvalidIndexError" in pat.pattern:
+                        issues.append("InvalidIndexError — likely caused by duplicate obs_names")
 
         return issues
 
@@ -574,6 +593,7 @@ class SupervisorAgent:
                     f"Check for blank/empty plots, missing labels, or obviously wrong visualizations.]"
                 )
 
+                self._set_llm_context()
                 response = await self.llm_client.chat_with_vision(
                     model=self.model,
                     text_prompt=f"{effective_prompt}\n\n{text_with_fig_note}",
@@ -590,6 +610,7 @@ class SupervisorAgent:
                 # Fall through to text-only evaluation
 
         # Text-only evaluation
+        self._set_llm_context()
         response = await self.llm_client.chat(
             model=self.model,
             messages=[
@@ -970,7 +991,7 @@ class SupervisorAgent:
 {figure_list}
 
 ## Instructions
-{"请用中文写报告。" if zh else "Write the report in English."}
+Write the report in English.
 Generate the report with the following sections (use the exact section IDs in brackets):
 
 {sections_text}
@@ -990,12 +1011,6 @@ IMPORTANT:
 
     def _get_report_system_prompt(self, language: str) -> str:
         zh = language == "zh"
-        if zh:
-            return (
-                "你是一位资深生物信息学研究员，负责撰写单细胞RNA-seq分析的详细报告。"
-                "报告应当专业、严谨、全面，包含分析过程的关键决策和PI的指导意见。"
-                "使用Markdown格式，引用具体的图表文件名和分析步骤编号。"
-            )
         return (
             "You are a senior bioinformatics researcher writing a detailed scRNA-seq analysis report. "
             "The report should be professional, rigorous, and comprehensive, including key analysis "

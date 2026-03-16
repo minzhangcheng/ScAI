@@ -1020,8 +1020,10 @@ class DetailedReportGenerator:
         bio_model: str,
         output_dir: str,
         workspace_dir: str = None,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
+        session_id: str = "report"
     ):
+        self._session_id = session_id
         self.llm_client = llm_client
         self.pi_model = pi_model
         self.bio_model = bio_model
@@ -1054,8 +1056,16 @@ class DetailedReportGenerator:
                 "status": status
             })
 
+    def _set_llm_context(self, agent_name: str = "report_generator"):
+        """Set LLM client context for logging (ReportGenerator doesn't inherit BaseAgent)."""
+        self.llm_client.set_context(
+            getattr(self, '_session_id', 'report'),
+            agent_name
+        )
+
     async def _pi_chat(self, prompt: str, temperature: float = 0.3, max_tokens: int = 32768) -> str:
         """Chat with PI Agent"""
+        self._set_llm_context("report_pi")
         response = await self.llm_client.chat(
             model=self.pi_model,
             messages=[{"role": "user", "content": prompt}],
@@ -1070,6 +1080,7 @@ class DetailedReportGenerator:
         temperature: float = 0.2
     ):
         """Chat with Bioinformatics Agent using tools"""
+        self._set_llm_context("report_bio")
         return await self.llm_client.chat_with_tools(
             model=self.bio_model,
             messages=messages,
@@ -1151,7 +1162,7 @@ Consider:
 3. Is the data quality sufficient for publication?
 4. Are there important visualizations missing?
 
-{"用中文回复" if zh else "Reply in English"}
+Reply in English
 
 Return JSON:
 {{
@@ -1220,7 +1231,7 @@ Be strict but fair. For a publication-quality report:
 ## Research Background:
 {json.dumps(findings.get('bioinformatics', [])[:10], ensure_ascii=False)}
 
-{"用中文回复，提供具体的分析指导" if zh else "Provide specific analytical guidance"}
+Provide specific analytical guidance
 
 Be specific and actionable. Include:
 1. What specific visualizations to create
@@ -2219,7 +2230,7 @@ Be specific and actionable. Include:
         if phase_saved_figures:
             figure_note += f"\nFigure filenames: {', '.join(sorted(phase_saved_figures))}"
 
-        lang_instruction = "用中文撰写，200-400字。具体描述使用的方法、参数和定量结果。" if zh else "Write 200-400 words. Be specific about parameters and quantitative results."
+        lang_instruction = "Write 200-400 words. Be specific about parameters and quantitative results."
 
         prompt = f"""You are a Principal Investigator reviewing your bioinformatics team's single-cell RNA sequencing analysis.
 Read the analysis code below carefully and examine the accompanying figures.
@@ -2249,6 +2260,7 @@ Provide a detailed technical summary of this analysis phase covering:
 """
 
         # Use vision API if we have images, otherwise text-only
+        self._set_llm_context("report_pi")
         try:
             if phase_images:
                 response = await self.llm_client.chat_with_vision(
@@ -2289,7 +2301,7 @@ Provide a detailed technical summary of this analysis phase covering:
         for pr in phase_reviews:
             reviews_text += f"\n### {pr['phase_name']}\n{pr['summary']}\n"
 
-        lang_instruction = "用中文撰写所有内容" if zh else "Write all content in English"
+        lang_instruction = "Write all content in English"
 
         prompt = f"""You are a Principal Investigator writing a comprehensive summary of your team's
 bioinformatics analysis. Below are detailed reviews of each analysis phase.
@@ -2391,11 +2403,7 @@ IMPORTANT:
         # Collect all images for vision API
         all_images = list(figure_images.values())
 
-        lang_instruction = (
-            "用中文撰写所有内容。analysis_approach 300-500字，analysis_results 300-500字。"
-            if zh else
-            "Write all content in English. analysis_approach 300-500 words, analysis_results 300-500 words."
-        )
+        lang_instruction = "Write all content in English. analysis_approach 300-500 words, analysis_results 300-500 words."
 
         exploration_context = ""
         if state.exploration_report and hasattr(state.exploration_report, "research_direction_candidates") and state.exploration_report.research_direction_candidates:
@@ -2437,11 +2445,11 @@ Objective: {state.initial_instruction}
 
 Return a JSON object with this exact structure:
 {{
-    "analysis_approach": "Overall analysis strategy and scientific rationale (分析思路). Explain: What was the overall analysis strategy? How was the analysis pipeline designed? What scientific questions guided the analysis? How did findings from earlier steps inform later analysis decisions? What was the rationale behind key methodological choices?",
+    "analysis_approach": "Overall analysis strategy and scientific rationale. Explain: What was the overall analysis strategy? How was the analysis pipeline designed? What scientific questions guided the analysis? How did findings from earlier steps inform later analysis decisions? What was the rationale behind key methodological choices?",
 
-    "analysis_workflow": "Complete step-by-step analysis pipeline (分析流程). Write as a numbered list from raw data processing to final results. Include specific methods, tools, parameters, and software used at each step. Example: '1. Data loading: Read 10x Genomics data with sc.read_10x_h5(), loaded N cells × M genes...'",
+    "analysis_workflow": "Complete step-by-step analysis pipeline. Write as a numbered list from raw data processing to final results. Include specific methods, tools, parameters, and software used at each step. Example: '1. Data loading: Read 10x Genomics data with sc.read_10x_h5(), loaded N cells × M genes...'",
 
-    "analysis_results": "All key quantitative findings (分析结果). Include: cell counts before/after filtering, number of clusters identified, cell types annotated, number of significant DEGs found, key pathways enriched, and any other quantitative results. Be specific with numbers.",
+    "analysis_results": "All key quantitative findings. Include: cell counts before/after filtering, number of clusters identified, cell types annotated, number of significant DEGs found, key pathways enriched, and any other quantitative results. Be specific with numbers.",
 
     "figure_descriptions": {{
         "filename.png": "Description of what this figure actually shows visually and its scientific significance (50-100 words per figure)"
@@ -2466,6 +2474,7 @@ IMPORTANT:
 - For score_definitions, identify ALL scoring/enrichment computations in the code and document what each score measures and how it was computed
 """
 
+        self._set_llm_context("report_pi")
         try:
             if all_images:
                 response_obj = await self.llm_client.chat_with_vision(
@@ -3009,7 +3018,7 @@ Objective: {state.initial_instruction}
 {findings['summary'][:2000] if findings['summary'] else 'Not available'}
 
 ## Task: Create a comprehensive report plan
-{"使用中文撰写所有内容（标题、描述、解读）" if zh else "Write all content in English"}
+Write all content in English
 
 Return JSON with this EXACT structure:
 {{
@@ -3120,45 +3129,45 @@ Return JSON with this EXACT structure:
         def make_fig_entry(fig):
             return {
                 "filename": fig["filename"],
-                "caption": f"{'该图展示了' if zh else 'This figure shows '}{fig['name'].lower()}",
-                "interpretation": "待PI Agent生成详细解读" if zh else "Detailed interpretation to be generated by PI Agent",
+                "caption": f"This figure shows {fig['name'].lower()}",
+                "interpretation": "Detailed interpretation to be generated by PI Agent",
                 "importance": "medium",
                 "png_path": fig["png_path"],
                 "pdf_path": fig["pdf_path"]
             }
 
         return {
-            "title": state.name or ("分析报告" if zh else "Analysis Report"),
+            "title": state.name or "Analysis Report",
             "_existing_figures": existing_figures,
             "sections": [
                 {
                     "id": "data_overview",
-                    "title": "数据概览与细胞聚类" if zh else "Data Overview and Cell Clustering",
-                    "description": "UMAP降维可视化与细胞聚类结果" if zh else "UMAP dimensionality reduction and cell clustering results",
+                    "title": "Data Overview and Cell Clustering",
+                    "description": "UMAP dimensionality reduction and cell clustering results",
                     "analysis_type": "general",
                     "existing_figures": [make_fig_entry(f) for f in umap_figs + bar_figs],
                     "narrative": ""
                 },
                 {
                     "id": "marker_genes",
-                    "title": "标记基因分析" if zh else "Marker Gene Analysis",
-                    "description": "各细胞群的标记基因鉴定与表达模式" if zh else "Identification of marker genes and expression patterns for each cell population",
+                    "title": "Marker Gene Analysis",
+                    "description": "Identification of marker genes and expression patterns for each cell population",
                     "analysis_type": "general",
                     "existing_figures": [make_fig_entry(f) for f in marker_figs + heatmap_figs[:2]],
                     "narrative": ""
                 },
                 {
                     "id": "differential_expression",
-                    "title": "差异表达分析" if zh else "Differential Expression Analysis",
-                    "description": "实验组与对照组的差异基因分析" if zh else "Analysis of differentially expressed genes between conditions",
+                    "title": "Differential Expression Analysis",
+                    "description": "Analysis of differentially expressed genes between conditions",
                     "analysis_type": "specific",
                     "existing_figures": [make_fig_entry(f) for f in de_figs + heatmap_figs[2:]],
                     "narrative": ""
                 },
                 {
                     "id": "key_findings",
-                    "title": "关键研究发现" if zh else "Key Research Findings",
-                    "description": "支持研究假说的关键基因表达分析" if zh else "Key gene expression analysis supporting research hypothesis",
+                    "title": "Key Research Findings",
+                    "description": "Key gene expression analysis supporting research hypothesis",
                     "analysis_type": "specific",
                     "existing_figures": [make_fig_entry(f) for f in violin_figs + feature_figs + other_figs],
                     "narrative": ""
@@ -3319,7 +3328,7 @@ Objective: {state.initial_instruction}
 {findings.get('summary', '')[:2000]}
 
 ## Task
-{"用中文撰写所有内容（标题、描述、解读、叙述）" if zh else "Write all content in English"}
+Write all content in English
 
 Create a report plan. The plan ONLY needs to define section structure and assign figures/tables to sections.
 Do NOT write captions, interpretations, or narratives — those will be generated later.
@@ -3547,7 +3556,7 @@ Objective: {state.initial_instruction}
 {findings.get('cluster_annotations', 'Not available')}
 
 ## Your Task
-{"用中文撰写" if zh else "Write in English"}
+Write in English
 
 Generate a comprehensive scientific narrative for this section. Your response must be a JSON object with this exact structure:
 
@@ -3578,6 +3587,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 """
 
         # Use vision API if we have figure images, otherwise text-only
+        self._set_llm_context("report_pi")
         try:
             if section_images:
                 response_obj = await self.llm_client.chat_with_vision(
@@ -3816,23 +3826,23 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 
 ## Requirements
 IMPORTANT: When referencing cell clusters, always use their annotated cell type names (e.g., "Hepatocytes (Stressed)" instead of "Cluster 1"). The cluster annotation table above provides the mapping.
-{"用中文撰写，遵循以下格式要求：" if zh else "Write in English, following these format requirements:"}
+Write in English, following these format requirements:
 
-1. **MUST reference each figure** - Use format like "如图 X 所示" or "As shown in Figure X"
+1. **MUST reference each figure** - Use format like "As shown in Figure X"
 2. For each figure, provide:
    - What the figure displays (methodology/visualization type)
    - Key observations visible in the figure
-   - Quantitative details where applicable (e.g., "共鉴定出 X 个细胞群")
+   - Quantitative details where applicable (e.g., "X cell populations were identified")
    - Biological interpretation of the results
 
 3. Use **bold** for important terms (gene names, cell types, key findings)
 4. Include specific numbers and statistics where relevant
 5. Connect observations to the research objectives
 
-{"撰写 3-5 段，400-600字，确保每个图片都有详细解释" if zh else "Write 3-5 paragraphs, 300-500 words, ensure each figure is explained in detail"}
+Write 3-5 paragraphs, 300-500 words, ensure each figure is explained in detail
 
 Example format:
-{"为了评估数据质量，我们首先进行了质控分析（如图 X 所示）。结果显示..." if zh else "To assess data quality, we first performed QC analysis (Figure X). The results show..."}
+To assess data quality, we first performed QC analysis (Figure X). The results show...
 """
 
         return await self._pi_chat(prompt, temperature=0.4)
@@ -3867,18 +3877,12 @@ Example format:
 {key_results[:1000] if key_results else ""}
 """
 
-        if zh:
-            abstract_instruction = (
-                "用中文撰写摘要，200-300字，包括背景、方法（具体的分析方法和参数）、主要发现和结论。"
-                "注意：直接输出摘要正文，不要以标题（如 **摘要** 或 ## Abstract）开头，报告模板已提供标题。"
-            )
-        else:
-            abstract_instruction = (
-                "Write abstract in English, 150-250 words, including background, methods "
-                "(specific analysis methods and parameters), main findings and conclusions. "
-                "IMPORTANT: Output the abstract text directly. Do NOT start with a title like "
-                "'**Abstract**' or '## Abstract' - the section heading is already provided by the report template."
-            )
+        abstract_instruction = (
+            "Write abstract in English, 150-250 words, including background, methods "
+            "(specific analysis methods and parameters), main findings and conclusions. "
+            "IMPORTANT: Output the abstract text directly. Do NOT start with a title like "
+            "'**Abstract**' or '## Abstract' - the section heading is already provided by the report template."
+        )
 
         prompt = f"""Write an abstract for this research report.
 
@@ -3927,20 +3931,13 @@ Objective: {state.initial_instruction}
 {key_results[:1500]}
 """
 
-        if zh:
-            conclusions_instruction = (
-                "用中文撰写结论，包括：1)主要发现总结（引用具体数据）2)生物学意义 3)研究局限性 4)未来方向。300-500字。"
-                "注意：直接输出结论正文，不要以标题（如 ### 结论）开头，报告模板已提供标题。"
-                "使用**粗体文本**作为各小节标签（如 **主要发现总结**），后接正文段落。"
-            )
-        else:
-            conclusions_instruction = (
-                "Write conclusions in English including: 1) Summary of main findings (cite specific numbers) "
-                "2) Biological significance 3) Limitations 4) Future directions. 250-400 words. "
-                "IMPORTANT: Output the conclusions text directly. Do NOT start with a header like "
-                "'### Conclusions' - the section heading is already provided by the report template. "
-                "Use **bold text** for subtopic labels (e.g., **Summary of Findings**), followed by paragraph text."
-            )
+        conclusions_instruction = (
+            "Write conclusions in English including: 1) Summary of main findings (cite specific numbers) "
+            "2) Biological significance 3) Limitations 4) Future directions. 250-400 words. "
+            "IMPORTANT: Output the conclusions text directly. Do NOT start with a header like "
+            "'### Conclusions' - the section heading is already provided by the report template. "
+            "Use **bold text** for subtopic labels (e.g., **Summary of Findings**), followed by paragraph text."
+        )
 
         prompt = f"""Write the final conclusions for this research report.
 

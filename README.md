@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.14.1
+**Version**: 0.14.2
 
 ## Core Features
 
@@ -331,178 +331,103 @@ Common customizations:
 
 ## Changelog
 
+### v0.14.2 (2026-03-16)
+
+- **Bioinformatics robustness improvements**: Automatic duplicate index repair after concat/subset operations; corrected step budget calculation on checkpoint resume; round mismatch validation prevents cross-round state contamination
+- **Smarter cell annotation**: Cluster annotation results are cached to avoid redundant Deep Research calls; annotation workflow now requires observing marker output before calling the annotation tool
+- **Graphic abstract token management**: Input token estimation and auto-trimming for the Gemini image generation model, preventing context overflow errors
+- **Connection stability**: WebSocket heartbeat keeps connections alive through proxies; concurrency fix prevents race conditions on connection close
+- **Bug fixes**: Exploration report dialog timing fix (no longer blocked between Phase 1 completion and direction selection); PI_DECIDE resume correctly extends round limit when needed
+
 ### v0.14.1 (2026-03-15)
 
-- **Human Input Wakes Workflow**: `POST /api/session/{id}/human-input` now calls `workflow.signal_continue()` when the session is in `WAITING_INPUT` state. Previously, user text or file feedback submitted between rounds was stored but did not wake the workflow — the system would only continue after the countdown timeout expired.
-- **Stale Convergence Flag Cleared on Round Start**: `_initialize_round()` now resets `should_continue = True` at the start of each round. This prevents a stale `should_continue = False` from a previous convergence check from silently terminating an extra round that was legitimately extended by user input.
-- **Direction State Consistency on Retry**: `current_round_direction` is now set immediately after popping a direction from `directions_queue`, before calling `innovation_instruction()`. If the PI instruction call fails and the direction is re-queued, `current_round_direction` is cleared to `None`, so subsequent retries see a clean slate instead of the previous round's direction.
-- **Annotation Pause Respects User Pause**: When the user pauses the analysis during the `WAITING_ANNOTATION` blocking point, confirming the annotation no longer overwrites the `PAUSED` status — the pause is preserved correctly.
-- **Single-Direction Mode Can Extend Rounds on Input**: The `multi_dir_completed` guard in `_wait_for_user_input` now uses `len(user_chosen_directions) > 1` to identify true multi-direction mode. Previously, single-direction mode (which also populates `user_chosen_directions` with one entry) was incorrectly treated as multi-direction-completed, preventing the extra-round extension when a user provided input on the last round.
-- **Exploration Report Failure Notified to Frontend**: If `generate_exploration_report()` raises an exception, an error message is now sent via WebSocket so users know the report is unavailable and can still select a research direction based on the analysis findings above.
+- **Fixed: Round feedback not waking workflow**: Submitting text guidance or files between rounds now immediately resumes the workflow instead of waiting for the countdown to expire
+- **Fixed: Extra round silently skipped**: A stale convergence flag could cause an extra round (triggered by user input) to terminate immediately — now correctly cleared at round start
+- **Fixed: Pause during annotation confirmation**: Pausing analysis while reviewing cluster annotations now correctly preserves the paused state
+- **Fixed: Single-direction extra round extension**: Single-direction sessions incorrectly blocked the extra round when the user provided input on the last round
+- **Fixed: Exploration report failure silently swallowed**: If exploration report generation fails, an error message is now shown so users can still select a research direction
 
 ### v0.14.0 (2026-03-15)
 
-- **Score Registration & Methodology Transparency**: New `register_score` tool in the Bioinformatics Agent allows the agent to document how each score was computed (method, gene list, source, key parameters) immediately after computation. Scores are stored as `ScoreDefinition` records in `AnalysisState.score_definitions` and surfaced in the final report's methodology section. Agent system prompt now mandates a "consult PI → compute → register" workflow for all scoring operations (sc.tl.score_genes, gseapy, decoupleR, etc.).
-- **Jupyter I/O Sandbox**: The kernel initialization now injects a runtime I/O sandbox that intercepts `open()`, `Path.mkdir()`, `Path.write_text()`, and `Path.write_bytes()` to block writes outside the session directory. Allowed roots: session workspace, `/tmp`, and standard system paths (`~/.cache`, `~/.local`, etc.). Write attempts to other locations raise a `PermissionError` with a clear message directing the agent to use the correct subdirectory.
-- **Working Directory Context in Kernel**: Kernel initialization now explicitly sets `os.chdir()` to the session workspace, creates `figures/` and `tables/` subdirectories, and configures `sc.settings.figdir` to the absolute figures path. The bioinformatics agent system prompt includes the working directory paths so the agent always saves files in the right location.
-- **Kernel Dead Detection**: Added `_kernel_dead` flag to `LocalJupyterSandbox`. When a kernel restart fails after timeout, the flag is set and subsequent `execute()` calls immediately return a clear error (`"Kernel is unavailable — restart failed"`) instead of hanging or producing cryptic failures.
-- **Annotation Dialog: Alternative Cell Types & Confidence Details**: The cell annotation confirmation dialog now displays `alternative_cell_types` and `low_confidence_reason` for medium/low confidence clusters, via expandable per-cluster detail rows. PI Agent's annotation review prompt now asks for these fields, giving users richer context when deciding whether to override a cluster's annotation. Key markers shown per cluster increased from 5 to 10 (both in PI review and dialog display), supplemented from `rank_genes_groups` output if the agent-provided list is short.
-- **Annotation Context HTML Report**: An HTML version of the annotation context report is now generated and saved during the annotation confirmation pause. A download button in the annotation dialog links to `GET /api/session/{id}/annotation-report/html`, allowing users to open the full context in a browser while reviewing cluster annotations.
-- **Per-Round Report Structure with Phase Labels**: The supervisor agent's report prompt and analysis narrative are now organized by round with phase headers (`ROUND N (EXPLORATION)` / `ROUND N (INNOVATION)`). Innovation rounds receive dedicated `[innovation_N]` sections in the report that must be written comprehensively (300–500 words minimum, including all figures, genes, pathways, and quantitative results). The exploration summary and all user-chosen directions are also included in the narrative.
-- **Publication Figures in Report Figure Map**: `_collect_figure_paths()` now also scans `state.publication_figures` (PI-reviewed figures) in addition to supervision records, ensuring all publication-quality figures are included in the generated report.
-- **Thread-Safe Session Cache**: Introduced `_update_session_cache()` helper in `main.py` that acquires `_state_lock` before updating the in-memory `sessions` dict and refreshing the LRU access time. All direct `sessions[id] = state` assignments replaced with this helper to prevent race conditions under concurrent WebSocket connections.
-- **Innovation Phase: User Guidance Merging**: In innovation rounds (round 2+), `adjusted_instructions` from user input are no longer treated as a planning replacement — they are merged as supplementary `[User guidance]` tasks appended to PI's direction-based task lists. This ensures the direction-driven analysis plan is not overridden by free-form user guidance.
-- **Direction Persistence on Pop**: After popping a direction from `directions_queue`, the state is immediately persisted via `state_callback` to prevent direction loss if the process crashes before the round completes.
-- **Message Trim: Orphan Prevention**: The bioinformatics agent's message history trim now walks the cut point backward to avoid orphaning `tool` role messages that require a preceding `assistant` message with the matching `tool_use` block.
-- **Direction Validation**: `POST /api/session/{id}/choose-direction` now returns HTTP 400 if no direction, direction list, or `let_pi_decide` flag is provided.
-- **Resume Without Direction Guard**: `POST /api/session/{id}/resume` in innovation phase without a chosen direction now defaults to `[PI_DECIDE]` instead of running a directionless round.
-- **Clear Direction Queue**: `HumanInputRequest` now accepts `clear_queue: bool`. When set, the remaining direction queue is cleared and `max_rounds` is capped, allowing users to abort the multi-direction sequence mid-run.
-- **Security: User Override Sanitization**: Cell type name overrides submitted via the annotation confirmation dialog are now sanitized (strips `{}[]\\;` `` ` ``$` `__dunder__`, `import`, `exec`, `eval` patterns) and capped at 200 characters before being embedded in generated Python code.
-- **Literature Agent: Search Mode Tracking**: Literature agent result dicts now include a `search_mode` field indicating the actual mode used (including fallback chain, e.g., `"pubmed_llm (fallback from gemini_deep_research)"`).
-- **Innovation Phase Analysis Requirements**: Bioinformatics agent innovation phase system prompt now specifies 10 concrete requirements: execute all PI-assigned tasks, generate at least one figure per task, use advanced methods (GSEA, gene scoring, trajectory, TF activity), add exploratory analyses, include volcano plots + heatmaps for DEG, bar plots for pathway results, UMAP + violin/box plots for scoring analyses, and report detailed statistics.
+- **Score methodology transparency**: Bioinformatics Agent now registers how each score was computed (method, gene list, source) and surfaces this in the final report's methodology section
+- **Jupyter sandbox security**: File writes outside the session directory are blocked at runtime; kernel initializes with correct working directory, figure output path, and subdirectories
+- **Kernel failure detection**: If the Jupyter kernel fails to restart, subsequent code executions immediately return a clear error instead of hanging
+- **Richer annotation dialog**: Cell annotation confirmation now shows alternative cell types and low-confidence reasons for each cluster; key markers increased to 10 per cluster; annotation context HTML report downloadable during review
+- **Report improvements**: Report narrative organized by round with Exploration/Innovation phase labels; publication figures reliably included in the figure map
+- **Innovation phase**: User text guidance between rounds is merged as supplementary tasks rather than overriding the direction-driven plan; direction queue state persisted immediately after pop to survive crashes
+- **Direction workflow fixes**: Resume without a chosen direction defaults to PI selection; multi-direction queue can be aborted mid-run; cell type name overrides sanitized before code injection
 
 ### v0.13.4 (2026-03-13)
 
-- **Pause/Resume Deadlock Fix**: `_wait_for_user_input` now checks and force-syncs `WAITING_INPUT` status before blocking (both manual and countdown modes), preventing a deadlock where Resume restored status to `RUNNING` but the frontend had no visible "waiting for input" UI.
-- **Multi-Direction max_rounds Guard**: Extending `max_rounds` on user input is now skipped when multi-direction mode has already completed all directions (queue empty + directions selected), preventing a spurious extra round after correlation analysis.
-- **Retry Status Field**: `@with_retry` exhaustion now returns `"status": "failed"` alongside the error, allowing PI synthesis to distinguish agent failures from skipped agents.
-- **Round 3+ Task Fallback**: When prefix-tagged tasks (`[Bioinformatics]`, etc.) are absent from `next_steps`, the workflow now falls back to assigning raw `next_steps` to bioinformatics first, then `pi_summary` as a secondary fallback, instead of silently producing empty task lists.
-- **Bioinformatics Message History Cap**: Message history is trimmed to 80 entries (preserving the system message) before each LLM call, preventing unbounded context growth during 200-step analyses.
-- **Supervisor LLM Evaluation Sampling**: Supervisor Agent's LLM evaluation is now called only on steps with errors, figure outputs, `annotate_clusters` calls, or every 5th step — reducing API cost while keeping full rule-based checks on every step.
-- **Report Generator Dead Code Removal**: Removed ~700 lines of unreachable code — `_setup_environment()`, `_auto_load_processed_data()`, `_extract_cluster_annotations()` (sandbox version), and `_generate_section_autonomous_legacy()`, along with the now-unused `self.sandbox` field and `LocalJupyterSandbox` import.
-- **Pre-existing Syntax Fix**: Fixed a merged comment+`if` statement in `workflow.py` (resume path) that caused an `IndentationError` under Python 3.13.
-- **Documentation**: Updated README and HANDOVER with accurate two-phase analysis flow, detailed workflow graph, and corrected key feature descriptions.
+- **Fixed: Pause/resume deadlock** where resuming could leave the UI stuck with no visible "waiting for input" indicator
+- **Fixed: Spurious extra round** after multi-direction correlation analysis completed
+- **Fixed: Empty task lists in round 3+** when PI planning output lacked expected prefix tags
+- **Performance**: Supervisor Agent LLM evaluation now sampled (errors, figures, every 5th step) to reduce API cost; bioinformatics message history capped at 80 entries
 
 ### v0.13.3 (2026-03-12)
 
-- **Annotation Context Panel**: The cell annotation confirmation dialog now shows a left-side "Analysis Context" panel with a structured markdown summary covering experimental design, biochemistry/pathology findings, previous round highlights, and recent literature searches — giving context for reviewing cluster annotations.
-- **`analysis_summary` in Annotation State**: Added `analysis_summary` field to `AnnotationConfirmationState`; populated by new `_build_annotation_context_report()` in `SingleCellAnalysisWorkflow`; stored in `_current_graph_state` (updated at round initialization and bioinformatics agent entry).
-- **Exploration Report Link in Results Panel**: Results panel now shows a "View Exploration Report" button linking to the standalone exploration report HTML when available.
-- **`exploration_report_url` in Session Load API**: `/api/session/{id}` now returns `exploration_report_url` when an exploration report HTML exists; `useApi.ts` maps it to `explorationReportUrl` in session state.
-- **Exploration Context in Report Prompts**: Both the bioinformatics summary and the full report generation prompts in `report_generator.py` now include Phase 1 exploration direction candidates and user-chosen directions, so LLM-generated report sections properly reference the two-phase analysis flow.
-- **Annotation Dialog Wider & More Markers**: Dialog widened to `w-[1200px] max-w-[90vw]`; key markers shown per cluster increased from 5 to 10.
+- **Annotation context panel**: Cell annotation confirmation dialog now shows a structured Analysis Context sidebar with experimental design, biochemistry/pathology findings, and recent literature — giving biological context when reviewing cluster assignments
+- **Exploration Report link**: Results panel shows a "View Exploration Report" button linking to the Phase 1 standalone HTML report
+- **Report narrative context**: Generated report sections now reference Phase 1 exploration directions and user-chosen directions
 
 ### v0.13.2 (2026-03-12)
 
-- **Checkpoint Directory Auto-Creation**: Fixed a crash when the session states directory does not exist — `states_dir.mkdir(parents=True, exist_ok=True)` is now called before creating the SQLite checkpoint file in `SingleCellAnalysisWorkflow`.
+- **Fixed: Crash on first checkpoint** when the session states directory did not yet exist
 
 ### v0.13.1 (2026-03-12)
 
-- **Multi-Direction Research Workflow**: Users can now select multiple research directions from the Exploration Report. Each direction is processed in a dedicated innovation round sequentially (auto-continuing between rounds without waiting for user input). After all direction rounds complete, PI automatically performs a **Multi-Direction Correlation Analysis** that synthesizes findings across all directions.
-- **Enhanced Direction Candidate Evaluation**: Exploration report direction candidates now include three scored evaluation fields: `expected_innovation` (how unexplored the area is), `expected_novelty` (how surprising the finding is), and `data_reliability` (confidence in supporting evidence) — each with a High/Medium/Low rating and brief explanation.
-- **Redesigned Exploration Report Dialog**: The direction selection UI now supports multi-select of AI-suggested candidates (with per-direction notes), custom direction entries (with notes), score badges for innovation/novelty/reliability, and a built-in countdown timer that auto-triggers PI selection on expiry. A link to the standalone Exploration Report HTML is included.
-- **Exploration Report HTML Export**: Added `generate_exploration_report_html()` in `report_generator.py` to produce a standalone HTML exploration report (Report A) with no LLM calls. Accessible via new endpoint `GET /api/session/{id}/exploration-report/html`.
-- **PI Direction Selection Revamp**: Replaced `innovation_instruction_pi_directed()` with `select_best_directions()` — PI now autonomously picks 2 best directions (with notes and rationale) using the multi-direction queue, so 2 sequential innovation rounds run when PI decides.
-- **Innovation Instruction Notes**: `innovation_instruction()` now accepts an optional `notes` parameter, allowing user-provided annotations to be injected into the PI's innovation planning prompt.
-- **Bioinformatics Agent LLM Error Propagation**: LLM call failures are now tracked separately (`llm_error` field) and result in `status = "error"` (distinct from `"max_steps_reached"`), with `success: false` and the error string propagated to the workflow.
-- **Session Eviction Race Fix**: Fixed a race condition in `cleanup_stale_sessions()` where a session accessed during eviction I/O could be incorrectly evicted. Added access-time snapshot comparison to abort eviction if the session was modified concurrently.
-- **Sidebar Max Rounds Control Removed**: Removed the manual "Analysis Rounds" slider/input from the sidebar. Max rounds is now set dynamically based on the number of selected research directions (1 exploration round + N direction rounds).
-- **New WebSocket Message Type**: Added `direction_correlation` message type, rendered in the message stream with direction badges and a formatted correlation analysis block.
+- **Multi-direction research**: Select multiple research directions from the Exploration Report — each runs as a dedicated innovation round, followed by an automatic multi-direction correlation analysis synthesizing findings across all directions
+- **Direction candidate scoring**: Each AI-suggested direction now shows Innovation, Novelty, and Data Reliability scores (High/Medium/Low) with brief explanations
+- **Redesigned direction selection dialog**: Multi-select with per-direction notes, custom direction entry, score badges, and countdown auto-selection; link to standalone Exploration Report HTML
+- **Exploration Report HTML export**: Standalone HTML exploration report generated at end of Phase 1, accessible via API endpoint
+- **Max rounds removed from sidebar**: Round count is now set automatically based on the number of selected directions
 
 ### v0.13.0 (2026-03-12)
 
-- **Two-Phase Analysis Workflow**: Introduced a structured two-phase analysis workflow. Round 1 is now an "Exploration Phase" that comprehensively maps the full cellular landscape. After Round 1, an Exploration Report is generated summarizing cluster overview, data quality warnings, strongest heterogeneity signals, key pathway changes, abnormal markers, and AI-assessed research direction candidates. Users choose a direction (from AI suggestions or a custom input) before entering the "Innovation Phase" (Round 2+) for focused, hypothesis-driven analysis.
-- **Cell Annotation Confirmation Dialog**: During the Exploration Phase, the Bioinformatics Agent pauses after completing cluster annotation to present annotations for user review. A new dialog shows each cluster's cell type, confidence level (high/medium/low), and key marker genes. Low-confidence clusters require manual confirmation or correction before analysis continues. High-confidence-only results auto-confirm after a countdown timer.
-- **Exploration Report Dialog**: A new dialog presented at the end of Phase 1 shows structured exploration findings and offers research direction candidates with rationale, expected innovation value, and data reliability notes. Users can select a suggested direction, enter a custom direction, or let the PI Agent decide automatically.
-- **New Backend State**: Added `analysis_phase` ("exploration"/"innovation"), `annotation_state`, `exploration_report`, `user_chosen_direction`, and `current_round_direction` fields to `AnalysisState`. New `WAITING_ANNOTATION` task status for annotation confirmation pauses. New data models: `ClusterAnnotation`, `AnnotationConfirmationState`, `ExplorationReport`.
+- **Two-phase analysis workflow**: Round 1 is now a dedicated Exploration Phase for unbiased full-landscape discovery. After Round 1, an Exploration Report summarizes findings and offers research direction candidates. Users select a direction (or let PI decide) before entering the Innovation Phase (Round 2+) for focused hypothesis-driven analysis
+- **Cell annotation confirmation**: Bioinformatics Agent pauses after cluster annotation so users can review, correct, or confirm each cluster's cell type and confidence level before analysis continues
 
 ### v0.12.4 (2026-03-11)
 
-- **Session-Centric Data Organization**: Restructured `intesc_data/` directory from type-based layout to session-centric layout. All per-session files (workspace, reports, uploads, states, LLM logs) are now co-located under `intesc_data/sessions/{session_id}/`, making multi-session management clean and predictable. Session deletion is now a single directory removal.
-- **Backward Compatibility**: The system automatically falls back to legacy paths when new-structure files are not found, ensuring existing sessions continue to work without migration.
-- **Migration Script**: Added `backend/migrate_to_session_dirs.py` to migrate existing data from the old layout to the new session-centric layout. Supports `--dry-run` mode for safe preview.
+- **Session-centric data layout**: All per-session files (workspace, reports, uploads, states, logs) now co-located under `intesc_data/sessions/{session_id}/`. Existing sessions automatically resolved via legacy path fallback; migration script provided
 
 ### v0.12.3 (2026-03-10)
 
-- **Improved Report Markdown Rendering**: Enhanced `markdown_to_html()` across all three report generators (`report_generator.py`, `supervisor_agent.py`, `regenerate_report_html.py`) to convert markdown headers (`#`/`##`/`###`/`####`) to proper HTML heading tags, and added bullet list support. Previously, markdown headers appeared as raw text in HTML reports.
-- **Fixed Conclusions Formatting**: Updated LLM prompts for abstract and conclusions generation to prevent redundant section headers (e.g., `### 3. Conclusions`). Added defensive post-processing to strip any remaining header artifacts from LLM output.
-- **Frontend Markdown Rendering**: ReportPanel Detail view now uses ReactMarkdown (already installed) for rendering abstract, section content, and conclusions, replacing raw `whitespace-pre-wrap` text display.
-- **Frontend Appendix Display**: Added appendix section to Report Detail view showing project information, agent model configurations, data files, treatment groups, and user instructions — data already existed in backend but was not rendered in the frontend.
-- **Supervisor Agent HTML Appendix**: Supervisor Agent's HTML report now includes a full appendix section (project info, agent config, data files, treatment groups, analysis rounds), matching the depth of the main report generator.
+- **Report rendering**: Markdown headers and bullet lists now render correctly as HTML in generated reports; report detail view uses ReactMarkdown; appendix section added to report UI; Supervisor Agent HTML report includes full appendix
 
 ### v0.12.2 (2026-03-10)
 
-- **Analysis Stop/Pause Support**: Added UI buttons and backend endpoint (`POST /api/session/{id}/stop`) to pause or terminate analysis. Support immediate termination (pause/save) or termination with summary (stop-and-summarize report generation).
-- **Publication-Quality Bioinformatics Figures**: Added mandatory checklist (UMAP axis labels, font sizes, legend placement) and strict composition barplot rules to bioinformatics agent's system prompt. Updated default matplotlib/seaborn themes in sandbox for professional "publication" aesthetics.
-- **Figure Revision Auto-Retry**: Bioinformatics Agent now automatically attempts to fix runtime errors during figure code revision once using the error message as context.
-- **Progressive Figure Review Leniency**: PI Agent's figure review now employs progressive leniency (from revision 2+) to focus on scientific accuracy over minor aesthetics, avoiding infinite revision loops.
-- **WebSocket Reconnection Improvements**: WebSocket handler now updates the global reference for active workflows, ensuring users can reliably observe real-time progress after a connection drop.
-- **UI UX Polish**: Feedback dialog "Skip" button renamed to "Continue"; added Stop/Summarize buttons to feedback dialog for easier control.
-- **Code Stability**: Fixed WebSocket handling for completed sessions; improved LLM retry logic; centralized code safety validation in sandbox.
+- **Pause/Stop controls**: Added Pause and Stop buttons to the analysis feedback dialog; Stop can optionally generate a summary report before terminating
+- **Publication-quality figures**: Bioinformatics Agent now enforces figure quality standards (axis labels, font sizes, legend placement, composition barplot rules) and uses publication-style matplotlib themes
+- **Figure revision**: Auto-retry on runtime errors during figure code revision; progressive review leniency from revision 2+ to avoid infinite loops
+- **UX**: "Skip" button renamed to "Continue" in the round feedback dialog
 
 ### v0.12.1 (2026-03-10)
 
-- Centralized code safety validation: moved `DANGEROUS_PATTERNS` and `validate_code_safety()` to `sandbox.py`, enforced at sandbox level so all callers (bioinformatics agent, report generator, chat sandbox) are protected
-- Extracted `CheckpointManager` to standalone `backend/utils/checkpoint.py` module, now shared by bioinformatics analysis and report generation
-- Added checkpoint-based resumption for report generation: interrupted reports (e.g. API rate limit) resume from last completed step instead of restarting
-- Fixed session save race condition: `async_save_session()` serializes JSON on the event-loop thread before writing in thread pool, preventing concurrent mutation during serialization
-- Fixed session eviction race: cleanup task now re-checks if session was re-activated before evicting, and properly closes Jupyter kernels and chat sandboxes for evicted sessions
-- Fixed completed session WebSocket handling: multiple clients can now connect to completed sessions without overwriting global WebSocket reference
-- Added `MAX_REALTIME_MESSAGES = 1000` cap to prevent unbounded memory growth from realtime messages
-- Strip base64 data from figure messages before persisting to realtime_messages to reduce memory usage
-- Added stale import job cleanup (1-hour TTL) to prevent memory leak from completed/failed import jobs
-- Added `rollback_last_turn()` method to BaseAgent, replacing duplicated inline rollback patterns across PI Agent
-- Changed output truncation strategy from head (first N chars) to tail (last N chars) across bioinformatics agent, supervisor agent, and analysis log — more useful for debugging as recent output is preserved
-- Supervisor Agent: added `system_prompt` parameter for user-customizable monitoring prompts; added explicit "Execution status" field and instruction to ignore truncation artifacts
-- Added `VALID_AGENTS` Literal type for API endpoint validation (prompt/model/temperature updates)
-- Added shared `extract_code_from_markdown()` utility with state-machine parsing to sandbox.py
-- Fixed bioinformatics checkpoint resume budget: uses `original_total` to avoid budget inflation on repeated resumes
-- Fixed bioinformatics checkpoint clearing: only clears on explicit completion via `report_findings`, preserving checkpoint for `max_steps_reached` and `completed_with_fallback` to allow resumption
-- Reset bioinformatics per-run state (code_history, analysis_context, last_result) at start of fresh runs to prevent cross-round pollution
-- Added graceful error handling for figure revision failures — keeps current version instead of crashing
-- Added `supervisor_feedback`, `supervisor_checkpoint`, `supervisor_summary` to WebSocket message types in schema
-- Supervisor Agent now appears in Prompts panel with model/temperature configuration (Eye icon, cyan theme)
-- Added sandbox-level code safety check with `skip_safety_check` flag for trusted internal code (kernel init, session restore/save)
-- Workflow now passes user-configured supervisor prompt to SupervisorAgent
-- Grab workflow reference under lock in pause/resume endpoints to avoid race with cleanup task
+- **Report generation resumption**: Interrupted reports now resume from the last completed chapter instead of restarting from scratch
+- **Reliability fixes**: Session save race condition; session eviction race; completed-session WebSocket handling; memory growth limits for real-time messages; graceful figure revision failure handling
+- **Supervisor Agent**: Customizable system prompt via Prompts panel
 
 ### v0.12.0 (2026-03-10)
 
-- Added Supervisor Agent: real-time monitoring of bioinformatics analysis steps with issue detection, biological checkpoint identification, and PI escalation
-- Fixed Supervisor Agent settings never syncing to backend — model, prompt, and temperature are now included in pre-analysis sync and GET API endpoints
-- Fixed LLM retry logic: replaced overly broad `APIError` with `InternalServerError` in retryable exceptions, preventing unnecessary retries on authentication failures and bad requests
-- Fixed settings sync failures being silently ignored — failures are now collected and displayed as error messages in the message stream so users are informed
-- Fixed round feedback dialog potentially triggering multiple times for the same round by adding a ref-based guard
-- Fixed WebSocket `state_sync` version conflict having no recovery — outdated versions now trigger a full session state reload from the server
-- Fixed `crypto.randomUUID()` usage that could crash in non-HTTPS contexts — replaced with a browser-safe UUID generator
-- Fixed WebSocket `connect()` using stale closure references for session ID — now reads fresh state from the store
-- Improved pre-analysis settings sync: all agent models/prompts/temperatures and remaining config now sync in parallel via `Promise.allSettled()`, reducing startup latency
-- Improved last-round UX: the waiting-for-input message now indicates it is the final round and that users can provide data to extend analysis
-- Added expand/collapse buttons to truncated message content (prompts, responses, outputs, literature) so users can view full text
-- Added localStorage hydration validation to prevent crashes from corrupted or outdated persisted state
-- Added `max_length=50000` validation for custom prompt updates to prevent oversized payloads
-- Added automatic cleanup of partial files when uploads fail mid-stream
-- Added `painter_prompt` and `supervisor_prompt` fields to backend `AgentPrompts` config for API consistency
-- Fixed Chinese translation for Painter Agent name
+- **Supervisor Agent**: Real-time monitoring of each bioinformatics analysis step — detects issues, identifies biological checkpoints, and escalates critical problems to the PI Agent
+- **Stability fixes**: LLM retry logic; settings sync error reporting; round feedback dialog deduplication; WebSocket version conflict recovery; pre-analysis settings sync parallelized
+- **UI**: Expand/collapse buttons for long message content
 
 ### v0.11.1 (2026-03-09)
 
-- Fixed duplicate publication figures: bioinformatics agent now upserts figures by name instead of always appending, with additional dedup in workflow sync
-- Fixed session cleanup: deleting a session now also removes workspace, reports, and state files from disk
-- Fixed session eviction: initializing sessions are no longer evicted by the cleanup task
-- Fixed literature model config: get-models endpoint now correctly reads `literature_model` instead of `pi_model`
-- Fixed hardcoded model names: report generation and chat now use configured model from settings instead of hardcoded defaults
-- Improved session persistence: status changes (start, pause, resume) are now immediately saved to disk
-- Improved WebSocket reconnection: message buffer now strips base64 data to reduce memory usage; history send moved outside lock to avoid I/O blocking
-- Improved LLM retry logic: `RateLimitError` is now caught before generic `APIError` to ensure proper backoff handling
-- Improved session restore detection: sandbox now verifies restore output instead of relying solely on exit code
-- Improved markdown code fence stripping in literature gap analysis JSON parsing
-- Added `generating_report` as a valid session status in the frontend
+- **Bug fixes**: Duplicate publication figures; session cleanup leaving orphaned files; literature model config; hardcoded model names in report generation and chat; LLM retry order for rate limits
 
 ### v0.11.0 (2026-03-09)
 
-- Changed agent execution order to biochemistry → pathology → bioinformatics → literature. Biochemistry now runs first so its results inform downstream agents
-- Added dynamic PI planning: PI Agent uses `plan_agent_tasks()` to refine each downstream agent's tasks based on already-completed results within the same round, building a coherent chain of thought
-- Enhanced cross-agent context: biochemistry findings are now injected into pathology and bioinformatics agent prompts for cross-referencing
-- PI resets message history at the start of each round's planning phase; dynamic planning calls accumulate context within the round
-- Round 2+ planning now includes previous round PI summary as strategic overview for dynamic task refinement
-- Literature topics are dynamically refined based on all completed agent results before search
+- **Execution order**: Biochemistry now runs first so its findings inform pathology and bioinformatics agents
+- **Dynamic PI planning**: PI Agent refines each downstream agent's tasks based on already-completed results within the same round, building a coherent chain of thought across agents
+- **Cross-agent context**: Biochemistry findings injected into pathology and bioinformatics prompts; literature topics dynamically refined from all completed agent results
 
 ### v0.10.3 (2026-03-09)
 
-- Added comprehensive analysis log: every bioinformatics agent step (code execution, PI consultation, literature search, cluster annotation, figure generation) is recorded with agent reasoning, timestamps, and results
-- Reports now include a full chronological analysis log timeline with collapsible code, outputs, and inline figures
-- Added scientific interpretation sections for publication figures and tables in reports
+- **Analysis log**: Every bioinformatics step (code, PI consultation, literature search, annotation, figures) recorded with reasoning and timestamps; reports include a full chronological log timeline with inline figures
+- **Figure/table interpretations**: Scientific interpretation narrative added to publication figures and tables in generated reports
 - PI Agent resets message history before synthesis and final summary, reducing token waste
 - Bioinformatics Agent: capped code history at 100 entries to prevent memory growth; figure attempt counter resets between rounds for retry
 - Workflow auto-activates agents when PI assigns tasks but forgets to include them in `agents_for_next_round`

@@ -184,13 +184,14 @@ class OpenAICompatibleClient:
         self.agent_name = agent_name
         self.llm_logger = get_llm_logger()
         
-        # Configure HTTP client with proxy if provided
-        http_client = None
+        # Always create an explicit HTTP client with tuned timeouts and pool settings,
+        # so both proxy and non-proxy scenarios get the same configuration.
+        http_client_kwargs = {
+            "timeout": httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
+        }
         if proxy_url:
-            http_client = httpx.AsyncClient(
-                proxy=proxy_url,
-                timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
-            )
+            http_client_kwargs["proxy"] = proxy_url
+        http_client = httpx.AsyncClient(**http_client_kwargs)
         
         self.client = AsyncOpenAI(
             api_key=api_key,

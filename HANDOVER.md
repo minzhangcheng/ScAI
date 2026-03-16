@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.14.1
-**Last Updated**: 2026-03-15
+**Version**: 0.14.2
+**Last Updated**: 2026-03-16
 
 ## Project Overview
 
@@ -60,7 +60,7 @@ This document is intended for developers and operations personnel, providing tec
 ```
 intesc/                         # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~4600 lines)
+│   ├── main.py                 # FastAPI entry point (~4700 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
@@ -79,8 +79,11 @@ intesc/                         # Code directory
 │   │                           # - Direction validation + resume-without-direction guard
 │   │                           # - HumanInputRequest.clear_queue: abort multi-direction queue mid-run
 │   │                           # - User override sanitization (injection prevention)
+│   │                           # - PI_DECIDE resume: extends max_rounds by 1 when round limit reached
+│   │                           # - Figure path resolution: uses explicit png_path from figure data if present
+│   │                           # - Empty cluster_markers guard in annotation endpoint
 │   │
-│   ├── workflow.py             # LangGraph workflow (~2330 lines)
+│   ├── workflow.py             # LangGraph workflow (~2400 lines)
 │   │                           # - Multi-Agent coordination
 │   │                           # - Parallel execution (Fan-out/Fan-in)
 │   │                           # - Human-in-the-loop (wait_for_user_input)
@@ -102,6 +105,10 @@ intesc/                         # Code directory
 │   │                           # - Innovation phase: user guidance merged as supplementary tasks (not direction override)
 │   │                           # - Direction pop persistence: state saved immediately after queue pop
 │   │                           # - key_markers supplemented to 10 genes from rank_genes_groups before PI review
+│   │                           # - _normalize_tasks(): normalizes dict/str task items returned by LLMs
+│   │                           # - annotate_clusters_callback: returns cached result if annotation already confirmed
+│   │                           # - WebSocket heartbeat: ping every 30s in disconnect listener to survive proxies
+│   │                           # - ws_lock held for entire check-and-send sequence (thread-safe WS send)
 │   │
 │   ├── report_generator.py     # Report generator (~4900 lines)
 │   │                           # - No-sandbox report compilation (v0.7.3 rewrite)
@@ -135,15 +142,26 @@ intesc/                         # Code directory
 │   │   ├── bioinformatics_agent.py  # Bioinformatics Agent (autonomous, figure step budget, pip install, cumulative revision history, analysis log)
 │   │   │                       #   register_score tool: documents score methodology (method, gene list, source, parameters)
 │   │   │                       #   mandatory score workflow: consult PI → compute → register_score
-│   │   │                       #   working directory context in system prompt (absolute paths for figures/tables/h5ad)
+│   │   │                       #   _WORKSPACE_DIR kernel variable: pre-defined pathlib.Path; agent always uses it for file paths
+│   │   │                       #   obs/var names auto-fix: make_unique() called after every execute_code + at data load time
+│   │   │                       #   annotate_clusters must be separate step from code that generates markers
+│   │   │                       #   gene module scoring: use_raw=True, preserve adata.raw before HVG, species-aware gene names
+│   │   │                       #   security restrictions: globals()/exec()/eval()/subprocess blocked in system prompt
+│   │   │                       #   checkpoint round validation: rejects checkpoints with mismatched round_number
+│   │   │                       #   step budget fix: remaining = original_total - step_count (not step_count + original_total)
 │   │   │                       #   message trim: walks cut point backward to avoid orphaning tool_result messages
 │   │   │                       #   cell type dict uses json.dumps for safe serialization (injection prevention)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2, ~785 lines)
 │   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~1060 lines)
 │   │   │                       #   result dict includes search_mode field (actual mode used, including fallback chain)
+│   │   │                       #   annotate_clusters cache: keyed by organism+tissue+top-gene fingerprint, skips redundant DR calls
+│   │   │                       #   empty cluster_markers guard: returns error immediately without calling LLM
+│   │   │                       #   previous literature reports included in annotate_clusters context
 │   │   ├── painter_agent.py    # Painter Agent (graphic abstract + revision support)
+│   │   │                       #   token budget management: estimates input tokens, auto-trims to 30K safe limit for gemini-3-pro-image-preview
 │   │   └── supervisor_agent.py # Supervisor Agent (real-time bioinformatics step monitoring, sampled LLM evaluation, PI escalation, custom system_prompt)
+│   │                           #   _set_llm_context(): called before each LLM call to bind shared client to session+agent
 │   │                           #   per-round narrative with phase/direction headers; publication figures in figure map
 │   │                           #   dynamic report sections: [innovation_N] per direction, [exploration_findings] if multi-phase
 │   │
@@ -166,8 +184,13 @@ intesc/                         # Code directory
 │   │                           # - Data helper methods: get_files_by_section/group, build_experimental_design_summary
 │   │
 │   ├── utils/
-│   │   ├── llm_client.py       # LLM client (~872 lines, OpenRouter + Google DR, precise retry with InternalServerError)
-│   │   ├── sandbox.py          # Jupyter execution environment (~1060 lines, auto PDF, code safety validation, extract_code_from_markdown)
+│   │   ├── llm_client.py       # LLM client (~880 lines, OpenRouter + Google DR, precise retry with InternalServerError)
+│   │   ├── sandbox.py          # Jupyter execution environment (~1110 lines, auto PDF, code safety validation, extract_code_from_markdown)
+│   │   │                       #   _WORKSPACE_DIR (pathlib.Path) pre-defined in kernel; agent uses this variable for all paths
+│   │   │                       #   savefig redirect: Figure.savefig monkey-patched to auto-redirect workspace-root saves → figures/
+│   │   │                       #   numba cache: /tmp/numba_cache_{session_id} per session to prevent cross-session conflicts
+│   │   │                       #   open() write safety check: allows writes referencing _WORKSPACE_DIR/working_dir/figures/tables//tmp
+│   │   │                       #   execute() params: save_to_history=False, skip_safety_check=True for internal/housekeeping calls
 │   │   │                       #   working_dir set to absolute path; kernel init sets os.chdir + creates figures/tables subdirs
 │   │   │                       #   I/O sandbox: intercepts open()/Path.mkdir()/write_text()/write_bytes() to block writes outside session dir
 │   │   │                       #   _kernel_dead flag: tracks failed restart, subsequent execute() calls return error immediately
@@ -1390,6 +1413,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.14.2 | 2026-03-16 | obs/var names auto-fix after every execute (make_unique), _WORKSPACE_DIR kernel variable, savefig redirect (workspace root → figures/), numba cache isolation, open() safety check refined (allows known safe paths), checkpoint round validation, step budget fix on resume, annotate_clusters separate-step requirement, gene scoring guidance (use_raw + species names), security restrictions in prompt, literature annotate_clusters cache + empty guard, painter token budget management, supervisor _set_llm_context(), _normalize_tasks() utility, confirmed annotation cache in workflow, WS heartbeat ping, thread-safe WS send, PI_DECIDE max_rounds extension, figure path resolution, exploration report dialog timing fix, painter model recommendation updated |
 | 0.14.1 | 2026-03-15 | human-input signals workflow (signal_continue on WAITING_INPUT), stale should_continue cleared in initialize_round, current_round_direction set before PI call + cleared on failure, annotation pause respects PAUSED status, multi_dir_completed guard uses len() > 1, exploration report failure notified to frontend |
 | 0.14.0 | 2026-03-15 | register_score tool (ScoreDefinition model, consult PI → compute → register workflow), Jupyter I/O sandbox (intercepts open/mkdir/write_text/write_bytes), kernel dead detection (_kernel_dead flag), working directory context in kernel init (os.chdir + figures/tables subdirs + sc.settings.figdir), annotation dialog: alternative_cell_types + low_confidence_reason + expandable rows + HTML report download, annotation context HTML report endpoint, per-round report structure with phase/direction labels + innovation sections, publication figures in report figure map, thread-safe session cache (_update_session_cache), innovation phase user guidance merging (supplementary, not override), direction pop persistence, message trim orphan prevention, direction validation + resume guard, clear_queue in HumanInputRequest, user override sanitization, literature search_mode tracking |
 | 0.13.4 | 2026-03-13 | Pause/resume deadlock fix (WAITING_INPUT status guard), multi-direction max_rounds guard, retry status:failed field, Round 3+ task fallback, bioinformatics message history cap (80), supervisor sampled LLM evaluation, report_generator dead code removal (~700 lines), pre-existing IndentationError fix, docs update |
@@ -1435,6 +1459,38 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.14.2 (2026-03-16)
+
+- **OBS/VAR Names Auto-Fix After Execute** (`bioinformatics_agent.py`, `sandbox.py`): After every `execute_code` tool call, the agent now runs a housekeeping snippet (via `execute(save_to_history=False, skip_safety_check=True)`) that iterates all globals and calls `obs_names_make_unique()` / `var_names_make_unique()` on every AnnData object. Also applied at data-load time in `_build_data_context()`. Prevents `InvalidIndexError` from duplicate indices after `ad.concat()`, subsetting, or merging.
+- **`_WORKSPACE_DIR` Kernel Variable** (`sandbox.py`): Kernel init now defines `_WORKSPACE_DIR = Path('<workspace>')` as a pre-built pathlib.Path variable. Bioinformatics Agent system prompt instructs to always use this variable for file paths rather than string literals, preventing path resolution errors.
+- **savefig Redirect** (`sandbox.py`): `matplotlib.figure.Figure.savefig` is monkey-patched at kernel startup to auto-redirect saves targeting the workspace root (e.g., `figure.png`) into `figures/` subdirectory. Agent no longer needs to manually manage figure output paths.
+- **Numba Cache Isolation** (`sandbox.py`): Kernel init sets `NUMBA_CACHE_DIR` to `/tmp/numba_cache_{session_id}` to prevent cache collisions between concurrent sessions.
+- **`open()` Write Safety Check Refined** (`sandbox.py`): Static code safety validator now allows `open()` write calls whose lines reference known safe path variables (`_WORKSPACE_DIR`, `working_dir`, `figures`, `tables`, `/tmp`), reducing false positives for legitimate file I/O that the runtime sandbox already enforces.
+- **`execute()` New Parameters** (`sandbox.py`): `execute()` now accepts `save_to_history: bool = True` and `skip_safety_check: bool = False`, enabling internal housekeeping calls that bypass history recording and the static safety validator.
+- **Checkpoint Round Validation** (`bioinformatics_agent.py`): Checkpoint loader now verifies that `checkpoint['round_number']` matches `state.current_round`. Mismatched checkpoints (from a previous round) are rejected, preventing cross-round state contamination on resume.
+- **Fixed Step Budget on Resume** (`bioinformatics_agent.py`): Corrected budget calculation: `max_steps = original_total` (remaining steps = `original_total - step_count`). Previously, `max_steps = step_count + original_total` doubled the effective budget on resume.
+- **`annotate_clusters` Must Follow Code Output** (`bioinformatics_agent.py`): System prompt now explicitly requires the agent to execute and observe marker-extraction code output before calling `annotate_clusters`, not in the same response. Added to both security restrictions and cell type annotation workflow steps.
+- **Gene Module Scoring Guidance** (`bioinformatics_agent.py`): System prompt adds a `GENE MODULE SCORING` section: preserve `adata.raw` before HVG, check gene overlap, use `use_raw=True` for `sc.tl.score_genes`, investigate if overlap < 50%. Companion `SPECIES-AWARE GENE NAMES` section explains mouse (Title case) vs. human (UPPER CASE) naming conventions.
+- **Security Restrictions Block in System Prompt** (`bioinformatics_agent.py`): New `SECURITY RESTRICTIONS` section explicitly lists `globals()`, `exec()`, `eval()`, `subprocess`, and bare-filename `open()` as blocked operations, reducing wasted steps from sandbox rejections.
+- **`round_number` in Checkpoint Data** (`bioinformatics_agent.py`): Checkpoint dict now includes `round_number: state.current_round` so the validator added above can compare it on resume.
+- **Iteration Tracking Reworked** (`bioinformatics_agent.py`): Replaced the `figure_only_iteration` boolean with three flags: `has_substantive_work`, `has_figure_work`, `has_register_score`. This enables finer-grained step-budget decisions.
+- **Literature Agent: `annotate_clusters` Cache** (`literature_agent.py`): In-memory `_annotation_cache` dict keyed by `f"{organism}:{tissue}:{hash(frozenset(top_genes))}"`. Cache hits return the previous result without calling the LLM or Deep Research API.
+- **Literature Agent: Empty Cluster Guard** (`literature_agent.py`): `annotate_clusters()` now returns an error dict immediately when `cluster_markers` is empty, without making any API calls.
+- **Literature Agent: Previous Reports in Context** (`literature_agent.py`): Previous round `LiteratureReport` summaries are now appended to `finding_parts` in `annotate_clusters()`, giving the LLM context to avoid redundant searches.
+- **Painter Agent: Token Budget Management** (`painter_agent.py`): Module-level constants `_TOTAL_CONTEXT_TOKENS = 65_536`, `_MAX_OUTPUT_TOKENS = 32_800`, `_SAFE_INPUT_TOKEN_LIMIT = 30_000` define the budget for `google/gemini-3-pro-image-preview`. `_estimate_tokens(text)` provides a rough estimate (len/3). Both `generate()` and `revise()` paths now estimate input tokens and truncate prompts/summaries when the limit is exceeded, with logged warnings.
+- **Supervisor Agent: `_set_llm_context()`** (`supervisor_agent.py`): New helper sets `llm_client.set_context(session_id, "supervisor")` before each LLM call, ensuring the shared client is bound to the correct session and agent for logging.
+- **`_normalize_tasks()` Utility** (`workflow.py`): New module-level function converts task items to strings. Handles plain strings, dicts with `task`/`description`/`topic`/`name` keys, and appends `rationale`/`recommended_methods`/`target_readouts` as inline annotations. Applied consistently across all task list usages in `workflow.py`.
+- **`annotate_clusters_callback`: Confirmed Annotation Cache** (`workflow.py`): When `state.annotation_state.confirmed` is True, returns cached annotations from `cluster_annotations` immediately without invoking the literature agent pipeline.
+- **`annotate_clusters_callback`: Empty Cluster Guard** (`workflow.py`): Returns an error dict immediately when `cluster_markers` is empty, with a message directing the agent to run `rank_genes_groups` first.
+- **WebSocket Heartbeat** (`main.py`): `_listen_for_disconnect()` now sends a `{"type": "ping"}` message every 30 seconds (on `asyncio.TimeoutError`) to keep connections alive through proxies. Frontend silently ignores `ping` messages.
+- **Thread-Safe WebSocket Send** (`main.py`): Both `message_callback` and `_send_ws_direct()` now acquire `ws_lock` for the entire check-and-send sequence, preventing concurrent coroutines from racing on a closing connection.
+- **PI_DECIDE Resume: `max_rounds` Extension** (`main.py`): When `POST /api/session/{id}/resume` is called while the session is in `WAITING_INPUT`, if the user supplied a `[PI_DECIDE]` signal and `current_round >= max_rounds`, `max_rounds` is incremented by 1 before re-entering the workflow.
+- **Figure Path Resolution** (`main.py`): Figure lookup now checks `fig_data.get('png_path', '')` first (explicit path stored when generating figures), falling back to workspace path conventions. Ensures figures saved with non-standard names are still served correctly.
+- **Empty `cluster_markers` Guard in Annotation Endpoint** (`main.py`): The `/annotate` endpoint now returns HTTP 400 with a descriptive error when `cluster_markers` is empty, matching the guard added in `workflow.py`.
+- **Exploration Report Dialog Timing Fix** (`AnalysisPanel.tsx`): Dialog suppression condition changed from `analysisPhase === 'innovation'` to `(currentRound ?? 0) > 1`. The backend sets `analysisPhase` to `'innovation'` at Phase 1 completion (before direction selection), which was incorrectly blocking the dialog before the user acted.
+- **Painter Model Recommendation Updated** (`PromptsPanel.tsx`): Model selector tooltip for the Painter Agent now recommends `google/gemini-3-pro-image-preview` and `google/gemini-3.1-flash-image-preview` as models with image generation capability.
+- **WebSocket `ping` Silently Ignored** (`useApi.ts`): Frontend WebSocket message handler now returns early on `data.type === 'ping'` without logging or state updates.
 
 #### v0.14.1 (2026-03-15)
 

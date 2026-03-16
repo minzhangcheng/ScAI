@@ -371,6 +371,8 @@ class BioinformaticsAgent(BaseAgent):
                     var_name_counts[base_name] = var_name_counts.get(base_name, 0) + 1
                     var_name = f"{base_name}_{var_name_counts[base_name]}" if var_name_counts[base_name] > 1 else base_name
                     data_parts.append(f"    Load: adata_{var_name} = sc.read_h5ad('{f.file_path}')")
+                    data_parts.append(f"    adata_{var_name}.obs_names_make_unique()")
+                    data_parts.append(f"    adata_{var_name}.var_names_make_unique()")
                 elif f.data_type == "loom":
                     data_parts.append(f"    Loom file for RNA velocity analysis")
         else:
@@ -461,6 +463,13 @@ class BioinformaticsAgent(BaseAgent):
                     if not isinstance(figures, list):
                         validation_errors.append(f"figures invalid: expected list")
 
+                    # Check round_number matches current round
+                    cp_round = checkpoint.get('round_number')
+                    if cp_round is not None and cp_round != state.current_round:
+                        validation_errors.append(
+                            f"round_number mismatch: checkpoint={cp_round}, current={state.current_round}"
+                        )
+
                     if not validation_errors:
                         checkpoint_valid = True
                         logger.info(f"[Bioinformatics] Resuming from checkpoint at step {checkpoint['step_number']}")
@@ -548,6 +557,12 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
      for cond in conditions:
          ct = ct.str.replace(f'_{{cond}}', '', regex=False)
 
+SECURITY RESTRICTIONS:
+- Do NOT use globals(), exec(), eval(), or subprocess — these are blocked by the sandbox for security and will cause repeated errors.
+- Do NOT write files to disk using open(..., 'w') or similar — these are blocked by the sandbox. Store all intermediate data in adata.uns, adata.obs, adata.var, or Python variables.
+- Do NOT call annotate_clusters in the same response as execute_code that generates markers.
+  You must FIRST execute code and see the printed output, THEN call annotate_clusters in a separate step.
+
 WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
 - **REUSE EXISTING RESULTS (CRITICAL for chat follow-up analyses)**:
@@ -566,6 +581,13 @@ WORKFLOW GUIDELINES:
     print(f"obsm keys: {{list(adata.obsm.keys())}}")
     print(f"uns keys: {{list(adata.uns.keys())}}")
     to see what's already available, then SKIP to the new analysis directly.
+  * **OBS_NAMES / VAR_NAMES UNIQUENESS (CRITICAL):**
+    After ANY of these operations, you MUST call adata.obs_names_make_unique() and adata.var_names_make_unique():
+    - ad.concat() or anndata.concat()
+    - Subsetting: adata[mask], adata[adata.obs['col'] == val]
+    - Merging or joining AnnData objects
+    Failure causes InvalidIndexError and corrupts all downstream analysis.
+    Pattern: adata = ad.concat([a, b]); adata.obs_names_make_unique(); adata.var_names_make_unique()
   * Only REDO a step if the user EXPLICITLY requests it or if a prerequisite has changed
 - **UMAP EXECUTION RULES (CRITICAL)**:
   * ALWAYS call sc.pp.neighbors() before sc.tl.umap() — verify with `assert adata.obsp.get('connectivities') is not None`
@@ -601,6 +623,21 @@ When you need to compute ANY score (gene signature, pathway enrichment, TF activ
 3. IMMEDIATELY after, call register_score to record the methodology
 This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrichr, decoupleR, custom scoring functions.
 
+GENE MODULE SCORING — USE FULL GENE SET (CRITICAL):
+  sc.tl.score_genes() on HVG-filtered data will miss most genes. Always:
+  1. Preserve raw before HVG filtering: adata.raw = adata.copy()  (do this ONCE, right after normalization)
+  2. Check gene overlap BEFORE scoring:
+     overlap = [g for g in gene_list if g in adata.raw.var_names]
+     print(f"Gene overlap: {{len(overlap)}}/{{len(gene_list)}}")
+  3. Score with use_raw=True: sc.tl.score_genes(adata, gene_list, score_name='...', use_raw=True)
+  4. If overlap < 50% of gene_list, investigate: wrong organism? wrong gene naming convention?
+
+SPECIES-AWARE GENE NAMES:
+  Mouse genes: Title case (Cd79a, Ptprc, Gapdh)
+  Human genes: UPPER CASE (CD79A, PTPRC, GAPDH)
+  Check convention: print(adata.var_names[:10])
+  Convert human→mouse: [g[0].upper() + g[1:].lower() for g in gene_list]
+
 DECOUPLER API (CRITICAL - use current API only):
 - TF/pathway activity: `dc.run_ulm(adata, net=net, source='source', target='target', weight='weight')`
 - DO NOT use deprecated methods: dc.run_mlm, dc.run_viper, dc.run_aucell (these will throw errors)
@@ -610,28 +647,36 @@ DECOUPLER API (CRITICAL - use current API only):
 
 CELL TYPE ANNOTATION WORKFLOW:
 1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')
-2. Extract top 10-20 marker genes per cluster into a dict, e.g.:
+2. Extract top 10-20 marker genes per cluster into a dict AND PRINT IT:
    markers = {{}}
    for cluster in adata.obs['leiden'].cat.categories:
        genes = sc.get.rank_genes_groups_df(adata, group=cluster).head(15)['names'].tolist()
        markers[cluster] = genes
-3. Determine tissue and organism from the research context or data metadata
-4. Call annotate_clusters(cluster_markers=markers, tissue="kidney", organism="mouse")
-5. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')
-6. Generate UMAP colored by cell_type
+   import json
+   print(json.dumps(markers, indent=2))
+3. IMPORTANT: You MUST see the printed markers output BEFORE calling annotate_clusters.
+   Do NOT call annotate_clusters in the same step as the code that generates markers.
+4. Determine tissue and organism from the research context or data metadata
+5. Call annotate_clusters(cluster_markers=markers, tissue="kidney", organism="mouse")
+   where markers is the LITERAL dict content you saw in the print output.
+6. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')
+7. Generate UMAP colored by cell_type
 
 {self._build_data_context(state)}
 
 === Working Directory ===
 Your Jupyter kernel is running in: {self.sandbox.working_dir}
-All output files MUST be saved within this directory or its subdirectories.
-- Figures: saved automatically by the system to {self.sandbox.working_dir}/figures/
-- Tables/CSV results: save to {self.sandbox.working_dir}/tables/  (create if needed)
-- H5AD files: save to {self.sandbox.working_dir}/
-NEVER use absolute paths outside the working directory (e.g., /workspace/results/) for saving files.
-When saving CSV/Excel files, use:
-  Path('{self.sandbox.working_dir}/tables').mkdir(exist_ok=True)
-  df.to_csv('{self.sandbox.working_dir}/tables/filename.csv')
+A variable `_WORKSPACE_DIR` (pathlib.Path) is pre-defined in the kernel and points to this directory.
+All output files MUST be saved using `_WORKSPACE_DIR` as the root. NEVER use relative paths like './' or '../'.
+- Figures: saved automatically by the system — do NOT call plt.savefig() yourself.
+- Tables/CSV results: save to `_WORKSPACE_DIR / 'tables'`
+- H5AD files: save to `_WORKSPACE_DIR`
+When writing files, ALWAYS use the `_WORKSPACE_DIR` variable for the path:
+  (_WORKSPACE_DIR / 'tables').mkdir(exist_ok=True)
+  df.to_csv(_WORKSPACE_DIR / 'tables' / 'filename.csv')
+  adata.write(_WORKSPACE_DIR / 'output.h5ad')
+Do NOT use string literals for paths (e.g., './output.csv', '/workspace/results/').
+Do NOT call open('filename', 'w') with bare filenames — use open(_WORKSPACE_DIR / 'tables' / 'filename', 'w').
 
 {self._build_notebook_context()}
 
@@ -682,10 +727,11 @@ Before running sc.tl.pca() or any dimensionality reduction:
             all_findings = checkpoint.get('findings', [])
             all_figures = checkpoint.get('figures', [])
             step_count = checkpoint.get('step_number', 0)
-            # Give resumed agent its remaining budget based on original total_steps cap
-            # Use the larger of (caller's max_steps, checkpoint's total_steps) to avoid shrinking budget
+            # Give resumed agent its remaining budget based on original total_steps cap.
+            # Use the larger of (caller's max_steps, checkpoint's total_steps) to avoid shrinking budget.
+            # max_steps stays at original_total so the agent has (original_total - step_count) steps left.
             original_total = max(max_steps, checkpoint.get('total_steps', max_steps))
-            max_steps = step_count + original_total
+            max_steps = original_total
             self.analysis_context = checkpoint.get('analysis_context', {})
             analysis_log = [AnalysisStep(**s) for s in checkpoint.get('analysis_log', [])]
             restored_code_history = checkpoint.get('code_history', [])
@@ -722,6 +768,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
             if checkpoint_mgr.should_checkpoint(step_count):
                 checkpoint_data = {
                     'session_id': state.id,
+                    'round_number': state.current_round,
                     'step_number': step_count,
                     'total_steps': max_steps,
                     'messages': messages,
@@ -797,8 +844,10 @@ Before running sc.tl.pca() or any dimensionality reduction:
                 })
                 continue
             
-            # Track whether this iteration only contains figure generation (excluded from step count)
-            figure_only_iteration = True
+            # Track what kind of work this iteration contains for step budget decisions
+            has_substantive_work = False   # execute_code/consult_pi/search_literature/annotate_clusters/report_findings
+            has_figure_work = False        # generate_publication_figure
+            has_register_score = False     # register_score
 
             # Add assistant message ONCE before processing tool calls.
             # Using raw_assistant_message preserves provider-specific fields such as
@@ -826,7 +875,7 @@ Before running sc.tl.pca() or any dimensionality reduction:
                 args = tool_call.arguments
 
                 if tool_name == "execute_code":
-                    figure_only_iteration = False
+                    has_substantive_work = True
                     code = args.get("code", "")
                     description = args.get("description", "")
                     step_type = args.get("step_type", "technical")
@@ -849,7 +898,6 @@ Before running sc.tl.pca() or any dimensionality reduction:
                             code=code, code_error=error_msg,
                             code_description=description, code_step_type=step_type,
                         ))
-                        agent_reasoning = None
                         continue
 
                     await self._notify("status", f"[{step_type.upper()}] {description}")
@@ -914,7 +962,18 @@ plt.close('all')
 '''
 
                     result = await self.sandbox.execute(wrapped_code)
-                    
+
+                    # Auto-fix: ensure obs/var names are unique after every execution
+                    await self.sandbox.execute(
+                        "import anndata as _ad\n"
+                        "for _name, _obj in list(globals().items()):\n"
+                        "    if isinstance(_obj, _ad.AnnData):\n"
+                        "        _obj.obs_names_make_unique()\n"
+                        "        _obj.var_names_make_unique()\n"
+                        "del _ad\n",
+                        save_to_history=False, skip_safety_check=True
+                    )
+
                     code_exec = CodeExecution(
                         code=code,
                         output=result.output,
@@ -937,8 +996,6 @@ plt.close('all')
                         code_description=description,
                         code_step_type=step_type, saved_figure_filenames=_saved_figs,
                     ))
-                    agent_reasoning = None  # Only record reasoning for first tool call in this turn
-
                     if result.output:
                         await self._notify("result", result.output[:2000])
                     for fig in result.figures:
@@ -963,7 +1020,7 @@ plt.close('all')
                     })
 
                 elif tool_name == "consult_pi":
-                    figure_only_iteration = False
+                    has_substantive_work = True
                     question = args.get("question", "")
                     context = args.get("context", "")
                     options = args.get("options", [])
@@ -995,10 +1052,9 @@ plt.close('all')
                         pi_question=question, pi_context=context[:1000],
                         pi_options=options or [], pi_response=(pi_response or "")[:2000],
                     ))
-                    agent_reasoning = None
 
                 elif tool_name == "search_literature":
-                    figure_only_iteration = False
+                    has_substantive_work = True
                     topic = args.get("topic", "")
                     
                     await self._notify("status", f"Searching literature: {topic[:50]}...")
@@ -1022,15 +1078,30 @@ plt.close('all')
                         agent_reasoning=agent_reasoning,
                         literature_topic=topic, literature_result=(lit_result or "")[:2000],
                     ))
-                    agent_reasoning = None
 
                 elif tool_name == "annotate_clusters":
-                    figure_only_iteration = False
+                    has_substantive_work = True
                     cluster_markers = args.get("cluster_markers", {})
                     tissue = args.get("tissue", "")
                     organism = args.get("organism", "mouse")
 
                     n_clusters = len(cluster_markers)
+
+                    if n_clusters == 0:
+                        tool_result = (
+                            "Error: cluster_markers is empty. You must first run "
+                            "sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon') "
+                            "and extract top marker genes per cluster into a dict before "
+                            "calling annotate_clusters. Please execute the marker "
+                            "extraction code first."
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_result
+                        })
+                        continue
+
                     await self._notify("status", f"Annotating {n_clusters} clusters using literature evidence ({organism} {tissue})...")
 
                     annotation_result: Dict[str, Any] = {}
@@ -1108,10 +1179,9 @@ plt.close('all')
                         cluster_markers_summary=markers_summary, annotation_tissue=tissue,
                         annotation_organism=organism, annotation_result_summary=(tool_result or "")[:2000],
                     ))
-                    agent_reasoning = None
 
                 elif tool_name == "report_findings":
-                    figure_only_iteration = False
+                    has_substantive_work = True
                     findings = args.get("findings", [])
                     summary = args.get("summary", "")
                     suggestions = args.get("suggestions", [])
@@ -1137,13 +1207,12 @@ plt.close('all')
                         findings=findings, findings_summary=summary,
                         findings_suggestions=suggestions or [],
                     ))
-                    agent_reasoning = None
 
                     completed = True
                     break
 
                 elif tool_name == "register_score":
-                    figure_only_iteration = False
+                    has_register_score = True
                     from ..models.schemas import ScoreDefinition
                     score_def = ScoreDefinition(
                         score_name=args.get("score_name", ""),
@@ -1178,11 +1247,9 @@ plt.close('all')
                         agent_reasoning=agent_reasoning,
                         code_description=f"Score: {score_def.score_name} via {score_def.method}",
                     ))
-                    agent_reasoning = None
-                    # Don't consume a step for metadata registration
-                    step_count -= 1
 
                 elif tool_name == "generate_publication_figure":
+                    has_figure_work = True
                     code = args.get("code", "")
                     figure_name = args.get("figure_name", f"figure_{len(state.publication_figures) + 1}")
                     description = args.get("description", "")
@@ -1235,10 +1302,12 @@ plt.close('all')
                         pub_figure_type=figure_type, pub_figure_code=code,
                         pub_figure_result=(tool_result or "")[:2000],
                     ))
-                    agent_reasoning = None
+
+            # Clear reasoning after all tool calls in this iteration are processed
+            agent_reasoning = None
 
             # Reset text-only counter when a substantive tool call was made
-            if not figure_only_iteration and response.has_tool_calls:
+            if has_substantive_work and response.has_tool_calls:
                 text_response_count = 0
 
             # === SUPERVISOR monitoring (every step) ===
@@ -1257,14 +1326,19 @@ plt.close('all')
                     logger.warning(f"[Bioinformatics] Supervisor callback error: {e}")
             # === END SUPERVISOR ===
 
-            # Figure-only iterations don't count toward analysis step budget (with safety cap)
-            if figure_only_iteration and response.has_tool_calls:
-                figure_iteration_count += 1
-                if figure_iteration_count <= MAX_FIGURE_ITERATIONS:
+            # Metadata-only iterations (no substantive work) don't count toward step budget.
+            # When both figure and register_score are present, use the figure budget cap.
+            if not has_substantive_work and response.has_tool_calls:
+                if has_figure_work:
+                    figure_iteration_count += 1
+                    if figure_iteration_count <= MAX_FIGURE_ITERATIONS:
+                        step_count -= 1
+                        logger.debug(f"[Bioinformatics] Metadata-only step excluded ({figure_iteration_count}/{MAX_FIGURE_ITERATIONS}), step_count={step_count}")
+                    else:
+                        logger.warning(f"[Bioinformatics] Figure iteration budget ({MAX_FIGURE_ITERATIONS}) exhausted, accepting last version and moving on")
+                elif has_register_score:
                     step_count -= 1
-                    logger.debug(f"[Bioinformatics] Figure-only step excluded ({figure_iteration_count}/{MAX_FIGURE_ITERATIONS}), step_count={step_count}")
-                else:
-                    logger.warning(f"[Bioinformatics] Figure iteration budget ({MAX_FIGURE_ITERATIONS}) exhausted, accepting last version and moving on")
+                    logger.debug(f"[Bioinformatics] register_score-only step excluded, step_count={step_count}")
 
         if llm_error:
             status = "error"
@@ -1312,6 +1386,23 @@ plt.close('all')
         self.code_history = []
         self.analysis_context = {}
         self.last_result = None
+
+        # For round 2+, inject previous round findings into instruction so the agent
+        # knows what was already completed (Jupyter kernel retains variables but the
+        # agent's code_history is cleared)
+        if state.current_round > 1 and state.round_results:
+            prev_findings = []
+            for prev_round in state.round_results:
+                for f in prev_round.bioinformatics_findings[:5]:
+                    prev_findings.append(str(f) if not isinstance(f, str) else f)
+            if prev_findings:
+                prev_context = "; ".join(prev_findings)
+                instruction = (
+                    f"[IMPORTANT — Previous round completed these analyses: {prev_context}. "
+                    f"The Jupyter kernel retains all variables from previous rounds. "
+                    f"Do NOT repeat QC, clustering, or annotation. Build upon existing results.]\n\n"
+                    + instruction
+                )
 
         if not state.has_sequencing_data():
             return {

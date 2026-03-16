@@ -1140,7 +1140,7 @@ Note: Extract biochemistry values from user message if they mention specific num
                 prev_parts.append(
                     f"### Round {prev_round.round_number}\n"
                     f"**Summary**: {prev_round.pi_summary[:500] if prev_round.pi_summary else 'N/A'}\n"
-                    f"**Key findings**: {'; '.join(all_findings) if all_findings else 'None'}\n"
+                    f"**Key findings**: {'; '.join(str(f) if not isinstance(f, str) else f for f in all_findings) if all_findings else 'None'}\n"
                     f"**Tasks assigned**: {'; '.join(prev_round.next_steps[:8]) if prev_round.next_steps else 'None'}"
                 )
             previous_context = "\n\n## Previous Rounds Summary\n" + "\n\n".join(prev_parts)
@@ -1294,10 +1294,10 @@ INNOVATION PHASE — focused synthesis:
         for result in state.round_results:
             rounds_summary.append(f"""
 ### Round {result.round_number}
-**Pathology findings**: {', '.join(result.pathology_findings) if result.pathology_findings else 'None'}
-**Bioinformatics findings**: {', '.join(result.bioinformatics_findings) if result.bioinformatics_findings else 'None'}
-**Biochemistry findings**: {', '.join(result.biochemistry_findings) if result.biochemistry_findings else 'None'}
-**Literature findings**: {', '.join(result.literature_findings) if result.literature_findings else 'None'}
+**Pathology findings**: {', '.join(str(f) for f in result.pathology_findings) if result.pathology_findings else 'None'}
+**Bioinformatics findings**: {', '.join(str(f) for f in result.bioinformatics_findings) if result.bioinformatics_findings else 'None'}
+**Biochemistry findings**: {', '.join(str(f) for f in result.biochemistry_findings) if result.biochemistry_findings else 'None'}
+**Literature findings**: {', '.join(str(f) for f in result.literature_findings) if result.literature_findings else 'None'}
 **PI Summary**: {result.pi_summary}
 """)
         
@@ -1705,7 +1705,7 @@ Focus on:
 3. Key findings related to research objectives
 4. Questions requiring further verification or analysis
 
-Reply in the same language as the research objective.
+Respond in English.
 """
 
         summary = await self.chat(prompt, temperature=0.3)
@@ -1828,6 +1828,7 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 
         # Use vision capability to analyze the figure
         try:
+            self._set_llm_context()
             response = await self.llm_client.chat_with_vision(
                 model=self.model,
                 text_prompt=prompt,
@@ -1953,6 +1954,7 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
 """
 
         try:
+            self._set_llm_context()
             response = await self.llm_client.chat_with_vision(
                 model=self.model,
                 text_prompt=prompt,
@@ -2054,6 +2056,7 @@ Consider:
 """
 
         try:
+            self._set_llm_context()
             response = await self.llm_client.chat_with_vision(
                 model=self.model,
                 text_prompt=prompt,
@@ -2163,7 +2166,7 @@ Generate a comprehensive research report in Markdown format suitable for publica
 **Important:**
 - Use academic writing style
 - Include figure/table references naturally in the text
-- Write in the same language as the research objective
+- Write in English
 - Focus on biological/clinical significance, not just technical details
 """
 
@@ -2227,6 +2230,7 @@ Example: ["umap_cell_types", "cell_type_proportions", "volcano_hepatocytes_dko_v
 """
 
         try:
+            self._set_llm_context()
             response = await self.llm_client.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
@@ -2282,7 +2286,10 @@ Example: ["umap_cell_types", "cell_type_proportions", "volcano_hepatocytes_dko_v
 {state.final_summary[:1500] if state.final_summary else "Summary not yet generated"}
 
 **Task:**
-Write a concise summary (100-150 words) that captures the essence of this research for a graphic abstract.
+Write a concise summary (100-150 words, STRICTLY under 200 words) that captures the essence of this research for a graphic abstract.
+
+IMPORTANT: The downstream image generation model has a 30K token input limit.
+Keep your summary brief and focused — long summaries will be truncated and lose important context.
 
 The summary should:
 1. State the main research question or hypothesis

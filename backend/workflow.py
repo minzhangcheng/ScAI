@@ -42,6 +42,40 @@ from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR, get_session_report
 from .report_generator import DetailedReportGenerator, compress_image_to_base64
 
 
+def _normalize_tasks(tasks: list) -> List[str]:
+    """Convert task items to strings — LLMs sometimes return dicts instead of plain strings."""
+    result = []
+    for t in tasks:
+        if isinstance(t, str):
+            result.append(t)
+        elif isinstance(t, dict):
+            parts = []
+            for key in ("task", "description", "topic", "name"):
+                if key in t:
+                    parts.append(str(t[key]))
+                    break
+            if not parts:
+                parts.append(str(t))
+            if "rationale" in t:
+                parts.append(f"(Rationale: {t['rationale']})")
+            if "recommended_methods" in t and t["recommended_methods"]:
+                methods = t["recommended_methods"]
+                if isinstance(methods, list):
+                    parts.append(f"[Methods: {'; '.join(str(m) for m in methods)}]")
+                else:
+                    parts.append(f"[Methods: {methods}]")
+            if "target_readouts" in t and t["target_readouts"]:
+                readouts = t["target_readouts"]
+                if isinstance(readouts, list):
+                    parts.append(f"[Readouts: {'; '.join(str(r) for r in readouts)}]")
+                else:
+                    parts.append(f"[Readouts: {readouts}]")
+            result.append(" ".join(parts))
+        else:
+            result.append(str(t))
+    return result
+
+
 # Mapping from node names to result keys
 NODE_TO_RESULT_KEY = {
     "pathology_analysis": "pathology_result",
@@ -317,6 +351,7 @@ class SingleCellAnalysisWorkflow:
             model=painter_model,
             config=AgentConfig(temperature=self.temperatures.get('painter', 0.7))
         )
+        self.painter_agent.set_session(self.session_id)
 
         # Initialize Supervisor Agent for real-time analysis monitoring
         supervisor_model = custom_models.get('supervisor', self.config.models.supervisor_model)
@@ -551,13 +586,41 @@ Be specific and actionable in your response."""
         2. Blocks execution until the user confirms annotations via frontend
         """
         n_clusters = len(cluster_markers)
+        if n_clusters == 0:
+            logger.warning(f"[{self.session_id}] annotate_clusters called with empty cluster_markers")
+            return {
+                "status": "error",
+                "annotations": {},
+                "error": "cluster_markers is empty. Run rank_genes_groups and extract markers first."
+            }
+
+        state = self._current_analysis_state if self._current_analysis_state else AnalysisState()
+
+        # Early exit: if annotations were already confirmed, return cached results
+        # without re-running the expensive deep research + LLM annotation pipeline
+        if state.annotation_state and state.annotation_state.confirmed:
+            logger.info(f"[{self.session_id}] Annotation already confirmed, returning cached annotations")
+            cached_annotations = {}
+            for ca in state.annotation_state.cluster_annotations:
+                cached_annotations[ca.cluster_id] = {
+                    "cell_type": ca.user_override or ca.cell_type,
+                    "subtypes": ca.subtypes,
+                    "key_markers": ca.key_markers,
+                    "confidence": ca.confidence,
+                    "evidence": ca.evidence,
+                    "alternative_cell_types": ca.alternative_cell_types,
+                    "low_confidence_reason": ca.low_confidence_reason,
+                }
+            return {
+                "annotations": cached_annotations,
+                "tissue_context": state.annotation_state.tissue_context or "",
+            }
+
         await self._send_message(
             "status",
             f"Literature-based cluster annotation: {n_clusters} clusters in {organism} {tissue}...",
             AgentType.LITERATURE
         )
-
-        state = self._current_analysis_state if self._current_analysis_state else AnalysisState()
 
         try:
             result = await self.literature_agent.annotate_clusters(
@@ -821,7 +884,9 @@ Be specific and actionable in your response."""
         for prev_round in analysis_state.round_results:
             findings = getattr(prev_round, findings_key, [])
             if findings:
-                parts.append(f"Round {prev_round.round_number}: " + "; ".join(findings[:5]))
+                parts.append(f"Round {prev_round.round_number}: " + "; ".join(
+                    str(f) if not isinstance(f, str) else f for f in findings[:5]
+                ))
 
         if not parts:
             return ""
@@ -1228,7 +1293,7 @@ Be specific and actionable in your response."""
                 extra = adjusted_instructions.get(key, [])
                 if extra:
                     existing = instructions.get(key, [])
-                    instructions[key] = existing + [f"[User guidance] {t}" for t in extra]
+                    instructions[key] = _normalize_tasks(existing) + [f"[User guidance] {t}" for t in _normalize_tasks(extra)]
             logger.info(f"[{self.session_id}] Merged adjusted_instructions into innovation planning")
 
         await self._send_message(
@@ -1298,7 +1363,7 @@ Be specific and actionable in your response."""
                 )
 
         # Enrich instruction with previous findings for round 2+
-        task_instruction = "\n".join(tasks)
+        task_instruction = "\n".join(_normalize_tasks(tasks))
         previous_context = self._build_previous_findings_context(analysis_state, "pathology")
         if previous_context:
             task_instruction += previous_context
@@ -1466,7 +1531,7 @@ Research context: {analysis_state.initial_instruction}
 {phase_instruction}
 
 PI's analysis goals for this round:
-{chr(10).join(f"- {task}" for task in bioinf_tasks) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
+{chr(10).join(f"- {task}" for task in _normalize_tasks(bioinf_tasks)) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
 {human_guidance}
 {pathology_context}
 {biochemistry_context}
@@ -1602,7 +1667,7 @@ Report key findings when you complete each major analysis phase."""
         await self._send_message("status", "Biochemistry analysis in progress...", AgentType.BIOCHEMISTRY)
         
         # Enrich instruction with previous findings for round 2+
-        task_instruction = "\n".join(tasks) if tasks else "Analyze existing biochemistry indicators"
+        task_instruction = "\n".join(_normalize_tasks(tasks)) if tasks else "Analyze existing biochemistry indicators"
         previous_context = self._build_previous_findings_context(analysis_state, "biochemistry")
         if previous_context:
             task_instruction += previous_context
@@ -1649,7 +1714,7 @@ Report key findings when you complete each major analysis phase."""
         analysis_state = state["analysis_state"]
         instructions = state["pi_instructions"]
 
-        topics = instructions.get("literature_topics", [])
+        topics = _normalize_tasks(instructions.get("literature_topics", []))
         logger.info(f"[{self.session_id}] Starting literature research with topics: {topics}")
 
         # Dynamic PI planning: refine literature topics based on all completed results
@@ -2095,19 +2160,19 @@ Return ONLY the JSON array, nothing else."""
         # If user provided real input (text or files) on the last round, extend max_rounds to allow one more
         has_real_text = (
             analysis_state.pending_human_input
-            and analysis_state.pending_human_input.strip() not in ('', '[CONTINUE]')
+            and analysis_state.pending_human_input.strip() not in ('', '[CONTINUE]', '[PI_DECIDE]')
         )
         has_uploaded_files = bool(analysis_state.pending_uploaded_files)
         max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
         if (has_real_text or has_uploaded_files) and analysis_state.current_round >= max_rounds:
             # Don't extend if multi-direction mode has completed all directions
-            # (queue empty + multiple directions were selected → correlation analysis already done)
-            # Use len() > 1 to distinguish multi-direction from single-direction mode
+            # AND the user didn't provide real new input/files (only synthetic signals).
+            # If the user explicitly typed instructions or uploaded files, honor their intent.
             multi_dir_completed = (
                 not analysis_state.directions_queue
                 and len(analysis_state.user_chosen_directions) > 1
             )
-            if multi_dir_completed:
+            if multi_dir_completed and not has_real_text:
                 logger.info(f"[{self.session_id}] Multi-direction completed, not extending max_rounds")
             else:
                 analysis_state.max_rounds = analysis_state.current_round + 1
@@ -2283,6 +2348,7 @@ Return ONLY the JSON array, nothing else."""
                         "description": "",
                         "figure_type": wf["type"],
                         "png_base64": b64,
+                        "png_path": wf["path"],
                         "pdf_path": wf["pdf_path"],
                         "review_status": "approved",
                         "revision_count": 0
@@ -2543,7 +2609,8 @@ Return ONLY the JSON array, nothing else."""
                     bio_model=bio_model,
                     output_dir=output_dir,
                     workspace_dir=workspace_dir,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    session_id=self.session_id
                 )
                 report = await generator.generate_report(analysis_state)
 
