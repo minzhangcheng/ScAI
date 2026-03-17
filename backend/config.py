@@ -11,12 +11,12 @@ from datetime import datetime
 
 
 # Data directories - stored outside the code directory for better separation
-# All data is stored in ../intesc_data/ relative to the backend directory
-# Can be overridden with INTESC_DATA_DIR environment variable
+# All data is stored in ../data/ relative to the backend directory
+# Can be overridden with SCAI_DATA_DIR environment variable
 _BACKEND_DIR = Path(__file__).parent
 DATA_BASE_DIR = Path(os.environ.get(
-    'INTESC_DATA_DIR',
-    str((_BACKEND_DIR.parent.parent / "intesc_data").resolve())
+    'SCAI_DATA_DIR',
+    str((_BACKEND_DIR.parent.parent / "data").resolve())
 ))
 
 # Create data directory structure

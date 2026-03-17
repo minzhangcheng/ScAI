@@ -2,7 +2,7 @@ import { createPortal } from 'react-dom'
 import { AlertTriangle, FlaskConical } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 
-const DISCLAIMER_KEY = 'intesc_disclaimer_accepted'
+const DISCLAIMER_KEY = 'scai_disclaimer_accepted'
 
 export function hasAcceptedDisclaimer(): boolean {
   return localStorage.getItem(DISCLAIMER_KEY) === '1'
@@ -29,11 +29,11 @@ export function DisclaimerDialog({ onAccept }: DisclaimerDialogProps) {
           <div className="flex items-center gap-3">
             <FlaskConical className="w-7 h-7 text-white shrink-0" />
             <div>
-              <h1 className="text-lg font-bold text-white">InteSc</h1>
+              <h1 className="text-lg font-bold text-white">ScAI</h1>
               <p className="text-sm text-violet-200">
                 {zh
-                  ? '整合与智能单细胞分析'
-                  : 'Integrated & Intelligent Single Cell Analysis'}
+                  ? '单细胞测序AI分析'
+                  : 'Single Cell Sequencing Analysis Driven by AI'}
               </p>
             </div>
           </div>
@@ -43,8 +43,8 @@ export function DisclaimerDialog({ onAccept }: DisclaimerDialogProps) {
         <div className="px-6 py-5 space-y-4">
           <p className="text-slate-700 leading-relaxed">
             {zh
-              ? 'InteSc 是一个由人工智能驱动的单细胞测序数据分析平台，集成了多种 AI 智能体，能够自动完成数据处理、分析、可视化与报告生成等任务。'
-              : 'InteSc is an AI-driven single-cell sequencing analysis platform that integrates multiple AI agents to automate data processing, analysis, visualization, and report generation.'}
+              ? 'ScAI 是一个由人工智能驱动的单细胞测序数据分析平台，集成了多种 AI 智能体，能够自动完成数据处理、分析、可视化与报告生成等任务。'
+              : 'ScAI is an AI-driven single-cell sequencing analysis platform that integrates multiple AI agents to automate data processing, analysis, visualization, and report generation.'}
           </p>
 
           <div className="flex gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">

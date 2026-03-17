@@ -467,7 +467,7 @@ export const useAppStore = create<AppState>()(
       setOpenSessionBrowserCallback: (callback) => set({ openSessionBrowser: callback }),
     }),
     {
-      name: 'intesc-storage',
+      name: 'scai-storage',
       // Validate critical fields on hydration to prevent crashes from corrupted/outdated localStorage
       merge: (persistedState: unknown, currentState) => {
         const ps = (persistedState && typeof persistedState === 'object') ? persistedState as Record<string, any> : {}

@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 
 # FastAPI app
 app = FastAPI(
-    title="InteSc - Integrated and Intelligent Single Cell Sequencing Analysis",
+    title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
     version="1.0.0"
 )
@@ -477,12 +477,12 @@ class GroupUpdateRequest(BaseModel):
 @app.get("/")
 async def root():
     """API root"""
-    return {"message": "InteSc - Integrated and Intelligent Single Cell Sequencing Analysis", "version": "1.0.0", "docs": "/docs"}
+    return {"message": "ScAI - Single Cell Sequencing Analysis Driven by AI", "version": "1.0.0", "docs": "/docs"}
 
 
 @app.get("/api")
 async def api_root():
-    return {"message": "InteSc API", "version": "1.0.0"}
+    return {"message": "ScAI API", "version": "1.0.0"}
 
 
 @app.post("/api/config")

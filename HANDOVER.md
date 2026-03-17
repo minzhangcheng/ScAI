@@ -1,13 +1,13 @@
-# InteSc Project Handover Document
+# ScAI Project Handover Document
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.14.3
+**Version**: 0.14.4
 **Last Updated**: 2026-03-17
 
 ## Project Overview
 
-**InteSc** (Integrated and Intelligent Single Cell Sequencing Analysis) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of seven specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, Painter, and Supervisor), it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, structured error tracking, and optimized real-time communication.
+**ScAI** (Single Cell Sequencing Analysis Driven by AI) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of seven specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, Painter, and Supervisor), it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, structured error tracking, and optimized real-time communication.
 
 ## Technical Architecture
 
@@ -58,7 +58,7 @@ This document is intended for developers and operations personnel, providing tec
 ### Directory Structure
 
 ```
-intesc/                         # Code directory
+scai/                           # Code directory
 ├── backend/
 │   ├── main.py                 # FastAPI entry point (~4700 lines)
 │   │                           # - REST API endpoints
@@ -226,7 +226,7 @@ intesc/                         # Code directory
 ├── README.md
 └── HANDOVER.md
 
-intesc_data/                    # Data directory (sibling to code directory)
+data/                    # Data directory (sibling to code directory)
 ├── sessions/                   # Session-centric data (new layout since v0.12.4)
 │   └── {session_id}/
 │       ├── session.json        # Session metadata
@@ -243,7 +243,7 @@ intesc_data/                    # Data directory (sibling to code directory)
 ├── workspace/                  # (legacy, kept for backward compatibility)
 └── reports/                    # (legacy, kept for backward compatibility)
 
-intesc_dep/                     # Dependencies directory (sibling to code directory)
+dep/                     # Dependencies directory (sibling to code directory)
 ├── venv/                       # Python virtual environment
 │   ├── bin/                    # Python executables
 │   ├── lib/                    # Python packages
@@ -1067,23 +1067,23 @@ class ExplorationReport(BaseModel):
 ```
 
 The script will automatically:
-1. Create Python virtual environment at `../intesc_dep/venv/`
-2. Install frontend dependencies at `../intesc_dep/node_modules/`
-3. Create data directories at `../intesc_data/`
+1. Create Python virtual environment at `../dep/venv/`
+2. Install frontend dependencies at `../dep/node_modules/`
+3. Create data directories at `../data/`
 4. Start frontend and backend services
 
 **Manual setup (if needed):**
 
 ```bash
-# Backend (dependencies installed to ../intesc_dep/venv)
-python -m venv ../intesc_dep/venv
-source ../intesc_dep/venv/bin/activate
+# Backend (dependencies installed to ../dep/venv)
+python -m venv ../dep/venv
+source ../dep/venv/bin/activate
 pip install -r requirements.txt
 
-# Frontend (dependencies installed to ../intesc_dep/node_modules)
-mkdir -p ../intesc_dep/node_modules
+# Frontend (dependencies installed to ../dep/node_modules)
+mkdir -p ../dep/node_modules
 cd frontend
-ln -s ../../intesc_dep/node_modules node_modules
+ln -s ../../dep/node_modules node_modules
 npm install
 ```
 
@@ -1116,7 +1116,7 @@ npm run dev
 
 ```python
 # View LLM interaction logs
-# Logs located in intesc_data/logs/ directory
+# Logs located in data/logs/ directory
 
 # Debug Jupyter execution
 # View states/{session_id}.ipynb
@@ -1149,27 +1149,27 @@ cd frontend && npm run build && npx serve -s dist -l 3000 &
 **Directories to back up** (located in parent of code directory):
 
 ```
-intesc_data/                # Data directory (must backup)
+data/                # Data directory (must backup)
 ├── sessions/               # All session data (session-centric layout since v0.12.4)
 │   └── {session_id}/       # Each session's workspace, reports, uploads, states, logs
 ├── logs/                   # Global system logs
 └── upload_temp/            # Temporary upload chunks (can skip)
 
-intesc_dep/                 # Dependencies directory (optional backup, can reinstall)
+dep/                 # Dependencies directory (optional backup, can reinstall)
 ├── venv/                   # Python virtual environment
 └── node_modules/           # Node.js dependencies
 ```
 
 **Backup Recommendations:**
 
-- `intesc_data/` directory contains user data and analysis results, must backup
-- `intesc_dep/` directory can be skipped, reinstall via `./start.sh`
-- Code directory `intesc/` managed via git
+- `data/` directory contains user data and analysis results, must backup
+- `dep/` directory can be skipped, reinstall via `./start.sh`
+- Code directory `scai/` managed via git
 
 ### Log Locations
 
 ```
-intesc_data/logs/   # LLM interaction logs
+data/logs/   # LLM interaction logs
 uvicorn stdout      # API logs
 ```
 
@@ -1259,13 +1259,13 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 - Gemini via OpenRouter may return empty content with high token count
 - Affects pathology and biochemistry image analysis
 - Biochemistry Agent v2 mitigates this with comprehensive prompts
-- Check `intesc_data/logs/error.log` for details
+- Check `data/logs/error.log` for details
 
 **8. Stale Session After Server Restart**
 
 - If browser shows blank/error state after server restart, the session may no longer exist on server
 - v0.6.1+ auto-detects this and clears stale session from localStorage
-- Manual fix: Clear localStorage in browser DevTools → Application → Local Storage → delete `intesc-storage`
+- Manual fix: Clear localStorage in browser DevTools → Application → Local Storage → delete `scai-storage`
 
 **9. Deep Research Timeout**
 
@@ -1461,6 +1461,13 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ### Detailed Changelog
 
+#### v0.14.4 (2026-03-17)
+
+- **Project Renamed** (all files): InteSc → ScAI (Single Cell Sequencing Analysis Driven by AI). All display names, branding, titles, localStorage keys, package names, and domain references updated.
+- **Directory Restructure** (`config.py`, `start.sh`, docs): Data directory `intesc_data/` → `data/`, dependency directory `intesc_dep/` → `dep/`, code directory `intesc/` → `scai/`. Environment variable `INTESC_DATA_DIR` → `SCAI_DATA_DIR`.
+- **Configurable Startup** (`start.sh`, `vite.config.ts`): `start.sh` now accepts `--host` (default 127.0.0.1), `--port` (default 3000), `--backport` (default 8000) CLI arguments. Vite proxy reads `SCAI_BACKPORT` env var for backend port.
+- **GitHub Repo Renamed**: `minzhangcheng/intesc` → `minzhangcheng/scai`.
+
 #### v0.14.3 (2026-03-17)
 
 - **JPG Figure Output** (`bioinformatics_agent.py`): All auto-saved figures and `generate_figure` / `revise_figure` tool calls now save JPG (quality 85, optimized) instead of PNG for web display. File size and bandwidth are reduced. Companion high-res PDF still generated. Regex for `[Auto-saved]` log lines updated to match both `.jpg` and `.png`. `PublicationFigure.png_path` now stores the JPG path; field name preserved for backward compatibility.
@@ -1595,7 +1602,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 #### v0.12.4 (2026-03-11)
 
-- **Session-Centric Data Organization**: Restructured `intesc_data/` from type-based layout (`uploads/`, `states/`, `workspace/`, `reports/` as top-level dirs) to session-centric layout (`sessions/{session_id}/` containing all subdirs). Each session now has its own isolated directory with `workspace/`, `reports/`, `uploads/`, `states/`, and `logs/` subdirectories.
+- **Session-Centric Data Organization**: Restructured `data/` from type-based layout (`uploads/`, `states/`, `workspace/`, `reports/` as top-level dirs) to session-centric layout (`sessions/{session_id}/` containing all subdirs). Each session now has its own isolated directory with `workspace/`, `reports/`, `uploads/`, `states/`, and `logs/` subdirectories.
 - **Path Helper Functions**: Added `get_session_dir()`, `get_session_workspace()`, `get_session_states()`, `get_session_uploads()`, `get_session_reports()`, `get_session_logs()`, `get_session_metadata_path()`, and `ensure_session_dirs()` to `config.py`.
 - **Backward Compatibility**: All path resolution falls back to legacy directories when new-structure files are not found. Session listing, loading, and deletion handle both layouts.
 - **Migration Script**: Added `backend/migrate_to_session_dirs.py` with `--dry-run` support to migrate existing data. Handles session metadata, uploads, workspace, reports, state files, and LLM logs. Remaps embedded absolute paths in session JSON.

@@ -1,8 +1,8 @@
-# InteSc - Integrated and Intelligent Single Cell Sequencing Analysis
+# ScAI - Single Cell Sequencing Analysis Driven by AI
 
-**InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
+**ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.14.3
+**Version**: 0.14.4
 
 ## Core Features
 
@@ -111,7 +111,7 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 
 ```bash
 git clone <repository-url>
-cd intesc
+cd scai
 ```
 
 ### 2. Install Backend Dependencies
@@ -331,6 +331,14 @@ Common customizations:
 
 ## Changelog
 
+### v0.14.4 (2026-03-17)
+
+- **Project renamed**: InteSc → ScAI (Single Cell Sequencing Analysis Driven by AI)
+- **Directory restructure**: Data directory `intesc_data/` → `data/`, dependency directory `intesc_dep/` → `dep/`, code directory `intesc/` → `scai/`
+- **Environment variable renamed**: `INTESC_DATA_DIR` → `SCAI_DATA_DIR`
+- **Configurable startup**: `start.sh` now accepts `--host`, `--port`, and `--backport` arguments (defaults: 127.0.0.1, 3000, 8000)
+- **GitHub repo renamed**: `minzhangcheng/intesc` → `minzhangcheng/scai`
+
 ### v0.14.3 (2026-03-17)
 
 - **JPG figure output**: Bioinformatics figures now saved as JPG (quality 85, optimized) instead of PNG for web display, reducing file size; companion PDF still generated for publication
@@ -399,7 +407,7 @@ Common customizations:
 
 ### v0.12.4 (2026-03-11)
 
-- **Session-centric data layout**: All per-session files (workspace, reports, uploads, states, logs) now co-located under `intesc_data/sessions/{session_id}/`. Existing sessions automatically resolved via legacy path fallback; migration script provided
+- **Session-centric data layout**: All per-session files (workspace, reports, uploads, states, logs) now co-located under `data/sessions/{session_id}/`. Existing sessions automatically resolved via legacy path fallback; migration script provided
 
 ### v0.12.3 (2026-03-10)
 

@@ -315,8 +315,8 @@ function App() {
           <footer className="shrink-0 border-t border-slate-100 bg-white/80 px-4 py-1.5 text-center">
             <p className="text-[11px] text-slate-400 select-none">
               {language === 'zh'
-                ? 'InteSc · 整合与智能单细胞分析 · © 2025–2026 程敏章 版权所有'
-                : 'InteSc · Integrated & Intelligent Single Cell Analysis · © 2025–2026 Minzhang Cheng. All rights reserved.'}
+                ? 'ScAI · 单细胞测序AI分析 · © 2025–2026 程敏章 版权所有'
+                : 'ScAI · Single Cell Sequencing Analysis Driven by AI · © 2025–2026 Minzhang Cheng. All rights reserved.'}
             </p>
           </footer>
         </div>

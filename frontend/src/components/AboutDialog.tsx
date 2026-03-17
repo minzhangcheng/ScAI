@@ -42,14 +42,14 @@ export function AboutDialog() {
             <div className="px-6 py-4 space-y-4 overflow-y-auto">
               {/* Title */}
               <div className="text-center">
-                <h3 className="text-2xl font-bold text-violet-700">InteSc</h3>
+                <h3 className="text-2xl font-bold text-violet-700">ScAI</h3>
                 <p className="text-sm text-slate-500 mt-1">
                   {zh
-                    ? '整合与智能单细胞分析'
-                    : 'Integrated & Intelligent Single Cell Analysis'}
+                    ? '单细胞测序AI分析'
+                    : 'Single Cell Sequencing Analysis Driven by AI'}
                 </p>
                 <div className="mt-2 inline-block px-3 py-1 bg-violet-100 text-violet-700 text-xs font-medium rounded-full">
-                  v0.14.3
+                  v0.14.4
                 </div>
               </div>
 
@@ -79,12 +79,12 @@ export function AboutDialog() {
                     {zh ? '源代码' : 'Source Code'}
                   </div>
                   <a
-                    href="https://github.com/minzhangcheng/intesc"
+                    href="https://github.com/minzhangcheng/scai"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-sm text-violet-600 hover:text-violet-700 hover:underline"
                   >
-                    github.com/minzhangcheng/intesc
+                    github.com/minzhangcheng/scai
                   </a>
                 </div>
               </div>

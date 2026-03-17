@@ -200,8 +200,8 @@ class OpenAICompatibleClient:
             timeout=300.0,  # Safety net; deep research uses per-request timeout=1800 override
             max_retries=0,  # Disable SDK internal retries; retry_with_backoff handles all retries
             default_headers={
-                "HTTP-Referer": "https://intesc.local",
-                "X-Title": "InteSc - Integrated Single Cell Analysis"
+                "HTTP-Referer": "https://scai.local",
+                "X-Title": "ScAI - Single Cell Sequencing Analysis Driven by AI"
             }
         )
     

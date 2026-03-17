@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# InteSc - Stop script
+# ScAI - Stop script
 
-echo "Stopping InteSc services..."
+echo "Stopping ScAI services..."
 echo ""
 
 # Get the script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PID_FILE="$SCRIPT_DIR/.intesc.pid"
+PID_FILE="$SCRIPT_DIR/.scai.pid"
 
 # Function to kill process and its children
 kill_tree() {
@@ -69,7 +69,7 @@ if [ -n "$VITE_PIDS" ]; then
 fi
 
 # Kill node processes related to our frontend
-NODE_PIDS=$(pgrep -f "node.*intesc/frontend" 2>/dev/null)
+NODE_PIDS=$(pgrep -f "node.*scai/frontend" 2>/dev/null)
 if [ -n "$NODE_PIDS" ]; then
     echo "   Stopping node processes: $NODE_PIDS"
     for pid in $NODE_PIDS; do
@@ -100,7 +100,7 @@ if [ -n "$PORT_3000_PID" ]; then
 fi
 
 echo ""
-echo "InteSc stopped"
+echo "ScAI stopped"
 echo ""
 
 # Verify

@@ -1,22 +1,24 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const backendPort = process.env.SCAI_BACKPORT || '8000'
+
 export default defineConfig({
   plugins: [react()],
   server: {
-    host: '0.0.0.0',
+    host: '127.0.0.1',
     port: 3000,
     allowedHosts: [
-      'intesc.cmz.ac.cn',
-      'intesc.organoids.org.cn'
+      'scai.cmz.ac.cn',
+      'scai.organoids.org.cn'
     ],
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: `http://localhost:${backendPort}`,
         changeOrigin: true
       },
       '/ws': {
-        target: 'ws://localhost:8000',
+        target: `ws://localhost:${backendPort}`,
         ws: true
       }
     }

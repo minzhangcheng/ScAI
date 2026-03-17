@@ -1594,7 +1594,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python regenerate_report_html.py <report_directory>")
-        print("Example: python regenerate_report_html.py ../intesc_data/reports/427c8e3c-16da-4b09-a908-392e68ec9fb3/")
+        print("Example: python regenerate_report_html.py ../data/reports/427c8e3c-16da-4b09-a908-392e68ec9fb3/")
         sys.exit(1)
 
     report_dir = Path(sys.argv[1])

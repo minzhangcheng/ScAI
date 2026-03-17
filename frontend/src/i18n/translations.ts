@@ -5,9 +5,9 @@ export type Language = 'zh' | 'en'
 export const translations = {
   zh: {
     // App
-    appName: 'InteSc',
-    appSubtitle: '整合与智能单细胞分析',
-    appFullName: 'InteSc - 整合与智能单细胞分析',
+    appName: 'ScAI',
+    appSubtitle: '单细胞测序AI分析',
+    appFullName: 'ScAI - 单细胞测序AI分析',
     
     // Tabs
     tabAnalysis: '分析',
@@ -370,9 +370,9 @@ Please provide a detailed literature review report with specific citation inform
 
   en: {
     // App
-    appName: 'InteSc',
-    appSubtitle: 'Integrated & Intelligent Single Cell Analysis',
-    appFullName: 'InteSc - Integrated & Intelligent Single Cell Analysis',
+    appName: 'ScAI',
+    appSubtitle: 'Single Cell Sequencing Analysis Driven by AI',
+    appFullName: 'ScAI - Single Cell Sequencing Analysis Driven by AI',
     
     // Tabs
     tabAnalysis: 'Analysis',

@@ -3,15 +3,15 @@
 Migration script: move from type-based directory layout to session-centric layout.
 
 Old structure:
-    intesc_data/uploads/{session_id}/...
-    intesc_data/states/{session_id}*
-    intesc_data/workspace/{session_id}/...
-    intesc_data/sessions/{session_id}.json
-    intesc_data/reports/{session_id}/...
-    intesc_data/logs/llm/sessions/{session_id}.jsonl
+    data/uploads/{session_id}/...
+    data/states/{session_id}*
+    data/workspace/{session_id}/...
+    data/sessions/{session_id}.json
+    data/reports/{session_id}/...
+    data/logs/llm/sessions/{session_id}.jsonl
 
 New structure:
-    intesc_data/sessions/{session_id}/
+    data/sessions/{session_id}/
         session.json
         workspace/
         reports/
@@ -191,7 +191,7 @@ def migrate_session(session_id: str, dry_run: bool):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Migrate intesc_data to session-centric layout")
+    parser = argparse.ArgumentParser(description="Migrate data to session-centric layout")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done without making changes")
     args = parser.parse_args()
 

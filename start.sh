@@ -1,23 +1,61 @@
 #!/bin/bash
 
-# InteSc - Integrated and Intelligent Single Cell Sequencing Analysis
+# ScAI - Single Cell Sequencing Analysis Driven by AI
 # Startup script
 
-echo "Starting InteSc - Integrated Single Cell Analysis System..."
+# Default settings
+HOST="127.0.0.1"
+PORT=3000
+BACKPORT=8000
+
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --host)
+            HOST="$2"
+            shift 2
+            ;;
+        --port)
+            PORT="$2"
+            shift 2
+            ;;
+        --backport)
+            BACKPORT="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: ./start.sh [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --host HOST        Listen address (default: 127.0.0.1)"
+            echo "  --port PORT        Frontend port (default: 3000)"
+            echo "  --backport PORT    Backend port (default: 8000)"
+            echo "  -h, --help         Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+echo "Starting ScAI - Single Cell Sequencing Analysis Driven by AI..."
 echo ""
 
 # Get the script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PARENT_DIR="$(dirname "$SCRIPT_DIR")"
-PID_FILE="$SCRIPT_DIR/.intesc.pid"
+PID_FILE="$SCRIPT_DIR/.scai.pid"
 
 # Dependencies directory (outside code directory)
-DEP_DIR="$PARENT_DIR/intesc_dep"
+DEP_DIR="$PARENT_DIR/dep"
 VENV_DIR="$DEP_DIR/venv"
 NODE_MODULES_DIR="$DEP_DIR/node_modules"
 
 # Data directory (outside code directory)
-DATA_DIR="$PARENT_DIR/intesc_data"
+DATA_DIR="$PARENT_DIR/data"
 
 # Check if already running
 if [ -f "$PID_FILE" ]; then
@@ -113,18 +151,18 @@ echo "Starting services..."
 echo ""
 
 # Start backend in background
-echo "   Backend: http://localhost:8000"
+echo "   Backend: http://$HOST:$BACKPORT"
 cd "$SCRIPT_DIR"
-"$VENV_DIR/bin/uvicorn" backend.main:app --host 0.0.0.0 --port 8000 &
+"$VENV_DIR/bin/uvicorn" backend.main:app --host "$HOST" --port "$BACKPORT" &
 BACKEND_PID=$!
 
 # Wait for backend to start
 sleep 2
 
 # Start frontend
-echo "   Frontend: http://localhost:3000"
+echo "   Frontend: http://$HOST:$PORT"
 cd "$SCRIPT_DIR/frontend"
-npm run dev &
+SCAI_BACKPORT="$BACKPORT" npx vite --host "$HOST" --port "$PORT" &
 FRONTEND_PID=$!
 
 # Save PIDs and paths to file for stop.sh
@@ -136,7 +174,7 @@ echo "VENV_DIR=$VENV_DIR" >> "$PID_FILE"
 echo ""
 echo "Services started successfully!"
 echo ""
-echo "   Open http://localhost:3000 in your browser"
+echo "   Open http://$HOST:$PORT in your browser"
 echo "   PID saved to $PID_FILE"
 echo ""
 echo "   Code directory: $SCRIPT_DIR"
