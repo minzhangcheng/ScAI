@@ -1021,7 +1021,9 @@ Please return in JSON format:
         all_genes_for_key: set = set()
         for genes in cluster_markers.values():
             all_genes_for_key.update(genes[:5])
-        cache_key = f"{organism}:{tissue}:{hash(frozenset(all_genes_for_key))}"
+        import hashlib
+        genes_hash = hashlib.md5(",".join(sorted(all_genes_for_key)).encode()).hexdigest()[:16]
+        cache_key = f"{organism}:{tissue}:{genes_hash}"
         if cache_key in self._annotation_cache:
             logger.info(f"[Literature] annotate_clusters cache HIT: {cache_key}")
             return self._annotation_cache[cache_key]

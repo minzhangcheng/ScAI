@@ -539,7 +539,7 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
    - When using sc.pl.umap/tsne, ALWAYS set show=False and capture the axes: `ax = sc.pl.umap(adata, ..., show=False, return_fig=True)`
    - ALWAYS manually add ax.set_xlabel('UMAP1') and ax.set_ylabel('UMAP2') to ALL embedding plots
    - If UMAP legends overlap data, use legend_loc='right margin' — NEVER manually set legend coordinates
-   - All text elements must have fontsize >= 10pt
+   - All text elements must have fontsize >= 12pt (title >= 14pt)
    - Legend must NOT overlap data — place outside plot or use bbox_to_anchor
    - Use consistent naming across ALL panels (e.g., always 'Cholangiocyte', never abbreviate in some panels)
    - No grid lines unless explicitly needed for the figure type
@@ -558,7 +558,8 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
          ct = ct.str.replace(f'_{{cond}}', '', regex=False)
 
 SECURITY RESTRICTIONS:
-- Do NOT use globals(), exec(), eval(), or subprocess — these are blocked by the sandbox for security and will cause repeated errors.
+- Do NOT use globals(), exec(), eval(), subprocess, or importlib — these are blocked by the sandbox for security and will cause repeated errors.
+- If a package import fails (ModuleNotFoundError), install it using `!pip install package_name` in a code cell, then import it normally. Do NOT use subprocess.run(['pip', ...]) or importlib.
 - Do NOT write files to disk using open(..., 'w') or similar — these are blocked by the sandbox. Store all intermediate data in adata.uns, adata.obs, adata.var, or Python variables.
 - Do NOT call annotate_clusters in the same response as execute_code that generates markers.
   You must FIRST execute code and see the printed output, THEN call annotate_clusters in a separate step.
@@ -638,19 +639,38 @@ SPECIES-AWARE GENE NAMES:
   Check convention: print(adata.var_names[:10])
   Convert human→mouse: [g[0].upper() + g[1:].lower() for g in gene_list]
 
-DECOUPLER API (CRITICAL - use current API only):
-- TF/pathway activity: `dc.run_ulm(adata, net=net, source='source', target='target', weight='weight')`
-- DO NOT use deprecated methods: dc.run_mlm, dc.run_viper, dc.run_aucell (these will throw errors)
-- Check available methods: `import decoupler as dc; [m for m in dir(dc) if m.startswith('run_')]`
-- Network format: net must be a DataFrame with columns 'source', 'target', 'weight'
-- Results stored in adata.obsm['ulm_estimate'] and adata.obsm['ulm_pvals'] by default
+GSEAPY PARAMETER RULES:
+  organism parameter must be LOWERCASE: 'mouse' or 'human' (NOT 'Mouse' or 'Human')
+  Example: gseapy.enrichr(gene_list=genes, gene_sets='KEGG_2019_Mouse', organism='mouse')
+
+DECOUPLER API (CRITICAL - v2.x API, do NOT use old v1.x API):
+- Get networks:
+  `net = dc.op.collectri(organism='mouse')` (for TF regulons)
+  `net = dc.op.progeny(organism='mouse')` (for pathway signatures)
+  `net = dc.op.dorothea(organism='mouse')` (for TF-target interactions)
+- Run activity inference: `dc.mt.ulm(adata, net)` — results in adata.obsm['score_ulm'] and adata.obsm['padj_ulm']
+- DO NOT use old v1.x API: dc.get_collectri, dc.get_progeny, dc.get_dorothea, dc.run_ulm, dc.run_mlm (these no longer exist)
+- Check available methods: `[m for m in dir(dc.mt) if not m.startswith('_')]`
+
+DEFENSIVE CODING (CRITICAL — prevents KeyError / empty DataFrame crashes):
+  When iterating over clusters or cell types for DE/enrichment analysis, ALWAYS check for empty results:
+    df = sc.get.rank_genes_groups_df(adata, group=cluster)
+    if df.empty or 'names' not in df.columns:
+        print(f"WARNING: No DE genes for {{cluster}}, skipping")
+        continue
+    genes = df.head(15)['names'].tolist()
+  This applies to: rank_genes_groups_df, gseapy.enrichr, gseapy.prerank, pathway analysis, any per-group iteration.
+  NEVER assume a DataFrame slice will be non-empty — always guard with `.empty` check or try/except.
 
 CELL TYPE ANNOTATION WORKFLOW:
 1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')
 2. Extract top 10-20 marker genes per cluster into a dict AND PRINT IT:
    markers = {{}}
    for cluster in adata.obs['leiden'].cat.categories:
-       genes = sc.get.rank_genes_groups_df(adata, group=cluster).head(15)['names'].tolist()
+       df = sc.get.rank_genes_groups_df(adata, group=cluster)
+       if df.empty:
+           continue
+       genes = df.head(15)['names'].tolist()
        markers[cluster] = genes
    import json
    print(json.dumps(markers, indent=2))
@@ -697,6 +717,20 @@ Before running sc.tl.pca() or any dimensionality reduction:
    - adata.X = np.nan_to_num(adata.X, nan=0.0) if dense
    - adata.X.data = np.nan_to_num(adata.X.data, nan=0.0) if sparse
 3. NEVER skip this step - PCA will fail with NaN values!
+
+**HARMONY BATCH CORRECTION (CRITICAL — dimension mismatch prevention)**:
+When using harmonypy for batch correction, ALWAYS verify dimensions match:
+  import harmonypy as hm
+  # Use the SAME adata that was used for PCA — do NOT subset/filter between PCA and Harmony
+  ho = hm.run_harmony(adata.obsm['X_pca'], adata.obs, 'batch_column')
+  # Verify shape BEFORE assignment
+  print(f"Harmony output shape: {{ho.Z_corr.T.shape}}, adata n_obs: {{adata.n_obs}}")
+  assert ho.Z_corr.T.shape[0] == adata.n_obs, "Shape mismatch! Do not assign."
+  adata.obsm['X_pca_harmony'] = ho.Z_corr.T
+  # Then recompute neighbors/UMAP using the corrected embedding
+  sc.pp.neighbors(adata, use_rep='X_pca_harmony')
+  sc.tl.umap(adata)
+NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the dimension mismatch.
 
 **CRITICAL: REPRODUCIBILITY IS MANDATORY**
 - ALWAYS use random_state=42 or seed=42 in EVERY function that accepts it
@@ -942,19 +976,20 @@ _fig_nums = plt.get_fignums()
 for _fig_num in _fig_nums:
     _fig = plt.figure(_fig_num)
     _fig_id = f"fig_{timestamp}_{{_fig_num}}"
-    _png_path = _figures_dir / f"{{_fig_id}}.png"
+    _jpg_path = _figures_dir / f"{{_fig_id}}.jpg"
     _pdf_path = _figures_dir / f"{{_fig_id}}.pdf"
 
-    # Save PNG (for preview and web report)
-    _fig.savefig(_png_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
+    # Save JPG (for web display — smaller file size than PNG)
+    _fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                 format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
 
-    # Save PDF (vector format for publication and editing)
+    # Save PDF (vector format for publication quality download)
     _fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
 
     # Display figure to trigger capture via display_data message
     display(_fig)
 
-    print(f"[Auto-saved] PNG: {{_png_path}}")
+    print(f"[Auto-saved] JPG: {{_jpg_path}}")
     print(f"[Auto-saved] PDF: {{_pdf_path}}")
 
 # Close all figures to free memory
@@ -987,7 +1022,7 @@ plt.close('all')
                     # Record execute_code step in analysis log
                     _saved_figs = []
                     if result.output:
-                        _saved_figs = [Path(p).name for p in re.findall(r'\[Auto-saved\] PNG: (.+\.png)', result.output)]
+                        _saved_figs = [Path(p).name for p in re.findall(r'\[Auto-saved\] (?:JPG|PNG): (.+\.(?:jpg|png))', result.output)]
                     analysis_log.append(AnalysisStep(
                         step_number=step_count, step_type="execute_code",
                         agent_reasoning=agent_reasoning,
@@ -1499,12 +1534,12 @@ plt.close('all')
 
         # Clean up figure name
         safe_name = "".join(c if c.isalnum() or c == '_' else '_' for c in figure_name)
-        png_path = figures_dir / f"{safe_name}.png"
+        jpg_path = figures_dir / f"{safe_name}.jpg"
         pdf_path = figures_dir / f"{safe_name}.pdf"
 
-        # Wrap code to save both PNG and PDF (use repr() for paths to prevent injection)
+        # Wrap code to save both JPG and PDF (use repr() for paths to prevent injection)
         figures_dir_repr = repr(str(figures_dir))
-        png_path_repr = repr(str(png_path))
+        png_path_repr = repr(str(jpg_path))  # Variable name kept for template compatibility
         pdf_path_repr = repr(str(pdf_path))
         indented_code = textwrap.indent(code, '    ')
         wrapped_code = f'''
@@ -1515,12 +1550,12 @@ from pathlib import Path
 plt.rcParams.update({{
     'figure.dpi': 300,
     'savefig.dpi': 300,
-    'font.size': 12,
-    'axes.titlesize': 14,
-    'axes.labelsize': 12,
-    'xtick.labelsize': 10,
-    'ytick.labelsize': 10,
-    'legend.fontsize': 10,
+    'font.size': 14,
+    'axes.titlesize': 16,
+    'axes.labelsize': 14,
+    'xtick.labelsize': 12,
+    'ytick.labelsize': 12,
+    'legend.fontsize': 11,
     'axes.grid': False,
     'axes.linewidth': 1.2,
     'pdf.fonttype': 42,  # Ensure fonts are vectorized in PDF
@@ -1547,12 +1582,13 @@ finally:
 # Get current figure
 fig = plt.gcf()
 
-_png_path = {png_path_repr}
+_jpg_path = {png_path_repr}
 _pdf_path = {pdf_path_repr}
 
-# Save PNG thumbnail (lower DPI for preview)
-fig.savefig(_png_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
-print(f"Saved PNG: {{_png_path}}")
+# Save JPG (for web display — smaller file size)
+fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+print(f"Saved JPG: {{_jpg_path}}")
 
 # Save high-res PDF
 fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
@@ -1571,27 +1607,27 @@ plt.close()
             return error_msg
 
         # Check if files were created
-        if not png_path.exists():
-            error_msg = f"PNG file was not created: {png_path}"
+        if not jpg_path.exists():
+            error_msg = f"JPG file was not created: {jpg_path}"
             logger.error(f"[Bioinformatics] {error_msg}")
             return error_msg
 
-        # Detect blank figures (empty white PNG with bbox_inches='tight' is typically <2KB)
-        if png_path.stat().st_size < 2000:
-            error_msg = f"Figure appears to be blank (file size: {png_path.stat().st_size} bytes). The plotting code may not have generated visible content."
+        # Detect blank figures (empty white JPG with bbox_inches='tight' is typically <2KB)
+        if jpg_path.stat().st_size < 2000:
+            error_msg = f"Figure appears to be blank (file size: {jpg_path.stat().st_size} bytes). The plotting code may not have generated visible content."
             logger.warning(f"[Bioinformatics] {error_msg}")
             return error_msg
 
-        # Read PNG and compress to base64
-        png_b64 = self._compress_image_to_base64(png_path, max_width=800)
+        # Read JPG and compress to base64
+        png_b64 = self._compress_image_to_base64(jpg_path, max_width=800)
 
-        # Create PublicationFigure object
+        # Create PublicationFigure object (png_path field stores JPG path for web display)
         figure = PublicationFigure(
             id=str(uuid.uuid4()),
             name=safe_name,
             description=description,
             figure_type=figure_type,
-            png_path=str(png_path),
+            png_path=str(jpg_path),
             pdf_path=str(pdf_path),
             png_base64=png_b64,
             review_status=FigureReviewStatus.PENDING
@@ -1691,12 +1727,12 @@ from pathlib import Path
 plt.rcParams.update({{
     'figure.dpi': 300,
     'savefig.dpi': 300,
-    'font.size': 12,
-    'axes.titlesize': 14,
-    'axes.labelsize': 12,
-    'xtick.labelsize': 10,
-    'ytick.labelsize': 10,
-    'legend.fontsize': 10,
+    'font.size': 14,
+    'axes.titlesize': 16,
+    'axes.labelsize': 14,
+    'xtick.labelsize': 12,
+    'ytick.labelsize': 12,
+    'legend.fontsize': 11,
     'axes.grid': False,
     'axes.linewidth': 1.2,
     'pdf.fonttype': 42,
@@ -1721,22 +1757,23 @@ finally:
 
 fig = plt.gcf()
 
-_png_path = {png_path_repr}
+_jpg_path = {png_path_repr}
 _pdf_path = {pdf_path_repr}
 
-fig.savefig(_png_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
+fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
 fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
 plt.close()
 '''
                     result = await self.sandbox.execute(revised_wrapped)
 
-                    if not result.error and png_path.exists():
+                    if not result.error and jpg_path.exists():
                         # Detect blank revised figure
-                        if png_path.stat().st_size < 2000:
-                            logger.warning(f"[Bioinformatics] Revised figure appears blank (size: {png_path.stat().st_size} bytes)")
+                        if jpg_path.stat().st_size < 2000:
+                            logger.warning(f"[Bioinformatics] Revised figure appears blank (size: {jpg_path.stat().st_size} bytes)")
                             break
                         # Update figure with new image
-                        figure.png_base64 = self._compress_image_to_base64(png_path, max_width=800)
+                        figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
                         await self._notify("figure", figure.png_base64)
                         current_code = revised_code
                     else:
@@ -1763,12 +1800,12 @@ from pathlib import Path
 plt.rcParams.update({{
     'figure.dpi': 300,
     'savefig.dpi': 300,
-    'font.size': 12,
-    'axes.titlesize': 14,
-    'axes.labelsize': 12,
-    'xtick.labelsize': 10,
-    'ytick.labelsize': 10,
-    'legend.fontsize': 10,
+    'font.size': 14,
+    'axes.titlesize': 16,
+    'axes.labelsize': 14,
+    'xtick.labelsize': 12,
+    'ytick.labelsize': 12,
+    'legend.fontsize': 11,
     'axes.grid': False,
     'axes.linewidth': 1.2,
     'pdf.fonttype': 42,
@@ -1791,17 +1828,18 @@ finally:
 
 fig = plt.gcf()
 
-_png_path = {png_path_repr}
+_jpg_path = {png_path_repr}
 _pdf_path = {pdf_path_repr}
 
-fig.savefig(_png_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none')
+fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
 fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
 plt.close()
 '''
                                 retry_result = await self.sandbox.execute(retry_wrapped)
-                                if not retry_result.error and png_path.exists() and png_path.stat().st_size >= 2000:
+                                if not retry_result.error and jpg_path.exists() and jpg_path.stat().st_size >= 2000:
                                     logger.info(f"[Bioinformatics] Auto-retry succeeded for {figure_name}")
-                                    figure.png_base64 = self._compress_image_to_base64(png_path, max_width=800)
+                                    figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
                                     await self._notify("figure", figure.png_base64)
                                     current_code = retry_code
                                     continue  # Back to review loop
@@ -1819,7 +1857,7 @@ plt.close()
 
         # No review callback, just save the figure
         self._upsert_publication_figure(state, figure)
-        return f"Figure {figure_name} has been generated and saved.\nPNG: {png_path}\nPDF: {pdf_path}"
+        return f"Figure {figure_name} has been generated and saved.\nJPG: {jpg_path}\nPDF: {pdf_path}"
 
     def _upsert_publication_figure(self, state, figure):
         """Replace existing figure with same name, or append if new."""

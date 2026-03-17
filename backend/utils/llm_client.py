@@ -780,7 +780,7 @@ class GoogleDeepResearchClient:
 
         response = await self.client.post(
             url,
-            params={"key": self.api_key},
+            headers={"x-goog-api-key": self.api_key},
             json=payload
         )
         response.raise_for_status()
@@ -812,7 +812,7 @@ class GoogleDeepResearchClient:
         while (time.time() - start_time) < max_wait:
             response = await self.client.get(
                 url,
-                params={"key": self.api_key}
+                headers={"x-goog-api-key": self.api_key}
             )
             response.raise_for_status()
             

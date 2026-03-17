@@ -197,6 +197,7 @@ export function RoundFeedbackDialog({
       await onSend(userInput.trim(), files)
     } catch (error) {
       console.error('Failed to send input:', error)
+    } finally {
       setSending(false)
     }
   }, [userInput, files, sending, onSend])

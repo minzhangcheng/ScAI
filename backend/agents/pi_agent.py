@@ -817,7 +817,7 @@ As the PI Agent, please:
 2. Decide if they want to stop/conclude the analysis, or adjust the direction
 3. If adjusting direction, provide new specific instructions for each agent
 
-Common stop/conclude keywords: stop, terminate, end, finish, conclude, summarize, 停止, 终止, 结束, 总结
+Common stop/conclude keywords: stop, terminate, end, finish, conclude, summarize
 
 Respond in JSON format:
 {{
@@ -857,10 +857,10 @@ If adjusting direction, provide specific and actionable tasks.
         else:
             logger.warning(f"[PI] No valid JSON found in response, using fallback parsing. Response: {response[:200] if response else 'None'}...")
         
-        # Fallback: check for stop keywords manually
+        # Fallback: check for stop keywords manually (English + Chinese)
         human_lower = human_input.lower()
         stop_keywords = ['stop', 'terminate', 'end', 'finish', 'conclude', 'summarize',
-                        '停止', '终止', '结束', '总结']
+                         '停止', '终止', '结束', '总结']
         
         if any(keyword in human_lower for keyword in stop_keywords):
             return {
@@ -1071,10 +1071,10 @@ Note: Extract biochemistry values from user message if they mention specific num
                 "reason": data.get("reason", "")
             }
         
-        # Fallback: check for stop keywords
+        # Fallback: check for stop keywords (English + Chinese)
         user_lower = user_message.lower()
         stop_keywords = ['stop', 'terminate', 'end', 'finish', 'conclude', 'report',
-                        '停止', '终止', '结束', '总结', '报告']
+                         '停止', '终止', '结束', '总结', '报告']
         
         if any(keyword in user_lower for keyword in stop_keywords):
             return {

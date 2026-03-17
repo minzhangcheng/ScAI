@@ -101,7 +101,7 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
     }
   }
 
-  const downloadPNG = async (figure: PublicationFigure) => {
+  const downloadJPG = async (figure: PublicationFigure) => {
     if (!currentSession) return
 
     try {
@@ -113,14 +113,14 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `${figure.name}.png`
+        a.download = `${figure.name}.jpg`
         document.body.appendChild(a)
         a.click()
         document.body.removeChild(a)
         URL.revokeObjectURL(url)
       }
     } catch (e) {
-      console.error('Failed to download PNG:', e)
+      console.error('Failed to download JPG:', e)
     }
   }
 
@@ -210,12 +210,12 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
                 <button
                   onClick={(e) => {
                     e.stopPropagation()
-                    downloadPNG(figure)
+                    downloadJPG(figure)
                   }}
                   className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition-colors"
                 >
                   <Download className="w-3 h-3" />
-                  PNG
+                  JPG
                 </button>
                 <button
                   onClick={(e) => {
@@ -303,11 +303,11 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
               </div>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => downloadPNG(selectedFigure)}
+                  onClick={() => downloadJPG(selectedFigure)}
                   className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors"
                 >
                   <Download className="w-4 h-4" />
-                  PNG
+                  JPG
                 </button>
                 <button
                   onClick={() => downloadPDF(selectedFigure)}

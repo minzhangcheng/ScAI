@@ -99,23 +99,25 @@ def process_pathology_image(
     tile_size: int = 1024,
     overlap: int = 64,
     blank_threshold: float = 0.95,
-    max_tiles: int = 50
+    max_tiles: int = 50,
+    preloaded_image: "Image.Image | None" = None
 ) -> List[str]:
     """
     Process a pathology image for vision model analysis
-    
+
     Args:
         image_path: Path to the pathology image
         tile_size: Size of each tile
         overlap: Overlap between tiles
         blank_threshold: Threshold for blank detection
         max_tiles: Maximum number of tiles to return
-        
+        preloaded_image: Optional pre-loaded PIL Image to avoid redundant disk reads
+
     Returns:
         List of base64 encoded tile images
     """
-    # Load image
-    image = load_image(image_path)
+    # Load image (reuse preloaded if provided)
+    image = preloaded_image if preloaded_image is not None else load_image(image_path)
     
     # Get image size
     width, height = image.size

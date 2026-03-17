@@ -16,6 +16,7 @@ import hashlib
 import uuid
 import io
 import base64
+import shutil
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -395,6 +396,9 @@ class SupervisorAgent:
         except Exception as e:
             logger.error(f"[{self.session_id}] Report generation LLM call failed: {e}")
             report_content = self._fallback_report(narrative, stats, language)
+        finally:
+            # Restore supervisor context in case of subsequent LLM calls
+            self._set_llm_context()
 
         await _progress(60, "解析报告结构..." if zh else "Parsing report structure...")
 
@@ -411,6 +415,8 @@ class SupervisorAgent:
                 abstract = sec.get("content", "")
             elif sid == "conclusions":
                 conclusions = sec.get("content", "")
+            elif sid in ("supervisor_log", "figure_appendix"):
+                continue  # Skip monitoring and figure appendix sections
             else:
                 filtered_sections.append(sec)
 
@@ -463,11 +469,15 @@ class SupervisorAgent:
 
         await _progress(90, "生成HTML报告..." if zh else "Generating HTML report...")
 
+        # Temporarily attach analysis_state for HTML generation (not serialized to JSON)
+        report["_analysis_state"] = analysis_state
+
         # Generate HTML
         html_path = self._generate_html_report(
             report, filtered_sections, abstract, conclusions,
             report_figures, figure_map, stats, language, output_path, workspace_path,
         )
+        report.pop("_analysis_state", None)
         report["html_path"] = str(html_path)
 
         await _progress(100, "完成" if zh else "Complete")
@@ -940,7 +950,7 @@ class SupervisorAgent:
         # Build dynamic section template
         base_sections = [
             "[abstract] - Research summary (background, methods, key findings, conclusions)",
-            "[analysis_overview] - Analysis workflow overview (steps, checkpoints, issues)",
+            "[analysis_overview] - Analysis methodology overview (study design, data processing pipeline, computational methods, key parameters)",
             "[data_qc] - Data overview and quality control",
             "[clustering_annotation] - Clustering and cell type annotation (include PI checkpoint guidance if available)",
             "[differential_expression] - Differential expression analysis (include PI checkpoint guidance if available)",
@@ -965,24 +975,16 @@ class SupervisorAgent:
         else:
             base_sections.append("[key_findings] - Key biological findings")
 
-        base_sections.extend([
-            "[supervisor_log] - Analysis monitoring log (technical issues, PI intervention points)",
-            "[conclusions] - Conclusions and future directions",
-            "[figure_appendix] - Figure descriptions (reference each figure by filename)",
-        ])
+        base_sections.append(
+            "[conclusions] - Conclusions and future directions"
+        )
 
         sections_text = "\n".join(base_sections)
 
-        prompt = f"""Based on the following complete analysis records, generate a detailed research report.
+        prompt = f"""Based on the following complete analysis records, generate a detailed scientific research report.
 
 ## Analysis Narrative
 {narrative}
-
-## Summary Statistics
-- Total steps monitored: {stats['total_steps_monitored']}
-- Steps with technical issues: {stats['steps_with_technical_issues']}
-- PI escalations: {stats['pi_escalations']}
-- Critical issues: {stats['critical_issues']}
 
 ## Key Findings (Per Round)
 {findings_text}
@@ -1000,12 +1002,17 @@ Format each section as:
 ## [section_id] Section Title
 Content...
 
+When referencing a figure, embed it inline using the marker: [FIGURE: exact_filename.png]
+Place the marker on its own line, immediately after the paragraph discussing that figure.
+Each figure should appear exactly once in the most relevant section.
+Do NOT create a separate figure appendix or figure descriptions section.
+
 IMPORTANT:
-- Make the report thorough and comprehensive. Reference specific step numbers and figures where relevant.
-- Each section should be substantive with detailed scientific content (300-500 words minimum per section).
+- Write as a formal scientific research report, NOT a monitoring or system log.
+- Make the report thorough and comprehensive with detailed scientific content (300-500 words minimum per section).
 - Innovation phase sections are CRITICAL — they contain the novel research findings and MUST be written in detail.
-- Reference specific genes, pathways, cell types, statistical results, and quantitative findings.
-- Include ALL available figures — assign each figure to the most relevant section.
+- Reference specific figures, genes, pathways, cell types, statistical results, and quantitative findings.
+- Include ALL available figures — assign each figure to the most relevant section using [FIGURE: filename] markers.
 """
         return prompt
 
@@ -1108,6 +1115,26 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
 
     def _build_appendix(self, state: AnalysisState, stats: Dict) -> Dict:
         """Build appendix metadata for the report."""
+        # Build user interaction records
+        cluster_annotations_data = []
+        if state.annotation_state and state.annotation_state.cluster_annotations:
+            for ca in state.annotation_state.cluster_annotations:
+                cluster_annotations_data.append({
+                    "cluster_id": ca.cluster_id,
+                    "cell_type": ca.cell_type,
+                    "user_override": ca.user_override or "",
+                    "confirmed": ca.user_confirmed,
+                    "confidence": ca.confidence,
+                })
+
+        direction_selection_data = []
+        if state.user_chosen_directions:
+            for d in state.user_chosen_directions:
+                direction_selection_data.append({
+                    "direction": d.get("direction", ""),
+                    "notes": d.get("notes", ""),
+                })
+
         return {
             "project_name": state.name,
             "project_description": state.initial_instruction[:500],
@@ -1122,7 +1149,6 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                 {"name": f.filename, "type": f.data_type, "section": f.section}
                 for f in state.data_files
             ],
-            "supervision_stats": stats,
             "round_results": [
                 {"round": rr.round_number, "findings_count": (
                     len(rr.bioinformatics_findings) + len(rr.pathology_findings) +
@@ -1130,6 +1156,15 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                 )}
                 for rr in state.round_results
             ],
+            "user_interactions": {
+                "cluster_annotations": cluster_annotations_data,
+                "direction_selection": direction_selection_data,
+            },
+            "related_reports": {
+                "exploration_report": "exploration_report.html",
+                "annotation_report": "annotation_context_report.html",
+            },
+            "notebook_filename": f"{state.id}.ipynb",
         }
 
     @staticmethod
@@ -1180,64 +1215,110 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                 f'{html_module.escape(sec["title"])}</a></li>'
             )
 
-        # Build sections HTML
+        # Build publication figure description lookup
+        pub_fig_descriptions: Dict[str, Dict[str, str]] = {}
+        analysis_state = report.get("_analysis_state")
+        if analysis_state and analysis_state.publication_figures:
+            for pf in analysis_state.publication_figures:
+                fname = os.path.basename(pf.png_path) if pf.png_path else ""
+                if fname:
+                    pub_fig_descriptions[fname] = {
+                        "name": pf.name,
+                        "description": pf.description or "",
+                        "interpretation": pf.interpretation or "",
+                    }
+
+        def _build_figure_html(fig_name: str) -> str:
+            """Build inline figure HTML block for a given figure filename."""
+            fig_b64 = figure_b64_cache.get(fig_name, "")
+            if not fig_b64:
+                return ""
+            # Determine MIME type from extension
+            mime = "image/jpeg" if fig_name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+            # PDF download link
+            pdf_link = ""
+            fig_path = figure_map.get(fig_name)
+            if fig_path:
+                pdf_p = fig_path.with_suffix(".pdf")
+                if pdf_p.exists():
+                    dl_label = "下载 PDF (高清)" if zh else "Download PDF (High-Res)"
+                    pdf_link = (
+                        f'<a href="figures/{html_module.escape(pdf_p.name)}" '
+                        f'class="download-link" download>{dl_label}</a>'
+                    )
+            # Figure description from publication figures
+            fig_desc = pub_fig_descriptions.get(fig_name, {})
+            display_name = fig_desc.get("name", fig_name.replace("_", " ").rsplit(".", 1)[0].title())
+            interpretation = fig_desc.get("interpretation", "") or fig_desc.get("description", "")
+            meta_html = ""
+            if interpretation:
+                meta_html = f'<div class="figure-meta"><p>{html_module.escape(interpretation)}</p></div>'
+            return f'''
+                <div class="figure-inline">
+                    <img src="data:{mime};base64,{fig_b64}"
+                         alt="{html_module.escape(fig_name)}"/>
+                    <div class="figure-name">{html_module.escape(display_name)}</div>
+                    {meta_html}
+                    <div>{pdf_link}</div>
+                </div>
+            '''
+
+        # Track which figures have been placed
+        placed_figures: set = set()
+
+        # Build sections HTML with inline figure embedding
         sections_html = []
         for sec in sections:
-            content_html = self._markdown_to_html(sec.get("content", ""))
+            raw_content = sec.get("content", "")
+            content_html = self._markdown_to_html(raw_content)
 
-            # Embed figures referenced in this section
-            fig_html_parts = []
-            for fig_name, fig_b64 in figure_b64_cache.items():
-                if fig_name.lower() in sec.get("content", "").lower():
-                    pdf_link = ""
-                    fig_path = figure_map.get(fig_name)
-                    if fig_path:
-                        pdf_p = fig_path.with_suffix(".pdf")
-                        if pdf_p.exists():
-                            pdf_link = (
-                                f'<a href="figures/{html_module.escape(pdf_p.name)}" '
-                                f'class="download-link" download>Download PDF</a>'
-                            )
-                    fig_html_parts.append(f'''
-                        <div class="figure-container">
-                            <img src="data:image/png;base64,{fig_b64}"
-                                 alt="{html_module.escape(fig_name)}" class="report-figure"/>
-                            <div class="figure-caption">
-                                {html_module.escape(fig_name)} {pdf_link}
-                            </div>
-                        </div>
-                    ''')
+            # Replace [FIGURE: filename] markers with inline figure HTML
+            def _replace_figure_marker(m):
+                fname = m.group(1).strip()
+                fig_html = _build_figure_html(fname)
+                if fig_html:
+                    placed_figures.add(fname)
+                    return fig_html
+                logger.warning(f"Figure referenced in report but not found: {fname}")
+                return f'<div class="figure-missing" style="color:#b91c1c;font-style:italic;margin:10px 0;">[Figure not found: {html_module.escape(fname)}]</div>'
+
+            content_html = re.sub(
+                r'\[FIGURE:\s*([^\]]+)\]',
+                _replace_figure_marker,
+                content_html,
+            )
+
+            # Fallback: embed figures referenced by filename in text but without markers
+            remaining_fig_parts = []
+            for fig_name in figure_b64_cache:
+                if fig_name in placed_figures:
+                    continue
+                if fig_name.lower() in raw_content.lower():
+                    fig_html = _build_figure_html(fig_name)
+                    if fig_html:
+                        placed_figures.add(fig_name)
+                        remaining_fig_parts.append(fig_html)
 
             sec_html = f'''
             <div class="section" id="{html_module.escape(sec["id"])}">
                 <h2>{html_module.escape(sec["title"])}</h2>
                 <div class="section-content">{content_html}</div>
-                {"".join(fig_html_parts)}
+                {"".join(remaining_fig_parts)}
             </div>
             '''
             sections_html.append(sec_html)
 
-        # Stats bar
-        stats_html = f'''
-        <div class="stats-bar">
-            <div class="stat-item">
-                <span class="stat-value">{stats["total_steps_monitored"]}</span>
-                <span class="stat-label">{"步骤监控" if zh else "Steps Monitored"}</span>
+        # Append any unplaced figures as a supplementary section
+        unplaced = [fn for fn in figure_b64_cache if fn not in placed_figures and not fn.startswith("graphic_abstract.")]
+        if unplaced:
+            supp_title = "补充图表" if zh else "Supplementary Figures"
+            supp_figs = "".join(_build_figure_html(fn) for fn in unplaced)
+            sections_html.append(f'''
+            <div class="section" id="supplementary_figures">
+                <h2>{supp_title}</h2>
+                {supp_figs}
             </div>
-            <div class="stat-item">
-                <span class="stat-value">{stats["steps_with_technical_issues"]}</span>
-                <span class="stat-label">{"技术问题" if zh else "Issues Found"}</span>
-            </div>
-            <div class="stat-item">
-                <span class="stat-value">{stats["pi_escalations"]}</span>
-                <span class="stat-label">{"PI 介入" if zh else "PI Escalations"}</span>
-            </div>
-            <div class="stat-item">
-                <span class="stat-value">{stats["critical_issues"]}</span>
-                <span class="stat-label">{"严重问题" if zh else "Critical Issues"}</span>
-            </div>
-        </div>
-        '''
+            ''')
 
         title = report.get("title", "Analysis Report")
 
@@ -1254,14 +1335,15 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
     h2 {{ color: #2c5282; border-bottom: 1px solid #bee3f8; padding-bottom: 5px; margin-top: 2em; }}
     .abstract {{ background: #ebf8ff; border-left: 4px solid #3182ce; padding: 15px 20px;
                  margin: 20px 0; border-radius: 0 8px 8px 0; }}
-    .stats-bar {{ display: flex; gap: 20px; margin: 20px 0; flex-wrap: wrap; }}
-    .stat-item {{ background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px;
-                  padding: 15px 20px; text-align: center; flex: 1; min-width: 120px; }}
-    .stat-value {{ display: block; font-size: 1.8em; font-weight: bold; color: #2b6cb0; }}
-    .stat-label {{ display: block; font-size: 0.85em; color: #718096; margin-top: 4px; }}
     .section {{ margin: 30px 0; }}
     .section-content {{ margin: 10px 0; }}
     .section-content p {{ margin: 8px 0; }}
+    .figure-inline {{ margin: 20px 0; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; background: #fafbfc; }}
+    .figure-inline img {{ max-width: 100%; height: auto; border-radius: 4px; }}
+    .figure-inline .figure-meta {{ margin-top: 10px; font-size: 0.95em; color: #4a5568; }}
+    .figure-inline .figure-name {{ font-weight: 600; margin-bottom: 4px; color: #2c5282; }}
+    .figure-inline .download-link {{ color: #3182ce; text-decoration: none; font-size: 0.9em; }}
+    .figure-inline .download-link:hover {{ text-decoration: underline; }}
     .figure-container {{ text-align: center; margin: 20px 0; }}
     .report-figure {{ max-width: 100%; height: auto; border: 1px solid #e2e8f0;
                       border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
@@ -1292,8 +1374,6 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
 {self._markdown_to_html(abstract)}
 </div>
 
-{stats_html}
-
 <div class="toc">
 <h3>{"目录" if zh else "Table of Contents"}</h3>
 <ol>{"".join(toc_items)}</ol>
@@ -1309,7 +1389,7 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
 {self._build_appendix_html_section(report, zh)}
 
 <div class="footer">
-    {"由 InteSc Supervisor Agent 自动生成" if zh else "Auto-generated by InteSc Supervisor Agent"}
+    {"由 InteSc 自动生成" if zh else "Auto-generated by InteSc"}
     &bull; {datetime.now().strftime("%Y-%m-%d %H:%M")}
 </div>
 </body>
@@ -1319,13 +1399,11 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         with open(html_file, "w", encoding="utf-8") as f:
             f.write(html_content)
 
-        # Copy PDF figures to output for download links
+        # Copy figures to output for download links
         figures_out = output_path / "figures"
         figures_out.mkdir(exist_ok=True)
-        import shutil
         for fig_name, fig_path in figure_map.items():
             try:
-                # Copy PNG
                 shutil.copy2(fig_path, figures_out / fig_name)
                 # Copy PDF if exists
                 pdf_path = fig_path.with_suffix(".pdf")
@@ -1333,6 +1411,17 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                     shutil.copy2(pdf_path, figures_out / pdf_path.name)
             except Exception as e:
                 logger.warning(f"Could not copy figure {fig_name}: {e}")
+
+        # Copy notebook to output for download
+        _analysis_state = report.get("_analysis_state")
+        if _analysis_state:
+            from ..config import get_session_states
+            notebook_src = Path(get_session_states(_analysis_state.id)) / f"{_analysis_state.id}.ipynb"
+            if notebook_src.exists():
+                try:
+                    shutil.copy2(notebook_src, output_path / f"{_analysis_state.id}.ipynb")
+                except Exception as e:
+                    logger.warning(f"Could not copy notebook: {e}")
 
         logger.info(f"HTML report generated: {html_file}")
         return html_file
@@ -1419,6 +1508,70 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                              f'<td style="padding:4px 8px;">{rr.get("findings_count", 0)}</td></tr>')
             parts.append('</tbody></table>')
 
+        # User Interaction History
+        user_interactions = appendix.get("user_interactions", {})
+        cluster_anns = user_interactions.get("cluster_annotations", [])
+        dir_selections = user_interactions.get("direction_selection", [])
+
+        if cluster_anns or dir_selections:
+            parts.append(f'<h3>{"用户交互记录" if zh else "User Interaction History"}</h3>')
+
+            if cluster_anns:
+                parts.append(f'<h4>{"细胞注释确认" if zh else "Cell Annotation Decisions"}</h4>')
+                parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
+                parts.append(f'<thead><tr>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">Cluster</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"细胞类型" if zh else "Cell Type"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"用户修改" if zh else "User Override"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"已确认" if zh else "Confirmed"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"置信度" if zh else "Confidence"}</th>'
+                             f'</tr></thead><tbody>')
+                for ca in cluster_anns:
+                    confirmed_icon = "✓" if ca.get("confirmed") else "-"
+                    parts.append(
+                        f'<tr><td style="padding:4px 8px;">{esc(str(ca.get("cluster_id", "-")))}</td>'
+                        f'<td style="padding:4px 8px;">{esc(ca.get("cell_type", "-"))}</td>'
+                        f'<td style="padding:4px 8px;">{esc(ca.get("user_override", "-") or "-")}</td>'
+                        f'<td style="padding:4px 8px;">{confirmed_icon}</td>'
+                        f'<td style="padding:4px 8px;">{esc(ca.get("confidence", "-"))}</td></tr>'
+                    )
+                parts.append('</tbody></table>')
+
+            if dir_selections:
+                parts.append(f'<h4>{"研究方向选择" if zh else "Research Direction Selections"}</h4>')
+                parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
+                parts.append(f'<thead><tr>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"方向" if zh else "Direction"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"用户备注" if zh else "User Notes"}</th>'
+                             f'</tr></thead><tbody>')
+                for d in dir_selections:
+                    parts.append(
+                        f'<tr><td style="padding:4px 8px;">{esc(d.get("direction", "-"))}</td>'
+                        f'<td style="padding:4px 8px;">{esc(d.get("notes", "-") or "-")}</td></tr>'
+                    )
+                parts.append('</tbody></table>')
+
+        # Related Reports & Downloads
+        related = appendix.get("related_reports", {})
+        notebook = appendix.get("notebook_filename", "")
+
+        if related or notebook:
+            parts.append(f'<h3>{"相关报告与下载" if zh else "Related Reports & Downloads"}</h3>')
+            parts.append('<ul style="margin:10px 0;padding-left:20px;">')
+            if related.get("exploration_report"):
+                label = "探索阶段报告" if zh else "Exploration Report"
+                parts.append(f'<li><a href="{esc(related["exploration_report"])}" download '
+                             f'style="color:#3182ce;">{label}</a></li>')
+            if related.get("annotation_report"):
+                label = "细胞注释报告" if zh else "Annotation Context Report"
+                parts.append(f'<li><a href="{esc(related["annotation_report"])}" download '
+                             f'style="color:#3182ce;">{label}</a></li>')
+            if notebook:
+                label = "分析 Notebook (.ipynb)" if zh else "Analysis Notebook (.ipynb)"
+                parts.append(f'<li><a href="{esc(notebook)}" download '
+                             f'style="color:#3182ce;">{label}</a></li>')
+            parts.append('</ul>')
+
         parts.append('</div>')
         return "\n".join(parts)
 
@@ -1428,15 +1581,30 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         if not text:
             return ""
         import html as html_module
+
+        # Extract code blocks and inline code before escaping to avoid double-escaping
+        code_blocks = []
+        def _save_code_block(m):
+            placeholder = f"\x00CODEBLOCK{len(code_blocks)}\x00"
+            code_blocks.append(f'<pre><code>{html_module.escape(m.group(2))}</code></pre>')
+            return placeholder
+        text = re.sub(r'```(\w*)\n(.*?)```', _save_code_block, text, flags=re.DOTALL)
+
+        inline_codes = []
+        def _save_inline_code(m):
+            placeholder = f"\x00INLINECODE{len(inline_codes)}\x00"
+            inline_codes.append(f'<code>{html_module.escape(m.group(1))}</code>')
+            return placeholder
+        text = re.sub(r'`([^`]+)`', _save_inline_code, text)
+
+        # Escape remaining (non-code) text
         text = html_module.escape(text)
-        # Code blocks
-        text = re.sub(
-            r'```(\w*)\n(.*?)```',
-            lambda m: f'<pre><code>{m.group(2)}</code></pre>',
-            text, flags=re.DOTALL,
-        )
-        # Inline code
-        text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+
+        # Restore code blocks and inline code
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00CODEBLOCK{i}\x00", block)
+        for i, code in enumerate(inline_codes):
+            text = text.replace(f"\x00INLINECODE{i}\x00", code)
         # Headers (longest prefix first)
         text = re.sub(r'^####\s+(.+)$', r'<h4>\1</h4>', text, flags=re.MULTILINE)
         text = re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)

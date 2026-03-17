@@ -97,15 +97,21 @@ def categorize_figures(figures_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
     if not figures_dir.exists():
         return categories
 
-    for png_file in sorted(figures_dir.glob("*.png")):
-        filename = png_file.stem.lower()
-        pdf_file = png_file.with_suffix('.pdf')
+    # Scan for both JPG and PNG (JPG preferred for new sessions, PNG for backward compatibility)
+    seen_stems = set()
+    image_files = sorted(figures_dir.glob("*.jpg")) + sorted(figures_dir.glob("*.png"))
+    for img_file in image_files:
+        if img_file.stem in seen_stems:
+            continue  # Skip PNG if JPG already found for same stem
+        seen_stems.add(img_file.stem)
+        filename = img_file.stem.lower()
+        pdf_file = img_file.with_suffix('.pdf')
 
         fig_info = {
-            "name": png_file.stem,
-            "png_path": str(png_file),
+            "name": img_file.stem,
+            "png_path": str(img_file),  # Field name kept for compatibility; may be JPG
             "pdf_path": str(pdf_file) if pdf_file.exists() else None,
-            "filename": png_file.name
+            "filename": img_file.name
         }
 
         # Categorize based on filename
@@ -911,6 +917,9 @@ HTML_TEMPLATE = """
             <!-- Analysis Log -->
             {analysis_log_html}
 
+            <!-- Score Definitions -->
+            {score_definitions_html}
+
             <!-- Appendix: Analysis Settings & Records -->
             {appendix_html}
         </div>
@@ -1194,6 +1203,22 @@ Be strict but fair. For a publication-quality report:
         except Exception as e:
             logger.error(f"Failed to parse PI review: {e}")
 
+        # Retry once before falling back to heuristic
+        try:
+            logger.info("Retrying PI review LLM call after JSON parse failure")
+            retry_response = await self._pi_chat(prompt, temperature=0.2)
+            retry_result = _safe_parse_json(retry_response)
+            if retry_result:
+                return {
+                    "satisfied": retry_result.get("satisfied", False),
+                    "quality_score": retry_result.get("quality_score", 5),
+                    "feedback": retry_result.get("feedback", ""),
+                    "missing_elements": retry_result.get("missing_elements", []),
+                    "improvement_suggestions": retry_result.get("improvement_suggestions", [])
+                }
+        except Exception as e:
+            logger.error(f"PI review retry also failed: {e}")
+
         # Default: not satisfied if fewer figures than planned
         min_figures = len(section_plan.get("figures", []))
         is_satisfied = len(figures_generated) >= max(min_figures, 2)
@@ -1368,6 +1393,12 @@ Be specific and actionable. Include:
             if saved_ca:
                 self.cluster_annotations = saved_ca
 
+        # Repopulate figure_images_cache when resuming from step 4+
+        # (since _pi_review_analysis is skipped on resume, the cache stays empty)
+        if last_step >= 4 and checkpoint and not self.figure_images_cache:
+            logger.info("Repopulating figure_images_cache after checkpoint restore")
+            self._prepare_figure_images(existing_figures)
+
         for i, section_plan in enumerate(report_plan.get("sections", [])):
             # Skip sections already completed in checkpoint
             if i < completed_section_count:
@@ -1433,11 +1464,18 @@ Be specific and actionable. Include:
         if state.graphic_abstract and state.graphic_abstract.image_base64:
             try:
                 import base64 as b64mod
-                ga_png = self.figures_dir / "graphic_abstract.png"
-                with open(ga_png, "wb") as ga_f:
-                    ga_f.write(b64mod.b64decode(state.graphic_abstract.image_base64))
-                graphic_abstract_path = str(ga_png)
-                logger.info(f"Saved graphic abstract to {ga_png}")
+                import io as _io
+                from PIL import Image as _PILImage
+                ga_jpg = self.figures_dir / "graphic_abstract.jpg"
+                ga_bytes = b64mod.b64decode(state.graphic_abstract.image_base64)
+                ga_img = _PILImage.open(_io.BytesIO(ga_bytes))
+                if ga_img.mode in ('RGBA', 'P'):
+                    bg = _PILImage.new('RGB', ga_img.size, (255, 255, 255))
+                    bg.paste(ga_img, mask=ga_img.split()[-1] if ga_img.mode == 'RGBA' else None)
+                    ga_img = bg
+                ga_img.save(ga_jpg, 'JPEG', quality=90, optimize=True)
+                graphic_abstract_path = str(ga_jpg)
+                logger.info(f"Saved graphic abstract to {ga_jpg}")
             except Exception as e:
                 logger.error(f"Failed to save graphic abstract: {e}")
 
@@ -1483,6 +1521,24 @@ Be specific and actionable. Include:
                 }
                 for hm in state.human_messages
             ],
+            "user_interactions": {
+                "cluster_annotations": [
+                    {
+                        "cluster_id": ca.cluster_id,
+                        "cell_type": ca.cell_type,
+                        "user_override": ca.user_override or "",
+                        "confirmed": ca.user_confirmed,
+                        "confidence": ca.confidence,
+                    }
+                    for ca in state.annotation_state.cluster_annotations
+                ] if state.annotation_state and state.annotation_state.cluster_annotations else [],
+                "direction_selection": state.user_chosen_directions or [],
+            },
+            "related_reports": {
+                "exploration_report": "exploration_report.html",
+                "annotation_report": "annotation_context_report.html",
+            },
+            "notebook_filename": f"{state.id}.ipynb",
         }
 
         report = {
@@ -1500,7 +1556,8 @@ Be specific and actionable. Include:
             "progress": 100,
             "current_step": "完成" if zh else "Complete",
             "appendix": appendix_data,
-            "analysis_log": self._build_full_analysis_log(state)
+            "analysis_log": self._build_full_analysis_log(state),
+            "score_definitions": [sd.model_dump(mode="json") for sd in state.score_definitions] if state.score_definitions else []
         }
 
         # Sanitize NaN/Infinity values before saving (pandas data can contain these)
@@ -1519,6 +1576,15 @@ Be specific and actionable. Include:
         report_path = self.output_dir / "report.json"
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
+
+        # Copy notebook to report directory for download
+        import shutil as _shutil
+        notebook_src = get_session_states(state.id) / f"{state.id}.ipynb"
+        if notebook_src.exists():
+            try:
+                _shutil.copy2(str(notebook_src), str(self.output_dir / f"{state.id}.ipynb"))
+            except Exception as e:
+                logger.warning(f"Could not copy notebook: {e}")
 
         # Generate HTML report
         await self._report_progress(95, "生成HTML报告..." if zh else "Generating HTML report...")
@@ -1682,7 +1748,7 @@ Be specific and actionable. Include:
 
                     # Extract saved figure filenames from code
                     saved_figures = []
-                    for match in _re.findall(r'["\']([^"\']*\.png)["\']', code):
+                    for match in _re.findall(r'["\']([^"\']*\.(?:png|jpg|jpeg))["\']', code):
                         fname = os.path.basename(match)
                         if fname:
                             saved_figures.append(fname)
@@ -1717,7 +1783,7 @@ Be specific and actionable. Include:
             text_output = cell.output or ""
 
             saved_figures = []
-            for match in _re.findall(r'["\']([^"\']*\.png)["\']', code):
+            for match in _re.findall(r'["\']([^"\']*\.(?:png|jpg|jpeg))["\']', code):
                 fname = os.path.basename(match)
                 if fname:
                     saved_figures.append(fname)
@@ -1986,7 +2052,7 @@ Be specific and actionable. Include:
 
             # Extract saved figure filenames
             saved_figures = []
-            for match in _re.findall(r'["\']([^"\']*\.png)["\']', code):
+            for match in _re.findall(r'["\']([^"\']*\.(?:png|jpg|jpeg))["\']', code):
                 fname = os.path.basename(match)
                 if fname:
                     saved_figures.append(fname)
@@ -2601,7 +2667,7 @@ IMPORTANT:
             # Extract saved figure filenames from code
             saved_figures = []
             # Match patterns like: savefig("name.png"), save_figure(fig, path / "name")
-            for match in _re.findall(r'["\']([^"\']*\.png)["\']', code):
+            for match in _re.findall(r'["\']([^"\']*\.(?:png|jpg|jpeg))["\']', code):
                 # Get just the filename, not full path
                 fname = os.path.basename(match)
                 if fname:
@@ -2657,7 +2723,9 @@ IMPORTANT:
         # 4. Scan workspace for CSV tables
         tables = []
         if self.workspace_dir and self.workspace_dir.exists():
-            for csv_file in sorted(self.workspace_dir.glob("*.csv")):
+            tables_subdir = self.workspace_dir / "tables"
+            csv_search_dir = tables_subdir if tables_subdir.exists() else self.workspace_dir
+            for csv_file in sorted(csv_search_dir.glob("*.csv")):
                 tables.append({
                     "filename": csv_file.name,
                     "name": csv_file.stem.replace("_", " ").title(),
@@ -2738,7 +2806,7 @@ IMPORTANT:
         log_entries = []
         for i, cell in enumerate(state.code_history):
             _saved = [os.path.basename(p) for p in re.findall(
-                r'\[Auto-saved\] PNG: (.+\.png)', cell.output or ""
+                r'\[Auto-saved\] (?:JPG|PNG): (.+\.(?:jpg|png))', cell.output or ""
             )]
             log_entries.append({
                 "step_number": i + 1,
@@ -2777,7 +2845,7 @@ IMPORTANT:
                 cell_type = ca.user_override or ca.cell_type
                 self.cluster_annotations[ca.cluster_id] = {
                     "cell_type": cell_type,
-                    "n_cells": 0,
+                    "n_cells": getattr(ca, "n_cells", 0) or 0,
                     "confidence": ca.confidence,
                     "key_markers": ca.key_markers if ca.key_markers else [],
                     "evidence": ca.evidence or "",
@@ -2882,10 +2950,12 @@ IMPORTANT:
             scan_dirs.append(figures_subdir)
 
         for scan_dir in scan_dirs:
-            for png_file in sorted(scan_dir.glob("*.png")):
-                if png_file.name in seen_filenames:
-                    continue
-                seen_filenames.add(png_file.name)
+            # Scan for both JPG and PNG (JPG preferred, PNG for backward compatibility)
+            image_files = sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png"))
+            for png_file in image_files:
+                if png_file.stem in seen_filenames:
+                    continue  # Skip PNG if JPG already found for same stem
+                seen_filenames.add(png_file.stem)
 
                 # Copy to report figures directory for HTML embedding
                 dest_png = self.figures_dir / png_file.name
@@ -2928,7 +2998,9 @@ IMPORTANT:
         if not self.workspace_dir or not self.workspace_dir.exists():
             return existing_tables
 
-        for csv_file in sorted(self.workspace_dir.glob("*.csv")):
+        tables_subdir = self.workspace_dir / "tables"
+        csv_search_dir = tables_subdir if tables_subdir.exists() else self.workspace_dir
+        for csv_file in sorted(csv_search_dir.glob("*.csv")):
             # Copy to report tables directory
             dest_csv = self.tables_dir / csv_file.name
             try:
@@ -2959,153 +3031,6 @@ IMPORTANT:
 
         logger.info(f"Found {len(existing_tables)} existing tables from workspace {self.workspace_dir}")
         return existing_tables
-
-    async def _plan_report_dynamic(
-        self,
-        state: AnalysisState,
-        findings: Dict[str, Any],
-        language: str,
-        existing_figures: List[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        PI Agent dynamically plans the report structure based on actual findings and EXISTING figures.
-
-        Key responsibilities:
-        1. Review all existing figures from the analysis phase
-        2. Decide which figures to include in the report
-        3. Determine the order and importance of each figure
-        4. Provide scientific interpretation for each figure
-        5. Organize figures into logical sections
-
-        The Agent decides what specific analyses to include based on the actual data and findings.
-        """
-        zh = language == "zh"
-
-        # Format existing figures list for PI Agent
-        existing_figures = existing_figures or []
-        figures_list = "\n".join([
-            f"  {i+1}. {fig['filename']} (type: {fig['inferred_type']})"
-            for i, fig in enumerate(existing_figures)
-        ]) if existing_figures else "No existing figures found."
-
-        prompt = f"""You are a Principal Investigator writing a rigorous scientific research report for single-cell RNA sequencing analysis.
-
-## CRITICAL: Use EXISTING FIGURES from the Analysis Phase
-You have {len(existing_figures)} figures that were generated during the analysis phase. Your task is to:
-1. SELECT which figures to include in the report (prioritize by scientific importance)
-2. ORGANIZE them in logical sections following standard scRNA-seq publication format
-3. PROVIDE detailed scientific interpretation and caption for EACH selected figure
-4. WRITE comprehensive narrative connecting the figures to the research findings
-
-## Available Figures (already generated):
-{figures_list}
-
-## Research Project
-Title: {state.name}
-Objective: {state.initial_instruction}
-
-## Key Findings from Analysis
-### Bioinformatics Findings:
-{json.dumps(findings['bioinformatics'][:20], ensure_ascii=False, indent=2)}
-
-### Pathology Findings:
-{json.dumps(findings['pathology'][:10], ensure_ascii=False, indent=2)}
-
-### Cluster Annotations:
-{findings.get('cluster_annotations', 'Not available')}
-
-### Final Summary:
-{findings['summary'][:2000] if findings['summary'] else 'Not available'}
-
-## Task: Create a comprehensive report plan
-Write all content in English
-
-Return JSON with this EXACT structure:
-{{
-    "title": "Report title reflecting the research",
-    "sections": [
-        {{
-            "id": "unique_section_id",
-            "title": "Section Title",
-            "description": "Brief description of what this section covers",
-            "analysis_type": "general" or "specific",
-            "existing_figures": [
-                {{
-                    "filename": "exact_filename.png from the available figures list",
-                    "caption": "Detailed scientific caption (50-100 words) explaining what the figure shows",
-                    "interpretation": "Scientific interpretation (100-200 words) explaining the biological significance and how it relates to the research findings",
-                    "importance": "high/medium/low"
-                }}
-            ],
-            "narrative": "Detailed narrative text (200-400 words) for this section, referencing the figures and explaining the scientific context, methods, and implications"
-        }}
-    ]
-}}
-
-## IMPORTANT Requirements:
-
-### Section Organization (follow standard scRNA-seq paper format):
-1. **Data Overview & Quality Control** (general): UMAP visualizations, clustering results
-2. **Cell Type Identification** (general): Marker gene analysis, cluster annotations
-3. **Comparative Analysis** (specific): Differential expression, condition comparisons
-4. **Key Biological Findings** (specific): Specific genes, pathways related to research hypothesis
-
-### Figure Selection Guidelines:
-- Include ALL relevant UMAP visualizations (cluster, condition, annotated)
-- Include marker gene dotplots AND heatmaps
-- Include ALL volcano plots for differential expression
-- Include violin plots for key genes
-- Include composition/bar charts showing cell proportions
-- Prioritize figures that directly support the research findings
-
-### Caption Requirements:
-- State what the figure shows (plot type, data represented)
-- Specify sample sizes (n=X cells, clusters, etc.)
-- Note statistical methods or thresholds used
-- Reference specific clusters or genes highlighted
-
-### Interpretation Requirements:
-- Explain the biological significance of the observations
-- Connect to the research hypothesis/objectives
-- Reference specific findings (e.g., "Cluster 1 shows upregulation of Mt1/Mt2")
-- Discuss implications for the disease/condition studied
-
-### Narrative Requirements:
-- Write as a scientific paper section
-- Reference figures by their filename (e.g., "As shown in umap_leiden_clusters.png...")
-- Include quantitative details where available
-- Connect findings across figures within the section
-
-### MUST include sections:
-1. **Data Overview & Clustering** (general): UMAP visualizations, cell composition
-2. **Marker Gene Analysis** (general): Dotplots, heatmaps of cluster markers
-3. **Differential Expression** (specific): Volcano plots, DE gene heatmaps
-4. **Key Biological Findings** (specific): Gene expression patterns supporting research hypothesis
-
-### IMPORTANT: Use ONLY figures from the "Available Figures" list above!
-"""
-
-        response = await self._pi_chat(prompt, temperature=0.4)
-
-        try:
-            plan = _safe_parse_json(response)
-            if plan:
-                logger.info(f"Report plan: {len(plan.get('sections', []))} sections with existing figures")
-
-                # Ensure all sections have analysis_type
-                for section in plan.get("sections", []):
-                    if "analysis_type" not in section:
-                        section["analysis_type"] = "general"
-
-                # Store the existing figures reference
-                plan["_existing_figures"] = existing_figures
-
-                return plan
-        except Exception as e:
-            logger.error(f"Failed to parse report plan: {e}")
-
-        # Fallback: auto-assign existing figures to sections based on type
-        return self._create_fallback_plan_with_existing_figures(state, existing_figures, zh)
 
     def _create_fallback_plan_with_existing_figures(
         self,
@@ -3700,6 +3625,27 @@ Generate a comprehensive scientific narrative for this section. Your response mu
         except Exception as e:
             logger.error(f"Failed to parse PI Agent response: {e}")
 
+        # Attempt to salvage narrative text from raw LLM response before falling back
+        if response and len(response.strip()) > 100:
+            # Try to extract narrative field value from partially valid JSON
+            narrative_match = re.search(r'"narrative"\s*:\s*"((?:[^"\\]|\\.)*)"', response, re.DOTALL)
+            if narrative_match:
+                try:
+                    salvaged = json.loads('"' + narrative_match.group(1) + '"')
+                    if len(salvaged.strip()) > 50:
+                        provided_narrative = salvaged
+                        logger.info(f"Salvaged narrative from raw LLM response ({len(salvaged)} chars)")
+                except Exception:
+                    pass
+            # If no JSON field found but response is substantial prose, use it directly
+            if not (provided_narrative and len((provided_narrative or '').strip()) > 50):
+                # Strip markdown code fences and JSON artifacts
+                cleaned = re.sub(r'```(?:json)?\s*', '', response)
+                cleaned = re.sub(r'[{}\[\]]', '', cleaned).strip()
+                if len(cleaned) > 200:
+                    provided_narrative = cleaned
+                    logger.info(f"Using cleaned raw LLM response as narrative ({len(cleaned)} chars)")
+
         # Fallback: use provided narrative and basic figure info
         section_figures = []
         for fig in existing_figures:
@@ -3766,86 +3712,6 @@ Generate a comprehensive scientific narrative for this section. Your response mu
             "pi_iterations": 1,
             "steps_executed": 1
         }
-
-    async def _generate_section_autonomous(
-        self,
-        state: AnalysisState,
-        section_plan: Dict[str, Any],
-        findings: Dict[str, Any],
-        language: str
-    ) -> Dict[str, Any]:
-        """
-        Generate a report section.
-
-        Always delegates to _generate_section_from_existing_figures() —
-        no code execution during report generation.
-        """
-        # Always use existing-figures path — no code execution during report
-        return await self._generate_section_from_existing_figures(
-            state, section_plan, findings, language
-        )
-
-    async def _generate_section_narrative(
-        self,
-        section_plan: Dict[str, Any],
-        figures: List[Dict],
-        tables: List[Dict],
-        findings: Dict[str, Any],
-        language: str
-    ) -> str:
-        """PI Agent writes the narrative for a section with figure references"""
-        zh = language == "zh"
-
-        # Build figure list with IDs for referencing
-        figure_list = []
-        for i, f in enumerate(figures):
-            fig_id = f.get('id', str(i+1))
-            figure_list.append(f"- Figure {fig_id}: {f['name']}")
-
-        table_list = []
-        for i, t in enumerate(tables):
-            tbl_id = t.get('id', str(i+1))
-            table_list.append(f"- Table {tbl_id}: {t['name']}")
-
-        prompt = f"""Write the narrative text for this report section, following academic paper standards.
-
-## Section: {section_plan.get('title', 'Section')}
-{section_plan.get('description', '')}
-
-## Generated Figures (you MUST reference each one):
-{chr(10).join(figure_list) if figure_list else "No figures"}
-
-## Generated Tables (reference if applicable):
-{chr(10).join(table_list) if table_list else "No tables"}
-
-## Cell Cluster Annotations:
-{findings.get('cluster_annotations', 'Not available')}
-
-## Relevant Findings:
-{json.dumps(findings['bioinformatics'][:10], ensure_ascii=False)}
-
-## Requirements
-IMPORTANT: When referencing cell clusters, always use their annotated cell type names (e.g., "Hepatocytes (Stressed)" instead of "Cluster 1"). The cluster annotation table above provides the mapping.
-Write in English, following these format requirements:
-
-1. **MUST reference each figure** - Use format like "As shown in Figure X"
-2. For each figure, provide:
-   - What the figure displays (methodology/visualization type)
-   - Key observations visible in the figure
-   - Quantitative details where applicable (e.g., "X cell populations were identified")
-   - Biological interpretation of the results
-
-3. Use **bold** for important terms (gene names, cell types, key findings)
-4. Include specific numbers and statistics where relevant
-5. Connect observations to the research objectives
-
-Write 3-5 paragraphs, 300-500 words, ensure each figure is explained in detail
-
-Example format:
-To assess data quality, we first performed QC analysis (Figure X). The results show...
-"""
-
-        return await self._pi_chat(prompt, temperature=0.4)
 
     async def _generate_abstract(
         self,
@@ -4176,6 +4042,68 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             lbl_no_input = "无用户输入记录" if zh else "No user inputs recorded"
             human_html = f"<h3>{human_title}</h3><p>{lbl_no_input}</p>"
 
+        # ── 6. User Interaction History ─────────────────────────────
+        interaction_html = ""
+        annotation_items = ""
+        if state.annotation_state and state.annotation_state.cluster_annotations:
+            ann_title = "细胞注释确认" if zh else "Cell Annotation Decisions"
+            lbl_cluster = "Cluster"
+            lbl_ct = "细胞类型" if zh else "Cell Type"
+            lbl_override = "用户修改" if zh else "User Override"
+            lbl_confirmed = "已确认" if zh else "Confirmed"
+            lbl_conf = "置信度" if zh else "Confidence"
+            ann_rows = ""
+            for ca in state.annotation_state.cluster_annotations:
+                override = esc(ca.user_override or "-") if ca.user_override else "-"
+                confirmed = "✓" if ca.user_confirmed else "-"
+                ann_rows += (
+                    f"<tr><td>{esc(ca.cluster_id)}</td><td>{esc(ca.cell_type)}</td>"
+                    f"<td>{override}</td><td>{confirmed}</td><td>{esc(ca.confidence)}</td></tr>\n"
+                )
+            annotation_items = f"""
+            <h4>{ann_title}</h4>
+            <table>
+                <thead><tr><th>{lbl_cluster}</th><th>{lbl_ct}</th><th>{lbl_override}</th><th>{lbl_confirmed}</th><th>{lbl_conf}</th></tr></thead>
+                <tbody>{ann_rows}</tbody>
+            </table>
+            """
+
+        direction_items = ""
+        if state.user_chosen_directions:
+            dir_title = "研究方向选择" if zh else "Research Direction Selections"
+            lbl_dir = "方向" if zh else "Direction"
+            lbl_notes = "用户备注" if zh else "User Notes"
+            dir_rows = ""
+            for d in state.user_chosen_directions:
+                dir_rows += f"<tr><td>{esc(d.get('direction', '-'))}</td><td>{esc(d.get('notes', '-') or '-')}</td></tr>\n"
+            direction_items = f"""
+            <h4>{dir_title}</h4>
+            <table>
+                <thead><tr><th>{lbl_dir}</th><th>{lbl_notes}</th></tr></thead>
+                <tbody>{dir_rows}</tbody>
+            </table>
+            """
+
+        if annotation_items or direction_items:
+            interaction_title = "用户交互记录" if zh else "User Interaction History"
+            interaction_html = f"<h3>{interaction_title}</h3>{annotation_items}{direction_items}"
+
+        # ── 7. Related Reports & Downloads ─────────────────────────
+        downloads_html = ""
+        dl_items = []
+        # Exploration report
+        exploration_label = "探索阶段报告" if zh else "Exploration Report"
+        dl_items.append(f'<li><a href="exploration_report.html" download style="color:#4f46e5;">{exploration_label}</a></li>')
+        # Annotation context report
+        annotation_label = "细胞注释报告" if zh else "Annotation Context Report"
+        dl_items.append(f'<li><a href="annotation_context_report.html" download style="color:#4f46e5;">{annotation_label}</a></li>')
+        # Notebook
+        notebook_label = "分析 Notebook (.ipynb)" if zh else "Analysis Notebook (.ipynb)"
+        dl_items.append(f'<li><a href="{esc(state.id)}.ipynb" download style="color:#4f46e5;">{notebook_label}</a></li>')
+
+        dl_title = "相关报告与下载" if zh else "Related Reports & Downloads"
+        downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'
+
         # ── Assemble ────────────────────────────────────────────────
         return f"""
         <div class="appendix" id="appendix">
@@ -4185,6 +4113,8 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             {data_html}
             {rounds_html}
             {human_html}
+            {interaction_html}
+            {downloads_html}
         </div>
         """
 
@@ -4503,16 +4433,18 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 </div>
             </div>'''
 
-        # Build analysis log HTML
+        # Analysis log is no longer shown in the main report
         analysis_log_html = ""
-        if report.get("analysis_log"):
-            analysis_log_html = self._build_analysis_log_html(report, language)
-            if analysis_log_html:
-                log_toc_label = "完整分析日志" if zh else "Complete Analysis Log"
-                toc_items.append(
-                    f'<li><a href="#analysis_log">{log_toc_label}</a>'
-                    f'<span class="section-type specific">{"日志" if zh else "Log"}</span></li>'
-                )
+
+        # Build score definitions HTML
+        score_definitions_html = ""
+        if state is not None and state.score_definitions:
+            score_definitions_html = _build_score_definitions_html_section(state)
+            score_toc_label = "评分定义" if zh else "Score Definitions"
+            toc_items.append(
+                f'<li><a href="#score-definitions">{score_toc_label}</a>'
+                f'<span class="section-type specific">{"方法" if zh else "Methods"}</span></li>'
+            )
 
         # Build appendix HTML (analysis settings & records)
         appendix_html = ""
@@ -4543,6 +4475,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             conclusions_title="结论" if zh else "Conclusions",
             conclusions=_safe_format_value(conclusions_html),
             analysis_log_html=_safe_format_value(analysis_log_html),
+            score_definitions_html=_safe_format_value(score_definitions_html),
             appendix_html=_safe_format_value(appendix_html)
         )
 
@@ -4552,6 +4485,19 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             f.write(html_content)
 
         logger.info(f"HTML report saved to: {html_path}")
+
+        # Save score definitions CSV alongside the report
+        if state is not None and state.score_definitions:
+            import csv
+            csv_path = self.output_dir / "score_definitions.csv"
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Score Name", "Method", "Description", "Parameters", "Gene List", "Gene List Source", "Round Number"])
+                for sd in state.score_definitions:
+                    params_str = ", ".join(f"{k}={v}" for k, v in sd.parameters.items()) if sd.parameters else ""
+                    genes_str = ", ".join(sd.gene_list) if sd.gene_list else ""
+                    writer.writerow([sd.score_name, sd.method, sd.description, params_str, genes_str, sd.gene_list_source or "", sd.round_number])
+            logger.info(f"Score definitions CSV saved to: {csv_path}")
 
         return html_path
 
@@ -4578,7 +4524,7 @@ def _build_score_definitions_html_section(state: AnalysisState, section_number: 
         </tr>"""
     prefix = f"{section_number}. " if section_number else ""
     return f"""
-        <div class="section">
+        <div class="section" id="score-definitions">
             <div class="section-header">
                 <h2>{prefix}Score Definitions</h2>
             </div>
@@ -5227,7 +5173,7 @@ def generate_annotation_context_report_html(
         title = html_module.escape(getattr(pf, 'title', '') or 'Figure')
         if hasattr(pf, 'base64_data') and pf.base64_data:
             figure_blocks.append(
-                f'<div class="figure-item"><img src="data:image/png;base64,{pf.base64_data}" alt="{title}"/>'
+                f'<div class="figure-item"><img src="data:image/{"png" if pf.base64_data[:5] == "iVBOR" else "jpeg"};base64,{pf.base64_data}" alt="{title}"/>'
                 f'<div class="figure-caption">{title}</div></div>'
             )
 
@@ -5242,7 +5188,7 @@ def generate_annotation_context_report_html(
                         b64 = compress_image_to_base64(str(fpath), max_width=700, quality=80)
                         caption = html_module.escape(s.code_description or fname)
                         figure_blocks.append(
-                            f'<div class="figure-item"><img src="data:image/png;base64,{b64}" alt="{caption}"/>'
+                            f'<div class="figure-item"><img src="{b64}" alt="{caption}"/>'
                             f'<div class="figure-caption">{caption}</div></div>'
                         )
                     except Exception:

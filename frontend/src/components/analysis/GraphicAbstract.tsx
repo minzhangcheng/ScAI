@@ -23,8 +23,9 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
 
   const downloadImage = () => {
     const link = document.createElement('a')
-    link.href = `data:image/png;base64,${graphicAbstract.imageBase64}`
-    link.download = 'graphic_abstract.png'
+    const isPng = graphicAbstract.imageBase64.startsWith('iVBOR')
+    link.href = `data:image/${isPng ? 'png' : 'jpeg'};base64,${graphicAbstract.imageBase64}`
+    link.download = isPng ? 'graphic_abstract.png' : 'graphic_abstract.jpg'
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -46,7 +47,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
           onClick={() => setShowModal(true)}
         >
           <img
-            src={`data:image/png;base64,${graphicAbstract.imageBase64}`}
+            src={`data:image/${graphicAbstract.imageBase64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${graphicAbstract.imageBase64}`}
             alt="Graphic Abstract"
             className="w-full h-auto max-h-96 object-contain"
           />
@@ -109,7 +110,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
 
             {/* Image */}
             <img
-              src={`data:image/png;base64,${graphicAbstract.imageBase64}`}
+              src={`data:image/${graphicAbstract.imageBase64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${graphicAbstract.imageBase64}`}
               alt="Graphic Abstract"
               className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl"
             />

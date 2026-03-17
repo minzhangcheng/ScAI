@@ -220,6 +220,10 @@ async def cleanup_stale_sessions():
                     if session_id in _message_buffers:
                         del _message_buffers[session_id]
 
+                # Clean up report websockets and cached detailed reports
+                report_websockets.pop(session_id, None)
+                detailed_reports.pop(session_id, None)
+
             if sessions_to_evict:
                 logger.info(f"Evicted {len(sessions_to_evict)} stale sessions from memory")
 
@@ -842,8 +846,8 @@ async def ensure_session(session_id: str, request: StartRequest):
         raise HTTPException(status_code=400, detail="API configuration not set")
 
     # If session already exists in memory, just return it
-    if session_id in sessions:
-        state = sessions[session_id]
+    state = sessions.get(session_id)
+    if state is not None:
         return APIResponse(
             success=True,
             message="Session exists",
@@ -1133,8 +1137,24 @@ async def upload_generic_file(
     upload_parent.mkdir(parents=True, exist_ok=True)
     validate_path_within(file_path, upload_parent)
 
+    # Stream-read file content with size limit (100MB for generic files)
+    MAX_GENERIC_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+    CHUNK_SIZE = 64 * 1024  # 64KB chunks
+    total_size = 0
+    chunks = []
+    while True:
+        chunk = await file.read(CHUNK_SIZE)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > MAX_GENERIC_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size exceeds maximum allowed ({MAX_GENERIC_FILE_SIZE // (1024 * 1024)}MB)"
+            )
+        chunks.append(chunk)
+    content = b''.join(chunks)
     with open(file_path, "wb") as f:
-        content = await file.read()
         f.write(content)
 
     return APIResponse(
@@ -1505,6 +1525,7 @@ async def resume_analysis(session_id: str):
         state.status = TaskStatus.RUNNING
         # Increment max_rounds to allow additional analysis
         state.max_rounds = state.current_round + 1
+        await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
         return APIResponse(
             success=True,
@@ -1517,8 +1538,12 @@ async def resume_analysis(session_id: str):
             and state.current_round >= 1
             and not state.user_chosen_direction
             and not state.directions_queue
-            and not state.pending_human_input):
-            # No direction chosen — default to PI_DECIDE so analysis doesn't run directionless
+            and not state.pending_human_input
+            and not state.user_chosen_directions):
+            # No direction chosen AND user never selected directions — default to PI_DECIDE
+            # so analysis doesn't run directionless.
+            # If user_chosen_directions is non-empty, all directions have been completed;
+            # just let _should_continue() stop naturally at max_rounds.
             state.user_chosen_direction = "[PI_DECIDE]"
             state.pending_human_input = "[PI_DECIDE]"
             logger.info(f"[{session_id}] Resume without direction: defaulting to PI_DECIDE")
@@ -1534,6 +1559,7 @@ async def resume_analysis(session_id: str):
             workflow = workflows.get(session_id)
         if workflow:
             state.status = TaskStatus.RUNNING
+            await _update_session_cache(session_id, state)
             await async_save_session(session_id, state)
             workflow.signal_continue()
             return APIResponse(
@@ -1553,6 +1579,7 @@ async def resume_analysis(session_id: str):
     elif state.status == TaskStatus.WAITING_ANNOTATION:
         # Continue from annotation confirmation wait
         state.status = TaskStatus.RUNNING
+        await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
         async with _state_lock:
             workflow = workflows.get(session_id)
@@ -1570,6 +1597,7 @@ async def resume_analysis(session_id: str):
             )
     elif state.status == TaskStatus.PAUSED:
         state.status = TaskStatus.RUNNING
+        await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
         return APIResponse(
             success=True,
@@ -1579,6 +1607,7 @@ async def resume_analysis(session_id: str):
     elif state.status in (TaskStatus.GENERATING_REPORT, TaskStatus.FAILED):
         # Interrupted during report generation or failed — allow re-run
         state.status = TaskStatus.RUNNING
+        await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
         return APIResponse(
             success=True,
@@ -1601,8 +1630,24 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION):
-        raise HTTPException(status_code=400, detail=f"Cannot stop: {state.status.value}")
+    if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
+                             TaskStatus.WAITING_ANNOTATION, TaskStatus.GENERATING_REPORT):
+        if state.status == TaskStatus.PAUSED:
+            return APIResponse(success=True, message="Analysis is already paused")
+        return APIResponse(success=True, message=f"Analysis is {state.status.value}")
+
+    # Handle GENERATING_REPORT state
+    if state.status == TaskStatus.GENERATING_REPORT:
+        if req.action == "immediate":
+            state.status = TaskStatus.PAUSED
+            await _update_session_cache(session_id, state)
+            await async_save_session(session_id, state)
+            task = _run_tasks.get(session_id)
+            if task and not task.done():
+                task.cancel()
+            return APIResponse(success=True, message="Report generation cancelled")
+        else:  # summarize
+            return APIResponse(success=True, message="Report generation already in progress")
 
     if req.action == "immediate":
         state.status = TaskStatus.PAUSED
@@ -1873,6 +1918,10 @@ async def get_exploration_report_html(session_id: str):
     if not html_path or not Path(html_path).exists():
         raise HTTPException(status_code=404, detail="Exploration report HTML not found")
 
+    # Validate path is within the session directory to prevent path traversal
+    session_dir = get_session_dir(session_id)
+    validate_path_within(Path(html_path), session_dir)
+
     return FileResponse(html_path, media_type="text/html", filename="exploration_report.html")
 
 
@@ -1887,6 +1936,10 @@ async def get_annotation_report_html(session_id: str):
     html_path = state.annotation_report_html_path
     if not html_path or not Path(html_path).exists():
         raise HTTPException(status_code=404, detail="Annotation report not found")
+
+    # Validate path is within the session directory to prevent path traversal
+    session_dir = get_session_dir(session_id)
+    validate_path_within(Path(html_path), session_dir)
 
     return FileResponse(html_path, media_type="text/html", filename="annotation_context_report.html")
 
@@ -2762,8 +2815,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             except Exception:
                                 ws_closed = True
                                 break
-        except (WebSocketDisconnect, asyncio.CancelledError):
+        except WebSocketDisconnect:
             logger.info(f"[{session_id}] Client disconnected during workflow execution")
+            async with ws_lock:
+                ws_closed = True
+        except asyncio.CancelledError:
             async with ws_lock:
                 ws_closed = True
         except Exception as e:
@@ -3392,6 +3448,32 @@ async def get_report_table_alt(session_id: str, filename: str):
     return await get_report_table(session_id, filename)
 
 
+@app.get("/api/session/{session_id}/report/{filename:path}")
+async def get_report_file(session_id: str, filename: str):
+    """Catch-all: serve any file from the report directory (notebook, sub-reports, etc.)"""
+    validate_session_id(session_id)
+    safe_name = safe_filename(filename)
+    report_dir = get_session_reports(session_id)
+    file_path = report_dir / safe_name
+    validate_path_within(file_path, report_dir)
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    ext = file_path.suffix.lower()
+    media_types = {
+        '.html': 'text/html', '.ipynb': 'application/json',
+        '.json': 'application/json', '.pdf': 'application/pdf',
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+        '.csv': 'text/csv',
+    }
+    return FileResponse(
+        file_path,
+        media_type=media_types.get(ext, 'application/octet-stream'),
+        filename=filename,
+    )
+
+
 # ============================================
 # Publication Figures and Graphic Abstract Endpoints
 # ============================================
@@ -3542,7 +3624,7 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str):
 
 @app.get("/api/session/{session_id}/figure/{figure_id}/png")
 async def download_publication_figure_png(session_id: str, figure_id: str):
-    """Download a specific publication figure as PNG"""
+    """Download a specific publication figure as PNG/JPG"""
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -3551,8 +3633,8 @@ async def download_publication_figure_png(session_id: str, figure_id: str):
 
     if figure is not None:
         if not figure.png_path:
-            raise HTTPException(status_code=404, detail="PNG not available for this figure")
-        png_path = Path(figure.png_path)
+            raise HTTPException(status_code=404, detail="Image not available for this figure")
+        img_path = Path(figure.png_path)
         fig_name = figure.name
     else:
         # Fallback: search workspace figures from integrated_report message
@@ -3560,27 +3642,37 @@ async def download_publication_figure_png(session_id: str, figure_id: str):
         if fig_data is None:
             raise HTTPException(status_code=404, detail="Figure not found")
         fig_name = fig_data.get('name', '')
-        explicit_png = fig_data.get('png_path', '')
-        if explicit_png and Path(explicit_png).exists():
-            png_path = Path(explicit_png)
+        explicit_path = fig_data.get('png_path', '')
+        if explicit_path and Path(explicit_path).exists():
+            img_path = Path(explicit_path)
         else:
-            png_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.png"
-            if not png_path.exists():
-                png_path = get_session_workspace(session_id) / f"{fig_name}.png"
+            # Try JPG first, then PNG for backward compatibility
+            img_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.jpg"
+            if not img_path.exists():
+                img_path = get_session_workspace(session_id) / "figures" / f"{fig_name}.png"
+            if not img_path.exists():
+                img_path = get_session_workspace(session_id) / f"{fig_name}.jpg"
+            if not img_path.exists():
+                img_path = get_session_workspace(session_id) / f"{fig_name}.png"
 
-    if not png_path.exists():
-        raise HTTPException(status_code=404, detail="PNG file not found on disk")
+    if not img_path.exists():
+        raise HTTPException(status_code=404, detail="Image file not found on disk")
 
     # Validate path is within allowed directories
-    resolved = png_path.resolve()
+    resolved = img_path.resolve()
     allowed_parents = [SESSION_DIR.resolve(), REPORTS_DIR.resolve(), WORKSPACE_DIR.resolve(), UPLOAD_DIR.resolve()]
     if not any(str(resolved).startswith(str(p) + os.sep) or resolved == p for p in allowed_parents):
         raise HTTPException(status_code=403, detail="Access denied: file outside allowed directories")
 
+    # Determine media type from extension
+    ext = img_path.suffix.lower()
+    media_type = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+    dl_ext = ext if ext in (".jpg", ".jpeg") else ".png"
+
     return FileResponse(
-        png_path,
-        media_type="image/png",
-        filename=f"{fig_name}.png"
+        img_path,
+        media_type=media_type,
+        filename=f"{fig_name}{dl_ext}"
     )
 
 
@@ -3926,10 +4018,11 @@ def _build_chat_context(state: AnalysisState) -> tuple:
     def _add_pngs(directory: Path):
         if not directory.exists():
             return
-        for png in sorted(directory.glob("*.png")):
-            if png.stem not in seen_names:
-                seen_names.add(png.stem)
-                figure_inventory.append({"name": png.stem, "path": str(png)})
+        # Scan JPG first (new format), then PNG for backward compatibility
+        for img in sorted(directory.glob("*.jpg")) + sorted(directory.glob("*.png")):
+            if img.stem not in seen_names:
+                seen_names.add(img.stem)
+                figure_inventory.append({"name": img.stem, "path": str(img)})
 
     _add_pngs(get_session_workspace(state.id))
     _add_pngs(get_session_workspace(state.id) / "figures")
@@ -4206,14 +4299,14 @@ def _collect_session_figures(
     # 1. figures/ subdirectory (highest priority — publication figures)
     fig_dir = get_session_workspace(session_id) / "figures"
     if fig_dir.exists():
-        for png in sorted(fig_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for png in sorted(list(fig_dir.glob("*.jpg")) + list(fig_dir.glob("*.png")), key=lambda p: p.stat().st_mtime, reverse=True):
             _add_png(png)
 
     # 2. Workspace root — picks up UMAP and other plots saved via explicit plt.savefig()
     #    when LLM code calls plt.close() before the auto-save wrapper can capture them.
     root_dir = get_session_workspace(session_id)
     if root_dir.exists():
-        for png in sorted(root_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for png in sorted(list(root_dir.glob("*.jpg")) + list(root_dir.glob("*.png")), key=lambda p: p.stat().st_mtime, reverse=True):
             _add_png(png)
 
     figures.sort(key=lambda e: Path(e["path"]).stat().st_mtime, reverse=True)

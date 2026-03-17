@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List
 import logging
 import base64
 import json
+import asyncio
 
 from .base import BaseAgent, AgentConfig
 from ..models.schemas import AgentType, AnalysisState, GraphicAbstract
@@ -24,6 +25,19 @@ _SAFE_INPUT_TOKEN_LIMIT = 30_000  # Conservative: 64K - 32.8K ≈ 31.2K, use 30K
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate: len/3 for mixed CJK+English (conservative)."""
     return max(1, len(text) // 3)
+
+
+def _is_client_error(exc: Exception) -> bool:
+    """Check if an exception is a non-retriable client error (4xx)."""
+    err = str(exc)
+    # OpenAI/OpenRouter client wraps HTTP status in error messages
+    for code in ("400", "401", "403", "404", "413", "422", "429"):
+        if f"Error code: {code}" in err or f"status_code={code}" in err:
+            # 429 (rate limit) IS retriable, skip it
+            if code == "429":
+                return False
+            return True
+    return False
 
 
 class PainterAgent(BaseAgent):
@@ -176,7 +190,7 @@ class PainterAgent(BaseAgent):
         est_tokens = _estimate_tokens(text_input)
         # Image tokens add overhead (~258 tokens for a 1024px image), leave extra margin
         est_tokens += 300
-        logger.info(
+        logger.debug(
             f"[{self.session_id}][Painter] Revision input token estimate: {est_tokens} "
             f"(limit: {_SAFE_INPUT_TOKEN_LIMIT})"
         )
@@ -208,21 +222,37 @@ class PainterAgent(BaseAgent):
                 }
             ]
 
-            response = await self.llm_client.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                temperature=self.config.temperature,
-                max_tokens=4096,
-                extra_body={
-                    "modalities": ["image", "text"]
-                }
-            )
-            new_image = self._extract_image_from_response(response)
-            logger.info(f"[{self.session_id}][Painter] Graphic abstract revision successful")
-            return new_image
+            last_error = None
+            for attempt in range(3):
+                try:
+                    response = await self.llm_client.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": self.system_prompt},
+                            {"role": "user", "content": user_content}
+                        ],
+                        temperature=self.config.temperature,
+                        max_tokens=4096,
+                        extra_body={
+                            "modalities": ["image", "text"]
+                        }
+                    )
+                    new_image = self._extract_image_from_response(response)
+                    logger.info(f"[{self.session_id}][Painter] Graphic abstract revision successful")
+                    return new_image
+                except Exception as e:
+                    last_error = e
+                    # Don't retry client errors (4xx) — they'll always fail
+                    if _is_client_error(e):
+                        break
+                    if attempt < 2:
+                        delay = 2 ** attempt
+                        logger.warning(
+                            f"[{self.session_id}][Painter] Revision attempt {attempt + 1} failed: {e}, "
+                            f"retrying in {delay}s"
+                        )
+                        await asyncio.sleep(delay)
+            raise last_error
 
         except Exception as e:
             logger.error(f"[{self.session_id}][Painter] Error revising graphic abstract: {e}")
@@ -430,7 +460,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
         system_text = self.system_prompt or ""
         total_input = system_text + prompt
         est_tokens = _estimate_tokens(total_input)
-        logger.info(
+        logger.debug(
             f"[{self.session_id}][Painter] Input token estimate: {est_tokens} "
             f"(limit: {_SAFE_INPUT_TOKEN_LIMIT})"
         )
@@ -447,19 +477,35 @@ The graphic abstract should tell the story of the research at a glance, highligh
         logger.debug(f"[{self.session_id}][Painter] Calling image generation via OpenRouter")
 
         try:
-            response = await self.llm_client.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=self.config.temperature,
-                max_tokens=4096,
-                extra_body={
-                    "modalities": ["image", "text"]
-                }
-            )
-            return self._extract_image_from_response(response)
+            last_error = None
+            for attempt in range(3):
+                try:
+                    response = await self.llm_client.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": self.system_prompt},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=self.config.temperature,
+                        max_tokens=4096,
+                        extra_body={
+                            "modalities": ["image", "text"]
+                        }
+                    )
+                    return self._extract_image_from_response(response)
+                except Exception as e:
+                    last_error = e
+                    # Don't retry client errors (4xx) — they'll always fail
+                    if _is_client_error(e):
+                        break
+                    if attempt < 2:
+                        delay = 2 ** attempt
+                        logger.warning(
+                            f"[{self.session_id}][Painter] Generation attempt {attempt + 1} failed: {e}, "
+                            f"retrying in {delay}s"
+                        )
+                        await asyncio.sleep(delay)
+            raise last_error
 
         except Exception as e:
             logger.error(f"[{self.session_id}][Painter] Error generating image: {e}")

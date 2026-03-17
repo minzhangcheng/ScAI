@@ -287,8 +287,8 @@ Code requirements:
 - Generate visualization results for each step
 - Save key intermediate results
 - After cell type annotation, always generate a UMAP showing cell type labels as the primary clustering visualization
-- When saving figures, use PNG format (e.g., plt.savefig('figure.png')). The system automatically generates a companion high-quality PDF for every PNG saved. Do NOT manually save separate PDF files.
-- When using scanpy plotting with save= parameter, use .png extension (e.g., sc.pl.umap(adata, save='_clusters.png'))
+- When saving figures, use JPG format (e.g., plt.savefig('figure.jpg')). The system automatically generates a companion high-quality PDF for every JPG saved. Do NOT manually save separate PDF files.
+- When using scanpy plotting with save= parameter, use .jpg extension (e.g., sc.pl.umap(adata, save='_clusters.jpg'))
 
 Please reply in English. Code comments should be in English."""
 

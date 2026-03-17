@@ -2,7 +2,7 @@
 
 **InteSc** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.14.2
+**Version**: 0.14.3
 
 ## Core Features
 
@@ -330,6 +330,16 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.14.3 (2026-03-17)
+
+- **JPG figure output**: Bioinformatics figures now saved as JPG (quality 85, optimized) instead of PNG for web display, reducing file size; companion PDF still generated for publication
+- **Larger plot fonts**: Default matplotlib font sizes increased (title 16pt, axes labels 14pt, tick labels 12pt) for better readability in reports and publications
+- **Updated analysis library APIs**: decoupler v2.x API guidance (dc.op.collectri/progeny + dc.mt.ulm); gseapy organism must be lowercase; defensive empty-DataFrame checks in per-cluster loops; Harmony batch correction dimension-mismatch prevention; `importlib` added to blocked operations list
+- **Supervisor report redesign**: Figures now embedded inline via `[FIGURE: filename]` markers rather than appended in a separate appendix; monitoring stats bar removed; report framed as a scientific document; user interaction history (cluster annotations, research direction choices) and downloadable notebook added to appendix
+- **Painter agent reliability**: Image generation and revision now retry up to 3 times with exponential backoff; non-retriable client errors (4xx) are skipped immediately
+- **Frontend JPG support**: Figure gallery download button updated PNG→JPG; graphic abstract and message stream auto-detect PNG vs JPEG from base64 header for correct MIME type
+- **Bug fixes**: Race condition in WebSocket message restoration (no longer overwrites live messages); chat panel stale closure fix for message list; 100MB streaming size limit for generic file uploads; stop analysis now handles GENERATING_REPORT state; path traversal validation added to HTML report serve endpoints; catch-all report file endpoint added
 
 ### v0.14.2 (2026-03-16)
 

@@ -11,9 +11,11 @@ from typing import Callable, Dict, Any, List, Optional, TypedDict, Annotated
 from datetime import datetime
 import json
 import operator
+import random
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 import aiosqlite
 
 # Configure logger
@@ -122,8 +124,9 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                             f"Retrying {node_name} (attempt {attempt + 1}/{max_retries + 1})...",
                             AgentType.PI
                         )
-                        # Brief delay before retry
-                        await asyncio.sleep(2)
+                        # Exponential backoff with jitter
+                        delay = min(2 ** attempt + random.uniform(0, 1), 30)
+                        await asyncio.sleep(delay)
 
                     result = await func(self, state)
                     return result
@@ -248,7 +251,8 @@ class SingleCellAnalysisWorkflow:
             states_dir.mkdir(parents=True, exist_ok=True)
             db_path = str(states_dir / "checkpoints.sqlite")
             self._db_conn = await aiosqlite.connect(db_path)
-            self.checkpointer = AsyncSqliteSaver(self._db_conn)
+            serde = JsonPlusSerializer(allowed_msgpack_modules=True)
+            self.checkpointer = AsyncSqliteSaver(self._db_conn, serde=serde)
             # Make sure tables are created
             await self.checkpointer.setup()
             
@@ -458,7 +462,7 @@ class SingleCellAnalysisWorkflow:
     async def _send_state_sync(self, analysis_state: AnalysisState, change_type: str):
         """Send unified state synchronization message after state changes"""
         # Increment version for synchronization
-        analysis_state.increment_version()
+        await analysis_state.increment_version()
 
         # Save state via callback first
         if self.state_callback:
@@ -757,8 +761,10 @@ Be specific and actionable in your response."""
                 logger.info(f"[{self.session_id}] Annotation confirmation received")
 
                 # Restore status, but respect pause if user paused during annotation wait
-                if state.status != TaskStatus.PAUSED:
-                    state.status = original_status
+                if state.status == TaskStatus.PAUSED:
+                    logger.info(f"[{self.session_id}] User paused during annotation wait, returning early")
+                    return result
+                state.status = original_status
                 await self._send_state_sync(state, "annotation_resumed")
 
                 # Step 4: Apply user overrides
@@ -1092,6 +1098,7 @@ Be specific and actionable in your response."""
             "human_guidance_processed": False
         }
 
+    @with_retry("pi_planning")
     async def _pi_planning(self, state: WorkflowState) -> WorkflowState:
         """PI agent plans the round, incorporating human guidance and adjusted instructions"""
         analysis_state = state["analysis_state"]
@@ -2294,15 +2301,18 @@ Return ONLY the JSON array, nothing else."""
             for scan_dir in [workspace_dir / "figures", workspace_dir]:
                 if not scan_dir.exists():
                     continue
-                for png in sorted(scan_dir.glob("*.png"), key=lambda p: p.stat().st_mtime):
-                    if png.stem in seen_stems:
+                for img in sorted(
+                    list(scan_dir.glob("*.png")) + list(scan_dir.glob("*.jpg")),
+                    key=lambda p: p.stat().st_mtime,
+                ):
+                    if img.stem in seen_stems:
                         continue
-                    seen_stems.add(png.stem)
-                    pdf = png.with_suffix(".pdf")
+                    seen_stems.add(img.stem)
+                    pdf = img.with_suffix(".pdf")
                     all_workspace_figs.append({
-                        "name": png.stem,
-                        "type": _infer_fig_type(png.stem),
-                        "path": str(png),
+                        "name": img.stem,
+                        "type": _infer_fig_type(img.stem),
+                        "path": str(img),
                         "pdf_path": str(pdf) if pdf.exists() else None,
                     })
 
@@ -2765,11 +2775,6 @@ Return ONLY the JSON array, nothing else."""
 
         workflow_state = None
         try:
-            # We must initialize so the checkpointer is available
-            await self.initialize()
-            if self.compiled_graph is None:
-                self._build_graph()
-                
             snapshot = await self.compiled_graph.aget_state(config)
             if snapshot and snapshot.values:
                 workflow_state = snapshot.values

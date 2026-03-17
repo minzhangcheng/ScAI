@@ -774,11 +774,22 @@ export function useWebSocket() {
                 !serverMsgIdSet.has(m.id) && !serverMsgKeySet.has(createMsgKey(m))
               )
 
-              // Combine and sort by timestamp
-              const mergedMessages = [...serverMessages, ...localOnlyMessages]
-                .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+              // Read latest messages from store to avoid overwriting messages
+              // that arrived via WebSocket during the async fetch.
+              const latestMessages = useAppStore.getState().messages
+              const latestMsgKeySet = new Set(latestMessages.map(createMsgKey))
+              const latestMsgIdSet = new Set(latestMessages.map((m: Message) => m.id))
 
-              setMessages(mergedMessages)
+              // Find server messages not already present locally
+              const newFromServer = serverMessages.filter((m: Message) =>
+                !latestMsgIdSet.has(m.id) && !latestMsgKeySet.has(createMsgKey(m))
+              )
+
+              if (newFromServer.length > 0) {
+                const merged = [...latestMessages, ...newFromServer]
+                  .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+                setMessages(merged)
+              }
               console.log(`WebSocket: Restored ${serverMessages.length} messages, merged ${localOnlyMessages.length} local-only`)
             }
 

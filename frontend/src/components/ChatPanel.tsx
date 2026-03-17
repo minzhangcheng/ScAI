@@ -98,10 +98,17 @@ export function ChatPanel() {
         )
         const msgs = data.messages || []
         // Check if backend has more messages than frontend (new response arrived)
-        if (msgs.length > chatMessages.length) {
+        // Read latest messages from store to avoid stale closure
+        const currentChatMessages = useAppStore.getState().chatMessages
+        if (msgs.length > currentChatMessages.length) {
           const lastMsg = msgs[msgs.length - 1] as any
           if (lastMsg && !lastMsg?.delegation_active && lastMsg.role === 'assistant') {
-            setChatMessages(msgs)
+            // Merge: preserve any local-only (optimistic) messages not yet on the server
+            const serverMsgIds = new Set(msgs.map((m: any) => m.id || `${m.timestamp}|${m.role}`))
+            const localOnly = currentChatMessages.filter(
+              (m) => !serverMsgIds.has(m.id || `${m.timestamp}|${m.role}`)
+            )
+            setChatMessages([...msgs, ...localOnly])
             setChatLoading(false)
             setChatDelegationActive(false)
             setChatDelegationPlan(null)
@@ -110,7 +117,8 @@ export function ChatPanel() {
       } catch {}
     }, 5000)
     return () => clearInterval(interval)
-  }, [chatLoading, currentSession?.id, chatMessages.length, setChatMessages, setChatLoading, setChatDelegationActive, setChatDelegationPlan])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatLoading, currentSession?.id, setChatMessages, setChatLoading, setChatDelegationActive, setChatDelegationPlan])
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -419,7 +427,7 @@ export function ChatPanel() {
                       <div key={idx} className="border border-slate-200 rounded-lg overflow-hidden bg-white">
                         <img
                           src={fig.base64
-                            ? `data:image/png;base64,${fig.base64}`
+                            ? `data:image/${fig.base64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${fig.base64}`
                             : `/api/file?path=${encodeURIComponent(fig.path || '')}`}
                           alt={fig.name}
                           className="w-full h-auto"

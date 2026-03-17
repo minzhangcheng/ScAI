@@ -63,7 +63,7 @@ interface GraphicAbstractContent {
 }
 
 // Reusable truncated text with expand/collapse
-function TruncatedText({ text, limit, className }: { text: string; limit: number; className?: string }) {
+function TruncatedText({ text, limit, className, language }: { text: string; limit: number; className?: string; language?: string }) {
   const [expanded, setExpanded] = useState(false)
   if (text.length <= limit) return <>{text}</>
   return (
@@ -73,7 +73,7 @@ function TruncatedText({ text, limit, className }: { text: string; limit: number
         onClick={() => setExpanded(!expanded)}
         className={`ml-1 text-xs text-blue-500 hover:text-blue-700 underline ${className || ''}`}
       >
-        {expanded ? '收起' : '展开全文'}
+        {expanded ? (language === 'zh' ? '收起' : 'Collapse') : (language === 'zh' ? '展开全文' : 'Expand')}
       </button>
     </>
   )
@@ -146,7 +146,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
             </div>
             <div className="bg-slate-800 rounded-lg p-3 text-sm text-slate-100 overflow-x-auto">
               <pre className="whitespace-pre-wrap font-mono text-xs">
-                <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1000} />
+                <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1000} language={language} />
               </pre>
             </div>
           </div>
@@ -162,7 +162,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
             </div>
             <div className={`${bgColor} border rounded-lg p-3 text-sm`}>
               <pre className="whitespace-pre-wrap text-slate-700 text-xs">
-                <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1500} />
+                <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1500} language={language} />
               </pre>
             </div>
           </div>
@@ -236,7 +236,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               <span>{language === 'zh' ? '生成图表' : 'Generated Figure'}</span>
             </div>
             <img
-              src={`data:image/png;base64,${message.content}`}
+              src={`data:image/${typeof message.content === 'string' && message.content.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${message.content}`}
               alt="Analysis figure"
               className="max-w-full rounded-lg border border-slate-200 shadow-sm"
             />
@@ -298,7 +298,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           <div className="space-y-1">
             <span className="text-xs text-slate-500">{language === 'zh' ? '输出' : 'Output'}:</span>
             <pre className="text-xs text-slate-700 bg-slate-100 rounded-lg p-2 overflow-x-auto whitespace-pre-wrap">
-              <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1000} />
+              <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1000} language={language} />
             </pre>
           </div>
         )
@@ -380,7 +380,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               )}
               {figureContent.png_base64 && (
                 <img
-                  src={`data:image/png;base64,${figureContent.png_base64}`}
+                  src={`data:image/${figureContent.png_base64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${figureContent.png_base64}`}
                   alt={figureContent.figure_name || 'Figure'}
                   className="mt-2 max-w-xs rounded border border-slate-200"
                 />
@@ -433,7 +433,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               )}
               {imageBase64 && (
                 <img
-                  src={`data:image/png;base64,${imageBase64}`}
+                  src={`data:image/${imageBase64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${imageBase64}`}
                   alt="Graphic Abstract"
                   className="max-w-full rounded border border-pink-200"
                 />
@@ -455,7 +455,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               </div>
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
                 <pre className="whitespace-pre-wrap text-xs">
-                  <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1500} />
+                  <TruncatedText text={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)} limit={1500} language={language} />
                 </pre>
               </div>
             </div>
@@ -770,8 +770,10 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
     </div>
   )
 }, (prevProps, nextProps) => {
-  // Only re-render if message id or language changed
+  // Re-render if message id, content, timestamp, or language changed
   return prevProps.message.id === nextProps.message.id &&
+         prevProps.message.content === nextProps.message.content &&
+         prevProps.message.timestamp === nextProps.message.timestamp &&
          prevProps.language === nextProps.language
 })
 

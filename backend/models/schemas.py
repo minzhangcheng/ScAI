@@ -6,10 +6,10 @@ from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
 import uuid
-import threading
+import asyncio
 
-# Module-level lock for thread-safe state version increments
-_version_lock = threading.RLock()
+# Module-level lock for async-safe state version increments (lazy-init for Python 3.10 compat)
+_version_lock: asyncio.Lock | None = None
 
 class AgentType(str, Enum):
     PI = "pi"
@@ -81,7 +81,7 @@ class CodeExecution(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class AnalysisStep(BaseModel):
-    """生信Agent分析日志中的一个步骤，涵盖所有工具调用类型"""
+    """A single step in the bioinformatics agent analysis log, covering all tool call types"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     step_number: int
     step_type: str  # "execute_code" | "consult_pi" | "search_literature" | "annotate_clusters" | "report_findings" | "generate_publication_figure" | "text_response"
@@ -232,6 +232,7 @@ class ClusterAnnotation(BaseModel):
     key_markers: List[str] = Field(default_factory=list)
     confidence: str = "low"  # "high" / "medium" / "low"
     evidence: str = ""
+    n_cells: int = 0  # Number of cells in this cluster
     alternative_cell_types: List[str] = Field(default_factory=list)  # Other possible cell types
     low_confidence_reason: str = ""  # Why confidence is low/medium
     user_confirmed: bool = False
@@ -495,12 +496,16 @@ class AnalysisState(BaseModel):
 
         return "\n".join(parts)
 
-    def increment_version(self):
+    async def increment_version(self):
         """Atomically increment state version for synchronization
 
-        Uses a module-level lock to ensure thread-safe increment in concurrent environments.
+        Uses a module-level async lock to ensure safe increment in concurrent async environments.
+        Lock is lazily created on first use for Python 3.10/3.11 compatibility.
         """
-        with _version_lock:
+        global _version_lock
+        if _version_lock is None:
+            _version_lock = asyncio.Lock()
+        async with _version_lock:
             self.state_version += 1
             self.last_sync_timestamp = datetime.now()
             self.updated_at = datetime.now()

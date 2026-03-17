@@ -120,6 +120,24 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
                 ]
                 if not non_import_lines or all(re.search(pip_pattern, line) for line in non_import_lines):
                     continue
+            # Allow importlib for safe usage patterns (import_module, util.find_spec)
+            if 'importlib' in description:
+                importlib_lines = [
+                    line.strip() for line in code.splitlines()
+                    if re.search(r'\bimportlib\b', line)
+                ]
+                # Only allow: `import importlib` (bare) or `from importlib import ...`
+                # Block dangerous submodules: importlib.machinery, importlib.abc, etc.
+                safe_import_pattern = r'^import\s+importlib\s*$'
+                safe_from_pattern = r'^from\s+importlib(?:\.util)?\s+import\s+'
+                safe_use_pattern = r'importlib\.(?:import_module|util\.find_spec)\s*\('
+                if all(
+                    re.match(safe_import_pattern, line)
+                    or re.match(safe_from_pattern, line)
+                    or re.search(safe_use_pattern, line)
+                    for line in importlib_lines
+                ):
+                    continue
             # Allow open() writes that reference known safe path variables / directories.
             # The runtime I/O sandbox (_sandboxed_open) enforces actual path safety,
             # so the static check only needs to catch writes with no safe-path indication.
@@ -560,17 +578,42 @@ plt.rcParams.update({
     'ps.fonttype': 42,
 })
 
-# === Monkey-patch Figure.savefig to auto-generate PDF alongside PNG ===
+# === Monkey-patch Figure.savefig to auto-convert PNG→JPG and auto-generate PDF ===
 import matplotlib.figure as _mpl_figure
 _original_savefig = _mpl_figure.Figure.savefig
 
-def _savefig_with_pdf(self, fname, *args, **kwargs):
-    # Wrapper: after saving PNG, auto-generate a companion high-res PDF.
+def _savefig_with_jpg_pdf(self, fname, *args, **kwargs):
+    # Wrapper: save figure, convert PNG→JPG if needed, and auto-generate companion PDF.
     _original_savefig(self, fname, *args, **kwargs)
     try:
         _fname_str = str(fname)
-        if _fname_str.lower().endswith('.png'):
-            _pdf_path = _fname_str[:-4] + '.pdf'
+        if _fname_str.lower().endswith(('.png', '.jpg', '.jpeg')):
+            _base, _ext = os.path.splitext(_fname_str)
+
+            # Convert PNG → JPG to unify output format
+            if _ext.lower() == '.png':
+                try:
+                    from PIL import Image as _PILImage
+                    _jpg_path = _base + '.jpg'
+                    _img = _PILImage.open(_fname_str)
+                    if _img.mode == 'RGBA':
+                        _bg = _PILImage.new('RGB', _img.size, (255, 255, 255))
+                        _bg.paste(_img, mask=_img.split()[-1])
+                        _img = _bg
+                    elif _img.mode != 'RGB':
+                        _img = _img.convert('RGB')
+                    _img.save(_jpg_path, 'JPEG', quality=85, optimize=True)
+                    # Remove original PNG to avoid duplicate files
+                    try:
+                        os.remove(_fname_str)
+                    except OSError:
+                        pass
+                    print(f"[Auto-convert] {os.path.basename(_fname_str)} -> {os.path.basename(_jpg_path)}")
+                except Exception as _conv_err:
+                    print(f"[Auto-convert] Warning: {_conv_err}")
+
+            # Auto-generate companion high-res PDF
+            _pdf_path = _base + '.pdf'
             _pdf_kwargs = dict(kwargs)
             _pdf_kwargs['format'] = 'pdf'
             _pdf_kwargs['dpi'] = 300
@@ -580,7 +623,7 @@ def _savefig_with_pdf(self, fname, *args, **kwargs):
     except Exception as _pdf_err:
         print(f"[Auto-PDF] Warning: {_pdf_err}")
 
-_mpl_figure.Figure.savefig = _savefig_with_pdf
+_mpl_figure.Figure.savefig = _savefig_with_jpg_pdf
 
 # Try importing common bioinformatics packages
 try:

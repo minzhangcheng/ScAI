@@ -148,24 +148,27 @@ class PathologyAgent(BaseAgent):
         try:
             logger.info(f"[PathologyAgent] Processing image: {image_info.file_path}")
             
+            # Load image once and reuse for both tiling and overview
+            img = load_image(image_info.file_path)
+
             # Process image into tiles
             tiles = process_pathology_image(
                 image_info.file_path,
                 tile_size=self.tile_size,
-                max_tiles=self.max_tiles
+                max_tiles=self.max_tiles,
+                preloaded_image=img
             )
-            
+
             logger.info(f"[PathologyAgent] Generated {len(tiles)} tiles from image")
-            
+
             if not tiles:
                 return {
                     "image_id": image_info.id,
                     "error": "No valid tiles generated from image (image may be too small or blank)",
                     "findings": []
                 }
-            
-            # Also create overview
-            img = load_image(image_info.file_path)
+
+            # Create overview from already-loaded image
             overview = create_overview_image(img)
             
             logger.info(f"[PathologyAgent] Starting overview analysis...")
