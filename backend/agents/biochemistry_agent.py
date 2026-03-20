@@ -142,7 +142,7 @@ class BiochemistryAgent(BaseAgent):
                                     f"{r.get('value')} - {e}"
                                 )
                 except Exception as e:
-                    logger.error(f"Failed to process data file {bio_file.filename}: {e}")
+                    logger.exception(f"Failed to process data file {bio_file.filename}")
                     bio_file.extracted_data = {"error": str(e)}
 
         # Check if we have any indicators to analyze
@@ -614,7 +614,7 @@ Reply in JSON format:
             return await self._parse_file_content(file_content, bio_file.filename)
 
         except Exception as e:
-            logger.error(f"Failed to read file {bio_file.filename}: {e}")
+            logger.exception(f"Failed to read file {bio_file.filename}")
             return {"error": str(e), "results": []}
 
     async def _parse_file_content(self, content: str, filename: str) -> Dict[str, Any]:

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
+import { devLog } from '../utils/logger'
 import ReactMarkdown from 'react-markdown'
 import {
   FileText,
@@ -122,7 +123,7 @@ export function ReportPanel() {
   useEffect(() => {
     if (currentSession?.status === 'completed' && !report && !loading && !generating) {
       retryTimerRef.current = setTimeout(() => {
-        console.log('ReportPanel: Retrying report load...')
+        devLog('ReportPanel: Retrying report load...')
         loadReport()
       }, 3000)
       return () => {

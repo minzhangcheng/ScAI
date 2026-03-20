@@ -83,7 +83,7 @@ class PathologyAgent(BaseAgent):
                 detailed_results.append(result)
                 logger.info(f"[PathologyAgent] Image {i+1} analysis complete: {len(result.get('findings', []))} findings")
             except Exception as e:
-                logger.error(f"[PathologyAgent] Failed to analyze image {img_info.filename}: {e}")
+                logger.exception(f"[PathologyAgent] Failed to analyze image {img_info.filename}")
                 detailed_results.append({
                     "image_id": img_info.id,
                     "error": str(e),
@@ -97,7 +97,7 @@ class PathologyAgent(BaseAgent):
                     instruction, detailed_results, state
                 )
             except Exception as e:
-                logger.error(f"[PathologyAgent] Failed to synthesize findings: {e}")
+                logger.exception("[PathologyAgent] Failed to synthesize findings")
                 synthesis = {
                     "summary": "Failed to synthesize findings",
                     "error": str(e)
@@ -438,7 +438,7 @@ Please reply in structured format.
                 "image_id": image_info.id
             }
         except Exception as e:
-            logger.error(f"[PathologyAgent] Targeted analysis failed: {e}")
+            logger.exception("[PathologyAgent] Targeted analysis failed")
             return {
                 "question": specific_question,
                 "answer": f"Targeted analysis failed: {str(e)}",

@@ -165,13 +165,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "annotate_clusters",
-            "description": "Annotate all cell clusters at once using literature-based evidence. Call this ONCE after clustering and rank_genes_groups with ALL cluster markers. Returns cell type annotations with confidence levels and literature evidence. Much more efficient than per-cluster consult_pi calls.",
+            "description": "Annotate all cell clusters at once using literature-based evidence. Call this ONCE after clustering and rank_genes_groups. Returns cell type annotations with confidence levels and literature evidence. Much more efficient than per-cluster consult_pi calls. You do NOT need to pass cluster_markers — they will be auto-extracted from adata.uns['rank_genes_groups'] if omitted.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "cluster_markers": {
                         "type": "object",
-                        "description": "Dict mapping cluster ID (string) to list of top marker genes. Example: {\"0\": [\"Cd79a\", \"Ms4a1\", \"Cd79b\"], \"1\": [\"Cd3d\", \"Cd3e\", \"Cd8a\"]}. Get these from sc.tl.rank_genes_groups result.",
+                        "description": "Optional. Dict mapping cluster ID (string) to list of top marker genes. Example: {\"0\": [\"Cd79a\", \"Ms4a1\", \"Cd79b\"], \"1\": [\"Cd3d\", \"Cd3e\", \"Cd8a\"]}. If omitted, markers will be auto-extracted from adata.uns['rank_genes_groups'].",
                         "additionalProperties": {
                             "type": "array",
                             "items": {"type": "string"}
@@ -186,7 +186,7 @@ TOOLS = [
                         "description": "Organism (e.g., 'mouse', 'human'). Extract from the research context or data metadata."
                     }
                 },
-                "required": ["cluster_markers", "tissue", "organism"]
+                "required": ["tissue", "organism"]
             }
         }
     },
@@ -479,8 +479,13 @@ class BioinformaticsAgent(BaseAgent):
                         checkpoint_mgr.clear()
                         checkpoint = None
             except Exception as e:
-                logger.error(f"[Bioinformatics] Failed to load checkpoint: {e}, starting fresh")
-                checkpoint_mgr.clear()
+                logger.exception("[Bioinformatics] Failed to load checkpoint")
+                # Only clear if it's a data corruption issue, not a transient error
+                try:
+                    checkpoint_mgr.clear()
+                    logger.warning("[Bioinformatics] Cleared corrupted checkpoint data")
+                except Exception as clear_err:
+                    logger.error(f"[Bioinformatics] Failed to clear checkpoint: {clear_err}")
                 checkpoint = None
                 await self._notify("status", "Previous checkpoint corrupted, starting fresh analysis...")
 
@@ -558,14 +563,18 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
          ct = ct.str.replace(f'_{{cond}}', '', regex=False)
 
 SECURITY RESTRICTIONS:
-- Do NOT use globals(), exec(), eval(), subprocess, or importlib — these are blocked by the sandbox for security and will cause repeated errors.
+- Do NOT use globals(), exec(), eval(), __import__(), subprocess, or importlib — these are blocked by the sandbox for security and will cause repeated errors.
+- ALWAYS use standard `import xxx` or `from xxx import yyy` syntax. NEVER use `__import__('xxx')` — it will be blocked.
 - If a package import fails (ModuleNotFoundError), install it using `!pip install package_name` in a code cell, then import it normally. Do NOT use subprocess.run(['pip', ...]) or importlib.
-- Do NOT write files to disk using open(..., 'w') or similar — these are blocked by the sandbox. Store all intermediate data in adata.uns, adata.obs, adata.var, or Python variables.
+- Do NOT write files to disk using open(..., 'w') or similar — direct file writes are blocked by the sandbox. Saving via library methods (e.g. pandas df.to_csv(), scanpy sc.pl.*, matplotlib savefig) to the workspace directory IS allowed. Store intermediate data in adata.uns, adata.obs, adata.var, or Python variables.
 - Do NOT call annotate_clusters in the same response as execute_code that generates markers.
   You must FIRST execute code and see the printed output, THEN call annotate_clusters in a separate step.
 
 WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
+- **MEMORY MANAGEMENT (CRITICAL to avoid OOM crashes)**:
+  The adata object persists in the Jupyter kernel between code cells. Do NOT reload adata from .h5ad files unless absolutely necessary (e.g., after a kernel restart). Reuse the in-memory adata object. When you no longer need a large intermediate object (e.g., a subset), delete it with `del variable_name` and call `import gc; gc.collect()`.
+  When saving checkpoints with adata.write(), keep at most 1-2 checkpoint files — do NOT accumulate many large .h5ad files.
 - **REUSE EXISTING RESULTS (CRITICAL for chat follow-up analyses)**:
   Before running any analysis step, CHECK if the result already exists in the current session.
   The notebook environment may already contain results from previous analyses.
@@ -794,6 +803,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         MAX_TEXT_RESPONSES = 2
         figure_iteration_count = 0
         MAX_FIGURE_ITERATIONS = 5  # Max figure-only iterations excluded from step count
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 5  # Force report_findings after this many consecutive code errors
 
         while step_count < max_steps and not completed:
             step_count += 1
@@ -801,6 +812,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             # Save checkpoint periodically
             if checkpoint_mgr.should_checkpoint(step_count):
                 checkpoint_data = {
+                    'step_name': f'step_{step_count}',
                     'session_id': state.id,
                     'round_number': state.current_round,
                     'step_number': step_count,
@@ -945,8 +957,12 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
                     wrapped_code = f'''
 import matplotlib.pyplot as plt
+import matplotlib.figure as _mpl_figure
 from pathlib import Path
 from IPython.display import display
+
+# Close any stale figures from previous executions to prevent poisoning
+plt.close('all')
 
 # Set PDF vectorized fonts
 plt.rcParams.update({{
@@ -957,6 +973,14 @@ plt.rcParams.update({{
 # Create figures directory
 _figures_dir = Path({figures_dir_repr})
 _figures_dir.mkdir(exist_ok=True)
+
+# Track figures explicitly saved by user code to avoid duplicate saves
+_explicitly_saved_figs = set()
+_prev_fig_savefig = _mpl_figure.Figure.savefig
+def _tracking_savefig(self, *_a, **_kw):
+    _explicitly_saved_figs.add(self.number)
+    return _prev_fig_savefig(self, *_a, **_kw)
+_mpl_figure.Figure.savefig = _tracking_savefig
 
 # Temporarily disable plt.close/plt.show to keep figures alive for auto-save
 _orig_close = plt.close
@@ -970,27 +994,41 @@ try:
 finally:
     plt.close = _orig_close
     plt.show = _orig_show
+    _mpl_figure.Figure.savefig = _prev_fig_savefig
 
 # Detect and save all active figures
 _fig_nums = plt.get_fignums()
 for _fig_num in _fig_nums:
-    _fig = plt.figure(_fig_num)
-    _fig_id = f"fig_{timestamp}_{{_fig_num}}"
-    _jpg_path = _figures_dir / f"{{_fig_id}}.jpg"
-    _pdf_path = _figures_dir / f"{{_fig_id}}.pdf"
+    try:
+        _fig = plt.figure(_fig_num)
 
-    # Save JPG (for web display — smaller file size than PNG)
-    _fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-                 format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+        # Display figure to trigger capture via display_data message (always)
+        display(_fig)
 
-    # Save PDF (vector format for publication quality download)
-    _fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+        # Skip file saving for figures already saved by user code
+        if _fig_num in _explicitly_saved_figs:
+            print(f"[Auto-save] Skipped figure {{_fig_num}} (already saved by code)")
+            continue
 
-    # Display figure to trigger capture via display_data message
-    display(_fig)
+        _fig_id = f"fig_{timestamp}_{{_fig_num}}"
+        _jpg_path = _figures_dir / f"{{_fig_id}}.jpg"
+        _pdf_path = _figures_dir / f"{{_fig_id}}.pdf"
 
-    print(f"[Auto-saved] JPG: {{_jpg_path}}")
-    print(f"[Auto-saved] PDF: {{_pdf_path}}")
+        # Save JPG (for web display — smaller file size than PNG)
+        _fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                     format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+
+        # Save PDF (vector format for publication quality download)
+        _fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+
+        print(f"[Auto-saved] JPG: {{_jpg_path}}")
+        print(f"[Auto-saved] PDF: {{_pdf_path}}")
+    except Exception as _save_err:
+        print(f"[Auto-save] Warning: could not save figure {{_fig_num}}: {{_save_err}}")
+        try:
+            plt.close(_fig_num)
+        except Exception:
+            pass
 
 # Close all figures to free memory
 plt.close('all')
@@ -1039,12 +1077,29 @@ plt.close('all')
                         _step_figures.append(fig)
                     if result.error:
                         await self._notify("error", result.error)
-                    
+                        consecutive_errors += 1
+                    else:
+                        consecutive_errors = 0
+
                     tool_result = f"Execution {'successful' if not result.error else 'failed'}.\n"
                     if result.output:
                         tool_result += f"Output:\n{result.output[:1500]}\n"
                     if result.error:
                         tool_result += f"Error: {result.error}\n"
+                        # Hint: if a module is missing, remind the agent to pip install
+                        if "ModuleNotFoundError" in result.error:
+                            missing = ""
+                            m = re.search(r"No module named ['\"]([^'\"]+)['\"]", result.error)
+                            if m:
+                                missing = m.group(1).split(".")[0]
+                            tool_result += (
+                                f"\nHint: The package '{missing}' is not installed. "
+                                f"You can install it by running `!pip install {missing}` in a code cell, "
+                                f"then retry the import.\n"
+                            ) if missing else (
+                                "\nHint: A required package is not installed. "
+                                "You can install it using `!pip install <package_name>` in a code cell.\n"
+                            )
                     if result.figures:
                         tool_result += f"Generated {len(result.figures)} figure(s).\n"
                     
@@ -1053,6 +1108,18 @@ plt.close('all')
                         "tool_call_id": tool_call.id,
                         "content": tool_result
                     })
+
+                    # Circuit breaker: too many consecutive errors → force report
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive code errors, forcing report")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[System] Too many consecutive code execution errors. "
+                                "Stop trying to fix the code. Report your findings so far "
+                                "using the report_findings tool and move on."
+                            )
+                        })
 
                 elif tool_name == "consult_pi":
                     has_substantive_work = True
@@ -1122,13 +1189,47 @@ plt.close('all')
 
                     n_clusters = len(cluster_markers)
 
+                    # Auto-extract markers from kernel adata if LLM didn't provide them
+                    if n_clusters == 0 and self.sandbox:
+                        logger.info("[Bioinformatics] cluster_markers empty, auto-extracting from adata.uns['rank_genes_groups']")
+                        extract_code = (
+                            "import json as _json\n"
+                            "_markers = {}\n"
+                            "try:\n"
+                            "    import scanpy as sc\n"
+                            "    for _cl in adata.obs['leiden'].cat.categories:\n"
+                            "        _df = sc.get.rank_genes_groups_df(adata, group=str(_cl))\n"
+                            "        _df = _df[_df['pvals_adj'] < 0.05]\n"
+                            "        _markers[str(_cl)] = _df.head(15)['names'].tolist()\n"
+                            "except Exception as _e:\n"
+                            "    _markers = {'__error__': str(_e)}\n"
+                            "print(_json.dumps(_markers))\n"
+                        )
+                        try:
+                            extract_result = await self.sandbox.execute(extract_code)
+                            if extract_result.success and extract_result.output.strip():
+                                try:
+                                    extracted = json.loads(extract_result.output.strip())
+                                except json.JSONDecodeError as je:
+                                    logger.warning(f"[Bioinformatics] Auto-extract markers JSON parse failed: {je}")
+                                    extracted = {}
+                                if "__error__" not in extracted and len(extracted) > 0:
+                                    cluster_markers = extracted
+                                    n_clusters = len(cluster_markers)
+                                    logger.info(f"[Bioinformatics] Auto-extracted markers for {n_clusters} clusters from adata")
+                                else:
+                                    err_msg = extracted.get("__error__", "unknown")
+                                    logger.warning(f"[Bioinformatics] Auto-extract failed: {err_msg}")
+                        except Exception as e:
+                            logger.warning(f"[Bioinformatics] Auto-extract markers exception: {e}")
+
                     if n_clusters == 0:
                         tool_result = (
-                            "Error: cluster_markers is empty. You must first run "
+                            "Error: cluster_markers is empty and auto-extraction from "
+                            "adata.uns['rank_genes_groups'] failed. You must first run "
                             "sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon') "
-                            "and extract top marker genes per cluster into a dict before "
-                            "calling annotate_clusters. Please execute the marker "
-                            "extraction code first."
+                            "and ensure it completes successfully before calling "
+                            "annotate_clusters."
                         )
                         messages.append({
                             "role": "tool",
@@ -1157,6 +1258,8 @@ plt.close('all')
 
                     # Build a code-friendly response
                     result_lines = []
+                    if annotation_result.get("already_confirmed"):
+                        result_lines.append("[NOTE: These annotations were already confirmed by the user. No re-annotation needed. Proceed to downstream analysis.]\n")
                     if tissue_summary:
                         result_lines.append(f"Tissue context: {tissue_summary}\n")
                     result_lines.append("Cluster annotations:")
@@ -1191,6 +1294,28 @@ plt.close('all')
 
                     tool_result = "\n".join(result_lines)
 
+                    # Auto-apply annotations to adata.obs['cell_type'] in sandbox
+                    # so the agent doesn't need to manually execute the mapping code
+                    if annotations and self.sandbox:
+                        cell_type_dict = {
+                            str(cid): (info.get("cell_type", "Unknown") if isinstance(info, dict) else "Unknown")
+                            for cid, info in annotations.items()
+                        }
+                        inject_code = (
+                            "import json as _json\n"
+                            f"_ct_map = _json.loads({json.dumps(json.dumps(cell_type_dict, ensure_ascii=False))})\n"
+                            "adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(_ct_map).fillna('Unknown')\n"
+                            "print(f'cell_type applied: {adata.obs[\"cell_type\"].value_counts().to_dict()}')\n"
+                        )
+                        try:
+                            inject_result = await self.sandbox.execute(inject_code)
+                            if inject_result.success:
+                                logger.info(f"[Bioinformatics] Auto-applied cell_type annotations to adata.obs")
+                            else:
+                                logger.warning(f"[Bioinformatics] Failed to auto-apply annotations: {inject_result.error}")
+                        except Exception as e:
+                            logger.warning(f"[Bioinformatics] Exception auto-applying annotations: {e}")
+
                     await self._notify("annotation_result", json.dumps(
                         annotation_result, ensure_ascii=False, default=str
                     )[:2000])
@@ -1198,7 +1323,7 @@ plt.close('all')
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": tool_result[:3000]
+                        "content": tool_result[:5000]
                     })
 
                     # Record annotate_clusters step in analysis log
@@ -1546,6 +1671,9 @@ plt.close('all')
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+# Close any stale figures from previous executions to prevent poisoning
+plt.close('all')
+
 # Set publication-quality parameters
 plt.rcParams.update({{
     'figure.dpi': 300,
@@ -1579,22 +1707,21 @@ finally:
     plt.close = _orig_close
     plt.show = _orig_show
 
-# Get current figure
+# Get current figure and save
 fig = plt.gcf()
-
 _jpg_path = {png_path_repr}
 _pdf_path = {pdf_path_repr}
 
-# Save JPG (for web display — smaller file size)
-fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-print(f"Saved JPG: {{_jpg_path}}")
+try:
+    fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+    print(f"Saved JPG: {{_jpg_path}}")
+    fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+    print(f"Saved PDF: {{_pdf_path}}")
+except Exception as _save_err:
+    print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
 
-# Save high-res PDF
-fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-print(f"Saved PDF: {{_pdf_path}}")
-
-plt.close()
+plt.close('all')
 '''
 
         # Execute the code
@@ -1724,6 +1851,9 @@ plt.close()
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+# Close any stale figures from previous executions to prevent poisoning
+plt.close('all')
+
 plt.rcParams.update({{
     'figure.dpi': 300,
     'savefig.dpi': 300,
@@ -1756,14 +1886,17 @@ finally:
     plt.show = _orig_show
 
 fig = plt.gcf()
-
 _jpg_path = {png_path_repr}
 _pdf_path = {pdf_path_repr}
 
-fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-plt.close()
+try:
+    fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+    fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+except Exception as _save_err:
+    print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
+
+plt.close('all')
 '''
                     result = await self.sandbox.execute(revised_wrapped)
 
@@ -1796,6 +1929,9 @@ plt.close()
                                 retry_wrapped = f'''
 import matplotlib.pyplot as plt
 from pathlib import Path
+
+# Close any stale figures from previous executions to prevent poisoning
+plt.close('all')
 
 plt.rcParams.update({{
     'figure.dpi': 300,
@@ -1831,10 +1967,14 @@ fig = plt.gcf()
 _jpg_path = {png_path_repr}
 _pdf_path = {pdf_path_repr}
 
-fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-plt.close()
+try:
+    fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+    fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+except Exception as _save_err:
+    print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
+
+plt.close('all')
 '''
                                 retry_result = await self.sandbox.execute(retry_wrapped)
                                 if not retry_result.error and jpg_path.exists() and jpg_path.stat().st_size >= 2000:
@@ -1918,7 +2058,7 @@ plt.close()
                 return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
         except Exception as e:
-            logger.error(f"[Bioinformatics] Failed to compress image: {e}")
+            logger.exception("[Bioinformatics] Failed to compress image")
             # Fallback: read raw file and encode
             with open(image_path, 'rb') as f:
                 return base64.b64encode(f.read()).decode('utf-8')

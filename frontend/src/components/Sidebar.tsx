@@ -48,19 +48,29 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Auto-reload session from API on page refresh to restore full data (images etc.)
-  // Uses currentSession?.id as dep so it fires after Zustand hydration restores the session
+  // Uses currentSession?.id as dep so it fires after Zustand hydration restores the session.
+  // Other deps (loadSession, setCurrentSession, clearMessages) are intentionally omitted:
+  // the hasAutoReloaded ref guard ensures this runs at most once per mount, and including
+  // the hook-returned functions would cause unnecessary re-fires since their identity
+  // changes on every render.
   const hasAutoReloaded = useRef(false)
+  const loadSessionRef = useRef(loadSession)
+  loadSessionRef.current = loadSession
+  const setCurrentSessionRef = useRef(setCurrentSession)
+  setCurrentSessionRef.current = setCurrentSession
+  const clearMessagesRef = useRef(clearMessages)
+  clearMessagesRef.current = clearMessages
   useEffect(() => {
     if (currentSession?.id && !hasAutoReloaded.current) {
       hasAutoReloaded.current = true
-      loadSession(currentSession.id).catch(e => {
+      loadSessionRef.current(currentSession.id).catch(e => {
         // Session no longer exists on server (404) - clear stale session from state
         console.warn('Sidebar: Auto-reload session failed, clearing stale session:', e)
-        setCurrentSession(null)
-        clearMessages()
+        setCurrentSessionRef.current(null)
+        clearMessagesRef.current()
       })
     }
-  }, [currentSession?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentSession?.id])
 
   // Register session browser callback for external components (e.g., ConfigPanel's Read Mode)
   useEffect(() => {
@@ -75,13 +85,17 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
     }
   }, [showSessionBrowser])
 
+  const [sessionListError, setSessionListError] = useState<string | null>(null)
+
   const fetchSessions = async () => {
     setLoadingSessions(true)
+    setSessionListError(null)
     try {
       const sessions = await listSessions()
       setSavedSessions(sessions)
-    } catch (e) {
+    } catch (e: any) {
       console.error('Failed to fetch sessions:', e)
+      setSessionListError(e?.message || 'Failed to load sessions')
     } finally {
       setLoadingSessions(false)
     }
@@ -447,6 +461,14 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                 <div className="text-center py-8 text-slate-500">
                   <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />
                   {language === 'zh' ? '加载中...' : 'Loading...'}
+                </div>
+              ) : sessionListError ? (
+                <div className="text-center py-8 text-red-500">
+                  <AlertCircle className="w-10 h-10 mx-auto mb-2 opacity-70" />
+                  <p className="text-sm">{language === 'zh' ? '加载会话列表失败' : 'Failed to load sessions'}</p>
+                  <button onClick={fetchSessions} className="mt-2 text-xs text-blue-500 hover:underline">
+                    {language === 'zh' ? '重试' : 'Retry'}
+                  </button>
                 </div>
               ) : savedSessions.length === 0 ? (
                 <div className="text-center py-8 text-slate-500">

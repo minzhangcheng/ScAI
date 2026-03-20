@@ -66,6 +66,12 @@ export function AnalysisPanel() {
   const [explorationReportData, setExplorationReportData] = useState<any>(null)
   const lastExplorationMsgRef = useRef<string>('')
 
+  // Reset message refs when session changes so dialogs can re-trigger after page reload
+  useEffect(() => {
+    lastAnnotationMsgRef.current = ''
+    lastExplorationMsgRef.current = ''
+  }, [currentSession?.id])
+
   // Stop dialog state
   const [showStopDialog, setShowStopDialog] = useState(false)
   const [stopping, setStopping] = useState(false)
@@ -448,7 +454,6 @@ export function AnalysisPanel() {
     if (currentSession &&
         (currentSession.status === 'running' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation') &&
         !wsConnected && wsConnect) {
-      console.log('AnalysisPanel: Auto-connecting WebSocket for running session')
       wsConnect()
     }
   }, [currentSession?.id, currentSession?.status, wsConnected, wsConnect])

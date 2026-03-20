@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.14.4
+**Version**: 0.14.5
 
 ## Core Features
 
@@ -330,6 +330,23 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.14.5 (2026-03-20)
+
+- **Fixed: Multi-direction queue crash**: Selecting multiple research directions could crash the workflow at round boundaries with `AttributeError: 'dict' object has no attribute 'strip'` — `directions_queue` items are dicts, not strings; filter now uses `.get("direction", "").strip()`
+- **Fixed: Countdown timeout status desync**: After a countdown timer expires and auto-continues, the session status is now correctly reset to RUNNING and a state sync message is sent to the frontend
+- **Fixed: PI callback context accumulation**: PI consultation callback during bioinformatics analysis now uses `chat_without_history()` to prevent unrelated prior context from polluting responses
+- **Fixed: Annotation callback field name**: `_annotate_clusters_callback` returned `tissue_context` (wrong field); now correctly returns `tissue_summary` and marks `already_confirmed: True` to avoid redundant confirmation prompts
+- **Fixed: Literature search with no prior findings**: If no agent findings exist (e.g., first-round literature search before bioinformatics completes), search topics are now built from `research_objective` or treatment group names instead of silently skipping
+- **Fixed: Multi-direction correlation direction mismatch**: Correlation analysis between directions now matches by direction name instead of list index, preventing wrong summaries being paired with wrong directions
+- **Fixed: `analysis_log` unbounded growth**: Log is now capped at 2000 entries to prevent memory growth in long-running sessions
+- **Fixed: `skip_nodes` lost on resume**: When resuming a workflow, `skip_nodes` decisions stored in `sandbox_state` are now injected into the LangGraph state so skipped nodes remain skipped
+- **Fixed: Checkpointer serializer too permissive**: `JsonPlusSerializer` now uses an explicit schema module allowlist instead of `allowed_msgpack_modules=True`
+- **Fixed: Figure review always auto-approved**: Publication figures now start with `review_status: "pending"` so PI review is always triggered; previously initialized as `"approved"`, skipping the review loop
+- **Fixed: DB connection not cleared after close**: `_db_conn` is now set to `None` in a `finally` block after closing to prevent potential double-close errors
+- **Improvement: Cluster merge strategy passed to bioinformatics**: PI's `merge_strategy` and `cluster_comparison_strategy` from planning output are now included in bioinformatics agent instructions, enabling biologically meaningful cluster grouping before DEG analysis
+- **Improvement: Exploration phase per-cell-type figures**: Exploration round instructions now explicitly require a volcano plot and pathway bar chart for each cell type group's DEG and enrichment results
+- **Improvement: PI English-only response enforcement**: PI consultation callback prompt now explicitly instructs the model to respond in English only
 
 ### v0.14.4 (2026-03-17)
 

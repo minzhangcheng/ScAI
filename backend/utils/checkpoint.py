@@ -56,7 +56,7 @@ class CheckpointManager:
             tmp_path.replace(self.checkpoint_path)
             logger.info(f"[{self.session_id}] Checkpoint saved: {checkpoint.get('step_name', 'unknown')}")
         except Exception as e:
-            logger.error(f"[{self.session_id}] Failed to save checkpoint: {e}")
+            logger.exception(f"[{self.session_id}] Failed to save checkpoint")
             if tmp_path.exists():
                 tmp_path.unlink()
 
@@ -75,7 +75,7 @@ class CheckpointManager:
                 content = await f.read()
                 return json.loads(content)
         except Exception as e:
-            logger.error(f"[{self.session_id}] Failed to load checkpoint: {e}")
+            logger.exception(f"[{self.session_id}] Failed to load checkpoint")
             return None
 
     def clear(self):

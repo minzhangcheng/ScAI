@@ -1,15 +1,44 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { useAppStore, Message, Session, AgentType } from '../stores/appStore'
+import { useAppStore, Message, Session, AgentType, RoundResult, FigureReviewStatus } from '../stores/appStore'
+import { devLog } from '../utils/logger'
+import type {
+  SessionLoadResponse,
+  SessionInfoUpdateResponse,
+  GroupAddResponse,
+  GroupUpdateResponse,
+  IndicatorAddResponse,
+  ResumeResponse,
+  SessionListItem,
+  SessionListResponse,
+  ReportResponse,
+  RawRoundResult,
+  RawDataFile,
+  RawPublicationFigure,
+  RawPublicationTable,
+  RawMessage,
+  RawTreatmentGroup,
+  RawBiochemistryIndicator,
+  ChatMessage,
+} from '../types'
 
 const API_BASE = '/api'
 
-// Generate UUID compatible with all browsers (including non-HTTPS contexts)
+// Generate UUID using crypto API with fallback for non-HTTPS contexts
 export function generateId(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = Math.random() * 16 | 0
-    const v = c === 'x' ? r : (r & 0x3 | 0x8)
-    return v.toString(16)
-  })
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID()
+  }
+  // Fallback for environments without crypto.randomUUID
+  const bytes = new Uint8Array(16)
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes)
+  } else {
+    for (let i = 0; i < 16; i++) bytes[i] = Math.random() * 256 | 0
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`
 }
 
 // Generic fetch wrapper (exported for direct use)
@@ -155,10 +184,10 @@ export function useSession() {
     setError(null)
     
     try {
-      const data = await apiFetch<any>(`/session/${sessionId}/load`)
+      const data = await apiFetch<SessionLoadResponse>(`/session/${sessionId}/load`)
 
       // Transform round_results from snake_case to camelCase with defensive null checks
-      const transformedRoundResults = (data.round_results || []).map((r: any) => {
+      const transformedRoundResults = (data.round_results || []).map((r: RawRoundResult | null) => {
         if (!r) return null
         return {
           round: r.round ?? 0,
@@ -168,10 +197,10 @@ export function useSession() {
           biochemistryFindings: Array.isArray(r.biochemistry_findings) ? r.biochemistry_findings : [],
           literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
         }
-      }).filter((r: any) => r !== null)
+      }).filter((r: RawRoundResult | null) => r !== null)
 
       // Validate status is a known value
-      const validStatuses = ['pending', 'running', 'paused', 'waiting_input', 'completed', 'failed', 'generating_report'] as const
+      const validStatuses = ['pending', 'running', 'paused', 'waiting_input', 'waiting_annotation', 'completed', 'failed', 'generating_report'] as const
       const status = validStatuses.includes(data.status) ? data.status : 'pending'
 
       const session: Session = {
@@ -181,17 +210,17 @@ export function useSession() {
         currentRound: data.current_round || 0,
         createdAt: data.created_at || new Date().toISOString(),
         instruction: data.initial_instruction || '',
-        treatmentGroups: (data.treatment_groups || []).map((g: any) => ({
+        treatmentGroups: (data.treatment_groups || []).map((g: RawTreatmentGroup) => ({
           id: g.id, name: g.name, description: g.description || '',
           sampleCount: g.sampleCount ?? g.sample_count ?? 1, order: g.order ?? 0,
         })),
-        dataFiles: (data.data_files || []).map((f: any) => ({
+        dataFiles: (data.data_files || []).map((f: RawDataFile) => ({
           id: f.id, filename: f.filename, filePath: f.filePath ?? f.file_path ?? '',
           section: f.section, dataType: f.dataType ?? f.data_type ?? '',
           groupId: f.groupId ?? f.group_id, sampleNumber: f.sampleNumber ?? f.sample_number,
           description: f.description, timestamp: f.timestamp || '',
         })),
-        biochemistryIndicators: (data.biochemistry_indicators || []).map((r: any) => ({
+        biochemistryIndicators: (data.biochemistry_indicators || []).map((r: RawBiochemistryIndicator) => ({
           id: r.id, indicator: r.indicator, value: r.value, unit: r.unit,
           referenceRange: r.referenceRange ?? r.reference_range,
           interpretation: r.interpretation,
@@ -200,7 +229,7 @@ export function useSession() {
         roundResults: transformedRoundResults,
         finalSummary: data.final_summary,
         // Publication outputs (snake_case → camelCase)
-        publicationFigures: (data.publication_figures || []).map((f: any) => ({
+        publicationFigures: (data.publication_figures || []).map((f: RawPublicationFigure) => ({
           id: f.id,
           name: f.name,
           description: f.description,
@@ -213,14 +242,14 @@ export function useSession() {
           revisionCount: f.revision_count ?? f.revisionCount ?? 0,
           createdAt: f.created_at || f.createdAt || '',
         })),
-        publicationTables: (data.publication_tables || []).map((t: any) => ({
+        publicationTables: (data.publication_tables || []).map((t: RawPublicationTable) => ({
           id: t.id,
           name: t.name,
           description: t.description,
           csvPath: t.csv_path || t.csvPath || '',
           columns: Array.isArray(t.columns) ? t.columns : [],
           previewData: Array.isArray(t.preview_data) ? t.preview_data : (t.previewData || []),
-          reviewStatus: t.review_status || t.reviewStatus || 'pending',
+          reviewStatus: (t.review_status || t.reviewStatus || 'pending') as FigureReviewStatus,
           piFeedback: t.pi_feedback || t.piFeedback,
           createdAt: t.created_at || t.createdAt || '',
         })),
@@ -261,9 +290,9 @@ export function useSession() {
       
       // Load realtime messages history (WebSocket messages)
       if (data.messages && Array.isArray(data.messages)) {
-        const messages: Message[] = data.messages.map((msg: any) => ({
+        const messages: Message[] = data.messages.map((msg: RawMessage) => ({
           id: msg.id || generateId(),
-          type: msg.type || 'message',
+          type: (msg.type || 'message') as Message['type'],
           agent: msg.agent as AgentType | undefined,
           content: msg.content,
           timestamp: msg.timestamp || new Date().toISOString(),
@@ -283,13 +312,8 @@ export function useSession() {
   }, [setCurrentSession, setMessages, clearMessages])
   
   const listSessions = useCallback(async () => {
-    try {
-      const data = await apiFetch<{ sessions: any[] }>('/sessions')
-      return data.sessions
-    } catch (e) {
-      console.error('Failed to list sessions:', e)
-      return []
-    }
+    const data = await apiFetch<SessionListResponse>('/sessions')
+    return data.sessions
   }, [])
   
   const deleteSession = useCallback(async (sessionId: string) => {
@@ -309,10 +333,10 @@ export function useSession() {
   const updateSessionInfo = useCallback(async (updates: { name?: string; instruction?: string }) => {
     const session = useAppStore.getState().currentSession
     if (!session) throw new Error('No active session')
-    const body: any = {}
+    const body: Record<string, unknown> = {}
     if (updates.name !== undefined) body.name = updates.name
     if (updates.instruction !== undefined) body.instruction = updates.instruction
-    const response = await apiFetch<any>(`/session/${session.id}/info`, {
+    const response = await apiFetch<SessionInfoUpdateResponse>(`/session/${session.id}/info`, {
       method: 'PUT',
       body: JSON.stringify(body),
     })
@@ -346,7 +370,7 @@ export function useSession() {
       
       const data = await response.json()
       if (data.data?.created) {
-        console.log('Session recreated after server restart')
+        devLog('Session recreated after server restart')
       }
       return data
     } catch (e) {
@@ -377,12 +401,12 @@ export function useSession() {
     const session = useAppStore.getState().currentSession
     if (!session) throw new Error('No active session')
 
-    const body: any = {}
+    const body: Record<string, unknown> = {}
     if (updates.name !== undefined) body.name = updates.name
     if (updates.description !== undefined) body.description = updates.description
     if (updates.sampleCount !== undefined) body.sample_count = updates.sampleCount
 
-    const response = await apiFetch<any>(`/session/${session.id}/groups/${groupId}`, {
+    const response = await apiFetch<GroupUpdateResponse>(`/session/${session.id}/groups/${groupId}`, {
       method: 'PUT',
       body: JSON.stringify(body),
     })
@@ -444,11 +468,11 @@ export function useSession() {
 
     // Refresh dataFiles from server to ensure frontend state matches backend
     try {
-      const refreshData = await apiFetch<any>(`/session/${session.id}/load`)
+      const refreshData = await apiFetch<SessionLoadResponse>(`/session/${session.id}/load`)
       const current = useAppStore.getState().currentSession
       if (current && current.id === session.id) {
         useAppStore.getState().updateSession({
-          dataFiles: (refreshData.data_files || []).map((f: any) => ({
+          dataFiles: (refreshData.data_files || []).map((f: RawDataFile) => ({
             id: f.id, filename: f.filename, filePath: f.filePath ?? f.file_path ?? '',
             section: f.section, dataType: f.dataType ?? f.data_type ?? '',
             groupId: f.groupId ?? f.group_id, sampleNumber: f.sampleNumber ?? f.sample_number,
@@ -619,21 +643,21 @@ export function useSession() {
   const exportState = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
     
-    // Download as zip file
+    // Download as tar.gz file (backend GET endpoint returns .tar.gz)
     const response = await fetch(`${API_BASE}/session/${currentSession.id}/export`, {
-      method: 'POST'
+      method: 'GET'
     })
-    
+
     if (!response.ok) {
       throw new Error('Failed to export state')
     }
-    
+
     // Create blob and download
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${currentSession.id}_export.zip`
+    a.download = `${currentSession.id}_export.tar.gz`
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
@@ -686,7 +710,7 @@ export function useWebSocket() {
     // Use fresh state to avoid stale closure references
     const session = useAppStore.getState().currentSession
     if (!session) {
-      console.log('WebSocket: No current session, skipping connect')
+      devLog('WebSocket: No current session, skipping connect')
       return
     }
 
@@ -694,7 +718,7 @@ export function useWebSocket() {
     if (wsRef.current) {
       const state = wsRef.current.readyState
       if (state === WebSocket.CONNECTING || state === WebSocket.OPEN) {
-        console.log('WebSocket: Already connected or connecting, skipping')
+        devLog('WebSocket: Already connected or connecting, skipping')
         return
       }
       // If CLOSING or CLOSED, clear the ref
@@ -702,7 +726,7 @@ export function useWebSocket() {
     }
 
     if (connectingRef.current) {
-      console.log('WebSocket: Connection already in progress, skipping')
+      devLog('WebSocket: Connection already in progress, skipping')
       return
     }
 
@@ -712,7 +736,7 @@ export function useWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}/ws/${session.id}`
 
-    console.log(`WebSocket: Connecting to ${wsUrl}${isReconnect ? ' (reconnect #' + reconnectCountRef.current + ')' : ''}`)
+    devLog(`WebSocket: Connecting to ${wsUrl}${isReconnect ? ' (reconnect #' + reconnectCountRef.current + ')' : ''}`)
 
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
@@ -721,7 +745,7 @@ export function useWebSocket() {
       connectingRef.current = false
       setConnected(true)
       setWsConnected(true)
-      console.log('WebSocket: Connected successfully')
+      devLog('WebSocket: Connected successfully')
 
       // Use fresh state to avoid stale closure
       const freshSession = useAppStore.getState().currentSession
@@ -729,7 +753,7 @@ export function useWebSocket() {
       // On reconnect, restore message history from server
       if (isReconnect && freshSession) {
         try {
-          console.log('WebSocket: Reconnect detected, loading message history...')
+          devLog('WebSocket: Reconnect detected, loading message history...')
           // Mark that we're loading history to prevent race conditions
           const loadingSessionId = freshSession.id
           const response = await fetch(`${API_BASE}/session/${freshSession.id}/load`)
@@ -737,7 +761,7 @@ export function useWebSocket() {
           // Verify session hasn't changed during fetch (race condition protection)
           const currentState = useAppStore.getState()
           if (currentState.currentSession?.id !== loadingSessionId) {
-            console.log('WebSocket: Session changed during reconnect, skipping history merge')
+            devLog('WebSocket: Session changed during reconnect, skipping history merge')
             reconnectCountRef.current = 0
             return
           }
@@ -750,9 +774,9 @@ export function useWebSocket() {
               const localMessages = currentState.messages
 
               // Convert server messages to frontend format
-              const serverMessages: Message[] = data.messages.map((msg: any) => ({
+              const serverMessages: Message[] = data.messages.map((msg: RawMessage) => ({
                 id: msg.id || generateId(),
-                type: msg.type || 'message',
+                type: (msg.type || 'message') as Message['type'],
                 agent: msg.agent as AgentType | undefined,
                 content: msg.content,
                 timestamp: msg.timestamp || new Date().toISOString(),
@@ -762,8 +786,8 @@ export function useWebSocket() {
               // Include content fingerprint to avoid collision when same agent/type/timestamp
               const createMsgKey = (m: Message) => {
                 const contentStr = typeof m.content === 'string'
-                  ? m.content.slice(0, 80)
-                  : JSON.stringify(m.content ?? null).slice(0, 80)
+                  ? m.content.slice(0, 200)
+                  : JSON.stringify(m.content ?? null).slice(0, 200)
                 return `${m.agent || 'system'}-${m.type}-${m.timestamp}-${contentStr}`
               }
               const serverMsgKeySet = new Set(serverMessages.map(createMsgKey))
@@ -790,7 +814,7 @@ export function useWebSocket() {
                   .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
                 setMessages(merged)
               }
-              console.log(`WebSocket: Restored ${serverMessages.length} messages, merged ${localOnlyMessages.length} local-only`)
+              devLog(`WebSocket: Restored ${serverMessages.length} messages, merged ${localOnlyMessages.length} local-only`)
             }
 
             // Also restore agent errors if present
@@ -809,6 +833,17 @@ export function useWebSocket() {
                     resolved: false
                   })
                 }
+              }
+            }
+            // Restore session status and analysis phase from server
+            if (data.status) {
+              const currentSess = useAppStore.getState().currentSession
+              if (currentSess && currentSess.id === loadingSessionId) {
+                useAppStore.getState().updateSession({
+                  status: data.status,
+                  currentRound: data.current_round ?? currentSess.currentRound,
+                  ...(data.analysis_phase ? { analysisPhase: data.analysis_phase } : {}),
+                })
               }
             }
           } else if (response.status === 404) {
@@ -893,15 +928,15 @@ export function useWebSocket() {
         // Handle message_history - batch restore messages (e.g. reconnect to completed session)
         if (data.type === 'message_history') {
           if (data.content?.messages && Array.isArray(data.content.messages)) {
-            const serverMessages: Message[] = data.content.messages.map((msg: any) => ({
+            const serverMessages: Message[] = data.content.messages.map((msg: RawMessage) => ({
               id: msg.id || generateId(),
-              type: msg.type || 'message',
+              type: (msg.type || 'message') as Message['type'],
               agent: msg.agent as AgentType | undefined,
               content: msg.content,
               timestamp: msg.timestamp || new Date().toISOString(),
             }))
             setMessages(serverMessages)
-            console.log(`WebSocket: Restored ${serverMessages.length} messages from history`)
+            devLog(`WebSocket: Restored ${serverMessages.length} messages from history`)
           }
           return  // Don't add message_history itself to the message stream
         }
@@ -931,7 +966,7 @@ export function useWebSocket() {
           // Refresh full chat history from backend to ensure consistency
           const sessionId = useAppStore.getState().currentSession?.id
           if (sessionId) {
-            apiFetch<{ messages: any[] }>(`/session/${sessionId}/chat`)
+            apiFetch<{ messages: ChatMessage[] }>(`/session/${sessionId}/chat`)
               .then((res) => {
                 useAppStore.getState().setChatMessages(res.messages || [])
               })
@@ -994,7 +1029,7 @@ export function useWebSocket() {
           // Extract round_results if provided (for completed session reconnect)
           const roundResults = data.content?.round_results
           if (roundResults && Array.isArray(roundResults)) {
-            updates.roundResults = roundResults.map((r: any) => ({
+            updates.roundResults = roundResults.map((r: RawRoundResult) => ({
               round: r.round ?? 0,
               summary: r.pi_summary || r.summary || '',
               pathologyFindings: Array.isArray(r.pathology_findings) ? r.pathology_findings : [],
@@ -1033,7 +1068,7 @@ export function useWebSocket() {
           if (latestSession) {
             const existingRounds = latestSession.roundResults || []
             // Check if this round already exists
-            const existingIndex = existingRounds.findIndex((r: any) => r.round === roundData.round)
+            const existingIndex = existingRounds.findIndex((r: RoundResult) => r.round === roundData.round)
 
             const newRoundResult = {
               round: roundData.round,
@@ -1077,7 +1112,7 @@ export function useWebSocket() {
       setWsConnected(false)
       wsRef.current = null
       reconnectCountRef.current += 1  // Track reconnect for history recovery
-      console.log('WebSocket: Disconnected, code:', event.code, 'reason:', event.reason)
+      devLog('WebSocket: Disconnected, code:', event.code, 'reason:', event.reason)
 
       // Auto-reconnect if session is still running (not manually disconnected)
       const latestSession = useAppStore.getState().currentSession
@@ -1086,7 +1121,7 @@ export function useWebSocket() {
           event.code !== 1000) {  // Not a normal close
         if (reconnectCountRef.current < 5) {  // Max 5 reconnect attempts
           const delay = Math.min(1000 * Math.pow(2, reconnectCountRef.current - 1), 10000)  // Exponential backoff, max 10s
-          console.log(`WebSocket: Auto-reconnecting in ${delay}ms (attempt ${reconnectCountRef.current})...`)
+          devLog(`WebSocket: Auto-reconnecting in ${delay}ms (attempt ${reconnectCountRef.current})...`)
           setTimeout(() => {
             if (!wsRef.current && !connectingRef.current) {
               connect()
@@ -1109,7 +1144,7 @@ export function useWebSocket() {
   
   const disconnect = useCallback(() => {
     if (wsRef.current) {
-      console.log('WebSocket: Disconnecting manually')
+      devLog('WebSocket: Disconnecting manually')
       wsRef.current.close()
       wsRef.current = null
     }

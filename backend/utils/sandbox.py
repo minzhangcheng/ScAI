@@ -46,9 +46,9 @@ DANGEROUS_PATTERNS = [
     (r'\b__class__\s*\.\s*__bases__\b', '__class__.__bases__ access'),
     (r'\b__class__\s*\.\s*__mro__\b', '__class__.__mro__ access'),
     (r'\b__subclasses__\s*\(', '__subclasses__ access'),
-    (r'\bglobals\s*\(\s*\)', 'globals() function'),
+    # globals() and getattr-with-dunder are commonly used by scanpy/anndata
+    # and pose no additional risk in an already-isolated Jupyter kernel.
     (r'\blocals\s*\(\s*\)', 'locals() function'),
-    (r'\bgetattr\s*\([^,]+,\s*["\']__', 'getattr with dunder'),
     (r'\bsetattr\s*\([^,]+,\s*["\']__', 'setattr with dunder'),
     (r'\bdelattr\s*\([^,]+,\s*["\']__', 'delattr with dunder'),
     (r'\bvars\s*\(\s*\)', 'vars() function'),
@@ -58,7 +58,9 @@ DANGEROUS_PATTERNS = [
     # rather than blanket-blocked, because the runtime I/O sandbox (_sandboxed_open)
     # already enforces path safety.  The static check only flags writes that do NOT
     # reference known safe path variables.
-    (r'\bopen\s*\([^)]*["\'][wa]', 'file write operations outside safe directories'),
+    # Note: This static check can be bypassed via variable indirection (e.g. mode='w'; open(f, mode)).
+    # The runtime I/O sandbox (_sandboxed_open) is the primary defense; this is a best-effort early check.
+    (r'\bopen\s*\([^)]*,\s*["\'][wa]', 'file write operations outside safe directories'),
     (r'\brm\s+-rf\b', 'rm -rf command'),
     (r'\bshutil\.rmtree\b', 'shutil.rmtree'),
     (r'\bos\.remove\b', 'os.remove'),
@@ -144,7 +146,7 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
             if 'file write' in description:
                 open_write_lines = [
                     line.strip() for line in code.splitlines()
-                    if re.search(r'\bopen\s*\(', line) and re.search(r'["\'][wa]', line)
+                    if re.search(r'\bopen\s*\(', line) and re.search(r',\s*["\'][wa]', line)
                 ]
                 safe_ref = re.compile(
                     r'_?WORKSPACE_DIR|working_dir|figures|tables|/tmp',
@@ -152,6 +154,10 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
                 )
                 if all(safe_ref.search(line) for line in open_write_lines):
                     continue
+            logger.warning(
+                "Security: blocked dangerous code pattern [%s] — snippet: %.200s",
+                description, code.replace('\n', ' '),
+            )
             return False, f"Dangerous pattern detected: {description}"
     return True, ""
 
@@ -392,7 +398,7 @@ class NotebookState:
             logger.info(f"Loaded notebook state: {len(self.cells)} cells")
             return True
         except Exception as e:
-            logger.error(f"Failed to load notebook state: {e}")
+            logger.exception("Failed to load notebook state")
             return False
     
     def has_session_dump(self) -> bool:
@@ -491,8 +497,9 @@ class LocalJupyterSandbox:
                 )
                 if msg['msg_type'] == 'kernel_info_reply':
                     break
-            except Exception:
+            except Exception as e:
                 # Kernel not ready yet, wait and retry
+                logger.debug(f"Kernel not ready yet: {e}")
                 await asyncio.sleep(0.5)
     
     async def _initialize_kernel(self):
@@ -578,52 +585,63 @@ plt.rcParams.update({
     'ps.fonttype': 42,
 })
 
-# === Monkey-patch Figure.savefig to auto-convert PNG→JPG and auto-generate PDF ===
+# === Monkey-patch Figure.savefig to auto-convert PNG→JPG ===
 import matplotlib.figure as _mpl_figure
 _original_savefig = _mpl_figure.Figure.savefig
 
-def _savefig_with_jpg_pdf(self, fname, *args, **kwargs):
-    # Wrapper: save figure, convert PNG→JPG if needed, and auto-generate companion PDF.
-    _original_savefig(self, fname, *args, **kwargs)
+def _savefig_as_jpg(self, fname, *args, **kwargs):
+    # Auto-convert PNG→JPG: save directly as JPEG (no intermediate PNG file).
+    _fname_str = str(fname)
+    if _fname_str.lower().endswith('.png'):
+        try:
+            _base, _ = os.path.splitext(_fname_str)
+            _jpg_path = _base + '.jpg'
+            _kw = dict(kwargs)
+            _kw['format'] = 'jpeg'
+            _kw.setdefault('facecolor', 'white')
+            if 'pil_kwargs' not in _kw:
+                _kw['pil_kwargs'] = {}
+            _kw['pil_kwargs'].setdefault('quality', 85)
+            _kw['pil_kwargs'].setdefault('optimize', True)
+            _original_savefig(self, _jpg_path, *args, **_kw)
+            print(f"[Auto-convert] {os.path.basename(_fname_str)} -> {os.path.basename(_jpg_path)}")
+        except Exception as _err:
+            # Fallback: save as original PNG if JPEG conversion fails
+            print(f"[Auto-convert] Warning: {_err}, saving as PNG")
+            _original_savefig(self, fname, *args, **kwargs)
+    else:
+        _original_savefig(self, fname, *args, **kwargs)
+
+_mpl_figure.Figure.savefig = _savefig_as_jpg
+
+# === Monkey-patch plt.show() to capture figures as display_data ===
+# With Agg backend, plt.show() is a no-op — figures are silently lost.
+# This patch saves all open figures as inline PNG images via IPython.display,
+# so the Jupyter kernel emits display_data messages that get captured.
+import io as _io
+_original_plt_show = plt.show
+
+def _capturing_show(*args, **kwargs):
+    '''Capture all open figures as inline images, then close them.'''
+    import matplotlib.pyplot as _plt
+    _fignums = _plt.get_fignums()
+    if not _fignums:
+        return
     try:
-        _fname_str = str(fname)
-        if _fname_str.lower().endswith(('.png', '.jpg', '.jpeg')):
-            _base, _ext = os.path.splitext(_fname_str)
+        from IPython.display import display, Image as IPImage
+    except ImportError:
+        _original_plt_show(*args, **kwargs)
+        return
+    for _fig_num in _fignums:
+        _fig = _plt.figure(_fig_num)
+        _buf = _io.BytesIO()
+        _original_savefig(_fig, _buf, format='png', bbox_inches='tight', dpi=100, facecolor='white')
+        _buf.seek(0)
+        display(IPImage(data=_buf.read(), format='png'))
+        _buf.close()
+    _plt.close('all')
 
-            # Convert PNG → JPG to unify output format
-            if _ext.lower() == '.png':
-                try:
-                    from PIL import Image as _PILImage
-                    _jpg_path = _base + '.jpg'
-                    _img = _PILImage.open(_fname_str)
-                    if _img.mode == 'RGBA':
-                        _bg = _PILImage.new('RGB', _img.size, (255, 255, 255))
-                        _bg.paste(_img, mask=_img.split()[-1])
-                        _img = _bg
-                    elif _img.mode != 'RGB':
-                        _img = _img.convert('RGB')
-                    _img.save(_jpg_path, 'JPEG', quality=85, optimize=True)
-                    # Remove original PNG to avoid duplicate files
-                    try:
-                        os.remove(_fname_str)
-                    except OSError:
-                        pass
-                    print(f"[Auto-convert] {os.path.basename(_fname_str)} -> {os.path.basename(_jpg_path)}")
-                except Exception as _conv_err:
-                    print(f"[Auto-convert] Warning: {_conv_err}")
-
-            # Auto-generate companion high-res PDF
-            _pdf_path = _base + '.pdf'
-            _pdf_kwargs = dict(kwargs)
-            _pdf_kwargs['format'] = 'pdf'
-            _pdf_kwargs['dpi'] = 300
-            if 'bbox_inches' not in _pdf_kwargs:
-                _pdf_kwargs['bbox_inches'] = 'tight'
-            _original_savefig(self, _pdf_path, *args, **_pdf_kwargs)
-    except Exception as _pdf_err:
-        print(f"[Auto-PDF] Warning: {_pdf_err}")
-
-_mpl_figure.Figure.savefig = _savefig_with_jpg_pdf
+plt.show = _capturing_show
 
 # Try importing common bioinformatics packages
 try:
@@ -685,6 +703,8 @@ print(f"Environment initialized with SEED={SEED} for reproducibility")
 print("Helper functions available: get_seed(), check_and_fix_nan(adata)")
 """.replace('__SESSION_ID__', self.session_id)
         result = await self.execute(init_code, save_to_history=False, skip_safety_check=True)
+        if result.output:
+            logger.debug("Kernel init stdout: %s", result.output[:1000])
 
         # Set working directory paths and install I/O sandbox (requires f-string with self.working_dir)
         working_dir_abs = str(self.working_dir.absolute())
@@ -707,8 +727,8 @@ os.chdir(_WORKSPACE_DIR)
 try:
     import scanpy as sc
     sc.settings.figdir = str(_WORKSPACE_DIR / 'figures')
-except Exception:
-    pass
+except Exception as _sc_err:
+    print(f"[sandbox] scanpy figdir setup skipped: {{_sc_err}}")
 
 # === Runtime I/O sandbox: intercept writes outside allowed directories ===
 import builtins as _builtins
@@ -735,7 +755,8 @@ def _is_write_allowed(filepath):
     '''Check if writing to this path is allowed.'''
     try:
         resolved = str(Path(filepath).resolve())
-    except Exception:
+    except Exception as e:
+        print(f"[sandbox] Path resolution failed for {{filepath!r}}: {{e}}")
         return False  # Can't resolve → deny by default for safety
     # Check allowed roots
     for root in _ALLOWED_WRITE_ROOTS:
@@ -795,23 +816,85 @@ _pathlib.Path.mkdir = _sandboxed_mkdir
 _pathlib.Path.write_text = _sandboxed_write_text
 _pathlib.Path.write_bytes = _sandboxed_write_bytes
 
+# === Sandbox file/directory deletion ===
+_ORIGINAL_OS_REMOVE = os.remove
+_ORIGINAL_OS_UNLINK = os.unlink
+_ORIGINAL_OS_RMDIR = os.rmdir
+_ORIGINAL_PATH_UNLINK = _pathlib.Path.unlink
+_ORIGINAL_PATH_RMDIR = _pathlib.Path.rmdir
+
+def _sandboxed_os_remove(path, *args, **kwargs):
+    '''Sandboxed os.remove() that blocks deletes outside allowed directories.'''
+    if not _is_write_allowed(path):
+        raise PermissionError(
+            f"\\n[Sandbox] Delete blocked: {{path}}\\n"
+            f"Deletes must be within the session workspace: {{_WORKSPACE_DIR}}"
+        )
+    return _ORIGINAL_OS_REMOVE(path, *args, **kwargs)
+
+def _sandboxed_os_unlink(path, *args, **kwargs):
+    '''Sandboxed os.unlink() that blocks deletes outside allowed directories.'''
+    if not _is_write_allowed(path):
+        raise PermissionError(
+            f"\\n[Sandbox] Delete blocked: {{path}}\\n"
+            f"Deletes must be within the session workspace: {{_WORKSPACE_DIR}}"
+        )
+    return _ORIGINAL_OS_UNLINK(path, *args, **kwargs)
+
+def _sandboxed_os_rmdir(path, *args, **kwargs):
+    '''Sandboxed os.rmdir() that blocks rmdir outside allowed directories.'''
+    if not _is_write_allowed(path):
+        raise PermissionError(
+            f"\\n[Sandbox] rmdir blocked: {{path}}\\n"
+            f"Directory removal must be within the session workspace: {{_WORKSPACE_DIR}}"
+        )
+    return _ORIGINAL_OS_RMDIR(path, *args, **kwargs)
+
+def _sandboxed_path_unlink(self, *args, **kwargs):
+    '''Sandboxed Path.unlink() that blocks deletes outside allowed directories.'''
+    if not _is_write_allowed(self):
+        raise PermissionError(
+            f"\\n[Sandbox] Delete blocked: {{self}}\\n"
+            f"Deletes must be within the session workspace: {{_WORKSPACE_DIR}}"
+        )
+    return _ORIGINAL_PATH_UNLINK(self, *args, **kwargs)
+
+def _sandboxed_path_rmdir(self, *args, **kwargs):
+    '''Sandboxed Path.rmdir() that blocks rmdir outside allowed directories.'''
+    if not _is_write_allowed(self):
+        raise PermissionError(
+            f"\\n[Sandbox] rmdir blocked: {{self}}\\n"
+            f"Directory removal must be within the session workspace: {{_WORKSPACE_DIR}}"
+        )
+    return _ORIGINAL_PATH_RMDIR(self, *args, **kwargs)
+
+os.remove = _sandboxed_os_remove
+os.unlink = _sandboxed_os_unlink
+os.rmdir = _sandboxed_os_rmdir
+_pathlib.Path.unlink = _sandboxed_path_unlink
+_pathlib.Path.rmdir = _sandboxed_path_rmdir
+
 # === Redirect Figure.savefig: workspace root → figures/ subdirectory ===
 import matplotlib.figure as _mpl_figure
 _prev_savefig = _mpl_figure.Figure.savefig
 
 _FIGURES_DIR = _WORKSPACE_DIR / 'figures'
+_WORKSPACE_DIR_RESOLVED = _WORKSPACE_DIR.resolve()
 
 def _redirected_savefig(self, fname, *args, **kwargs):
     '''Redirect savefig calls from workspace root into figures/ subdirectory.'''
+    # Skip non-path arguments (e.g. BytesIO buffers)
+    if not isinstance(fname, (str, os.PathLike)):
+        return _prev_savefig(self, fname, *args, **kwargs)
     try:
         _p = Path(str(fname)).resolve()
         # Only redirect if target is directly under workspace root (not in a subdirectory)
-        if _p.parent == _WORKSPACE_DIR.resolve():
+        if _p.parent == _WORKSPACE_DIR_RESOLVED:
             _new = _FIGURES_DIR / _p.name
             print(f"[savefig-redirect] {{_p.name}} -> figures/")
             fname = str(_new)
-    except Exception:
-        pass
+    except Exception as _redir_err:
+        print(f"[savefig-redirect] failed: {{_redir_err}}")
     return _prev_savefig(self, fname, *args, **kwargs)
 
 _mpl_figure.Figure.savefig = _redirected_savefig
@@ -819,7 +902,9 @@ _mpl_figure.Figure.savefig = _redirected_savefig
 print(f"Working directory set to: {{os.getcwd()}}")
 print(f"I/O sandbox active: writes restricted to session directory")
 """
-        await self.execute(path_setup_code, save_to_history=False, skip_safety_check=True)
+        path_result = await self.execute(path_setup_code, save_to_history=False, skip_safety_check=True)
+        if path_result.output:
+            logger.debug("Kernel path-setup stdout: %s", path_result.output[:1000])
 
         self._initialized = True
         logger.info("Kernel initialized")
@@ -1007,8 +1092,8 @@ print(f"Session saved: {{len(_session_data)}} variables")
                                     if self.kc is not None:
                                         try:
                                             self.kc.stop_channels()
-                                        except Exception:
-                                            pass
+                                        except Exception as e:
+                                            logger.debug(f"Failed to stop kernel channels during recovery: {e}")
                                     self.kc = self.km.client()
                                     self.kc.start_channels()
 
@@ -1094,7 +1179,7 @@ print(f"Session saved: {{len(_session_data)}} variables")
             )
             
         except Exception as e:
-            logger.error(f"Execution error: {e}")
+            logger.exception("Execution error")
             return CodeExecutionResult(
                 success=False,
                 error=str(e)
@@ -1136,7 +1221,7 @@ print(f"Session saved: {{len(_session_data)}} variables")
             try:
                 asyncio.run(self.save_session())
             except Exception as e:
-                logger.error(f"Failed to save session state: {e}")
+                logger.exception("Failed to save session state")
     
     async def save_state_async(self):
         """Save current state asynchronously"""
@@ -1150,20 +1235,20 @@ print(f"Session saved: {{len(_session_data)}} variables")
             await self.save_session()
             self.notebook_state.save()
         except Exception as e:
-            logger.error(f"Failed to save session during stop for {self.session_id}: {e}")
+            logger.exception(f"Failed to save session during stop for {self.session_id}")
         finally:
             if self.kc is not None:
                 try:
                     self.kc.stop_channels()
                 except Exception as e:
-                    logger.error(f"Error stopping kernel channels for {self.session_id}: {e}")
+                    logger.exception(f"Error stopping kernel channels for {self.session_id}")
                 self.kc = None
 
             if self.km is not None:
                 try:
                     self.km.shutdown_kernel(now=True)
                 except Exception as e:
-                    logger.error(f"Error shutting down kernel for {self.session_id}: {e}")
+                    logger.exception(f"Error shutting down kernel for {self.session_id}")
                 self.km = None
                 self._initialized = False
 

@@ -175,21 +175,21 @@ class ModelConfig(BaseModel):
     pathology_model: str = "google/gemini-3.1-pro-preview"
     bioinformatics_model: str = "anthropic/claude-sonnet-4.6"
     biochemistry_model: str = "google/gemini-3.1-pro-preview"
-    literature_model: str = "google/gemini-3-flash-preview"
+    literature_model: str = "google/gemini-3.1-flash-lite-preview"
     # Painter agent uses image generation model via OpenRouter
-    painter_model: str = "google/gemini-3-pro-image-preview"
+    painter_model: str = "google/gemini-3.1-flash-image-preview"
     # Supervisor agent uses cheap vision model for real-time monitoring
     supervisor_model: str = "google/gemini-3.1-flash-lite-preview"
 
 class AgentTemperatures(BaseModel):
     """Default temperatures for each agent - centralized configuration"""
-    pi: float = 0.5  # More creative synthesis/planning
-    pathology: float = 0.2  # Objective, consistent analysis
-    bioinformatics: float = 0.1  # Highly deterministic code generation
-    biochemistry: float = 0.2  # Objective interpretation
-    literature: float = 0.6  # Broader exploration
-    painter: float = 0.7  # Creative image generation
-    supervisor: float = 0.1  # High-certainty evaluation
+    pi: float = Field(default=0.5, ge=0.0, le=2.0)  # More creative synthesis/planning
+    pathology: float = Field(default=0.2, ge=0.0, le=2.0)  # Objective, consistent analysis
+    bioinformatics: float = Field(default=0.1, ge=0.0, le=2.0)  # Highly deterministic code generation
+    biochemistry: float = Field(default=0.2, ge=0.0, le=2.0)  # Objective interpretation
+    literature: float = Field(default=0.6, ge=0.0, le=2.0)  # Broader exploration
+    painter: float = Field(default=0.7, ge=0.0, le=2.0)  # Creative image generation
+    supervisor: float = Field(default=0.1, ge=0.0, le=2.0)  # High-certainty evaluation
 
     def get(self, agent: str, default: float = 0.5) -> float:
         """Get temperature for an agent by name"""
@@ -207,7 +207,9 @@ DEFAULT_LITERATURE_MAX_SEARCH_ROUNDS = 5
 
 class AgentPrompts(BaseModel):
     """Customizable prompts for each agent - all in English for consistency"""
-    pi_prompt: str = """You are a senior biomedical research PI (Principal Investigator) leading a multidisciplinary research team for integrated analysis.
+    pi_prompt: str = """IMPORTANT: You MUST communicate exclusively in English.
+
+You are a senior biomedical research PI (Principal Investigator) leading a multidisciplinary research team for integrated analysis.
 
 Your responsibilities:
 1. Develop overall research strategy and analysis direction
@@ -223,9 +225,11 @@ Core questions to focus on:
 - Potential molecular mechanisms
 - Consistency with known literature and novel findings
 
-Please analyze based on the specific research objectives provided. Maintain scientific rigor. Respond in English."""
+Please analyze based on the specific research objectives provided. Maintain scientific rigor."""
 
-    pathology_prompt: str = """You are a professional pathology expert specialized in analyzing various histological sections.
+    pathology_prompt: str = """IMPORTANT: You MUST communicate exclusively in English.
+
+You are a professional pathology expert specialized in analyzing various histological sections.
 
 Your tasks:
 1. Analyze stained sections and identify tissue structural abnormalities
@@ -238,9 +242,11 @@ Your tasks:
    - Abnormal deposits
 4. Suggest special staining when necessary
 
-Please describe the pathological features you observe in detail and provide professional assessment. Respond in English."""
+Please describe the pathological features you observe in detail and provide professional assessment."""
 
-    bioinformatics_prompt: str = """You are a professional bioinformatics analyst specializing in high-throughput sequencing data analysis (including single-cell RNA sequencing, bulk RNA-seq, etc.).
+    bioinformatics_prompt: str = """IMPORTANT: All responses, analysis, findings, and code comments must be written exclusively in English.
+
+You are a professional bioinformatics analyst specializing in high-throughput sequencing data analysis (including single-cell RNA sequencing, bulk RNA-seq, etc.).
 
 Your working approach:
 1. Write and execute Python code step by step
@@ -290,9 +296,11 @@ Code requirements:
 - When saving figures, use JPG format (e.g., plt.savefig('figure.jpg')). The system automatically generates a companion high-quality PDF for every JPG saved. Do NOT manually save separate PDF files.
 - When using scanpy plotting with save= parameter, use .jpg extension (e.g., sc.pl.umap(adata, save='_clusters.jpg'))
 
-Please reply in English. Code comments should be in English."""
+Code comments should be in English."""
 
-    biochemistry_prompt: str = """You are a laboratory biochemistry analysis expert responsible for interpreting and integrating experimental results.
+    biochemistry_prompt: str = """IMPORTANT: You MUST communicate exclusively in English.
+
+You are a laboratory biochemistry analysis expert responsible for interpreting and integrating experimental results.
 
 You need to focus on various biochemical indicators, including but not limited to:
 1. Tissue/organ function indicators
@@ -307,9 +315,11 @@ Your tasks:
 3. Infer possible pathophysiological mechanisms
 4. Suggest additional experiments needed
 
-Please reply in English with professional analysis opinions."""
+Please provide professional analysis opinions."""
 
-    literature_prompt: str = """Please help me conduct literature research on the topic: {topic}
+    literature_prompt: str = """IMPORTANT: You MUST respond exclusively in English.
+
+Please help me conduct literature research on the topic: {topic}
 
 Please search for relevant biomedical literature, focusing on:
 1. Related molecular mechanisms

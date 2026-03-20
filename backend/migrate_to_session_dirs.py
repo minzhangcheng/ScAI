@@ -187,7 +187,7 @@ def migrate_session(session_id: str, dry_run: bool):
                 new_meta.write_text(updated, encoding="utf-8")
                 logger.info(f"  Remapped embedded paths in session.json")
         except Exception as e:
-            logger.error(f"  Failed to remap paths in session.json: {e}")
+            logger.exception("  Failed to remap paths in session.json")
 
 
 def main():
@@ -209,7 +209,7 @@ def main():
         try:
             migrate_session(sid, args.dry_run)
         except Exception as e:
-            logger.error(f"Failed to migrate session {sid}: {e}")
+            logger.exception(f"Failed to migrate session {sid}")
 
     logger.info("Migration complete.")
 

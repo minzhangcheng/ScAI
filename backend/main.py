@@ -55,8 +55,8 @@ def safe_filename(filename: str) -> str:
 
 
 def validate_session_id(session_id: str) -> None:
-    """Validate session ID to prevent path traversal"""
-    if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
+    """Validate session ID to prevent path traversal (whitelist approach)"""
+    if not session_id or len(session_id) > 128 or not re.match(r'^[a-zA-Z0-9_-]+$', session_id):
         raise HTTPException(status_code=400, detail="Invalid session ID")
 
 
@@ -64,7 +64,7 @@ def validate_path_within(path: Path, parent: Path) -> Path:
     """Validate that resolved path stays within expected parent directory"""
     resolved = path.resolve()
     parent_resolved = parent.resolve()
-    if not str(resolved).startswith(str(parent_resolved) + os.sep) and resolved != parent_resolved:
+    if resolved != parent_resolved and not resolved.is_relative_to(parent_resolved):
         raise HTTPException(status_code=400, detail="Invalid path: path traversal detected")
     return resolved
 
@@ -127,9 +127,17 @@ MAX_MESSAGE_BUFFER_SIZE = 100  # Keep last N messages per session
 _message_buffers: Dict[str, List[Dict[str, Any]]] = {}  # session_id -> list of messages
 _message_buffer_lock = asyncio.Lock()
 
+# WebSocket monitor tasks (for cancellation on reconnect)
+_monitor_tasks: Dict[str, asyncio.Task] = {}  # session_id -> monitor task
+
 # Background import jobs: import_id -> {"status": "pending"|"completed"|"failed", "created_at": float, ...}
 _import_jobs: Dict[str, dict] = {}
+_import_jobs_lock = asyncio.Lock()
 _IMPORT_JOB_TTL = 3600  # Clean up completed/failed import jobs after 1 hour
+
+# Detailed report generation state
+detailed_reports: Dict[str, Any] = {}
+report_websockets: Dict[str, WebSocket] = {}
 
 # Log the data directory location (directories are created in config.py)
 logger.info(f"Data directory: {DATA_BASE_DIR.resolve()}")
@@ -137,7 +145,6 @@ logger.info(f"Data directory: {DATA_BASE_DIR.resolve()}")
 
 async def cleanup_stale_sessions():
     """Background task to clean up stale sessions from memory"""
-    import time
     while True:
         try:
             await asyncio.sleep(300)  # Run every 5 minutes
@@ -207,7 +214,8 @@ async def cleanup_stale_sessions():
                         del _session_access_times[session_id]
 
                 # Also stop any active chat sandbox for this session
-                chat_sandbox = _chat_sandboxes.pop(session_id, None)
+                async with _chat_task_lock:
+                    chat_sandbox = _chat_sandboxes.pop(session_id, None)
                 if chat_sandbox:
                     try:
                         await chat_sandbox.stop()
@@ -228,23 +236,23 @@ async def cleanup_stale_sessions():
                 logger.info(f"Evicted {len(sessions_to_evict)} stale sessions from memory")
 
             # Clean up stale import jobs (completed/failed older than TTL)
-            stale_jobs = [
-                jid for jid, job in _import_jobs.items()
-                if job.get("status") in ("completed", "failed")
-                and current_time - job.get("created_at", 0) > _IMPORT_JOB_TTL
-            ]
-            for jid in stale_jobs:
-                del _import_jobs[jid]
+            async with _import_jobs_lock:
+                stale_jobs = [
+                    jid for jid, job in _import_jobs.items()
+                    if job.get("status") in ("completed", "failed")
+                    and current_time - job.get("created_at", 0) > _IMPORT_JOB_TTL
+                ]
+                for jid in stale_jobs:
+                    del _import_jobs[jid]
             if stale_jobs:
                 logger.info(f"Cleaned up {len(stale_jobs)} stale import jobs")
 
         except Exception as e:
-            logger.error(f"Error in session cleanup task: {e}")
+            logger.exception("Error in session cleanup task")
 
 
 async def touch_session(session_id: str):
     """Update the last access time for a session (thread-safe)"""
-    import time
     async with _state_lock:
         _session_access_times[session_id] = time.time()
 
@@ -278,7 +286,7 @@ def _write_session_json(session_id: str, json_str: str):
                 os.unlink(tmp_path)
             raise
     except Exception as e:
-        logger.error(f"Failed to save session {session_id}: {e}")
+        logger.exception(f"Failed to save session {session_id}")
 
 
 def save_session_to_disk(session_id: str, state: AnalysisState):
@@ -315,7 +323,7 @@ def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
             logger.info(f"Session {session_id} loaded from disk")
             return state
     except Exception as e:
-        logger.error(f"Failed to load session {session_id}: {e}")
+        logger.exception(f"Failed to load session {session_id}: {e}")
     return None
 
 
@@ -329,8 +337,6 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
 
     # Validate session_id to prevent path traversal
     validate_session_id(session_id)
-
-    import time
 
     # Quick check without lock (optimization for common case)
     if session_id in sessions:
@@ -396,7 +402,7 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
             if session_file.is_file():
                 _parse_session_file(session_file, fallback_id=session_file.stem)
     except Exception as e:
-        logger.error(f"Failed to list sessions: {e}")
+        logger.exception("Failed to list sessions")
 
     # Sort by updated_at descending
     sessions_list.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
@@ -437,7 +443,7 @@ class ModelUpdateRequest(BaseModel):
 
 class TemperatureUpdateRequest(BaseModel):
     agent: VALID_AGENTS
-    temperature: float
+    temperature: float = Field(ge=0.0, le=2.0)
 
 
 class LiteratureConfigRequest(BaseModel):
@@ -505,7 +511,8 @@ async def set_config(request: ConfigRequest):
         # Clear proxy environment variables if not set
         for var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
             os.environ.pop(var, None)
-    
+
+    logger.info(f"Config saved: base_url={config.api.llm_base_url}, proxy={'configured' if config.api.proxy_url else 'none'}")
     return APIResponse(
         success=True,
         message="Configuration saved successfully"
@@ -1072,6 +1079,12 @@ async def upload_data(
     upload_parent.mkdir(parents=True, exist_ok=True)
     validate_path_within(file_path, upload_parent)
 
+    # Check available disk space before saving
+    import shutil as _shutil
+    disk_usage = _shutil.disk_usage(upload_parent)
+    if file.size and disk_usage.free < file.size * 2:
+        raise HTTPException(status_code=507, detail="Insufficient disk space for upload")
+
     # For large sequencing files, use stream save
     try:
         if section == "sequencing":
@@ -1080,7 +1093,8 @@ async def upload_data(
             content = await file.read()
             with open(file_path, "wb") as f:
                 f.write(content)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to save uploaded file {file_path}: {e}")
         # Clean up partial file on failure
         try:
             file_path.unlink(missing_ok=True)
@@ -1667,7 +1681,7 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
                     "timestamp": datetime.now().isoformat()
                 })
             except Exception:
-                pass
+                logger.debug("Failed to send termination status via WebSocket")
         return APIResponse(success=True, message="Analysis terminated")
 
     elif req.action == "summarize":
@@ -1761,8 +1775,8 @@ async def send_human_input(session_id: str, request: HumanInputRequest):
                 "timestamp": datetime.now().isoformat()
             })
         except Exception:
-            pass
-    
+            logger.debug("Failed to buffer human input to WebSocket")
+
     # Signal the workflow to continue if it's waiting for user input
     async with _state_lock:
         workflow = workflows.get(session_id)
@@ -1961,8 +1975,8 @@ async def request_human_input(session_id: str):
                 "timestamp": datetime.now().isoformat()
             })
         except Exception:
-            pass
-    
+            logger.debug("Failed to send human_input_requested via WebSocket")
+
     return APIResponse(
         success=True,
         message="Human input requested"
@@ -2072,6 +2086,7 @@ async def export_state(session_id: str):
 
 # In-memory store for prepared export file paths: session_id -> {"path": str, "filename": str, "size": int}
 _prepared_exports: Dict[str, Dict[str, Any]] = {}
+_prepared_exports_lock = asyncio.Lock()
 
 
 @app.post("/api/session/{session_id}/export/prepare")
@@ -2167,11 +2182,12 @@ async def export_prepare(session_id: str):
     size_bytes = tar_path.stat().st_size
 
     # Store reference for the download endpoint
-    _prepared_exports[session_id] = {
-        "path": str(tar_path),
-        "filename": filename,
-        "size": size_bytes,
-    }
+    async with _prepared_exports_lock:
+        _prepared_exports[session_id] = {
+            "path": str(tar_path),
+            "filename": filename,
+            "size": size_bytes,
+        }
 
     return {
         "status": "ready",
@@ -2188,7 +2204,8 @@ async def export_download(session_id: str):
     """
     validate_session_id(session_id)
 
-    info = _prepared_exports.pop(session_id, None)
+    async with _prepared_exports_lock:
+        info = _prepared_exports.pop(session_id, None)
     if not info or not os.path.exists(info["path"]):
         raise HTTPException(status_code=404, detail="Export not prepared. Call POST /export/prepare first.")
 
@@ -2216,17 +2233,20 @@ async def import_state(background_tasks: BackgroundTasks, file: UploadFile = Fil
         # ---- tar.gz: save to disk, then extract in background to avoid proxy timeouts ----
         # Register import job BEFORE saving file so frontend can poll even if proxy times out
         import_job_id = import_id or str(uuid.uuid4())
-        _import_jobs[import_job_id] = {"status": "uploading", "created_at": time.time()}
+        async with _import_jobs_lock:
+            _import_jobs[import_job_id] = {"status": "uploading", "created_at": time.time()}
 
         tmp_path = UPLOAD_TEMP_DIR / f"import_{uuid.uuid4().hex}.tar.gz"
         try:
             await stream_save_file(file, tmp_path)
         except Exception as e:
-            _import_jobs[import_job_id] = {"status": "failed", "error": f"Upload failed: {str(e)}"}
+            async with _import_jobs_lock:
+                _import_jobs[import_job_id] = {"status": "failed", "error": f"Upload failed: {str(e)}"}
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
 
-        _import_jobs[import_job_id] = {"status": "pending"}
+        async with _import_jobs_lock:
+            _import_jobs[import_job_id] = {"status": "pending"}
         background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id)
 
         return APIResponse(
@@ -2268,16 +2288,20 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str):
         state = await asyncio.to_thread(_import_tar_gz, tmp_path_str)
 
         if not state.id or '/' in state.id or '\\' in state.id or '..' in state.id:
-            _import_jobs[import_job_id] = {"status": "failed", "error": "Invalid session ID in imported data"}
+            async with _import_jobs_lock:
+                _import_jobs[import_job_id] = {"status": "failed", "error": "Invalid session ID in imported data"}
             return
 
         await async_save_session(state.id, state)
         await _update_session_cache(state.id, state)
-        _import_jobs[import_job_id] = {"status": "completed", "session_id": state.id, "name": state.name}
+        async with _import_jobs_lock:
+            _import_jobs[import_job_id] = {"status": "completed", "session_id": state.id, "name": state.name}
     except HTTPException as e:
-        _import_jobs[import_job_id] = {"status": "failed", "error": e.detail}
+        async with _import_jobs_lock:
+            _import_jobs[import_job_id] = {"status": "failed", "error": e.detail}
     except Exception as e:
-        _import_jobs[import_job_id] = {"status": "failed", "error": str(e)}
+        async with _import_jobs_lock:
+            _import_jobs[import_job_id] = {"status": "failed", "error": str(e)}
     finally:
         Path(tmp_path_str).unlink(missing_ok=True)
 
@@ -2285,9 +2309,10 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str):
 @app.get("/api/session/import/{import_id}")
 async def get_import_status(import_id: str):
     """Poll the status of a background tar.gz import job."""
-    if import_id not in _import_jobs:
-        raise HTTPException(status_code=404, detail="Import job not found")
-    job = _import_jobs[import_id]
+    async with _import_jobs_lock:
+        if import_id not in _import_jobs:
+            raise HTTPException(status_code=404, detail="Import job not found")
+        job = _import_jobs[import_id].copy()
     return {"import_id": import_id, **job}
 
 
@@ -2539,6 +2564,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     if workflow_running or workflow_initializing:
         logger.info(f"Workflow already running for session {session_id}, reconnecting WebSocket...")
 
+        # Cancel old monitor task to prevent zombie background tasks
+        old_monitor = _monitor_tasks.pop(session_id, None)
+        if old_monitor and not old_monitor.done():
+            old_monitor.cancel()
+            logger.info(f"Cancelled old monitor task for session {session_id}")
+
         # Update websocket reference so message_callback sends to new connection
         async with _state_lock:
             websockets[session_id] = websocket
@@ -2553,7 +2584,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             })
 
         except Exception as e:
-            logger.error(f"Failed to send status to observer: {e}")
+            logger.exception("Failed to send status to observer")
 
         # Send buffered messages to allow observer to catch up (outside lock to avoid I/O under lock)
         async with _message_buffer_lock:
@@ -2588,8 +2619,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "timestamp": datetime.now().isoformat()
                         })
                     except Exception:
+                        logger.debug("Observer WebSocket ping failed, closing")
                         break
                 except Exception:
+                    logger.debug("Observer WebSocket receive failed, closing")
                     break
         except WebSocketDisconnect:
             logger.info(f"WebSocket observer disconnected for session {session_id}")
@@ -2652,7 +2685,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 })
                 logger.info(f"[{session_id}] Sent {len(msg_data_list)} messages from history to reconnecting client")
         except Exception as e:
-            logger.error(f"[{session_id}] Failed to send completed status: {e}")
+            logger.exception(f"[{session_id}] Failed to send completed status")
 
         # Keep connection open for potential client requests
         try:
@@ -2736,7 +2769,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             except Exception as e:
                 # Mark as closed to prevent further attempts
                 ws_closed = True
-                logger.error(f"[{session_id}] Failed to send WS message, marking as closed: {e}")
+                logger.exception(f"[{session_id}] Failed to send WS message, marking as closed")
 
     # Helper to safely send JSON
     async def safe_send(data: dict):
@@ -2761,6 +2794,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await current_ws.send_json(data)
                 return True
             except Exception:
+                logger.debug("WebSocket send_json failed, marking closed")
                 ws_closed = True
                 return False
     
@@ -2773,7 +2807,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             "timestamp": datetime.now().isoformat()
         })
     except Exception as e:
-        logger.error(f"[{session_id}] Failed to send initial message: {e}")
+        logger.exception(f"[{session_id}] Failed to send initial message")
 
     # State callback to save after each round
     async def state_callback(state: AnalysisState):
@@ -2813,6 +2847,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                     "timestamp": datetime.now().isoformat()
                                 })
                             except Exception:
+                                logger.debug(f"[{session_id}] WebSocket ping failed, marking closed")
                                 ws_closed = True
                                 break
         except WebSocketDisconnect:
@@ -2823,11 +2858,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             async with ws_lock:
                 ws_closed = True
         except Exception as e:
-            logger.error(f"[{session_id}] Unexpected WebSocket monitor error: {e}")
+            logger.exception(f"[{session_id}] Unexpected WebSocket monitor error")
             async with ws_lock:
                 ws_closed = True
 
     monitor_task = asyncio.create_task(monitor_websocket())
+    _monitor_tasks[session_id] = monitor_task
 
     # Detect sessions that completed analysis but were interrupted during report generation
     effective_max_rounds = state.max_rounds if state.max_rounds > 0 else config.max_rounds
@@ -2879,7 +2915,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     })
                     final_state = report_state
                 except Exception as e:
-                    logger.error(f"[{session_id}] Report generation after stop failed: {e}")
+                    logger.exception(f"[{session_id}] Report generation after stop failed")
                     logger.error(traceback.format_exc())
                     current_state.status = TaskStatus.FAILED
                     await _update_session_cache(session_id, current_state)
@@ -2914,7 +2950,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     except Exception as e:
         # Log the full error traceback
-        logger.error(f"Workflow error for session {session_id}: {e}")
+        logger.exception(f"Workflow error for session {session_id}")
         logger.error(traceback.format_exc())
 
         # Try to send error, but don't fail if WebSocket is closed
@@ -2934,6 +2970,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
         # Cancel the WebSocket monitor task
         monitor_task.cancel()
+        _monitor_tasks.pop(session_id, None)
         try:
             await monitor_task
         except asyncio.CancelledError:
@@ -2944,7 +2981,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         try:
             await workflow.close()
         except Exception as e:
-            logger.error(f"Error closing workflow: {e}")
+            logger.exception("Error closing workflow")
         async with _state_lock:
             if session_id in workflows:
                 del workflows[session_id]
@@ -2963,10 +3000,6 @@ if __name__ == "__main__":
 # ============== Detailed Report Generation ==============
 
 from .report_generator import DetailedReportGenerator
-
-# Store for detailed reports
-detailed_reports: Dict[str, Any] = {}
-report_websockets: Dict[str, WebSocket] = {}
 
 
 def _sanitize_nan(obj):
@@ -3006,7 +3039,7 @@ async def get_detailed_report(session_id: str):
             detailed_reports[session_id] = report
             return {"report": report}
         except Exception as e:
-            logger.error(f"Failed to load report for {session_id}: {e}")
+            logger.exception(f"Failed to load report for {session_id}")
 
     # Only check session exists if no report found
     session_meta = get_session_metadata_path(session_id)
@@ -3113,7 +3146,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                 logger.debug(f"Failed to send completion to WebSocket for session {session_id}: {e}")
 
     except Exception as e:
-        logger.error(f"Report generation failed: {e}")
+        logger.exception("Report generation failed")
         logger.error(traceback.format_exc())
 
         if session_id in report_websockets:
@@ -3912,7 +3945,7 @@ async def get_failed_node(session_id: str):
                     "retry_counts": graph_state.values.get("node_retry_count", {})
                 }
         except Exception as e:
-            logger.error(f"Error getting workflow state: {e}")
+            logger.exception("Error getting workflow state")
 
     # Fallback: check sandbox_state
     if state.sandbox_state:
@@ -3955,7 +3988,7 @@ async def resume_bioinformatics(session_id: str):
             }
         )
     except Exception as e:
-        logger.error(f"Error reading checkpoint: {e}")
+        logger.exception("Error reading checkpoint")
         raise HTTPException(status_code=500, detail=f"Error reading checkpoint: {str(e)}")
 
 
@@ -4166,14 +4199,14 @@ async def _generate_figures_in_chat(
                                f"(success={result.success})")
 
     except Exception as e:
-        logger.error(f"Chat figure generation error: {e}")
+        logger.exception("Chat figure generation error")
         logger.error(traceback.format_exc())
     finally:
         _chat_sandboxes.pop(session_id, None)
         try:
             await sandbox.stop()
         except Exception:
-            pass
+            logger.debug("Failed to stop chat code sandbox during cleanup")
 
     return generated_figures
 
@@ -4264,7 +4297,7 @@ def _build_synthesis_prompt(
         "- Synthesize these results into a comprehensive response\n"
         "- Reference specific findings from each agent\n"
         "- If figures were generated during the analysis, you can reference them with [[FIGURE:figure_name]]\n"
-        "- Respond in the same language as the user's message\n"
+        "- Always respond in English\n"
     )
     if delegation.get("synthesis_instruction"):
         parts.append(f"Additional guidance: {delegation['synthesis_instruction']}")
@@ -4427,7 +4460,7 @@ async def _execute_chat_agent(
             try:
                 await sandbox.stop()
             except Exception:
-                pass
+                logger.debug("Failed to stop delegation sandbox during cleanup")
 
     elif agent_name == "pathology":
         from .agents.pathology_agent import PathologyAgent
@@ -4523,7 +4556,7 @@ async def _run_chat_delegation(
                         "id": msg.id,
                     })
                 except Exception:
-                    pass
+                    logger.debug(f"[{session_id}] Failed to send chat delegation message via WebSocket")
             # Persist to realtime_messages
             if hasattr(state, 'realtime_messages'):
                 state.realtime_messages.append(msg)
@@ -4581,7 +4614,16 @@ async def _run_chat_delegation(
                         session_id, state, d.get("agent", "unknown"), d.get("instruction", ""),
                         llm_manager.openrouter, chat_msg_callback, saved_files
                     ))
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                # Global timeout to prevent indefinite hang if an agent's LLM call stalls
+                CHAT_DELEGATION_TIMEOUT = 600  # 10 minutes
+                try:
+                    results = await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=CHAT_DELEGATION_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"Chat delegation timed out after {CHAT_DELEGATION_TIMEOUT}s for session {session_id}")
+                    results = [TimeoutError(f"Delegation timed out after {CHAT_DELEGATION_TIMEOUT}s")] * len(tasks)
                 for d, result in zip(group, results):
                     agent_name = d.get("agent", "unknown")
                     if isinstance(result, Exception):
@@ -4639,7 +4681,7 @@ async def _run_chat_delegation(
                 generated = await _generate_figures_in_chat(session_id, state, generate_requests)
                 synthesis_figures.extend(generated)
             except Exception as e:
-                logger.error(f"Chat delegation figure generation failed: {e}")
+                logger.exception("Chat delegation figure generation failed")
 
         # Merge: all_figures from agents + synthesis_figures
         # Deduplicate by name
@@ -4704,7 +4746,7 @@ async def _run_chat_delegation(
             await _update_session_cache(session_id, state)
             await async_save_session(session_id, state)
         except Exception:
-            pass
+            logger.warning(f"[{session_id}] Failed to save session during cancellation")
         raise
 
     except Exception as e:
@@ -4731,7 +4773,7 @@ async def _run_chat_delegation(
             try:
                 await llm_manager.close()
             except Exception:
-                pass
+                logger.debug("Failed to close LLM manager")
 
 
 @app.post("/api/session/{session_id}/chat")
@@ -4819,8 +4861,8 @@ async def chat_with_pi(
                 with open(dest, "r", encoding="utf-8", errors="replace") as f:
                     content_preview = f.read(5000)
                 data_file_contents.append(f"--- {dest.name} ---\n{content_preview}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to read file preview for {dest}: {e}")
 
     # --- Register files to target agent state (per-file) ---
     _agent_section_map = {"pathology": "pathology", "bioinformatics": "sequencing", "biochemistry": "biochemistry"}
@@ -4872,7 +4914,7 @@ async def chat_with_pi(
         "When the user asks to see, show, display, generate, or create any figure/plot/chart/image, "
         "you MUST use [[FIGURE:...]] or [[GENERATE_FIGURE:...]] — NEVER give code.\n"
         "\n"
-        "- Respond in the same language as the user's message\n"
+        "- Always respond in English\n"
         "\n"
         "DELEGATION CAPABILITY:\n"
         "When the user's request requires running new computational analysis, processing new data, "
@@ -4964,7 +5006,7 @@ async def chat_with_pi(
         assistant_content = response.content if response.content else "I'm sorry, I couldn't generate a response. Please try again."
 
     except Exception as e:
-        logger.error(f"Chat LLM error: {e}")
+        logger.exception("Chat LLM error")
         logger.error(traceback.format_exc())
         assistant_content = f"Error communicating with LLM: {str(e)}"
 
@@ -5051,7 +5093,7 @@ async def chat_with_pi(
                 response_figures.extend(generated)
                 await async_save_session(session_id, state)
         except Exception as e:
-            logger.error(f"Chat figure generation failed: {e}")
+            logger.exception("Chat figure generation failed")
             logger.error(traceback.format_exc())
 
     result: Dict[str, Any] = {"role": "assistant", "content": cleaned_content}

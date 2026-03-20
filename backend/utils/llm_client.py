@@ -16,6 +16,31 @@ from .llm_logger import get_llm_logger, LLMInteraction
 
 logger = logging.getLogger(__name__)
 
+# English enforcement instruction injected into every LLM call
+ENGLISH_ENFORCEMENT = (
+    "CRITICAL INSTRUCTION: You MUST respond exclusively in English. "
+    "All output — analysis, descriptions, findings, instructions, JSON values, "
+    "and communications — must be written in English regardless of the language "
+    "of input data or context."
+)
+
+
+def _inject_english_enforcement(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Inject English enforcement instruction into the message list.
+
+    If a system message exists, appends the enforcement to it.
+    Otherwise, prepends a new system message.
+    Returns a shallow-copied list to avoid mutating the original.
+    """
+    messages = list(messages)  # shallow copy
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "system":
+            messages[i] = {**msg, "content": msg["content"] + "\n\n" + ENGLISH_ENFORCEMENT}
+            return messages
+    # No system message found — prepend one
+    messages.insert(0, {"role": "system", "content": ENGLISH_ENFORCEMENT})
+    return messages
+
 
 def _detect_image_mime_type(img_b64: str) -> str:
     """Detect image MIME type from base64-encoded data using magic bytes.
@@ -34,8 +59,8 @@ def _detect_image_mime_type(img_b64: str) -> str:
             return "image/gif"
         if header[:4] == b'RIFF' and len(header) >= 8:
             return "image/webp"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Image MIME type detection failed, defaulting to image/png: {e}")
     return "image/png"
 
 
@@ -192,6 +217,7 @@ class OpenAICompatibleClient:
         if proxy_url:
             http_client_kwargs["proxy"] = proxy_url
         http_client = httpx.AsyncClient(**http_client_kwargs)
+        logger.info(f"[{agent_name}] LLM client initialized (session={session_id}, proxy={'set' if proxy_url else 'none'})")
         
         self.client = AsyncOpenAI(
             api_key=api_key,
@@ -289,6 +315,8 @@ class OpenAICompatibleClient:
             logger.warning(f"[{self.agent_name}] Request was refused: {message.refusal}")
 
         # Debug logging: tokens generated but content empty
+        completion_tokens = 0
+        has_tool_calls = False
         if not content and response and response.usage:
             completion_tokens = response.usage.completion_tokens or 0
             if completion_tokens > 0:
@@ -304,8 +332,8 @@ class OpenAICompatibleClient:
                                 f"Raw message keys: {list(raw_dump.keys())}, "
                                 f"values preview: {str(raw_dump)[:2000]}"
                             )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"[{self.agent_name}] Failed to dump raw message for debugging: {e}")
                     msg_dict = {}
                     for attr_name in ("content", "refusal", "role", "reasoning", "reasoning_content"):
                         if hasattr(message, attr_name):
@@ -314,12 +342,21 @@ class OpenAICompatibleClient:
                     try:
                         if hasattr(message, "model_dump"):
                             msg_dict["_all_keys"] = list(message.model_dump().keys())
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"[{self.agent_name}] Failed to extract message keys: {e}")
                     logger.warning(
                         f"[{self.agent_name}] Response has {completion_tokens} completion tokens "
                         f"but empty content. Message fields: {msg_dict}"
                     )
+
+        # If tokens were generated but content extraction failed, return an error
+        # message instead of empty string so downstream agents can detect the failure.
+        if not content and completion_tokens and completion_tokens > 0 and not has_tool_calls:
+            logger.warning(
+                f"[{self.agent_name}] Non-zero completion tokens ({completion_tokens}) "
+                f"but empty extracted content — returning error placeholder"
+            )
+            return "[Error: LLM generated a response but content extraction failed. Please retry.]"
 
         return content
 
@@ -346,6 +383,9 @@ class OpenAICompatibleClient:
         Returns:
             LLMResponse object
         """
+        # Enforce English output
+        messages = _inject_english_enforcement(messages)
+
         # Create log record
         interaction = self.llm_logger.log_request(
             session_id=self.session_id,
@@ -356,10 +396,10 @@ class OpenAICompatibleClient:
             temperature=temperature,
             max_tokens=max_tokens
         )
-        
+
         start_time = time.time()
         error_msg = None
-        
+
         async def _make_request():
             params: Dict[str, Any] = dict(
                 model=model,
@@ -418,7 +458,7 @@ class OpenAICompatibleClient:
             
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"[{self.agent_name}] Chat error: {e}")
+            logger.exception(f"[{self.agent_name}] Chat error")
             
             # Log error
             self.llm_logger.log_response(
@@ -451,6 +491,9 @@ class OpenAICompatibleClient:
         Returns:
             LLMToolResponse with potential tool calls
         """
+        # Enforce English output
+        messages = _inject_english_enforcement(messages)
+
         # Create log record
         interaction = self.llm_logger.log_request(
             session_id=self.session_id,
@@ -531,8 +574,8 @@ class OpenAICompatibleClient:
                         "content": msg_dict.get("content"),
                         "tool_calls": msg_dict.get("tool_calls"),
                     }
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[{self.agent_name}] Failed to preserve raw assistant message: {e}")
 
             result = LLMToolResponse(
                 content=content,
@@ -559,7 +602,7 @@ class OpenAICompatibleClient:
             return result
             
         except Exception as e:
-            logger.error(f"[{self.agent_name}] Chat with tools error: {e}")
+            logger.exception(f"[{self.agent_name}] Chat with tools error")
             
             # Log error
             self.llm_logger.log_response(
@@ -586,6 +629,9 @@ class OpenAICompatibleClient:
             Content chunks
         """
         logger.info(f"[{self.agent_name}] Starting stream request to {model}")
+
+        # Enforce English output
+        messages = _inject_english_enforcement(messages)
 
         params: Dict[str, Any] = dict(
             model=model,
@@ -652,11 +698,11 @@ class OpenAICompatibleClient:
             "text": text_prompt
         })
         
-        messages = [{
-            "role": "user",
-            "content": content
-        }]
-        
+        messages = [
+            {"role": "system", "content": ENGLISH_ENFORCEMENT},
+            {"role": "user", "content": content},
+        ]
+
         # Create log record (without the actual image data to save space)
         interaction = self.llm_logger.log_request(
             session_id=self.session_id,
@@ -725,7 +771,7 @@ class OpenAICompatibleClient:
             return result
             
         except Exception as e:
-            logger.error(f"[{self.agent_name}] Vision error: {e}")
+            logger.exception(f"[{self.agent_name}] Vision error")
             
             # Log error
             self.llm_logger.log_response(

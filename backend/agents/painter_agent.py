@@ -255,7 +255,7 @@ class PainterAgent(BaseAgent):
             raise last_error
 
         except Exception as e:
-            logger.error(f"[{self.session_id}][Painter] Error revising graphic abstract: {e}")
+            logger.exception(f"[{self.session_id}][Painter] Error revising graphic abstract")
             raise ValueError(f"Graphic abstract revision failed: {e}") from e
 
     def _build_graphic_prompt(self, state: AnalysisState, summary: str) -> str:
@@ -508,7 +508,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
             raise last_error
 
         except Exception as e:
-            logger.error(f"[{self.session_id}][Painter] Error generating image: {e}")
+            logger.exception(f"[{self.session_id}][Painter] Error generating image")
             raise ValueError(f"Image generation failed: {e}") from e
 
     async def process(
@@ -534,7 +534,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
                 "success": True
             }
         except Exception as e:
-            logger.error(f"[{self.session_id}][Painter] Process failed: {e}")
+            logger.exception(f"[{self.session_id}][Painter] Process failed")
             return {
                 "graphic_abstract": None,
                 "success": False,

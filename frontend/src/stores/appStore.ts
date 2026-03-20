@@ -11,7 +11,8 @@ export interface Message {
   id: string
   type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report' | 'direction_correlation'
   agent?: AgentType
-  content: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  content: any  // Message content varies significantly by type (string | object | figure | findings etc.)
   timestamp: string
 }
 
@@ -158,8 +159,8 @@ export const DEFAULT_MODELS: AgentModels = {
   pathology: 'google/gemini-3.1-pro-preview',
   bioinformatics: 'anthropic/claude-sonnet-4.6',
   biochemistry: 'google/gemini-3.1-pro-preview',
-  literature: 'google/gemini-3-flash-preview',
-  painter: 'google/gemini-3-pro-image-preview',  // Image generation model via OpenRouter
+  literature: 'google/gemini-3.1-flash-lite-preview',
+  painter: 'google/gemini-3.1-flash-image-preview',  // Image generation model via OpenRouter
   supervisor: 'google/gemini-3.1-flash-lite-preview'
 }
 
@@ -472,15 +473,22 @@ export const useAppStore = create<AppState>()(
       merge: (persistedState: unknown, currentState) => {
         const ps = (persistedState && typeof persistedState === 'object') ? persistedState as Record<string, any> : {}
         // Validate key types; fall back to current (default) state for invalid fields
-        if (ps.models && typeof ps.models !== 'object') delete ps.models
-        if (ps.temperatures && typeof ps.temperatures !== 'object') delete ps.temperatures
-        if (ps.prompts && typeof ps.prompts !== 'object') delete ps.prompts
+        if (ps.models && (typeof ps.models !== 'object' || Array.isArray(ps.models))) delete ps.models
+        if (ps.temperatures && (typeof ps.temperatures !== 'object' || Array.isArray(ps.temperatures))) delete ps.temperatures
+        if (ps.prompts && (typeof ps.prompts !== 'object' || Array.isArray(ps.prompts))) delete ps.prompts
         if (ps.language && typeof ps.language !== 'string') delete ps.language
         if (ps.maxRounds && typeof ps.maxRounds !== 'number') delete ps.maxRounds
         if (ps.messages && !Array.isArray(ps.messages)) delete ps.messages
+        // Expire persisted messages older than 7 days to prevent localStorage bloat
+        const PERSIST_TTL_MS = 7 * 24 * 60 * 60 * 1000
+        if (ps._persistedAt && Date.now() - ps._persistedAt > PERSIST_TTL_MS) {
+          delete ps.messages
+          delete ps.currentSession
+        }
         return { ...currentState, ...ps }
       },
       partialize: (state) => ({
+        _persistedAt: Date.now(),
         language: state.language,
         apiConfig: state.apiConfig,
         prompts: state.prompts,
@@ -498,12 +506,18 @@ export const useAppStore = create<AppState>()(
         currentSession: state.currentSession ? {
           ...state.currentSession,
           publicationFigures: state.currentSession.publicationFigures?.map(
-            (f: any) => ({ ...f, pngBase64: undefined, png_base64: undefined })
+            (f: PublicationFigure) => ({ ...f, pngBase64: undefined })
           ),
           graphicAbstract: state.currentSession.graphicAbstract
             ? { ...state.currentSession.graphicAbstract, imageBase64: undefined, image_base64: undefined }
             : undefined,
         } : null,
+        // Limit persisted messages and strip ALL base64 content to prevent localStorage overflow
+        // Persist chat messages (limit to 100, strip base64 from figures)
+        chatMessages: state.chatMessages.slice(-100).map(msg => ({
+          ...msg,
+          figures: msg.figures?.map((f) => f ? { ...f, base64: undefined } : f)
+        })),
         // Limit persisted messages and strip ALL base64 content to prevent localStorage overflow
         messages: state.messages.slice(-200).map(msg => {
           // figure type: content is raw base64 string
@@ -524,7 +538,7 @@ export const useAppStore = create<AppState>()(
               ...msg,
               content: {
                 ...msg.content,
-                figures: msg.content.figures.map((f: any) => f ? { ...f, data: undefined, pngBase64: undefined, png_base64: undefined } : f)
+                figures: msg.content.figures.map((f: Record<string, unknown>) => f ? { ...f, data: undefined, pngBase64: undefined, png_base64: undefined } : f)
               }
             }
           }

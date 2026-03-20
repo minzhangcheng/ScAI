@@ -40,12 +40,14 @@ class ChunkedUploadManager:
         self.chunk_size = chunk_size
         # Per-upload locks to prevent concurrent metadata read/write race conditions
         self._upload_locks: Dict[str, asyncio.Lock] = {}
+        self._upload_locks_guard = asyncio.Lock()
 
-    def _get_upload_lock(self, upload_id: str) -> asyncio.Lock:
-        """Get or create a lock for a specific upload"""
-        if upload_id not in self._upload_locks:
-            self._upload_locks[upload_id] = asyncio.Lock()
-        return self._upload_locks[upload_id]
+    async def _get_upload_lock(self, upload_id: str) -> asyncio.Lock:
+        """Get or create a lock for a specific upload (thread-safe)"""
+        async with self._upload_locks_guard:
+            if upload_id not in self._upload_locks:
+                self._upload_locks[upload_id] = asyncio.Lock()
+            return self._upload_locks[upload_id]
 
     def _get_upload_meta_path(self, upload_id: str) -> Path:
         """Get path to upload metadata file"""
@@ -144,7 +146,7 @@ class ChunkedUploadManager:
             await f.write(chunk_data)
 
         # Update metadata with lock to prevent concurrent read-modify-write race
-        async with self._get_upload_lock(upload_id):
+        async with await self._get_upload_lock(upload_id):
             meta_path = self._get_upload_meta_path(upload_id)
             if not meta_path.exists():
                 return {"success": False, "error": "Upload not found"}
@@ -188,7 +190,7 @@ class ChunkedUploadManager:
             return {"success": False, "error": "Upload not found"}
 
         # Read metadata under lock to avoid race with concurrent save_chunk
-        async with self._get_upload_lock(upload_id):
+        async with await self._get_upload_lock(upload_id):
             async with aiofiles.open(meta_path, 'r') as f:
                 meta = json.loads(await f.read())
 
@@ -223,7 +225,7 @@ class ChunkedUploadManager:
                                 break
                             await out_f.write(data)
         except Exception as e:
-            logger.error(f"Failed to assemble file: {e}")
+            logger.exception("Failed to assemble file")
             if final_path.exists():
                 final_path.unlink()
             return {"success": False, "error": f"Assembly failed: {str(e)}"}
@@ -298,7 +300,7 @@ class ChunkedUploadManager:
             return None
 
         # Read metadata under lock to avoid race with concurrent save_chunk
-        async with self._get_upload_lock(upload_id):
+        async with await self._get_upload_lock(upload_id):
             async with aiofiles.open(meta_path, 'r') as f:
                 meta = json.loads(await f.read())
 

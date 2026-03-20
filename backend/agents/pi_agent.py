@@ -191,7 +191,8 @@ CRITICAL CONSTRAINTS:
 4. Normalization, HVG selection, PCA, UMAP
 5. Clustering (leiden/louvain)
 6. Cell type annotation via annotate_clusters tool
-7. ALL clusters: condition-level DEG (treatment vs control per cluster) + GO/KEGG enrichment
+7. Condition-level DEG (treatment vs control) + GO/KEGG enrichment for all cell types
+   (merge similar subtypes/states into unified groups first, e.g., merge stress hepatocytes with hepatocytes)
 8. Cell-cell communication analysis (CellChat or NicheNet)
 
 ## Your Additional Planning (UNBIASED exploration)

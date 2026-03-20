@@ -112,8 +112,9 @@ if [ ! -d "$NODE_MODULES_DIR" ]; then
     # Install dependencies to the shared location
     cd "$SCRIPT_DIR/frontend"
 
-    # Remove existing node_modules if it's a directory (not a symlink)
-    if [ -d "node_modules" ] && [ ! -L "node_modules" ]; then
+    # Remove existing node_modules only if it's a real directory (not a symlink)
+    if [ -e "node_modules" ] && [ ! -L "node_modules" ] && [ -d "node_modules" ]; then
+        echo "Removing existing node_modules directory..."
         rm -rf node_modules
     fi
 
@@ -131,8 +132,9 @@ else
 
     # Ensure symlink exists
     if [ ! -L "node_modules" ]; then
-        # Remove if it's a regular directory
-        if [ -d "node_modules" ]; then
+        # Remove only if it's a real directory (not a symlink)
+        if [ -e "node_modules" ] && [ ! -L "node_modules" ] && [ -d "node_modules" ]; then
+            echo "Removing existing node_modules directory..."
             rm -rf node_modules
         fi
         ln -s "$NODE_MODULES_DIR" node_modules
@@ -162,7 +164,7 @@ sleep 2
 # Start frontend
 echo "   Frontend: http://$HOST:$PORT"
 cd "$SCRIPT_DIR/frontend"
-SCAI_BACKPORT="$BACKPORT" npx vite --host "$HOST" --port "$PORT" &
+SCAI_HOST="$HOST" SCAI_BACKPORT="$BACKPORT" npx vite --host "$HOST" --port "$PORT" &
 FRONTEND_PID=$!
 
 # Save PIDs and paths to file for stop.sh

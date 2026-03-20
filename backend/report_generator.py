@@ -73,7 +73,7 @@ def compress_image_to_base64(image_path: str, max_width: int = 800, quality: int
             b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
             return f"data:image/jpeg;base64,{b64_data}"
     except Exception as e:
-        logger.error(f"Error compressing image {image_path}: {e}")
+        logger.exception(f"Error compressing image {image_path}")
         return ""
 
 
@@ -1077,7 +1077,10 @@ class DetailedReportGenerator:
         self._set_llm_context("report_pi")
         response = await self.llm_client.chat(
             model=self.pi_model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a senior biomedical research PI writing a scientific report. You MUST respond exclusively in English."},
+                {"role": "user", "content": prompt},
+            ],
             temperature=temperature,
             max_tokens=max_tokens
         )
@@ -1115,7 +1118,6 @@ class DetailedReportGenerator:
             - feedback: str - feedback for bioinformatics agent if not satisfied
             - missing_elements: List[str] - specific items still needed
         """
-        zh = language == "zh"
 
         # Build summary of what was generated
         fig_summary = "\n".join([
@@ -1201,7 +1203,7 @@ Be strict but fair. For a publication-quality report:
                     "improvement_suggestions": result.get("improvement_suggestions", [])
                 }
         except Exception as e:
-            logger.error(f"Failed to parse PI review: {e}")
+            logger.exception("Failed to parse PI review")
 
         # Retry once before falling back to heuristic
         try:
@@ -1217,7 +1219,7 @@ Be strict but fair. For a publication-quality report:
                     "improvement_suggestions": retry_result.get("improvement_suggestions", [])
                 }
         except Exception as e:
-            logger.error(f"PI review retry also failed: {e}")
+            logger.exception("PI review retry also failed")
 
         # Default: not satisfied if fewer figures than planned
         min_figures = len(section_plan.get("figures", []))
@@ -1240,7 +1242,6 @@ Be strict but fair. For a publication-quality report:
         language: str
     ) -> str:
         """PI provides guidance to bioinformatics agent during report generation"""
-        zh = language == "zh"
 
         prompt = f"""You are the PI guiding the bioinformatics analyst in generating report figures.
 
@@ -1311,14 +1312,14 @@ Be specific and actionable. Include:
                 checkpoint = None
 
         report_id = checkpoint.get('report_id', str(uuid.uuid4())) if checkpoint else str(uuid.uuid4())
-        language = "zh" if any('\u4e00' <= c <= '\u9fff' for c in state.initial_instruction) else "en"
-        zh = language == "zh"
+        # Force English output for all reports
+        language = "en"
 
-        await self._report_progress(2, "初始化报告编排..." if zh else "Initializing report compilation...")
+        await self._report_progress(2, "Initializing report compilation...")
 
         # Step 1: Build structured analysis record from state data
         # (Pure data extraction, fast — always re-run to pick up latest state)
-        await self._report_progress(5, "读取分析记录..." if zh else "Reading analysis records...")
+        await self._report_progress(5, "Reading analysis records...")
         analysis_record = self._build_analysis_record(state)
         logger.info(
             f"Analysis record: {analysis_record['total_code_cells']} code cells, "
@@ -1327,13 +1328,13 @@ Be specific and actionable. Include:
         )
 
         # Step 2: Scan workspace for existing figures and tables, copy to report dir
-        await self._report_progress(10, "收集分析图表..." if zh else "Collecting analysis figures and tables...")
+        await self._report_progress(10, "Collecting analysis figures and tables...")
         existing_figures = self._scan_existing_figures()
         existing_tables = self._scan_existing_tables()
         logger.info(f"Collected {len(existing_figures)} figures and {len(existing_tables)} tables for report")
 
         # Step 3: Extract findings from round results
-        await self._report_progress(15, "提取分析结论..." if zh else "Extracting analysis findings...")
+        await self._report_progress(15, "Extracting analysis findings...")
         findings = self._extract_findings(state)
 
         # Extract cluster annotations from state data (no sandbox needed)
@@ -1344,7 +1345,7 @@ Be specific and actionable. Include:
             analysis_summary = checkpoint.get('analysis_summary', {})
             logger.info("Restored analysis_summary from checkpoint")
         else:
-            await self._report_progress(16, "PI Agent审阅分析代码和图表..." if zh else "PI Agent reviewing analysis code and figures...")
+            await self._report_progress(16, "PI Agent reviewing analysis code and figures...")
             analysis_summary = await self._pi_review_analysis(
                 state, analysis_record, findings, existing_figures, existing_tables, language
             )
@@ -1362,7 +1363,7 @@ Be specific and actionable. Include:
             report_plan = checkpoint.get('report_plan', {})
             logger.info("Restored report_plan from checkpoint")
         else:
-            await self._report_progress(30, "PI Agent规划报告结构..." if zh else "PI Agent planning report structure...")
+            await self._report_progress(30, "PI Agent planning report structure...")
             report_plan = await self._plan_report_from_analysis(
                 state, analysis_record, findings, existing_figures, existing_tables, language,
                 analysis_summary=analysis_summary
@@ -1408,7 +1409,7 @@ Be specific and actionable. Include:
             section_title = section_plan.get("title", f"Section {i+1}")
             await self._report_progress(
                 progress,
-                f"撰写: {section_title}" if zh else f"Writing: {section_title}"
+                f"Writing: {section_title}"
             )
 
             section = await self._generate_section_from_existing_figures(
@@ -1434,7 +1435,7 @@ Be specific and actionable. Include:
             abstract = checkpoint.get('abstract', '')
             logger.info("Restored abstract from checkpoint")
         else:
-            await self._report_progress(85, "撰写摘要..." if zh else "Writing abstract...")
+            await self._report_progress(85, "Writing abstract...")
             abstract = await self._generate_abstract(state, sections, findings, language, analysis_summary=analysis_summary)
             await checkpoint_mgr.save({
                 'report_id': report_id, 'last_step': 7, 'step_name': 'abstract',
@@ -1448,7 +1449,7 @@ Be specific and actionable. Include:
             conclusions = checkpoint.get('conclusions', '')
             logger.info("Restored conclusions from checkpoint")
         else:
-            await self._report_progress(92, "撰写结论..." if zh else "Writing conclusions...")
+            await self._report_progress(92, "Writing conclusions...")
             conclusions = await self._generate_conclusions(state, sections, findings, language, analysis_summary=analysis_summary)
             await checkpoint_mgr.save({
                 'report_id': report_id, 'last_step': 8, 'step_name': 'conclusions',
@@ -1477,7 +1478,7 @@ Be specific and actionable. Include:
                 graphic_abstract_path = str(ga_jpg)
                 logger.info(f"Saved graphic abstract to {ga_jpg}")
             except Exception as e:
-                logger.error(f"Failed to save graphic abstract: {e}")
+                logger.exception("Failed to save graphic abstract")
 
         # Build appendix data for report.json (so regenerate can use it)
         appendix_data = {
@@ -1554,7 +1555,7 @@ Be specific and actionable. Include:
             "generated_at": datetime.now().isoformat(),
             "status": "completed",
             "progress": 100,
-            "current_step": "完成" if zh else "Complete",
+            "current_step": "Complete",
             "appendix": appendix_data,
             "analysis_log": self._build_full_analysis_log(state),
             "score_definitions": [sd.model_dump(mode="json") for sd in state.score_definitions] if state.score_definitions else []
@@ -1587,14 +1588,14 @@ Be specific and actionable. Include:
                 logger.warning(f"Could not copy notebook: {e}")
 
         # Generate HTML report
-        await self._report_progress(95, "生成HTML报告..." if zh else "Generating HTML report...")
+        await self._report_progress(95, "Generating HTML report...")
         html_path = await self._generate_html_report(report, language, state=state)
         report["html_path"] = str(html_path)
 
         # Clear checkpoint on successful completion
         checkpoint_mgr.clear()
 
-        await self._report_progress(100, "完成" if zh else "Complete", "completed")
+        await self._report_progress(100, "Complete", "completed")
 
         return report
 
@@ -1993,7 +1994,7 @@ Be specific and actionable. Include:
                 buffer.seek(0)
                 return base64.b64encode(buffer.getvalue()).decode('utf-8')
         except Exception as e:
-            logger.error(f"Error loading image for vision: {image_path}: {e}")
+            logger.exception(f"Error loading image for vision: {image_path}")
             return None
 
     def _extract_analysis_code(self, state: AnalysisState) -> List[Dict[str, Any]]:
@@ -2179,7 +2180,7 @@ Be specific and actionable. Include:
                             down = sig[sig[fc_col] < 0]
                             parts.append(f"  Upregulated: {len(up)}, Downregulated: {len(down)}")
                         except Exception:
-                            pass
+                            logger.debug("Failed to compute up/down regulation counts")
 
                 # Add data preview
                 preview = df.head(max_rows).to_string(max_colwidth=40)
@@ -2216,7 +2217,6 @@ Be specific and actionable. Include:
 
         Returns structured text summary of methodology, workflow, and results for this phase.
         """
-        zh = language == "zh"
         phase_name = phase["phase_name"]
         phase_id = phase["phase_id"]
         cells = phase["cells"]
@@ -2360,7 +2360,6 @@ Provide a detailed technical summary of this analysis phase covering:
         Returns dict with methodology_overview, workflow_summary, key_results,
         figure_descriptions, and parameters_used.
         """
-        zh = language == "zh"
 
         # Format phase reviews
         reviews_text = ""
@@ -2402,7 +2401,7 @@ IMPORTANT:
         try:
             response = await self._pi_chat(prompt, temperature=0.3)
         except Exception as e:
-            logger.error(f"PI synthesis LLM call failed: {e}")
+            logger.exception("PI synthesis LLM call failed")
             all_reviews = "\n\n".join(pr["summary"] for pr in phase_reviews if pr["summary"])
             fallback = self._empty_analysis_summary()
             fallback["methodology_overview"] = all_reviews[:2000] if all_reviews else ""
@@ -2414,7 +2413,7 @@ IMPORTANT:
                 logger.info("PI synthesis successful")
                 return result
         except Exception as e:
-            logger.error(f"Failed to parse PI synthesis: {e}")
+            logger.exception("Failed to parse PI synthesis")
 
         # Fallback: construct basic summary from raw review texts
         logger.warning("PI synthesis JSON parsing failed, constructing fallback summary")
@@ -2454,7 +2453,6 @@ IMPORTANT:
 
         Returns analysis_summary dict compatible with downstream report generation.
         """
-        zh = language == "zh"
 
         # Build table context
         table_text = ""
@@ -2555,7 +2553,7 @@ IMPORTANT:
             else:
                 response = await self._pi_chat(prompt, temperature=0.3, max_tokens=8192)
         except Exception as e:
-            logger.error(f"PI comprehensive review failed: {e}")
+            logger.exception("PI comprehensive review failed")
             # Fallback to text-only
             try:
                 response = await self._pi_chat(prompt, temperature=0.3, max_tokens=8192)
@@ -2583,7 +2581,7 @@ IMPORTANT:
                     "parameters_used": parameters_used if isinstance(parameters_used, dict) else {},
                 }
         except Exception as e:
-            logger.error(f"Failed to parse PI comprehensive review response: {e}")
+            logger.exception("Failed to parse PI comprehensive review response")
 
         # Fallback: use raw response as methodology_overview
         fallback = self._empty_analysis_summary()
@@ -2607,10 +2605,9 @@ IMPORTANT:
 
         Returns analysis_summary dict for downstream report generation.
         """
-        zh = language == "zh"
 
         # Step 1: Read notebook directly
-        await self._report_progress(17, "读取分析Notebook..." if zh else "Reading analysis notebook...")
+        await self._report_progress(17, "Reading analysis notebook...")
         notebook_cells = self._read_notebook(state)
 
         if not notebook_cells:
@@ -2620,19 +2617,19 @@ IMPORTANT:
         logger.info(f"Read {len(notebook_cells)} code cells from notebook")
 
         # Step 2: Build chronological code digest
-        await self._report_progress(19, "构建代码摘要..." if zh else "Building code digest...")
+        await self._report_progress(19, "Building code digest...")
         code_digest = self._build_notebook_digest(notebook_cells)
         logger.info(f"Built code digest: {len(code_digest)} chars")
 
         # Step 3: Load figure images for vision API
-        await self._report_progress(21, "加载图片..." if zh else "Loading figure images...")
+        await self._report_progress(21, "Loading figure images...")
         figure_images = self._prepare_figure_images(existing_figures)
 
         # Step 4: Load table summaries
         table_summaries = self._prepare_table_summaries(existing_tables)
 
         # Step 5: Single comprehensive PI review
-        await self._report_progress(23, "PI Agent从头审阅分析全流程..." if zh else "PI Agent reviewing complete analysis from scratch...")
+        await self._report_progress(23, "PI Agent reviewing complete analysis from scratch...")
         analysis_summary = await self._pi_comprehensive_review(
             code_digest, figure_images, table_summaries, state, language
         )
@@ -2972,7 +2969,7 @@ IMPORTANT:
                     try:
                         shutil.copy2(str(pdf_file), str(dest_pdf))
                     except Exception:
-                        pass
+                        logger.debug("Failed to copy PDF for figure %s", pdf_file.name)
 
                 fig_info = {
                     "filename": png_file.name,
@@ -3012,12 +3009,14 @@ IMPORTANT:
             # Read preview data
             columns = []
             preview_data = []
+            total_rows = 0
             try:
                 df_preview = pd.read_csv(csv_file, nrows=10)
                 columns = list(df_preview.columns)
                 preview_data = df_preview.to_dict('records')
+                total_rows = pd.read_csv(csv_file, usecols=[0]).shape[0]
             except Exception:
-                pass
+                logger.debug("Failed to read CSV preview: %s", csv_file)
 
             tbl_info = {
                 "filename": csv_file.name,
@@ -3025,6 +3024,7 @@ IMPORTANT:
                 "csv_path": str(dest_csv),
                 "columns": columns,
                 "preview_data": preview_data,
+                "total_rows": total_rows,
                 "inferred_type": "differential_expression" if csv_file.stem.startswith("de_") else "data"
             }
             existing_tables.append(tbl_info)
@@ -3036,7 +3036,6 @@ IMPORTANT:
         self,
         state: AnalysisState,
         existing_figures: List[Dict[str, Any]],
-        zh: bool
     ) -> Dict[str, Any]:
         """
         Create a fallback report plan using existing figures, organized by type.
@@ -3115,7 +3114,6 @@ IMPORTANT:
         Uses analysis flow, existing figures, tables, round findings, and analysis_summary
         (from code/figure review) to create a comprehensive report.
         """
-        zh = language == "zh"
         analysis_summary = analysis_summary or {}
 
         # Format figures list with visual descriptions from analysis review
@@ -3356,11 +3354,11 @@ Then create sections in this EXACT order.
                     f"Response length: {len(response)} chars, starts with: {response[:200]!r}"
                 )
         except Exception as e:
-            logger.error(f"Failed to parse analysis-based report plan: {e}")
+            logger.exception("Failed to parse analysis-based report plan")
 
         # Fallback to auto-assignment based on figure types
         logger.warning("Using fallback plan (auto-assignment by figure type)")
-        return self._create_fallback_plan_with_existing_figures(state, existing_figures, zh)
+        return self._create_fallback_plan_with_existing_figures(state, existing_figures)
 
     async def _generate_section_from_existing_figures(
         self,
@@ -3375,7 +3373,6 @@ Then create sections in this EXACT order.
         PI Agent writes the narrative, captions, and scientific interpretations.
         When figure images are available in cache, uses vision API for accurate descriptions.
         """
-        zh = language == "zh"
         analysis_summary = analysis_summary or {}
         section_id = section_plan.get("id", str(uuid.uuid4())[:8])
         section_title = section_plan.get("title", "Section")
@@ -3623,7 +3620,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
                 }
 
         except Exception as e:
-            logger.error(f"Failed to parse PI Agent response: {e}")
+            logger.exception("Failed to parse PI Agent response")
 
         # Attempt to salvage narrative text from raw LLM response before falling back
         if response and len(response.strip()) > 100:
@@ -3636,7 +3633,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
                         provided_narrative = salvaged
                         logger.info(f"Salvaged narrative from raw LLM response ({len(salvaged)} chars)")
                 except Exception:
-                    pass
+                    logger.debug("Failed to salvage narrative from JSON")
             # If no JSON field found but response is substantial prose, use it directly
             if not (provided_narrative and len((provided_narrative or '').strip()) > 50):
                 # Strip markdown code fences and JSON artifacts
@@ -3722,7 +3719,6 @@ Generate a comprehensive scientific narrative for this section. Your response mu
         analysis_summary: Optional[Dict[str, Any]] = None
     ) -> str:
         """PI Agent generates the report abstract"""
-        zh = language == "zh"
         analysis_summary = analysis_summary or {}
 
         section_summaries = "\n".join([
@@ -3772,8 +3768,7 @@ Objective: {state.initial_instruction}
         abstract = await self._pi_chat(prompt, temperature=0.3)
         # Strip redundant leading title that LLM may have added
         abstract = re.sub(r'^\*{0,2}Abstract\*{0,2}\s*\n*', '', abstract, flags=re.IGNORECASE).strip()
-        abstract = re.sub(r'^\*{0,2}摘要\*{0,2}\s*\n*', '', abstract, flags=re.IGNORECASE).strip()
-        abstract = re.sub(r'^#{1,4}\s+.*?(Abstract|摘要).*?\n+', '', abstract, flags=re.IGNORECASE).strip()
+        abstract = re.sub(r'^#{1,4}\s+.*?Abstract.*?\n+', '', abstract, flags=re.IGNORECASE).strip()
         return abstract
 
     async def _generate_conclusions(
@@ -3785,7 +3780,6 @@ Objective: {state.initial_instruction}
         analysis_summary: Optional[Dict[str, Any]] = None
     ) -> str:
         """PI Agent generates the final conclusions"""
-        zh = language == "zh"
         analysis_summary = analysis_summary or {}
 
         # Include key results from analysis review
@@ -3827,7 +3821,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
         conclusions = await self._pi_chat(prompt, temperature=0.3)
         # Strip redundant leading title that LLM may have added
-        conclusions = re.sub(r'^#{1,4}\s+[\d.]*\s*(Conclusions?|结论).*?\n+', '', conclusions, flags=re.IGNORECASE).strip()
+        conclusions = re.sub(r'^#{1,4}\s+[\d.]*\s*Conclusions?.*?\n+', '', conclusions, flags=re.IGNORECASE).strip()
         return conclusions
 
     def _build_appendix_html(
@@ -3842,19 +3836,18 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         """
         from .config import ModelConfig, AgentTemperatures
 
-        zh = language == "zh"
         esc = html_module.escape
         default_models = ModelConfig()
         default_temps = AgentTemperatures()
 
-        appendix_title = "附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"
+        appendix_title = "Appendix: Analysis Settings & Records"
 
         # ── 1. Project Information ──────────────────────────────────
-        proj_title = "项目信息" if zh else "Project Information"
-        lbl_name = "项目名称" if zh else "Project Name"
-        lbl_desc = "项目描述" if zh else "Project Description"
-        lbl_created = "创建时间" if zh else "Created At"
-        lbl_report_time = "报告生成时间" if zh else "Report Generated At"
+        proj_title = "Project Information"
+        lbl_name = "Project Name"
+        lbl_desc = "Project Description"
+        lbl_created = "Created At"
+        lbl_report_time = "Report Generated At"
 
         created_str = state.created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(state.created_at, 'strftime') else str(state.created_at)
         report_time = report.get("generated_at", "")
@@ -3872,9 +3865,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         """
 
         # ── 2. Agent Configuration ──────────────────────────────────
-        agent_title = "Agent 配置" if zh else "Agent Configuration"
+        agent_title = "Agent Configuration"
         lbl_agent = "Agent"
-        lbl_model = "模型" if zh else "Model"
+        lbl_model = "Model"
         lbl_temp = "Temperature"
 
         agent_keys = [
@@ -3901,15 +3894,15 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         """
 
         # ── 3. Uploaded Data ────────────────────────────────────────
-        data_title = "上传数据" if zh else "Uploaded Data"
+        data_title = "Uploaded Data"
 
         # Treatment groups
         groups_html = ""
         if state.treatment_groups:
-            lbl_group = "实验分组" if zh else "Treatment Groups"
-            lbl_gname = "组名" if zh else "Group"
-            lbl_gdesc = "描述" if zh else "Description"
-            lbl_samples = "样本数" if zh else "Samples"
+            lbl_group = "Treatment Groups"
+            lbl_gname = "Group"
+            lbl_gdesc = "Description"
+            lbl_samples = "Samples"
 
             group_rows = ""
             for g in sorted(state.treatment_groups, key=lambda x: x.order):
@@ -3925,11 +3918,11 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         # Data files
         files_html = ""
         if state.data_files:
-            lbl_files = "数据文件" if zh else "Data Files"
-            lbl_filename = "文件名" if zh else "Filename"
-            lbl_section = "类别" if zh else "Section"
-            lbl_type = "类型" if zh else "Type"
-            lbl_fgroup = "分组" if zh else "Group"
+            lbl_files = "Data Files"
+            lbl_filename = "Filename"
+            lbl_section = "Section"
+            lbl_type = "Type"
+            lbl_fgroup = "Group"
 
             file_rows = ""
             for f in state.data_files:
@@ -3951,8 +3944,8 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         biochem_html = ""
         if state.biochemistry_indicators:
             count = len(state.biochemistry_indicators)
-            lbl_biochem = "生化指标" if zh else "Biochemistry Indicators"
-            lbl_count = f"共 {count} 项手动录入指标" if zh else f"{count} manually entered indicator(s)"
+            lbl_biochem = "Biochemistry Indicators"
+            lbl_count = f"{count} manually entered indicator(s)"
             biochem_html = f"<p><strong>{lbl_biochem}:</strong> {lbl_count}</p>"
 
         data_html = f"""
@@ -3963,19 +3956,17 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         """
 
         # ── 4. Analysis Rounds ──────────────────────────────────────
-        rounds_title = "分析轮次" if zh else "Analysis Rounds"
+        rounds_title = "Analysis Rounds"
 
         rounds_html = ""
         if state.round_results:
-            lbl_round = "轮次" if zh else "Round"
-            lbl_time = "时间" if zh else "Time"
-            lbl_patho = "病理" if zh else "Pathology"
-            lbl_bio = "生信" if zh else "Bioinformatics"
-            lbl_chem = "生化" if zh else "Biochemistry"
-            lbl_lit = "文献" if zh else "Literature"
+            lbl_round = "Round"
+            lbl_time = "Time"
+            lbl_patho = "Pathology"
+            lbl_bio = "Bioinformatics"
+            lbl_chem = "Biochemistry"
+            lbl_lit = "Literature"
             lbl_total_rounds = (
-                f"共 {len(state.round_results)} 轮分析（最大 {state.max_rounds} 轮）"
-                if zh else
                 f"Total: {len(state.round_results)} round(s) (max {state.max_rounds})"
             )
 
@@ -4004,11 +3995,11 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             </table>
             """
         else:
-            lbl_no_rounds = "无分析轮次记录" if zh else "No analysis round records"
+            lbl_no_rounds = "No analysis round records"
             rounds_html = f"<h3>{rounds_title}</h3><p>{lbl_no_rounds}</p>"
 
         # ── 5. User Inputs Between Rounds ───────────────────────────
-        human_title = "轮次间用户输入记录" if zh else "User Inputs Between Rounds"
+        human_title = "User Inputs Between Rounds"
 
         human_html = ""
         if state.human_messages:
@@ -4018,7 +4009,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 files = hm.get("files", [])
                 ts = hm.get("timestamp", "")
                 rn = hm.get("round_number", "?")
-                round_label = f"Round {rn}" if not zh else f"第 {rn} 轮"
+                round_label = f"Round {rn}"
                 ts_str = ts if isinstance(ts, str) else (ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, 'strftime') else str(ts))
 
                 files_info = ""
@@ -4026,7 +4017,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                     file_names = ", ".join(
                         esc(f.get("filename", f.get("name", "file"))) for f in files
                     )
-                    files_label = "附件" if zh else "Attached files"
+                    files_label = "Attached files"
                     files_info = f'<div class="files">{files_label}: {file_names}</div>'
 
                 items += f"""
@@ -4039,19 +4030,19 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 """
             human_html = f"<h3>{human_title}</h3>{items}"
         else:
-            lbl_no_input = "无用户输入记录" if zh else "No user inputs recorded"
+            lbl_no_input = "No user inputs recorded"
             human_html = f"<h3>{human_title}</h3><p>{lbl_no_input}</p>"
 
         # ── 6. User Interaction History ─────────────────────────────
         interaction_html = ""
         annotation_items = ""
         if state.annotation_state and state.annotation_state.cluster_annotations:
-            ann_title = "细胞注释确认" if zh else "Cell Annotation Decisions"
+            ann_title = "Cell Annotation Decisions"
             lbl_cluster = "Cluster"
-            lbl_ct = "细胞类型" if zh else "Cell Type"
-            lbl_override = "用户修改" if zh else "User Override"
-            lbl_confirmed = "已确认" if zh else "Confirmed"
-            lbl_conf = "置信度" if zh else "Confidence"
+            lbl_ct = "Cell Type"
+            lbl_override = "User Override"
+            lbl_confirmed = "Confirmed"
+            lbl_conf = "Confidence"
             ann_rows = ""
             for ca in state.annotation_state.cluster_annotations:
                 override = esc(ca.user_override or "-") if ca.user_override else "-"
@@ -4070,9 +4061,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
         direction_items = ""
         if state.user_chosen_directions:
-            dir_title = "研究方向选择" if zh else "Research Direction Selections"
-            lbl_dir = "方向" if zh else "Direction"
-            lbl_notes = "用户备注" if zh else "User Notes"
+            dir_title = "Research Direction Selections"
+            lbl_dir = "Direction"
+            lbl_notes = "User Notes"
             dir_rows = ""
             for d in state.user_chosen_directions:
                 dir_rows += f"<tr><td>{esc(d.get('direction', '-'))}</td><td>{esc(d.get('notes', '-') or '-')}</td></tr>\n"
@@ -4085,23 +4076,23 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             """
 
         if annotation_items or direction_items:
-            interaction_title = "用户交互记录" if zh else "User Interaction History"
+            interaction_title = "User Interaction History"
             interaction_html = f"<h3>{interaction_title}</h3>{annotation_items}{direction_items}"
 
         # ── 7. Related Reports & Downloads ─────────────────────────
         downloads_html = ""
         dl_items = []
         # Exploration report
-        exploration_label = "探索阶段报告" if zh else "Exploration Report"
+        exploration_label = "Exploration Report"
         dl_items.append(f'<li><a href="exploration_report.html" download style="color:#4f46e5;">{exploration_label}</a></li>')
         # Annotation context report
-        annotation_label = "细胞注释报告" if zh else "Annotation Context Report"
+        annotation_label = "Annotation Context Report"
         dl_items.append(f'<li><a href="annotation_context_report.html" download style="color:#4f46e5;">{annotation_label}</a></li>')
         # Notebook
-        notebook_label = "分析 Notebook (.ipynb)" if zh else "Analysis Notebook (.ipynb)"
+        notebook_label = "Analysis Notebook (.ipynb)"
         dl_items.append(f'<li><a href="{esc(state.id)}.ipynb" download style="color:#4f46e5;">{notebook_label}</a></li>')
 
-        dl_title = "相关报告与下载" if zh else "Related Reports & Downloads"
+        dl_title = "Related Reports & Downloads"
         downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'
 
         # ── Assemble ────────────────────────────────────────────────
@@ -4128,7 +4119,6 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         Generate HTML report with embedded images and download links.
         Images are embedded as base64 for standalone HTML display.
         """
-        zh = language == "zh"
 
         # Scan figures directory for all available images
         all_figures = categorize_figures(self.figures_dir)
@@ -4143,18 +4133,19 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             "key_findings": ["de", "violin", "heatmap", "other"]
         }
 
-        # Track which figures have been used
+        # Track which figures and tables have been used
         used_figures = set()
+        used_tables = set()
 
         # Prepare table of contents
         toc_items = []
         if self.cluster_annotations:
-            ca_toc_label = "细胞群注释" if zh else "Cell Cluster Annotations"
+            ca_toc_label = "Cell Cluster Annotations"
             toc_items.append(f'<li><a href="#cluster_annotations">{ca_toc_label}</a></li>')
         for section in report.get("sections", []):
             analysis_type = section.get("analysis_type", "general")
             type_class = "general" if analysis_type == "general" else "specific"
-            type_label = ("通用分析" if zh else "General") if analysis_type == "general" else ("特定分析" if zh else "Specific")
+            type_label = ("General") if analysis_type == "general" else ("Specific")
 
             toc_items.append(
                 f'<li><a href="#{html_module.escape(section["id"])}">{html_module.escape(section["title"])}</a>'
@@ -4166,7 +4157,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         for section in report.get("sections", []):
             analysis_type = section.get("analysis_type", "general")
             type_class = "general" if analysis_type == "general" else "specific"
-            type_label = ("通用分析" if zh else "General") if analysis_type == "general" else ("特定分析" if zh else "Specific")
+            type_label = ("General") if analysis_type == "general" else ("Specific")
 
             # Convert markdown in content to HTML
             content_html = markdown_to_html(section.get("content", ""))
@@ -4239,14 +4230,14 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 fig_interpretation = figure.get("interpretation", "")
                 fig_interpretation_html = markdown_to_html(fig_interpretation) if fig_interpretation else ""
 
-                img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else ("<p>" + ("图片不可用" if zh else "Image not available") + "</p>")
+                img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else ("<p>" + ("Image not available") + "</p>")
 
                 # Build interpretation section if available
                 interpretation_section = ""
                 if fig_interpretation_html:
                     interpretation_section = f'''
                             <div class="figure-interpretation">
-                                <strong>{"科学解读" if zh else "Scientific Interpretation"}:</strong>
+                                <strong>{"Scientific Interpretation"}:</strong>
                                 <p>{fig_interpretation_html}</p>
                             </div>'''
 
@@ -4261,9 +4252,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                             {interpretation_section}
                             <div class="figure-actions">
                                 <a href="figures/{png_filename}" download class="download-btn png">
-                                    {"下载 PNG" if zh else "Download PNG"}
+                                    {"Download PNG"}
                                 </a>
-                                {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("下载 PDF (高清)" if zh else "Download PDF (High-Res)") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
+                                {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("Download PDF (High-Res)") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
                             </div>
                         </div>
                     </div>
@@ -4273,8 +4264,10 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             for table in section.get("tables", []):
                 tbl_name = table.get("name", "Table")
                 csv_path = table.get("csv_path", "")
+                used_tables.add(os.path.basename(csv_path) if csv_path else "")
                 columns = table.get("columns", [])
                 preview_data = table.get("preview_data", [])
+                total_rows = table.get("total_rows", len(preview_data))
                 tbl_interpretation = table.get("interpretation", "")
 
                 csv_filename = url_quote(os.path.basename(csv_path)) if csv_path else ""
@@ -4284,7 +4277,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 if tbl_interpretation_html:
                     tbl_interpretation_section = f'''
                             <div class="table-interpretation">
-                                <strong>{"科学解读" if zh else "Scientific Interpretation"}:</strong>
+                                <strong>{"Scientific Interpretation"}:</strong>
                                 <p>{tbl_interpretation_html}</p>
                             </div>'''
 
@@ -4300,7 +4293,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                         <div class="table-header">
                             <h4>{html_module.escape(tbl_name)}</h4>
                             <a href="tables/{csv_filename}" download class="download-btn csv">
-                                {"下载 CSV" if zh else "Download CSV"}
+                                {"Download CSV"}
                             </a>
                         </div>
                         <div class="table-wrapper">
@@ -4310,7 +4303,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                             </table>
                         </div>
                         {tbl_interpretation_section}
-                        {"<div class='table-info'>" + (f"显示前10行，共{len(preview_data)}行" if zh else f"Showing 10 of {len(preview_data)} rows") + "</div>" if len(preview_data) > 10 else ""}
+                        {"<div class='table-info'>" + (f"Showing 10 of {total_rows} rows") + "</div>" if total_rows > 10 else ""}
                     </div>
                 '''
 
@@ -4328,10 +4321,10 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                     remaining_figures.append(fig_info)
 
         if remaining_figures:
-            supp_title = "补充图表" if zh else "Supplementary Figures"
+            supp_title = "Supplementary Figures"
             toc_items.append(
                 f'<li><a href="#supplementary_figures">{supp_title}</a>'
-                f'<span class="section-type specific">{"补充" if zh else "Supplementary"}</span></li>'
+                f'<span class="section-type specific">{"Supplementary"}</span></li>'
             )
 
             supp_section_html = f'''
@@ -4339,11 +4332,11 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 <div class="section-header">
                     <h2>
                         {supp_title}
-                        <span class="analysis-type-badge specific">{"补充" if zh else "Supplementary"}</span>
+                        <span class="analysis-type-badge specific">{"Supplementary"}</span>
                     </h2>
                 </div>
                 <div class="section-content">
-                    <p>{"以下是分析过程中生成的其他图表，供参考。" if zh else "The following figures were generated during the analysis and are provided for reference."}</p>
+                    <p>{"The following figures were generated during the analysis and are provided for reference."}</p>
             '''
 
             for idx, fig_info in enumerate(remaining_figures, 1):
@@ -4354,7 +4347,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 pdf_filename = url_quote(os.path.basename(pdf_path)) if pdf_path else ""
 
                 img_src = compress_image_to_base64(png_path, max_width=900, quality=85) if os.path.exists(png_path) else ""
-                img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else ("<p>" + ("图片不可用" if zh else "Image not available") + "</p>")
+                img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else ("<p>" + ("Image not available") + "</p>")
 
                 supp_section_html += f'''
                     <div class="figure-container" id="fig-supp-{idx}">
@@ -4362,12 +4355,12 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                             {img_tag}
                         </div>
                         <div class="figure-caption">
-                            <h4>{"补充图" if zh else "Supp. Fig."} {idx}: {html_module.escape(fig_name)}</h4>
+                            <h4>{"Supp. Fig."} {idx}: {html_module.escape(fig_name)}</h4>
                             <div class="figure-actions">
                                 <a href="figures/{png_filename}" download class="download-btn png">
-                                    {"下载 PNG" if zh else "Download PNG"}
+                                    {"Download PNG"}
                                 </a>
-                                {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("下载 PDF (高清)" if zh else "Download PDF (High-Res)") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
+                                {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("Download PDF (High-Res)") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
                             </div>
                         </div>
                     </div>
@@ -4378,6 +4371,87 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             </div>
             '''
             sections_html.append(supp_section_html)
+
+        # Add supplementary data tables for any CSV files not assigned to sections
+        remaining_table_files = []
+        if self.tables_dir.exists():
+            for csv_file in sorted(self.tables_dir.glob("*.csv")):
+                if csv_file.name not in used_tables:
+                    columns, preview_data, total_rows = [], [], 0
+                    try:
+                        df_preview = pd.read_csv(csv_file, nrows=10)
+                        columns = list(df_preview.columns)
+                        preview_data = df_preview.to_dict('records')
+                        total_rows = pd.read_csv(csv_file, usecols=[0]).shape[0]
+                    except Exception:
+                        logger.debug("Failed to read CSV preview for HTML: %s", csv_file)
+                    remaining_table_files.append({
+                        "name": csv_file.stem.replace("_", " ").title(),
+                        "filename": csv_file.name,
+                        "columns": columns,
+                        "preview_data": preview_data,
+                        "total_rows": total_rows,
+                        "inferred_type": "differential_expression" if csv_file.stem.lower().startswith(("de_", "dea_", "deg_")) else "data"
+                    })
+
+        if remaining_table_files:
+            supp_tbl_title = "Supplementary Data Tables"
+            toc_items.append(
+                f'<li><a href="#supplementary_tables">{supp_tbl_title}</a>'
+                f'<span class="section-type specific">{"Supplementary"}</span></li>'
+            )
+            supp_tbl_html = f'''
+            <div class="section" id="supplementary_tables">
+                <div class="section-header">
+                    <h2>
+                        {supp_tbl_title}
+                        <span class="analysis-type-badge specific">{"Supplementary"}</span>
+                    </h2>
+                </div>
+                <div class="section-content">
+                    <p>{"The following tables were generated during analysis and are provided for download and reference."}</p>
+            '''
+            for tbl in remaining_table_files:
+                tbl_name = tbl["name"]
+                csv_filename = url_quote(tbl["filename"])
+                columns = tbl["columns"]
+                preview_data = tbl["preview_data"]
+                total_rows = tbl.get("total_rows", len(preview_data))
+                inferred_type = tbl["inferred_type"]
+
+                type_label = ("Differential Expression") if inferred_type == "differential_expression" else ("Analysis Data")
+                col_list = ", ".join(str(c) for c in columns[:8]) + ("..." if len(columns) > 8 else "")
+
+                table_header = "".join([f"<th>{html_module.escape(str(col))}</th>" for col in columns])
+                table_rows = ""
+                for row in preview_data[:5]:
+                    row_cells = "".join([f"<td>{html_module.escape(str(row.get(col, '-')))}</td>" for col in columns])
+                    table_rows += f"<tr>{row_cells}</tr>"
+
+                supp_tbl_html += f'''
+                    <div class="table-container">
+                        <div class="table-header">
+                            <h4>{html_module.escape(tbl_name)}</h4>
+                            <span class="table-type-badge">{type_label}</span>
+                            <a href="tables/{csv_filename}" download class="download-btn csv">
+                                {"Download Full CSV"}
+                            </a>
+                        </div>
+                        <p class="table-columns-info">{"Columns: "}{html_module.escape(col_list)}</p>
+                        <div class="table-wrapper">
+                            <table>
+                                <thead><tr>{table_header}</tr></thead>
+                                <tbody>{table_rows}</tbody>
+                            </table>
+                        </div>
+                        {"<div class='table-info'>" + (f"Showing 5 of {total_rows} rows — download CSV for full data") + "</div>" if total_rows > 5 else ""}
+                    </div>
+                '''
+            supp_tbl_html += '''
+                </div>
+            </div>
+            '''
+            sections_html.append(supp_tbl_html)
 
         # Convert markdown in abstract and conclusions
         abstract_html = markdown_to_html(report.get("abstract", ""))
@@ -4390,7 +4464,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             try:
                 ga_b64 = compress_image_to_base64(ga_path, max_width=1200, quality=90)
                 if ga_b64:
-                    ga_title = "图形摘要" if zh else "Graphic Abstract"
+                    ga_title = "Graphic Abstract"
                     ga_html = f'''
             <div class="graphic-abstract">
                 <h2>{ga_title}</h2>
@@ -4400,15 +4474,15 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 else:
                     logger.warning(f"Graphic abstract image compression returned empty for: {ga_path}")
             except Exception as e:
-                logger.error(f"Failed to embed graphic abstract in HTML: {e}")
+                logger.exception("Failed to embed graphic abstract in HTML")
 
         # Build cluster annotations table HTML
         ca_html = ""
         if self.cluster_annotations:
-            ca_title = "细胞群注释" if zh else "Cell Cluster Annotations"
+            ca_title = "Cell Cluster Annotations"
             ca_header = (
-                "<th>Cluster</th><th>" + ("细胞类型" if zh else "Cell Type") +
-                "</th><th>" + ("细胞数" if zh else "Cell Count") + "</th>"
+                "<th>Cluster</th><th>" + ("Cell Type") +
+                "</th><th>" + ("Cell Count") + "</th>"
             )
             ca_rows = ""
             total_cells = 0
@@ -4417,7 +4491,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 nc = info.get("n_cells", 0)
                 total_cells += nc
                 ca_rows += f"<tr><td>{html_module.escape(cid)}</td><td>{ct}</td><td>{nc:,}</td></tr>"
-            ca_rows += f"<tr style='font-weight:bold;border-top:2px solid #333'><td colspan='2'>{'总计' if zh else 'Total'}</td><td>{total_cells:,}</td></tr>"
+            ca_rows += f"<tr style='font-weight:bold;border-top:2px solid #333'><td colspan='2'>Total</td><td>{total_cells:,}</td></tr>"
             ca_html = f'''
             <div class="section" id="cluster_annotations">
                 <div class="section-header">
@@ -4440,20 +4514,20 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         score_definitions_html = ""
         if state is not None and state.score_definitions:
             score_definitions_html = _build_score_definitions_html_section(state)
-            score_toc_label = "评分定义" if zh else "Score Definitions"
+            score_toc_label = "Score Definitions"
             toc_items.append(
                 f'<li><a href="#score-definitions">{score_toc_label}</a>'
-                f'<span class="section-type specific">{"方法" if zh else "Methods"}</span></li>'
+                f'<span class="section-type specific">{"Methods"}</span></li>'
             )
 
         # Build appendix HTML (analysis settings & records)
         appendix_html = ""
         if state is not None:
             appendix_html = self._build_appendix_html(state, report, language)
-            appendix_toc_label = "附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"
+            appendix_toc_label = "Appendix: Analysis Settings & Records"
             toc_items.append(
                 f'<li><a href="#appendix">{appendix_toc_label}</a>'
-                f'<span class="section-type specific">{"附录" if zh else "Appendix"}</span></li>'
+                f'<span class="section-type specific">{"Appendix"}</span></li>'
             )
 
         # Escape curly braces in content to prevent str.format() crash on LLM output
@@ -4462,17 +4536,17 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
         # Build full HTML
         html_content = HTML_TEMPLATE.format(
-            language="zh" if zh else "en",
+            language="en",
             title=_safe_format_value(report.get("title", "Analysis Report")),
-            generated_at=("生成时间: " if zh else "Generated: ") + report.get("generated_at", ""),
-            toc_title="目录" if zh else "Table of Contents",
+            generated_at=("Generated: ") + report.get("generated_at", ""),
+            toc_title="Table of Contents",
             toc_items=_safe_format_value("\n".join(toc_items)),
             graphic_abstract_html=_safe_format_value(ga_html),
-            abstract_title="摘要" if zh else "Abstract",
+            abstract_title="Abstract",
             abstract=_safe_format_value(abstract_html),
             cluster_annotations_html=_safe_format_value(ca_html),
             sections_html=_safe_format_value("\n".join(sections_html)),
-            conclusions_title="结论" if zh else "Conclusions",
+            conclusions_title="Conclusions",
             conclusions=_safe_format_value(conclusions_html),
             analysis_log_html=_safe_format_value(analysis_log_html),
             score_definitions_html=_safe_format_value(score_definitions_html),
@@ -5192,7 +5266,7 @@ def generate_annotation_context_report_html(
                             f'<div class="figure-caption">{caption}</div></div>'
                         )
                     except Exception:
-                        pass
+                        logger.debug("Failed to embed figure in HTML: %s", fpath)
 
     if figure_blocks:
         figures_html = f"""

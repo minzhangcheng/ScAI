@@ -4,6 +4,7 @@ import { useTranslation } from '../i18n/translations'
 import { apiFetch } from '../hooks/useApi'
 import ReactMarkdown from 'react-markdown'
 import { Send, Loader2, User, Bot, AlertCircle, Paperclip, X, FileText, Image as ImageIcon, Download, Square } from 'lucide-react'
+import { base64ToDataUri } from '../utils/image'
 
 const AGENT_OPTIONS = [
   { value: 'pi', labelKey: 'chatTargetPi' as const },
@@ -117,7 +118,6 @@ export function ChatPanel() {
       } catch {}
     }, 5000)
     return () => clearInterval(interval)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatLoading, currentSession?.id, setChatMessages, setChatLoading, setChatDelegationActive, setChatDelegationPlan])
 
   // Auto-scroll to bottom when messages change
@@ -427,7 +427,7 @@ export function ChatPanel() {
                       <div key={idx} className="border border-slate-200 rounded-lg overflow-hidden bg-white">
                         <img
                           src={fig.base64
-                            ? `data:image/${fig.base64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${fig.base64}`
+                            ? base64ToDataUri(fig.base64)
                             : `/api/file?path=${encodeURIComponent(fig.path || '')}`}
                           alt={fig.name}
                           className="w-full h-auto"

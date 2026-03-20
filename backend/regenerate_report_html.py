@@ -16,7 +16,11 @@ from urllib.parse import quote as url_quote
 from pathlib import Path
 from datetime import datetime
 
+import logging
+
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
 def compress_image_to_base64(image_path: str, max_width: int = 800, quality: int = 85) -> str:
@@ -50,7 +54,7 @@ def compress_image_to_base64(image_path: str, max_width: int = 800, quality: int
             b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
             return f"data:image/jpeg;base64,{b64_data}"
     except Exception as e:
-        print(f"Error compressing image {image_path}: {e}")
+        logger.error("Error compressing image %s: %s", image_path, e)
         return ""
 
 
@@ -825,28 +829,23 @@ HTML_TEMPLATE = """
 
 def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Path) -> str:
     """Build analysis log HTML from report.json data. Mirrors DetailedReportGenerator._build_analysis_log_html()."""
-    zh = language == "zh"
     esc = html_module.escape
 
     log_data = report.get("analysis_log", [])
     if not log_data:
         return ""
 
-    title = "完整分析日志" if zh else "Complete Analysis Log"
-    subtitle = (
-        f"以下按时间顺序展示了全部 {len(log_data)} 个分析步骤及其结果。"
-        if zh else
-        f"The following shows all {len(log_data)} analysis steps and their results in chronological order."
-    )
+    title = "Complete Analysis Log"
+    subtitle = f"The following shows all {len(log_data)} analysis steps and their results in chronological order."
 
     type_badges = {
-        "execute_code": ("代码执行" if zh else "Code", "#dbeafe", "#1d4ed8"),
-        "consult_pi": ("PI咨询" if zh else "PI Consultation", "#f3e8ff", "#7c3aed"),
-        "search_literature": ("文献检索" if zh else "Literature Search", "#d1fae5", "#047857"),
-        "annotate_clusters": ("细胞注释" if zh else "Cluster Annotation", "#fef3c7", "#b45309"),
-        "report_findings": ("分析发现" if zh else "Findings Report", "#dcfce7", "#15803d"),
-        "generate_publication_figure": ("发表图生成" if zh else "Publication Figure", "#fce7f3", "#be185d"),
-        "text_response": ("Agent回复" if zh else "Agent Response", "#f1f5f9", "#64748b"),
+        "execute_code": ("Code", "#dbeafe", "#1d4ed8"),
+        "consult_pi": ("PI Consultation", "#f3e8ff", "#7c3aed"),
+        "search_literature": ("Literature Search", "#d1fae5", "#047857"),
+        "annotate_clusters": ("Cluster Annotation", "#fef3c7", "#b45309"),
+        "report_findings": ("Findings Report", "#dcfce7", "#15803d"),
+        "generate_publication_figure": ("Publication Figure", "#fce7f3", "#be185d"),
+        "text_response": ("Agent Response", "#f1f5f9", "#64748b"),
     }
 
     steps_html = ""
@@ -870,7 +869,7 @@ def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Pa
         '''
 
         if reasoning:
-            reasoning_label = "Agent 推理" if zh else "Agent Reasoning"
+            reasoning_label = "Agent Reasoning"
             step_html += f'<details class="log-reasoning-details"><summary>{reasoning_label}</summary><div class="log-reasoning">{esc(reasoning[:1000])}</div></details>'
 
         if step_type == "execute_code":
@@ -883,13 +882,13 @@ def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Pa
             if desc:
                 step_html += f'<div class="log-description">{esc(desc)}</div>'
             if code:
-                code_label = "查看代码" if zh else "View Code"
+                code_label = "View Code"
                 step_html += f'<details><summary>{code_label}</summary><pre class="log-code"><code>{esc(code[:2500])}</code></pre></details>'
             if output:
-                output_label = "输出" if zh else "Output"
+                output_label = "Output"
                 step_html += f'<details open><summary>{output_label}</summary><pre class="log-output">{esc(output[:2000])}</pre></details>'
             if error:
-                error_label = "错误" if zh else "Error"
+                error_label = "Error"
                 step_html += f'<div class="log-error"><strong>{error_label}:</strong> {esc(error[:500])}</div>'
 
             if saved_figs and figures_dir:
@@ -903,8 +902,8 @@ def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Pa
         elif step_type == "consult_pi":
             q = entry.get("pi_question", "")
             r = entry.get("pi_response", "")
-            q_label = "问题" if zh else "Question"
-            r_label = "PI 回复" if zh else "PI Response"
+            q_label = "Question"
+            r_label = "PI Response"
             if q:
                 step_html += f'<div class="log-qa"><strong>{q_label}:</strong> {esc(q[:500])}</div>'
             if r:
@@ -913,8 +912,8 @@ def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Pa
         elif step_type == "search_literature":
             topic = entry.get("literature_topic", "")
             result_text = entry.get("literature_result", "")
-            topic_label = "检索主题" if zh else "Search Topic"
-            result_label = "检索结果" if zh else "Results"
+            topic_label = "Search Topic"
+            result_label = "Results"
             if topic:
                 step_html += f'<div class="log-qa"><strong>{topic_label}:</strong> {esc(topic)}</div>'
             if result_text:
@@ -926,13 +925,13 @@ def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Pa
             organism = entry.get("annotation_organism", "")
             ann_result = entry.get("annotation_result_summary", "")
             if markers:
-                markers_label = "Marker 基因" if zh else "Cluster Markers"
+                markers_label = "Cluster Markers"
                 step_html += f'<div class="log-qa"><strong>{markers_label}:</strong> {esc(markers[:500])}</div>'
             if tissue or organism:
-                ctx_label = "组织/物种" if zh else "Tissue/Organism"
+                ctx_label = "Tissue/Organism"
                 step_html += f'<div class="log-qa"><strong>{ctx_label}:</strong> {esc(tissue)} / {esc(organism)}</div>'
             if ann_result:
-                result_label = "注释结果" if zh else "Annotation Results"
+                result_label = "Annotation Results"
                 step_html += f'<details open><summary>{result_label}</summary><pre class="log-output">{esc(ann_result[:1500])}</pre></details>'
 
         elif step_type == "report_findings":
@@ -940,14 +939,14 @@ def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Pa
             summary = entry.get("findings_summary", "")
             suggestions = entry.get("findings_suggestions", [])
             if summary:
-                summary_label = "摘要" if zh else "Summary"
+                summary_label = "Summary"
                 step_html += f'<div class="log-qa"><strong>{summary_label}:</strong> {esc(summary[:500])}</div>'
             if findings_list:
-                findings_label = "发现列表" if zh else "Findings"
+                findings_label = "Findings"
                 items = "".join(f"<li>{esc(f[:300])}</li>" for f in findings_list[:20])
                 step_html += f'<div class="log-findings"><strong>{findings_label}:</strong><ul>{items}</ul></div>'
             if suggestions:
-                sugg_label = "建议" if zh else "Suggestions"
+                sugg_label = "Suggestions"
                 items = "".join(f"<li>{esc(s[:200])}</li>" for s in suggestions[:10])
                 step_html += f'<div class="log-findings"><strong>{sugg_label}:</strong><ul>{items}</ul></div>'
 
@@ -957,16 +956,16 @@ def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Pa
             fig_code = entry.get("pub_figure_code", "")
             fig_result = entry.get("pub_figure_result", "")
             if fig_name:
-                name_label = "图名" if zh else "Figure Name"
+                name_label = "Figure Name"
                 step_html += f'<div class="log-qa"><strong>{name_label}:</strong> {esc(fig_name)}</div>'
             if fig_desc:
-                desc_label = "描述" if zh else "Description"
+                desc_label = "Description"
                 step_html += f'<div class="log-qa"><strong>{desc_label}:</strong> {esc(fig_desc[:300])}</div>'
             if fig_code:
-                code_label = "查看代码" if zh else "View Code"
+                code_label = "View Code"
                 step_html += f'<details><summary>{code_label}</summary><pre class="log-code"><code>{esc(fig_code[:2500])}</code></pre></details>'
             if fig_result:
-                result_label = "结果" if zh else "Result"
+                result_label = "Result"
                 step_html += f'<details open><summary>{result_label}</summary><pre class="log-output">{esc(fig_result[:1000])}</pre></details>'
 
         elif step_type == "text_response":
@@ -1040,17 +1039,16 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
     if not appendix:
         return ""
 
-    zh = language == "zh"
     esc = html_module.escape
 
-    appendix_title = "附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"
+    appendix_title = "Appendix: Analysis Settings & Records"
 
     # 1. Project Information
-    proj_title = "项目信息" if zh else "Project Information"
-    lbl_name = "项目名称" if zh else "Project Name"
-    lbl_desc = "项目描述" if zh else "Project Description"
-    lbl_created = "创建时间" if zh else "Created At"
-    lbl_report_time = "报告生成时间" if zh else "Report Generated At"
+    proj_title = "Project Information"
+    lbl_name = "Project Name"
+    lbl_desc = "Project Description"
+    lbl_created = "Created At"
+    lbl_report_time = "Report Generated At"
 
     project_html = f"""
     <h3>{proj_title}</h3>
@@ -1065,7 +1063,7 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
     """
 
     # 2. Agent Configuration
-    agent_title = "Agent 配置" if zh else "Agent Configuration"
+    agent_title = "Agent Configuration"
     agent_rows = ""
     models = appendix.get("agent_models", {})
     temps = appendix.get("agent_temperatures", {})
@@ -1077,24 +1075,24 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
     agent_html = f"""
     <h3>{agent_title}</h3>
     <table>
-        <thead><tr><th>Agent</th><th>{'模型' if zh else 'Model'}</th><th>Temperature</th></tr></thead>
+        <thead><tr><th>Agent</th><th>Model</th><th>Temperature</th></tr></thead>
         <tbody>{agent_rows}</tbody>
     </table>
     """
 
     # 3. Uploaded Data
-    data_title = "上传数据" if zh else "Uploaded Data"
+    data_title = "Uploaded Data"
     groups_html = ""
     groups = appendix.get("treatment_groups", [])
     if groups:
-        lbl_group = "实验分组" if zh else "Treatment Groups"
+        lbl_group = "Treatment Groups"
         group_rows = ""
         for g in groups:
             group_rows += f"<tr><td>{esc(g.get('name', '-'))}</td><td>{esc(g.get('description', '-'))}</td><td>{g.get('sample_count', 0)}</td></tr>\n"
         groups_html = f"""
         <p><strong>{lbl_group}</strong></p>
         <table>
-            <thead><tr><th>{'组名' if zh else 'Group'}</th><th>{'描述' if zh else 'Description'}</th><th>{'样本数' if zh else 'Samples'}</th></tr></thead>
+            <thead><tr><th>Group</th><th>Description</th><th>Samples</th></tr></thead>
             <tbody>{group_rows}</tbody>
         </table>
         """
@@ -1102,7 +1100,7 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
     files_html = ""
     files = appendix.get("data_files", [])
     if files:
-        lbl_files = "数据文件" if zh else "Data Files"
+        lbl_files = "Data Files"
         file_rows = ""
         for f in files:
             file_rows += (
@@ -1112,7 +1110,7 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
         files_html = f"""
         <p><strong>{lbl_files}</strong></p>
         <table>
-            <thead><tr><th>{'文件名' if zh else 'Filename'}</th><th>{'类别' if zh else 'Section'}</th><th>{'类型' if zh else 'Type'}</th><th>{'分组' if zh else 'Group'}</th></tr></thead>
+            <thead><tr><th>Filename</th><th>Section</th><th>Type</th><th>Group</th></tr></thead>
             <tbody>{file_rows}</tbody>
         </table>
         """
@@ -1120,21 +1118,18 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
     biochem_count = appendix.get("biochemistry_indicators_count", 0)
     biochem_html = ""
     if biochem_count:
-        lbl_biochem = "生化指标" if zh else "Biochemistry Indicators"
-        lbl_count = f"共 {biochem_count} 项手动录入指标" if zh else f"{biochem_count} manually entered indicator(s)"
+        lbl_biochem = "Biochemistry Indicators"
+        lbl_count = f"{biochem_count} manually entered indicator(s)"
         biochem_html = f"<p><strong>{lbl_biochem}:</strong> {lbl_count}</p>"
 
     data_html = f"<h3>{data_title}</h3>{groups_html}{files_html}{biochem_html}"
 
     # 4. Analysis Rounds
-    rounds_title = "分析轮次" if zh else "Analysis Rounds"
+    rounds_title = "Analysis Rounds"
     round_results = appendix.get("round_results", [])
     if round_results:
         max_rounds = appendix.get("max_rounds", "?")
-        lbl_total = (
-            f"共 {len(round_results)} 轮分析（最大 {max_rounds} 轮）" if zh
-            else f"Total: {len(round_results)} round(s) (max {max_rounds})"
-        )
+        lbl_total = f"Total: {len(round_results)} round(s) (max {max_rounds})"
         round_rows = ""
         for r in round_results:
             round_rows += (
@@ -1149,19 +1144,19 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
         <p>{lbl_total}</p>
         <table>
             <thead><tr>
-                <th>{'轮次' if zh else 'Round'}</th><th>{'时间' if zh else 'Time'}</th>
-                <th>{'病理' if zh else 'Pathology'}</th><th>{'生信' if zh else 'Bioinformatics'}</th>
-                <th>{'生化' if zh else 'Biochemistry'}</th><th>{'文献' if zh else 'Literature'}</th>
+                <th>Round</th><th>Time</th>
+                <th>Pathology</th><th>Bioinformatics</th>
+                <th>Biochemistry</th><th>Literature</th>
             </tr></thead>
             <tbody>{round_rows}</tbody>
         </table>
         """
     else:
-        lbl_no_rounds = "无分析轮次记录" if zh else "No analysis round records"
+        lbl_no_rounds = "No analysis round records"
         rounds_html = f"<h3>{rounds_title}</h3><p>{lbl_no_rounds}</p>"
 
     # 5. User Inputs Between Rounds
-    human_title = "轮次间用户输入记录" if zh else "User Inputs Between Rounds"
+    human_title = "User Inputs Between Rounds"
     human_msgs = appendix.get("human_messages", [])
     if human_msgs:
         items = ""
@@ -1170,12 +1165,12 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
             files_list = hm.get("files", [])
             ts = hm.get("timestamp", "")
             rn = hm.get("round_number", "?")
-            round_label = f"第 {rn} 轮" if zh else f"Round {rn}"
+            round_label = f"Round {rn}"
 
             files_info = ""
             if files_list:
                 file_names = ", ".join(esc(str(f)) for f in files_list)
-                files_label = "附件" if zh else "Attached files"
+                files_label = "Attached files"
                 files_info = f'<div class="files">{files_label}: {file_names}</div>'
 
             items += f"""
@@ -1188,7 +1183,7 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
             """
         human_html = f"<h3>{human_title}</h3>{items}"
     else:
-        lbl_no_input = "无用户输入记录" if zh else "No user inputs recorded"
+        lbl_no_input = "No user inputs recorded"
         human_html = f"<h3>{human_title}</h3><p>{lbl_no_input}</p>"
 
     # 6. User Interaction History
@@ -1198,11 +1193,11 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
     dir_selections = user_interactions.get("direction_selection", [])
 
     if cluster_anns or dir_selections:
-        interaction_title = "用户交互记录" if zh else "User Interaction History"
+        interaction_title = "User Interaction History"
         interaction_html = f"<h3>{interaction_title}</h3>"
 
         if cluster_anns:
-            ann_title = "细胞注释确认" if zh else "Cell Annotation Decisions"
+            ann_title = "Cell Annotation Decisions"
             ann_rows = ""
             for ca in cluster_anns:
                 confirmed = "✓" if ca.get("confirmed") else "-"
@@ -1216,22 +1211,22 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
             interaction_html += f"""
             <h4>{ann_title}</h4>
             <table>
-                <thead><tr><th>Cluster</th><th>{'细胞类型' if zh else 'Cell Type'}</th>
-                <th>{'用户修改' if zh else 'User Override'}</th><th>{'已确认' if zh else 'Confirmed'}</th>
-                <th>{'置信度' if zh else 'Confidence'}</th></tr></thead>
+                <thead><tr><th>Cluster</th><th>Cell Type</th>
+                <th>User Override</th><th>Confirmed</th>
+                <th>Confidence</th></tr></thead>
                 <tbody>{ann_rows}</tbody>
             </table>
             """
 
         if dir_selections:
-            dir_title = "研究方向选择" if zh else "Research Direction Selections"
+            dir_title = "Research Direction Selections"
             dir_rows = ""
             for d in dir_selections:
                 dir_rows += f"<tr><td>{esc(d.get('direction', '-'))}</td><td>{esc(d.get('notes', '-') or '-')}</td></tr>\n"
             interaction_html += f"""
             <h4>{dir_title}</h4>
             <table>
-                <thead><tr><th>{'方向' if zh else 'Direction'}</th><th>{'用户备注' if zh else 'User Notes'}</th></tr></thead>
+                <thead><tr><th>Direction</th><th>User Notes</th></tr></thead>
                 <tbody>{dir_rows}</tbody>
             </table>
             """
@@ -1241,16 +1236,16 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
     related = appendix.get("related_reports", {})
     notebook = appendix.get("notebook_filename", "")
     if related or notebook:
-        dl_title = "相关报告与下载" if zh else "Related Reports & Downloads"
+        dl_title = "Related Reports & Downloads"
         dl_items = []
         if related.get("exploration_report"):
-            label = "探索阶段报告" if zh else "Exploration Report"
+            label = "Exploration Report"
             dl_items.append(f'<li><a href="{esc(related["exploration_report"])}" download style="color:#4f46e5;">{label}</a></li>')
         if related.get("annotation_report"):
-            label = "细胞注释报告" if zh else "Annotation Context Report"
+            label = "Annotation Context Report"
             dl_items.append(f'<li><a href="{esc(related["annotation_report"])}" download style="color:#4f46e5;">{label}</a></li>')
         if notebook:
-            label = "分析 Notebook (.ipynb)" if zh else "Analysis Notebook (.ipynb)"
+            label = "Analysis Notebook (.ipynb)"
             dl_items.append(f'<li><a href="{esc(notebook)}" download style="color:#4f46e5;">{label}</a></li>')
         downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'
 
@@ -1272,7 +1267,6 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     """
     Generate HTML report with embedded base64 images.
     """
-    zh = language == "zh"
 
     # Load report.json
     report_json_path = report_dir / "report.json"
@@ -1288,10 +1282,10 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     # Scan figures directory
     all_figures = categorize_figures(figures_dir)
     total_figs = sum(len(v) for v in all_figures.values())
-    print(f"Found {total_figs} figures in categories:")
+    logger.info("Found %d figures in categories:", total_figs)
     for cat, figs in all_figures.items():
         if figs:
-            print(f"  - {cat}: {len(figs)}")
+            logger.info("  - %s: %d", cat, len(figs))
 
     # Map section IDs to figure categories
     section_figure_map = {
@@ -1309,7 +1303,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     for section in report.get("sections", []):
         analysis_type = section.get("analysis_type", "general")
         type_class = "general" if analysis_type == "general" else "specific"
-        type_label = ("通用分析" if zh else "General") if analysis_type == "general" else ("特定分析" if zh else "Specific")
+        type_label = "General" if analysis_type == "general" else "Specific"
 
         toc_items.append(
             f'<li><a href="#{html_module.escape(section["id"])}">{html_module.escape(section["title"])}</a>'
@@ -1321,7 +1315,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     for section in report.get("sections", []):
         analysis_type = section.get("analysis_type", "general")
         type_class = "general" if analysis_type == "general" else "specific"
-        type_label = ("通用分析" if zh else "General") if analysis_type == "general" else ("特定分析" if zh else "Specific")
+        type_label = "General" if analysis_type == "general" else "Specific"
 
         content_html = markdown_to_html(section.get("content", ""))
 
@@ -1378,7 +1372,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             image_exists = png_path and os.path.exists(png_path)
             img_src = ""
             if image_exists:
-                print(f"  Embedding: {png_filename}")
+                logger.info("  Embedding: %s", png_filename)
                 img_src = compress_image_to_base64(png_path, max_width=900, quality=85)
                 used_figures.add(png_path)
 
@@ -1395,7 +1389,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             if fig_interpretation_html:
                 interpretation_section = f'''
                             <div class="figure-interpretation">
-                                <strong>{"科学解读" if zh else "Scientific Interpretation"}:</strong>
+                                <strong>Scientific Interpretation:</strong>
                                 <p>{fig_interpretation_html}</p>
                             </div>'''
 
@@ -1410,9 +1404,9 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                         {interpretation_section}
                         <div class="figure-actions">
                             <a href="figures/{png_filename}" download class="download-btn png">
-                                {"下载 PNG" if zh else "Download PNG"}
+                                "Download PNG"
                             </a>
-                            {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("下载 PDF" if zh else "Download PDF") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
+                            {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + "Download PDF" + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
                         </div>
                     </div>
                 </div>
@@ -1436,7 +1430,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             if tbl_interpretation_html:
                 tbl_interpretation_section = f'''
                             <div class="table-interpretation">
-                                <strong>{"科学解读" if zh else "Scientific Interpretation"}:</strong>
+                                <strong>Scientific Interpretation:</strong>
                                 <p>{tbl_interpretation_html}</p>
                             </div>'''
 
@@ -1451,7 +1445,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                     <div class="table-header">
                         <h4>{html_module.escape(tbl_name)}</h4>
                         <a href="tables/{csv_filename}" download class="download-btn csv">
-                            {"下载 CSV" if zh else "Download CSV"}
+                            "Download CSV"
                         </a>
                     </div>
                     <div class="table-wrapper">
@@ -1461,7 +1455,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                         </table>
                     </div>
                     {tbl_interpretation_section}
-                    {"<div class='table-info'>" + ("显示 10 / " if zh else "Showing 10 of ") + str(len(preview_data)) + (" 行" if zh else " rows") + "</div>" if len(preview_data) > 10 else ""}
+                    {"<div class='table-info'>" + "Showing 10 of " + str(len(preview_data)) + " rows" + "</div>" if len(preview_data) > 10 else ""}
                 </div>
             '''
 
@@ -1479,9 +1473,9 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                 remaining_figures.append(fig_info)
 
     if remaining_figures:
-        print(f"  Adding {len(remaining_figures)} supplementary figures...")
-        supp_title = "补充图表" if zh else "Supplementary Figures"
-        supp_badge = "补充" if zh else "Supplementary"
+        logger.info("  Adding %d supplementary figures...", len(remaining_figures))
+        supp_title = "Supplementary Figures"
+        supp_badge = "Supplementary"
         toc_items.append(
             f'<li><a href="#supplementary_figures">{supp_title}</a>'
             f'<span class="section-type specific">{supp_badge}</span></li>'
@@ -1496,7 +1490,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                 </h2>
             </div>
             <div class="section-content">
-                <p>{"以下是分析过程中生成的其他图表，供参考。" if zh else "The following figures were generated during the analysis and are provided for reference."}</p>
+                <p>The following figures were generated during the analysis and are provided for reference.</p>
                 <div class="figure-grid">
         '''
 
@@ -1507,7 +1501,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             png_filename = url_quote(os.path.basename(png_path))
             pdf_filename = url_quote(os.path.basename(pdf_path)) if pdf_path else ""
 
-            print(f"  Embedding supplementary: {os.path.basename(png_path)}")
+            logger.info("  Embedding supplementary: %s", os.path.basename(png_path))
             img_src = compress_image_to_base64(png_path, max_width=900, quality=85) if os.path.exists(png_path) else ""
             img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else "<p>Image not available</p>"
 
@@ -1517,12 +1511,12 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                         {img_tag}
                     </div>
                     <div class="figure-caption">
-                        <h4>{"补充图" if zh else "Supp. Fig."} {idx}: {html_module.escape(fig_name)}</h4>
+                        <h4>Supp. Fig. {idx}: {html_module.escape(fig_name)}</h4>
                         <div class="figure-actions">
                             <a href="figures/{png_filename}" download class="download-btn png">
-                                {"下载 PNG" if zh else "Download PNG"}
+                                "Download PNG"
                             </a>
-                            {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("下载 PDF" if zh else "Download PDF") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
+                            {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + "Download PDF" + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
                         </div>
                     </div>
                 </div>
@@ -1544,38 +1538,37 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         return v.replace("{", "{{").replace("}", "}}")
 
     # Analysis log is no longer shown in the main report
-    zh = language == "zh"
     analysis_log_html = ""
 
     # Build score definitions HTML from report.json data if available
     score_definitions_html = _build_score_definitions_from_report(report, language) if report.get("score_definitions") else ""
     if score_definitions_html:
-        score_toc_label = "评分定义" if zh else "Score Definitions"
+        score_toc_label = "Score Definitions"
         toc_items.append(
             f'<li><a href="#score-definitions">{score_toc_label}</a>'
-            f'<span class="section-type specific">{"方法" if zh else "Methods"}</span></li>'
+            f'<span class="section-type specific">Methods</span></li>'
         )
 
     # Build appendix HTML from report.json data if available
     appendix_html = _build_appendix_from_report(report, language) if report.get("appendix") else ""
     if appendix_html:
-        appendix_toc_label = "附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"
+        appendix_toc_label = "Appendix: Analysis Settings & Records"
         toc_items.append(
             f'<li><a href="#appendix">{appendix_toc_label}</a>'
-            f'<span class="section-type specific">{"附录" if zh else "Appendix"}</span></li>'
+            f'<span class="section-type specific">Appendix</span></li>'
         )
 
     # Build full HTML
     html_content = HTML_TEMPLATE.format(
         language=language,
-        title=_safe_format_value(report.get("title", "分析报告" if zh else "Analysis Report")),
-        generated_at=("生成时间: " if zh else "Generated: ") + report.get("generated_at", datetime.now().isoformat()),
-        toc_title="目录" if zh else "Table of Contents",
+        title=_safe_format_value(report.get("title", "Analysis Report")),
+        generated_at="Generated: " + report.get("generated_at", datetime.now().isoformat()),
+        toc_title="Table of Contents",
         toc_items=_safe_format_value("\n".join(toc_items)),
-        abstract_title="摘要" if zh else "Abstract",
+        abstract_title="Abstract",
         abstract=_safe_format_value(abstract_html),
         sections_html=_safe_format_value("\n".join(sections_html)),
-        conclusions_title="结论" if zh else "Conclusions",
+        conclusions_title="Conclusions",
         conclusions=_safe_format_value(conclusions_html),
         analysis_log_html=_safe_format_value(analysis_log_html),
         score_definitions_html=_safe_format_value(score_definitions_html),
@@ -1587,19 +1580,20 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    print(f"\nHTML report saved to: {html_path}")
+    logger.info("HTML report saved to: %s", html_path)
     return html_path
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if len(sys.argv) < 2:
-        print("Usage: python regenerate_report_html.py <report_directory>")
-        print("Example: python regenerate_report_html.py ../data/reports/427c8e3c-16da-4b09-a908-392e68ec9fb3/")
+        logger.error("Usage: python regenerate_report_html.py <report_directory>")
+        logger.error("Example: python regenerate_report_html.py ../data/reports/427c8e3c-16da-4b09-a908-392e68ec9fb3/")
         sys.exit(1)
 
     report_dir = Path(sys.argv[1])
     if not report_dir.exists():
-        print(f"Error: Directory {report_dir} does not exist")
+        logger.error("Error: Directory %s does not exist", report_dir)
         sys.exit(1)
 
     generate_html_report(report_dir)

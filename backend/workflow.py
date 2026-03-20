@@ -251,7 +251,14 @@ class SingleCellAnalysisWorkflow:
             states_dir.mkdir(parents=True, exist_ok=True)
             db_path = str(states_dir / "checkpoints.sqlite")
             self._db_conn = await aiosqlite.connect(db_path)
-            serde = JsonPlusSerializer(allowed_msgpack_modules=True)
+            serde = JsonPlusSerializer(allowed_msgpack_modules=[
+                ("backend.models.schemas", "AgentType"),
+                ("backend.models.schemas", "AnalysisState"),
+                ("backend.models.schemas", "AnalysisPhase"),
+                ("backend.models.schemas", "RoundResult"),
+                ("backend.models.schemas", "TaskStatus"),
+                ("backend.models.schemas", "MessageRole"),
+            ])
             self.checkpointer = AsyncSqliteSaver(self._db_conn, serde=serde)
             # Make sure tables are created
             await self.checkpointer.setup()
@@ -457,7 +464,7 @@ class SingleCellAnalysisWorkflow:
             try:
                 await self.message_callback(msg)
             except Exception as e:
-                logger.error(f"[Workflow] Failed to send message: {e}")
+                logger.exception("[Workflow] Failed to send message")
 
     async def _send_state_sync(self, analysis_state: AnalysisState, change_type: str):
         """Send unified state synchronization message after state changes"""
@@ -469,7 +476,7 @@ class SingleCellAnalysisWorkflow:
             try:
                 await self.state_callback(analysis_state)
             except Exception as e:
-                logger.error(f"[{self.session_id}] State callback failed: {e}")
+                logger.exception(f"[{self.session_id}] State callback failed")
 
         # Then send sync message to frontend
         if self.message_callback:
@@ -489,7 +496,7 @@ class SingleCellAnalysisWorkflow:
             try:
                 await self.message_callback(sync_msg)
             except Exception as e:
-                logger.error(f"[{self.session_id}] Failed to send state sync: {e}")
+                logger.exception(f"[{self.session_id}] Failed to send state sync")
 
     async def _literature_callback(self, topic: str) -> str:
         """Callback for bioinformatics agent to request literature support"""
@@ -521,10 +528,12 @@ Please provide clear guidance on:
 3. Any specific parameters, genes, or pathways to focus on
 4. Potential pitfalls to avoid
 
-Be specific and actionable in your response."""
+Be specific and actionable in your response.
+
+IMPORTANT: Respond in English only. Do not use any other language."""
 
         try:
-            response = await self.pi_agent.chat(prompt, temperature=self.temperatures.get('pi', 0.5))
+            response = await self.pi_agent.chat_without_history(prompt, temperature=self.temperatures.get('pi', 0.5))
             await self._send_message("pi_response", response, AgentType.PI)
             return response
         except Exception as e:
@@ -617,7 +626,8 @@ Be specific and actionable in your response."""
                 }
             return {
                 "annotations": cached_annotations,
-                "tissue_context": state.annotation_state.tissue_context or "",
+                "tissue_summary": state.annotation_state.tissue_summary or "",
+                "already_confirmed": True,
             }
 
         await self._send_message(
@@ -1164,14 +1174,14 @@ Be specific and actionable in your response."""
                     analysis_state.directions_queue.insert(0, current_dir)
                     # Clear stale direction since this round's instruction failed
                     analysis_state.current_round_direction = None
-                    logger.error(f"[{self.session_id}] innovation_instruction failed, direction re-queued: {e}")
+                    logger.exception(f"[{self.session_id}] innovation_instruction failed, direction re-queued")
                     raise
                 # Persist state after instructions are successfully generated
                 if self.state_callback:
                     try:
                         await self.state_callback(analysis_state)
                     except Exception as e:
-                        logger.error(f"[{self.session_id}] Failed to persist state after direction pop: {e}")
+                        logger.exception(f"[{self.session_id}] Failed to persist state after direction pop")
                 # Clear single direction field
                 analysis_state.user_chosen_direction = None
             elif user_direction and user_direction not in ("", "[PI_DECIDE]"):
@@ -1453,6 +1463,8 @@ Be specific and actionable in your response."""
         # Get PI instructions from workflow state
         pi_instructions = state.get("pi_instructions", {})
         bioinf_tasks = pi_instructions.get("bioinformatics_tasks", [])
+        merge_strategy = pi_instructions.get("merge_strategy", "")
+        cluster_comparison_strategy = pi_instructions.get("cluster_comparison_strategy", "")
 
         # Dynamic PI planning: refine bioinformatics tasks based on completed results
         overview = pi_instructions.get("overview", "")
@@ -1503,11 +1515,15 @@ Be specific and actionable in your response."""
 ## EXPLORATION PHASE INSTRUCTIONS
 This is Round 1 — comprehensive, unbiased exploration. You MUST:
 1. Complete the FULL standard pipeline (QC → normalization → clustering → annotation)
-2. After annotation: perform condition-level DEG for ALL clusters (treatment vs control)
-3. Run GO/KEGG pathway enrichment on ALL DEG results
-4. Keep analyses simple and high-throughput (DEG + GO/KEGG)
-5. Do NOT skip any cluster — analyze everything comprehensively
-6. Complete cell communication analysis (CellChat or similar)
+2. After annotation: merge biologically similar clusters (e.g., stress hepatocytes + hepatocytes,
+   macrophage subtypes) into unified cell type groups before DEG analysis
+3. Perform condition-level DEG (treatment vs control) for ALL merged cell type groups
+4. Run GO/KEGG pathway enrichment on ALL DEG results
+5. Keep analyses simple and high-throughput (DEG + GO/KEGG)
+6. Do NOT skip any cell type — but DO merge related subtypes/states of the same cell type
+7. Complete cell communication analysis (CellChat or similar)
+8. For EACH cell type group's DEG results, generate a visualization figure (volcano plot or bar chart)
+9. For EACH cell type group's KEGG/GO enrichment, generate a bar plot of top enriched pathways
 """
         else:
             direction_ctx = analysis_state.current_round_direction or "PI-directed"
@@ -1532,6 +1548,13 @@ You may skip irrelevant cell populations and focus on those relevant to the hypo
 Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc.).
 """
 
+        # Build merge strategy context from PI instructions
+        merge_context = ""
+        if merge_strategy:
+            merge_context += f"\n\nPI's cluster merge strategy:\n{merge_strategy}"
+        if cluster_comparison_strategy:
+            merge_context += f"\n\nPI's cluster comparison strategy:\n{cluster_comparison_strategy}"
+
         instruction = f"""Analyze single-cell RNA-seq data for project: {analysis_state.name}
 
 Research context: {analysis_state.initial_instruction}
@@ -1539,6 +1562,7 @@ Research context: {analysis_state.initial_instruction}
 
 PI's analysis goals for this round:
 {chr(10).join(f"- {task}" for task in _normalize_tasks(bioinf_tasks)) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
+{merge_context}
 {human_guidance}
 {pathology_context}
 {biochemistry_context}
@@ -1608,6 +1632,10 @@ Report key findings when you complete each major analysis phase."""
             if step.id not in existing_step_ids:
                 analysis_state.analysis_log.append(step)
                 existing_step_ids.add(step.id)
+        # Cap log size to prevent unbounded memory growth
+        _MAX_ANALYSIS_LOG = 2000
+        if len(analysis_state.analysis_log) > _MAX_ANALYSIS_LOG:
+            analysis_state.analysis_log = analysis_state.analysis_log[-_MAX_ANALYSIS_LOG:]
 
         # Dedup publication_figures by name to handle node retries
         seen_fig_names = {}
@@ -1753,6 +1781,17 @@ Report key findings when you complete each major analysis phase."""
                     for f in all_source_findings[:3]
                 ]
                 topics = [f"single cell sequencing {' '.join(short_findings)}"]
+            else:
+                # No findings from other agents — build topic from research objective and treatment groups
+                objective = analysis_state.research_objective or ""
+                group_names = [g.name for g in (analysis_state.treatment_groups or []) if g.name]
+                if objective:
+                    topics = [f"single cell sequencing {objective[:120]}"]
+                elif group_names:
+                    topics = [f"single cell sequencing {' '.join(group_names[:3])}"]
+                else:
+                    logger.warning(f"[{self.session_id}] No findings or objective for literature search, skipping")
+                    topics = []
 
         await self._send_message("status", "Literature research in progress...", AgentType.LITERATURE)
 
@@ -1982,7 +2021,7 @@ Return ONLY the JSON array, nothing else."""
                     "html_url": html_url,
                 }, AgentType.PI)
             except Exception as e:
-                logger.error(f"[{self.session_id}] Exploration report generation failed: {e}")
+                logger.exception(f"[{self.session_id}] Exploration report generation failed")
                 await self._send_message(
                     "error",
                     f"Exploration report generation failed: {e}. You can still select a research direction based on the analysis findings above.",
@@ -2004,13 +2043,19 @@ Return ONLY the JSON array, nothing else."""
         ):
             try:
                 await self._send_message("status", "Analyzing correlations between research directions...", AgentType.PI)
-                # Build directions_with_results from round_results (skip round 1 which is exploration)
+                # Build directions_with_results by matching direction names (not index)
                 directions_with_results = []
                 innovation_rounds = [r for r in analysis_state.round_results if r.phase == "innovation"]
-                for i, chosen_dir in enumerate(analysis_state.user_chosen_directions):
-                    round_summary = innovation_rounds[i].pi_summary if i < len(innovation_rounds) else ""
+                # Build lookup: direction name -> latest round summary
+                direction_summaries: Dict[str, str] = {}
+                for r in innovation_rounds:
+                    if r.direction:
+                        direction_summaries[r.direction] = r.pi_summary or ""
+                for chosen_dir in analysis_state.user_chosen_directions:
+                    dir_name = chosen_dir.get("direction", "")
+                    round_summary = direction_summaries.get(dir_name, "")
                     directions_with_results.append({
-                        "direction": chosen_dir.get("direction", ""),
+                        "direction": dir_name,
                         "notes": chosen_dir.get("notes", ""),
                         "round_summary": round_summary
                     })
@@ -2024,14 +2069,14 @@ Return ONLY the JSON array, nothing else."""
                 }, AgentType.PI)
                 logger.info(f"[{self.session_id}] Multi-direction correlation analysis complete")
             except Exception as e:
-                logger.error(f"[{self.session_id}] Direction correlation analysis failed: {e}")
+                logger.exception(f"[{self.session_id}] Direction correlation analysis failed")
 
         # Save state after each round
         if self.state_callback:
             try:
                 await self.state_callback(analysis_state)
             except Exception as e:
-                logger.error(f"Failed to save state after round: {e}")
+                logger.exception("Failed to save state after round")
         
         # Extract data requests from PI
         try:
@@ -2129,6 +2174,11 @@ Return ONLY the JSON array, nothing else."""
 
         # Multi-direction mode: auto-skip wait if more directions remain in queue
         if analysis_state.directions_queue:
+            # Filter out empty/whitespace-only directions before deciding to skip
+            analysis_state.directions_queue = [
+                d for d in analysis_state.directions_queue if d and d.get("direction", "").strip()
+            ]
+        if analysis_state.directions_queue:
             logger.info(f"[{self.session_id}] Directions queue has {len(analysis_state.directions_queue)} remaining, auto-continuing")
             return {**state, "analysis_state": analysis_state}
 
@@ -2163,6 +2213,8 @@ Return ONLY the JSON array, nothing else."""
                 logger.info(f"[{self.session_id}] Continue signal received")
             except asyncio.TimeoutError:
                 logger.info(f"[{self.session_id}] Wait timeout ({backend_timeout}s), auto-proceeding")
+                analysis_state.status = TaskStatus.RUNNING
+                await self._send_state_sync(analysis_state, "auto_continue")
 
         # If user provided real input (text or files) on the last round, extend max_rounds to allow one more
         has_real_text = (
@@ -2360,7 +2412,7 @@ Return ONLY the JSON array, nothing else."""
                         "png_base64": b64,
                         "png_path": wf["path"],
                         "pdf_path": wf["pdf_path"],
-                        "review_status": "approved",
+                        "review_status": "pending",
                         "revision_count": 0
                     })
 
@@ -2395,7 +2447,7 @@ Return ONLY the JSON array, nothing else."""
             logger.info(f"[{self.session_id}] Integrated report generated with {len(figures_data)} brief figures")
 
         except Exception as e:
-            logger.error(f"[{self.session_id}] Failed to generate integrated report: {e}")
+            logger.exception(f"[{self.session_id}] Failed to generate integrated report")
             await self._send_message("error", f"Integrated report generation failed: {str(e)}", AgentType.PI)
             # Continue anyway - final summary is still available
 
@@ -2550,7 +2602,7 @@ Return ONLY the JSON array, nothing else."""
             )
 
         except Exception as e:
-            logger.error(f"[{self.session_id}] Failed to generate graphic abstract: {e}")
+            logger.exception(f"[{self.session_id}] Failed to generate graphic abstract")
             await self._send_message(
                 "error",
                 f"Graphic abstract generation failed: {str(e)}. Continuing with detailed report...",
@@ -2640,7 +2692,7 @@ Return ONLY the JSON array, nothing else."""
             logger.info(f"[{self.session_id}] Detailed report generated successfully")
 
         except Exception as e:
-            logger.error(f"[{self.session_id}] Failed to generate detailed report: {e}")
+            logger.exception(f"[{self.session_id}] Failed to generate detailed report")
             import traceback
             logger.error(traceback.format_exc())
             await self._send_message(
@@ -2690,7 +2742,7 @@ Return ONLY the JSON array, nothing else."""
             await self.initialize()
             logger.info(f"Workflow initialized for session {self.session_id}")
         except Exception as e:
-            logger.error(f"Failed to initialize workflow: {e}")
+            logger.exception("Failed to initialize workflow")
             await self._send_message("error", f"Initialization failed: {str(e)}")
             initial_state.status = TaskStatus.FAILED
             return initial_state
@@ -2763,7 +2815,7 @@ Return ONLY the JSON array, nothing else."""
             await self.initialize()
             logger.info(f"[{self.session_id}] Workflow initialized for report-only generation")
         except Exception as e:
-            logger.error(f"[{self.session_id}] Failed to initialize for report generation: {e}")
+            logger.exception(f"[{self.session_id}] Failed to initialize for report generation")
             await self._send_message("error", f"Initialization failed: {str(e)}")
             initial_state.status = TaskStatus.FAILED
             return initial_state
@@ -2854,6 +2906,16 @@ Return ONLY the JSON array, nothing else."""
                 await self.compiled_graph.aupdate_state(config, {"analysis_state": analysis_state})
                 self._current_analysis_state = analysis_state
 
+            # Sync skip_nodes from sandbox_state to graph state (retry-node API stores
+            # skip decisions in analysis_state.sandbox_state, but with_retry checks
+            # the top-level WorkflowState)
+            skip_nodes = []
+            if analysis_state and analysis_state.sandbox_state:
+                skip_nodes = analysis_state.sandbox_state.get("skip_nodes", [])
+            if skip_nodes:
+                await self.compiled_graph.aupdate_state(config, {"skip_nodes": skip_nodes})
+                logger.info(f"[{self.session_id}] Injected skip_nodes into graph state: {skip_nodes}")
+
             # Resume from checkpoint
             logger.info(f"[{self.session_id}] Found saved state, resuming execution")
             final_state = await self.compiled_graph.ainvoke(
@@ -2894,20 +2956,22 @@ Return ONLY the JSON array, nothing else."""
                 await self.sandbox.stop()
                 logger.info(f"[{self.session_id}] Sandbox stopped")
             except Exception as e:
-                logger.error(f"[{self.session_id}] Error stopping sandbox: {e}")
+                logger.exception(f"[{self.session_id}] Error stopping sandbox")
                 
         if hasattr(self, '_db_conn') and self._db_conn:
             try:
                 await self._db_conn.close()
             except Exception as e:
-                logger.error(f"[{self.session_id}] Error closing sqlite connection: {e}")
+                logger.exception(f"[{self.session_id}] Error closing sqlite connection")
+            finally:
+                self._db_conn = None
                 
         if self.llm_manager:
             try:
                 await self.llm_manager.close()
                 logger.info(f"[{self.session_id}] LLM manager closed")
             except Exception as e:
-                logger.error(f"[{self.session_id}] Error closing LLM manager: {e}")
+                logger.exception(f"[{self.session_id}] Error closing LLM manager")
     
     def get_notebook_path(self) -> Optional[str]:
         """Get path to the saved Jupyter notebook"""

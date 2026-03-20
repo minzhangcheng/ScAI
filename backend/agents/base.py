@@ -153,7 +153,12 @@ class BaseAgent(ABC):
         messages = [
             {"role": "system", "content": self.system_prompt}
         ]
-        messages.extend(self.message_history)
+        # Limit history to the most recent 20 exchange pairs to prevent unbounded growth
+        _MAX_HISTORY_PAIRS = 20
+        history = self.message_history
+        if len(history) > _MAX_HISTORY_PAIRS * 2:
+            history = history[-(_MAX_HISTORY_PAIRS * 2):]
+        messages.extend(history)
         messages.append({"role": "user", "content": user_message})
         return messages
     
@@ -193,7 +198,35 @@ class BaseAgent(ABC):
         self.add_to_history("assistant", content)
 
         return content
-    
+
+    async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None) -> str:
+        """Send a message and get a response without using or modifying message history.
+
+        Useful for isolated Q&A interactions that should not be influenced by
+        or contaminate the accumulated conversation context.
+        """
+        self._set_llm_context()
+
+        prompt = system_prompt or self.system_prompt
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": message}
+        ]
+
+        actual_temp = temperature if temperature is not None else self.config.temperature
+
+        response = await self.llm_client.chat(
+            model=self.model,
+            messages=messages,
+            temperature=actual_temp
+        )
+
+        content = response.content if response and response.content else ""
+        if not content:
+            logger.warning(f"[{self.agent_type.value}] LLM returned empty response (standalone)")
+
+        return content
+
     async def chat_stream(
         self,
         message: str,

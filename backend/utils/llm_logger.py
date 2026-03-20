@@ -120,7 +120,7 @@ class LLMLogger:
                 self._log_to_console(interaction)
                 
         except Exception as e:
-            logger.error(f"Failed to log LLM interaction: {e}")
+            logger.exception("Failed to log LLM interaction")
     
     def _log_to_console(self, interaction: LLMInteraction):
         """Log a summarized version to console"""

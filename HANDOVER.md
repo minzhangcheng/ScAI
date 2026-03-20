@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.14.4
-**Last Updated**: 2026-03-17
+**Version**: 0.14.5
+**Last Updated**: 2026-03-20
 
 ## Project Overview
 
@@ -1413,6 +1413,8 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.14.5 | 2026-03-20 | directions_queue type mismatch fix (d.strip() → d.get("direction","").strip()), countdown timeout status reset to RUNNING + state sync, PI callback uses chat_without_history(), annotation callback tissue_summary field fix + already_confirmed, literature search fallback to objective/groups when no findings, multi-direction correlation by name not index, analysis_log capped at 2000 entries, skip_nodes injected into graph state on resume, JsonPlusSerializer explicit schema allowlist, figure review_status init "pending" not "approved", _db_conn=None after close, PI merge_strategy/cluster_comparison_strategy passed to bioinformatics, exploration per-cell-type figure requirement, PI English-only prompt |
+| 0.14.4 | 2026-03-17 | Project renamed InteSc→ScAI, directory restructure (intesc_data→data, intesc_dep→dep, intesc→scai), SCAI_DATA_DIR env var, configurable start.sh (--host/--port/--backport), GitHub repo renamed |
 | 0.14.3 | 2026-03-17 | JPG figure output (quality 85, optimized) replaces PNG for web; larger matplotlib fonts (title 16pt, labels 14pt, ticks 12pt); decoupler v2.x API (dc.op.* + dc.mt.ulm); gseapy lowercase organism; defensive empty-DataFrame guards; Harmony dimension-mismatch prevention; supervisor inline figure embedding ([FIGURE:] markers, stats bar removed, user interaction history in appendix, notebook download); painter retry logic (3 attempts, exponential backoff, skip 4xx); literature hashlib.md5 cache key; pathology image loaded once; frontend JPG MIME detection; WebSocket message merge race condition fix; chat stale closure fix; 100MB generic upload limit; stop handles GENERATING_REPORT; path traversal validation on HTML report endpoints; catch-all report file endpoint; async version lock (asyncio.Lock) |
 | 0.14.2 | 2026-03-16 | obs/var names auto-fix after every execute (make_unique), _WORKSPACE_DIR kernel variable, savefig redirect (workspace root → figures/), numba cache isolation, open() safety check refined (allows known safe paths), checkpoint round validation, step budget fix on resume, annotate_clusters separate-step requirement, gene scoring guidance (use_raw + species names), security restrictions in prompt, literature annotate_clusters cache + empty guard, painter token budget management, supervisor _set_llm_context(), _normalize_tasks() utility, confirmed annotation cache in workflow, WS heartbeat ping, thread-safe WS send, PI_DECIDE max_rounds extension, figure path resolution, exploration report dialog timing fix, painter model recommendation updated |
 | 0.14.1 | 2026-03-15 | human-input signals workflow (signal_continue on WAITING_INPUT), stale should_continue cleared in initialize_round, current_round_direction set before PI call + cleared on failure, annotation pause respects PAUSED status, multi_dir_completed guard uses len() > 1, exploration report failure notified to frontend |
@@ -1460,6 +1462,23 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.14.5 (2026-03-20)
+
+- **`directions_queue` type mismatch fix** (`workflow.py` `_wait_for_user_input`): Queue items are `Dict[str, str]` (`{"direction": ..., "notes": ...}`), but the filter used `d.strip()` causing `AttributeError` when multi-direction mode was used. Fix: added a pre-filter step using `d.get("direction", "").strip()` before the skip-wait decision.
+- **Countdown timeout status desync** (`workflow.py` `_wait_for_user_input`): After `asyncio.wait_for` timeout, `analysis_state.status` was not reset to `RUNNING` and no state sync was sent. Frontend remained showing `WAITING_INPUT`. Fix: set status + call `_send_state_sync("auto_continue")` after timeout.
+- **PI callback context accumulation** (`workflow.py` `_pi_callback`): Used `chat()` which accumulates history, causing unrelated prior bioinformatics context to pollute PI consultation responses. Changed to `chat_without_history()`.
+- **Annotation callback field name** (`workflow.py` `_annotate_clusters_callback`): Returned `tissue_context` (does not exist on `AnnotationConfirmationState`); correct field is `tissue_summary`. Also added `"already_confirmed": True` to the cached-annotation return path to prevent double confirmation prompts.
+- **Literature search with no prior findings** (`workflow.py` `_literature_research`): When no findings exist from other agents (e.g., early round), topic building fell into an empty `else` branch, silently skipping literature search. Fix: build topics from `research_objective` or treatment group names; log a warning and skip only if truly nothing is available.
+- **Multi-direction correlation direction mismatch** (`workflow.py` `_pi_synthesis`): Correlation analysis matched each `user_chosen_direction` to an innovation round by list index (`innovation_rounds[i]`). If any round was skipped or reordered, summaries were paired with wrong directions. Fix: build a `direction_summaries` dict keyed by `r.direction` and look up by name.
+- **`analysis_log` unbounded growth** (`workflow.py` `_bioinformatics_analysis`): Log accumulated indefinitely across rounds; no truncation. Fix: cap at `_MAX_ANALYSIS_LOG = 2000` entries (keep latest) after each append pass.
+- **`skip_nodes` lost on resume** (`workflow.py` `resume()`): `skip_nodes` decisions are stored in `analysis_state.sandbox_state["skip_nodes"]` but `with_retry` checks the top-level `WorkflowState["skip_nodes"]`. On resume, the top-level key was never populated. Fix: extract `skip_nodes` from `sandbox_state` and inject into graph state via `aupdate_state` before `ainvoke`.
+- **`JsonPlusSerializer` too permissive** (`workflow.py` `initialize()`): `allowed_msgpack_modules=True` allows deserialization of any module. Changed to explicit allowlist: `backend.models.schemas` types only (`AgentType`, `AnalysisState`, `AnalysisPhase`, `RoundResult`, `TaskStatus`, `MessageRole`).
+- **Figure review always auto-approved** (`workflow.py` `_generate_integrated_report`): `PublicationFigure` was initialized with `review_status: "approved"`, bypassing the PI review loop. Changed to `"pending"`.
+- **`_db_conn` not cleared after close** (`workflow.py` `cleanup()`): Added `finally: self._db_conn = None` to prevent potential double-close if `cleanup()` is called multiple times.
+- **PI merge strategy passed to bioinformatics** (`workflow.py` `_bioinformatics_analysis`): `merge_strategy` and `cluster_comparison_strategy` from `pi_instructions` are now appended to the bioinformatics instruction string, enabling biologically informed cluster merging (e.g., "stress hepatocytes + hepatocytes → hepatocytes") before DEG analysis.
+- **Exploration phase per-cell-type figure requirement**: Exploration round instruction now explicitly requires a volcano plot (or bar chart) for each cell type's DEG results and a pathway enrichment bar plot for each cell type's GO/KEGG results.
+- **PI English-only enforcement** (`workflow.py` `_pi_callback`): Added `IMPORTANT: Respond in English only.` to the PI consultation prompt to prevent language mixing when non-English data is in the context.
 
 #### v0.14.4 (2026-03-17)
 
@@ -1881,5 +1900,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-15*
-*Version: 0.14.0*
+*Document updated: 2026-03-20*
+*Version: 0.14.5*

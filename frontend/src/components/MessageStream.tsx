@@ -28,6 +28,7 @@ import {
   Eye,
   TrendingUp
 } from 'lucide-react'
+import { base64ToDataUri } from '../utils/image'
 
 // Type interfaces for message content
 interface ResultContent {
@@ -236,7 +237,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               <span>{language === 'zh' ? '生成图表' : 'Generated Figure'}</span>
             </div>
             <img
-              src={`data:image/${typeof message.content === 'string' && message.content.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${message.content}`}
+              src={typeof message.content === 'string' ? base64ToDataUri(message.content) : ''}
               alt="Analysis figure"
               className="max-w-full rounded-lg border border-slate-200 shadow-sm"
             />
@@ -380,7 +381,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               )}
               {figureContent.png_base64 && (
                 <img
-                  src={`data:image/${figureContent.png_base64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${figureContent.png_base64}`}
+                  src={base64ToDataUri(figureContent.png_base64)}
                   alt={figureContent.figure_name || 'Figure'}
                   className="mt-2 max-w-xs rounded border border-slate-200"
                 />
@@ -433,7 +434,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               )}
               {imageBase64 && (
                 <img
-                  src={`data:image/${imageBase64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${imageBase64}`}
+                  src={base64ToDataUri(imageBase64)}
                   alt="Graphic Abstract"
                   className="max-w-full rounded border border-pink-200"
                 />

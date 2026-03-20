@@ -122,12 +122,16 @@ export function RoundFeedbackDialog({
 
   const isLastRound = roundNumber >= maxRounds
 
-  // No-wait mode: auto-skip immediately on mount
+  // No-wait mode: auto-skip immediately on mount.
+  // Intentionally runs only once on mount — isNoWait is derived from props
+  // and won't change, and we only want to trigger the skip once.
+  const onSkipRef = useRef(onSkip)
+  onSkipRef.current = onSkip
   useEffect(() => {
     if (isNoWait && !sending) {
-      onSkip()
+      onSkipRef.current()
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isNoWait, sending])
 
   // Handle pause/resume: shift deadline when pausing/resuming
   useEffect(() => {

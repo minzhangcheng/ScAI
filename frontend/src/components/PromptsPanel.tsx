@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { usePrompts } from '../hooks/useApi'
 import { useAppStore, AgentType, DEFAULT_MODELS, DEFAULT_TEMPERATURES } from '../stores/appStore'
 import { useTranslation, getDefaultPrompts } from '../i18n/translations'
@@ -18,6 +18,73 @@ import {
   Search,
   AlertCircle,
 } from 'lucide-react'
+
+// Color styles mapping for Tailwind - use complete class names to prevent purging
+const colorStyles: Record<string, {
+  bgSelected: string
+  borderSelected: string
+  bgIcon: string
+  bgIconSelected: string
+  textIcon: string
+  textIconSelected: string
+}> = {
+  violet: {
+    bgSelected: 'bg-violet-50',
+    borderSelected: 'border-violet-200',
+    bgIcon: 'bg-slate-100',
+    bgIconSelected: 'bg-violet-100',
+    textIcon: 'text-slate-500',
+    textIconSelected: 'text-violet-600'
+  },
+  red: {
+    bgSelected: 'bg-red-50',
+    borderSelected: 'border-red-200',
+    bgIcon: 'bg-slate-100',
+    bgIconSelected: 'bg-red-100',
+    textIcon: 'text-slate-500',
+    textIconSelected: 'text-red-600'
+  },
+  green: {
+    bgSelected: 'bg-green-50',
+    borderSelected: 'border-green-200',
+    bgIcon: 'bg-slate-100',
+    bgIconSelected: 'bg-green-100',
+    textIcon: 'text-slate-500',
+    textIconSelected: 'text-green-600'
+  },
+  amber: {
+    bgSelected: 'bg-amber-50',
+    borderSelected: 'border-amber-200',
+    bgIcon: 'bg-slate-100',
+    bgIconSelected: 'bg-amber-100',
+    textIcon: 'text-slate-500',
+    textIconSelected: 'text-amber-600'
+  },
+  blue: {
+    bgSelected: 'bg-blue-50',
+    borderSelected: 'border-blue-200',
+    bgIcon: 'bg-slate-100',
+    bgIconSelected: 'bg-blue-100',
+    textIcon: 'text-slate-500',
+    textIconSelected: 'text-blue-600'
+  },
+  pink: {
+    bgSelected: 'bg-pink-50',
+    borderSelected: 'border-pink-200',
+    bgIcon: 'bg-slate-100',
+    bgIconSelected: 'bg-pink-100',
+    textIcon: 'text-slate-500',
+    textIconSelected: 'text-pink-600'
+  },
+  cyan: {
+    bgSelected: 'bg-cyan-50',
+    borderSelected: 'border-cyan-200',
+    bgIcon: 'bg-slate-100',
+    bgIconSelected: 'bg-cyan-100',
+    textIcon: 'text-slate-500',
+    textIconSelected: 'text-cyan-600'
+  }
+}
 
 export function PromptsPanel() {
   const {
@@ -40,6 +107,15 @@ export function PromptsPanel() {
   const [editedTemperature, setEditedTemperature] = useState(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
+    }
+  }, [])
 
   // Update edited prompt, model, and temperature when selected agent changes
   useEffect(() => {
@@ -47,73 +123,6 @@ export function PromptsPanel() {
     setEditedModel(models[selectedAgent] ?? DEFAULT_MODELS[selectedAgent] ?? '')
     setEditedTemperature(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
   }, [selectedAgent, prompts, models, temperatures, defaultPrompts])
-
-  // Color styles mapping for Tailwind - use complete class names to prevent purging
-  const colorStyles: Record<string, {
-    bgSelected: string
-    borderSelected: string
-    bgIcon: string
-    bgIconSelected: string
-    textIcon: string
-    textIconSelected: string
-  }> = {
-    violet: {
-      bgSelected: 'bg-violet-50',
-      borderSelected: 'border-violet-200',
-      bgIcon: 'bg-slate-100',
-      bgIconSelected: 'bg-violet-100',
-      textIcon: 'text-slate-500',
-      textIconSelected: 'text-violet-600'
-    },
-    red: {
-      bgSelected: 'bg-red-50',
-      borderSelected: 'border-red-200',
-      bgIcon: 'bg-slate-100',
-      bgIconSelected: 'bg-red-100',
-      textIcon: 'text-slate-500',
-      textIconSelected: 'text-red-600'
-    },
-    green: {
-      bgSelected: 'bg-green-50',
-      borderSelected: 'border-green-200',
-      bgIcon: 'bg-slate-100',
-      bgIconSelected: 'bg-green-100',
-      textIcon: 'text-slate-500',
-      textIconSelected: 'text-green-600'
-    },
-    amber: {
-      bgSelected: 'bg-amber-50',
-      borderSelected: 'border-amber-200',
-      bgIcon: 'bg-slate-100',
-      bgIconSelected: 'bg-amber-100',
-      textIcon: 'text-slate-500',
-      textIconSelected: 'text-amber-600'
-    },
-    blue: {
-      bgSelected: 'bg-blue-50',
-      borderSelected: 'border-blue-200',
-      bgIcon: 'bg-slate-100',
-      bgIconSelected: 'bg-blue-100',
-      textIcon: 'text-slate-500',
-      textIconSelected: 'text-blue-600'
-    },
-    pink: {
-      bgSelected: 'bg-pink-50',
-      borderSelected: 'border-pink-200',
-      bgIcon: 'bg-slate-100',
-      bgIconSelected: 'bg-pink-100',
-      textIcon: 'text-slate-500',
-      textIconSelected: 'text-pink-600'
-    },
-    cyan: {
-      bgSelected: 'bg-cyan-50',
-      borderSelected: 'border-cyan-200',
-      bgIcon: 'bg-slate-100',
-      bgIconSelected: 'bg-cyan-100',
-      textIcon: 'text-slate-500',
-      textIconSelected: 'text-cyan-600'
-    }
-  }
 
   const agentConfig: {
     id: AgentType
@@ -183,6 +192,7 @@ export function PromptsPanel() {
 
   const handleSave = async () => {
     setSaving(true)
+    setSaveError(null)
     try {
       if (currentSession) {
         await savePrompt(selectedAgent, editedPrompt)
@@ -204,6 +214,7 @@ export function PromptsPanel() {
             })
           } catch (e) {
             console.error('Failed to save literature config:', e)
+            throw e  // Re-throw to prevent false success indicator
           }
         }
       } else {
@@ -212,9 +223,11 @@ export function PromptsPanel() {
         setTemperature(selectedAgent, editedTemperature)
       }
       setSaved(true)
-      setTimeout(() => setSaved(false), 2000)
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
+      savedTimerRef.current = setTimeout(() => setSaved(false), 2000)
     } catch (e) {
       console.error('Failed to save prompt:', e)
+      setSaveError('Failed to save configuration. Please try again.')
     } finally {
       setSaving(false)
     }
@@ -330,6 +343,9 @@ export function PromptsPanel() {
               {saved ? t('saved') : saving ? t('saving') : t('save')}
             </button>
           </div>
+          {saveError && (
+            <p className="text-red-600 text-xs mt-1">{saveError}</p>
+          )}
         </div>
 
         {/* Literature Agent: Research Mode Selector */}
@@ -488,21 +504,21 @@ export function PromptsPanel() {
           <p className="text-xs text-slate-500 mt-2 ml-8">
             {language === 'zh' ? (
               selectedAgent === 'pi' ? '推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4' :
-              selectedAgent === 'pathology' ? '需要具有病理图片识别能力的模型，强烈推荐: google/gemini-3.1-pro-preview' :
-              selectedAgent === 'bioinformatics' ? '需要 coding 能力较强的模型，推荐: anthropic/claude-sonnet-4.6、anthropic/claude-opus-4.6、openai/gpt-5.2-codex 或 google/gemini-3.1-pro-preview' :
-              selectedAgent === 'biochemistry' ? '推荐: google/gemini-3.1-pro-preview。若上传了生化结果图片，需要选择支持 Vision 的模型' :
-              selectedAgent === 'literature' ? '用于 PubMed 模式文献分析的 LLM 模型，推荐: google/gemini-3.1-flash-lite-preview、google/gemini-3-flash-preview' :
-              selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3-pro-image-preview、google/gemini-3.1-flash-image-preview' :
-              selectedAgent === 'supervisor' ? '使用低成本、快速的模型进行实时监控，推荐: google/gemini-3.1-flash-lite-preview' :
+              selectedAgent === 'pathology' ? '需要具有病理图片识别能力的模型，强烈推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4' :
+              selectedAgent === 'bioinformatics' ? '需要 coding 能力较强的模型，推荐: anthropic/claude-sonnet-4.6、anthropic/claude-opus-4.6、openai/gpt-5.3-codex 或 google/gemini-3.1-pro-preview' :
+              selectedAgent === 'biochemistry' ? '推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4。若上传了生化结果图片，需要选择支持 Vision 的模型' :
+              selectedAgent === 'literature' ? '用于 PubMed 模式文献分析的 LLM 模型，推荐: google/gemini-3.1-flash-lite-preview、google/gemini-3-flash-preview、openai/gpt-5.4-nano、openai/gpt-5.4-mini' :
+              selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3.1-flash-image-preview、google/gemini-3-pro-image-preview' :
+              selectedAgent === 'supervisor' ? '使用低成本、快速的模型进行实时监控，推荐: google/gemini-3.1-flash-lite-preview、openai/gpt-5.4-nano' :
               '使用 OpenRouter 模型格式'
             ) : (
               selectedAgent === 'pi' ? 'Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
-              selectedAgent === 'pathology' ? 'Requires pathology image recognition capability. Strongly recommended: google/gemini-3.1-pro-preview' :
-              selectedAgent === 'bioinformatics' ? 'Requires strong coding capability. Recommended: anthropic/claude-sonnet-4.6, anthropic/claude-opus-4.6, openai/gpt-5.2-codex, or google/gemini-3.1-pro-preview' :
-              selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3.1-pro-preview. If biochemistry images are uploaded, a Vision-capable model is required' :
-              selectedAgent === 'literature' ? 'LLM model for PubMed mode literature analysis. Recommended: google/gemini-3.1-flash-lite-preview, google/gemini-3-flash-preview' :
-              selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3-pro-image-preview, google/gemini-3.1-flash-image-preview' :
-              selectedAgent === 'supervisor' ? 'Uses a cheap, fast model for real-time monitoring. Recommended: google/gemini-3.1-flash-lite-preview' :
+              selectedAgent === 'pathology' ? 'Requires pathology image recognition capability. Strongly recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
+              selectedAgent === 'bioinformatics' ? 'Requires strong coding capability. Recommended: anthropic/claude-sonnet-4.6, anthropic/claude-opus-4.6, openai/gpt-5.3-codex, or google/gemini-3.1-pro-preview' :
+              selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4. If biochemistry images are uploaded, a Vision-capable model is required' :
+              selectedAgent === 'literature' ? 'LLM model for PubMed mode literature analysis. Recommended: google/gemini-3.1-flash-lite-preview, google/gemini-3-flash-preview, openai/gpt-5.4-nano, openai/gpt-5.4-mini' :
+              selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3.1-flash-image-preview, google/gemini-3-pro-image-preview' :
+              selectedAgent === 'supervisor' ? 'Uses a cheap, fast model for real-time monitoring. Recommended: google/gemini-3.1-flash-lite-preview, openai/gpt-5.4-nano' :
               'Use OpenRouter model format'
             )}
           </p>

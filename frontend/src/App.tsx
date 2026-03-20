@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from './stores/appStore'
 import { useConfig, useWebSocket } from './hooks/useApi'
+import { devLog } from './utils/logger'
 import { useTranslation } from './i18n/translations'
 import { ConfigPanel } from './components/ConfigPanel'
 import { DisclaimerDialog, hasAcceptedDisclaimer } from './components/DisclaimerDialog'
@@ -113,7 +114,7 @@ function App() {
       const delay = Math.min(baseDelay * Math.pow(2, reconnectAttemptRef.current), maxReconnectDelay)
 
       const timer = setTimeout(() => {
-        console.log(`App: Session is running but not connected, attempting reconnect (attempt ${reconnectAttemptRef.current + 1}, delay ${delay}ms)...`)
+        devLog(`App: Session is running but not connected, attempting reconnect (attempt ${reconnectAttemptRef.current + 1}, delay ${delay}ms)...`)
         reconnectAttemptRef.current += 1
         connect()
       }, delay)

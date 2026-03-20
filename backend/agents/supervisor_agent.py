@@ -85,6 +85,8 @@ Respond ONLY with a JSON object (no markdown, no explanation):
   "pi_question": "question to ask PI if is_biological_checkpoint=true, empty string otherwise"
 }
 
+IMPORTANT: All responses must be in English.
+
 Severity guide:
 - none: step looks fine
 - info: minor note, no action needed
@@ -98,6 +100,13 @@ Biological checkpoint criteria (set is_biological_checkpoint=true when):
 - Results require biological interpretation or domain expertise
 - Analysis reached a decision fork (multiple directions possible)
 - PI guidance would improve the next analysis direction
+
+IMPORTANT: Do NOT set is_biological_checkpoint=true for purely technical issues such as:
+- Sandbox security blocks (e.g., "Dangerous pattern detected")
+- Code validation failures or syntax errors
+- Missing package / ModuleNotFoundError
+- Memory errors or kernel crashes
+These are technical problems the analyst can fix on their own without PI guidance.
 
 If images are provided, check for:
 - Blank or empty plots (no data visible)
@@ -244,18 +253,23 @@ class SupervisorAgent:
                     record.pi_response = pi_resp
                     feedback_parts.append(f"PI guidance: {pi_resp}")
 
-        # Hard-coded: annotate_clusters always escalates to PI
+        # Hard-coded: annotate_clusters escalates to PI only on first occurrence per round
         if step.step_type == "annotate_clusters" and not record.pi_escalated:
-            record.checkpoint_type = "annotate_clusters"
-            pi_resp = await self._escalate_to_pi(
-                "Cell type annotation has been completed. Please review the annotation results "
-                "and provide guidance on whether they are biologically reasonable.",
-                self._build_checkpoint_context(step),
+            already_annotated = any(
+                r.step_type == "annotate_clusters" and r.pi_escalated
+                for r in self.supervision_log
             )
-            if pi_resp:
-                record.pi_escalated = True
-                record.pi_response = pi_resp
-                feedback_parts.append(f"PI guidance: {pi_resp}")
+            if not already_annotated:
+                record.checkpoint_type = "annotate_clusters"
+                pi_resp = await self._escalate_to_pi(
+                    "Cell type annotation has been completed. Please review the annotation results "
+                    "and provide guidance on whether they are biologically reasonable.",
+                    self._build_checkpoint_context(step),
+                )
+                if pi_resp:
+                    record.pi_escalated = True
+                    record.pi_response = pi_resp
+                    feedback_parts.append(f"PI guidance: {pi_resp}")
 
         # Assemble final feedback
         feedback = None
@@ -354,14 +368,13 @@ class SupervisorAgent:
         output_path.mkdir(parents=True, exist_ok=True)
         workspace_path = Path(workspace_dir) if workspace_dir else None
 
-        language = "zh" if any('\u4e00' <= c <= '\u9fff' for c in analysis_state.initial_instruction) else "en"
-        zh = language == "zh"
+        language = "en"
 
         async def _progress(pct: float, step: str):
             if progress_callback:
                 await progress_callback({"progress": pct, "step": step, "status": "generating"})
 
-        await _progress(5, "准备分析记录..." if zh else "Preparing analysis records...")
+        await _progress(5, "Preparing analysis records...")
 
         # Collect all records
         all_records = self.get_supervision_log()
@@ -373,11 +386,15 @@ class SupervisorAgent:
         # Collect figure paths from workspace and publication figures
         figure_map = self._collect_figure_paths(all_records, workspace_path, state=analysis_state)
 
-        await _progress(15, "生成报告内容..." if zh else "Generating report content...")
+        # Collect table paths from workspace
+        table_list = self._collect_table_paths(workspace_path)
+
+        await _progress(15, "Generating report content...")
 
         # Generate report sections using strong model
         report_prompt = self._build_report_prompt(
-            narrative, stats, analysis_state, figure_map, language
+            narrative, stats, analysis_state, figure_map, language,
+            table_list=table_list,
         )
 
         try:
@@ -394,13 +411,13 @@ class SupervisorAgent:
             )
             report_content = response.content or ""
         except Exception as e:
-            logger.error(f"[{self.session_id}] Report generation LLM call failed: {e}")
+            logger.exception(f"[{self.session_id}] Report generation LLM call failed")
             report_content = self._fallback_report(narrative, stats, language)
         finally:
             # Restore supervisor context in case of subsequent LLM calls
             self._set_llm_context()
 
-        await _progress(60, "解析报告结构..." if zh else "Parsing report structure...")
+        await _progress(60, "Parsing report structure...")
 
         # Parse the LLM output into sections
         sections = self._parse_report_sections(report_content, language)
@@ -420,7 +437,7 @@ class SupervisorAgent:
             else:
                 filtered_sections.append(sec)
 
-        await _progress(70, "嵌入图表..." if zh else "Embedding figures...")
+        await _progress(70, "Embedding figures...")
 
         # Build figures list for report
         report_figures = []
@@ -436,7 +453,7 @@ class SupervisorAgent:
                 fig_entry["pdf_path"] = str(pdf_path)
             report_figures.append(fig_entry)
 
-        await _progress(80, "构建报告..." if zh else "Building report...")
+        await _progress(80, "Building report...")
 
         report_id = str(uuid.uuid4())
         appendix_data = self._build_appendix(analysis_state, stats)
@@ -449,12 +466,12 @@ class SupervisorAgent:
             "sections": filtered_sections,
             "conclusions": conclusions,
             "figures": report_figures,
-            "tables": [],
+            "tables": table_list,
             "graphic_abstract_path": None,  # GraphicAbstract only has image_base64, no file path
             "generated_at": datetime.now().isoformat(),
             "status": "completed",
             "progress": 100,
-            "current_step": "完成" if zh else "Complete",
+            "current_step": "Complete",
             "appendix": appendix_data,
             "analysis_log": all_records,
         }
@@ -467,7 +484,7 @@ class SupervisorAgent:
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
 
-        await _progress(90, "生成HTML报告..." if zh else "Generating HTML report...")
+        await _progress(90, "Generating HTML report...")
 
         # Temporarily attach analysis_state for HTML generation (not serialized to JSON)
         report["_analysis_state"] = analysis_state
@@ -480,7 +497,7 @@ class SupervisorAgent:
         report.pop("_analysis_state", None)
         report["html_path"] = str(html_path)
 
-        await _progress(100, "完成" if zh else "Complete")
+        await _progress(100, "Complete")
         return report
 
     # ------------------------------------------------------------------
@@ -501,13 +518,27 @@ class SupervisorAgent:
             if len(self._recent_errors) > 5:
                 self._recent_errors = self._recent_errors[-5:]
 
-            # Check for 3 consecutive identical errors
+            # Check for 3 consecutive errors of the same type
             if len(self._recent_errors) >= 3:
                 last_3 = self._recent_errors[-3:]
+                # Extract error type from traceback (e.g. "ZeroDivisionError")
+                def _extract_error_type(e: str) -> str:
+                    for line in reversed(e.split('\n')):
+                        line = line.strip()
+                        if line and ':' in line and not line.startswith('File'):
+                            return line.split(':')[0].strip()
+                    return e[:50]
+                error_types = [_extract_error_type(e) for e in last_3]
                 if all(e == last_3[0] for e in last_3):
                     issues.append(
                         "WARNING: Agent appears stuck — same error occurred 3 times in a row. "
                         "Consider a different approach."
+                    )
+                elif all(t == error_types[0] for t in error_types):
+                    issues.append(
+                        f"WARNING: Agent appears stuck — same error type ({error_types[0]}) "
+                        "occurred 3 times in a row. Consider a completely different approach "
+                        "or skip this analysis step."
                     )
         else:
             # Reset error streak on success
@@ -576,7 +607,7 @@ class SupervisorAgent:
         if step.literature_result:
             parts.append(f"Literature result: {step.literature_result[:300]}")
         if step.annotation_result_summary:
-            parts.append(f"Annotation result: {step.annotation_result_summary[:300]}")
+            parts.append(f"Annotation result: {step.annotation_result_summary}")
         if step.findings:
             parts.append(f"Findings: {'; '.join(step.findings[:3])}")
 
@@ -862,7 +893,12 @@ class SupervisorAgent:
         self, records: List[Dict], workspace_path: Optional[Path],
         state: Optional[AnalysisState] = None,
     ) -> Dict[str, Path]:
-        """Collect all figure file paths from supervision records and publication figures."""
+        """Collect all figure file paths from supervision records, publication figures,
+        and workspace directory scan.
+
+        The workspace scan fallback is essential for report-only generation after
+        session restore, where a fresh SupervisorAgent has empty supervision logs.
+        """
         figure_map: Dict[str, Path] = {}
         if not workspace_path:
             return figure_map
@@ -894,7 +930,56 @@ class SupervisorAgent:
                 if fig_path.exists():
                     figure_map[fname] = fig_path
 
+        # Fallback: scan workspace directory for any figures not already collected.
+        scan_dirs = [workspace_path]
+        figures_subdir = workspace_path / "figures"
+        if figures_subdir.exists():
+            scan_dirs.append(figures_subdir)
+
+        seen_stems = {Path(f).stem for f in figure_map}
+        for scan_dir in scan_dirs:
+            for img_file in sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png")):
+                if img_file.stem in seen_stems:
+                    continue
+                seen_stems.add(img_file.stem)
+                figure_map[img_file.name] = img_file
+
+        logger.info(f"Collected {len(figure_map)} figures for report "
+                     f"({len(records)} supervision records, workspace={workspace_path})")
+
         return figure_map
+
+    def _collect_table_paths(
+        self, workspace_path: Optional[Path],
+    ) -> List[Dict[str, Any]]:
+        """Scan workspace for CSV tables generated during analysis."""
+        tables = []
+        if not workspace_path:
+            return tables
+
+        tables_subdir = workspace_path / "tables"
+        csv_search_dir = tables_subdir if tables_subdir.exists() else workspace_path
+
+        for csv_file in sorted(csv_search_dir.glob("*.csv")):
+            table_info: Dict[str, Any] = {
+                "filename": csv_file.name,
+                "path": str(csv_file),
+                "name": csv_file.stem.replace("_", " ").title(),
+            }
+            # Read preview
+            try:
+                import pandas as pd
+                df_preview = pd.read_csv(csv_file, nrows=5)
+                table_info["columns"] = list(df_preview.columns)
+                table_info["preview_rows"] = len(df_preview)
+                table_info["total_rows"] = sum(1 for _ in open(csv_file)) - 1
+            except Exception:
+                logger.debug("Failed to read CSV preview for table collection: %s", csv_file)
+            tables.append(table_info)
+
+        if tables:
+            logger.info(f"Collected {len(tables)} tables from workspace")
+        return tables
 
     def _build_report_prompt(
         self,
@@ -903,12 +988,12 @@ class SupervisorAgent:
         state: AnalysisState,
         figure_map: Dict[str, Path],
         language: str,
+        table_list: Optional[List[Dict]] = None,
     ) -> str:
         """Build the prompt for the report-writing LLM."""
-        zh = language == "zh"
         figure_list = "\n".join(
             f"- {name} ({self._categorize_figure(name)})" for name in figure_map.keys()
-        ) or ("无" if zh else "None")
+        ) or ("None")
 
         # Collect per-round findings with phase labels
         findings_parts = []
@@ -945,7 +1030,7 @@ class SupervisorAgent:
                         findings_parts.append(f"- {f[:300]}")
             findings_parts.append("")
 
-        findings_text = "\n".join(findings_parts) or ("无" if zh else "None")
+        findings_text = "\n".join(findings_parts) or ("None")
 
         # Build dynamic section template
         base_sections = [
@@ -981,6 +1066,13 @@ class SupervisorAgent:
 
         sections_text = "\n".join(base_sections)
 
+        # Build table list text
+        table_list = table_list or []
+        table_list_text = "\n".join(
+            f"- {tbl['filename']}: {tbl.get('name', '')} ({tbl.get('total_rows', '?')} rows, columns: {', '.join(tbl.get('columns', [])[:8])})"
+            for tbl in table_list
+        ) if table_list else "None"
+
         prompt = f"""Based on the following complete analysis records, generate a detailed scientific research report.
 
 ## Analysis Narrative
@@ -991,6 +1083,9 @@ class SupervisorAgent:
 
 ## Available Figures
 {figure_list}
+
+## Available Tables (CSV)
+{table_list_text}
 
 ## Instructions
 Write the report in English.
@@ -1017,7 +1112,6 @@ IMPORTANT:
         return prompt
 
     def _get_report_system_prompt(self, language: str) -> str:
-        zh = language == "zh"
         return (
             "You are a senior bioinformatics researcher writing a detailed scRNA-seq analysis report. "
             "The report should be professional, rigorous, and comprehensive, including key analysis "
@@ -1054,7 +1148,7 @@ IMPORTANT:
             # Fallback: treat entire content as one section
             sections.append({
                 "id": "full_report",
-                "title": "Analysis Report" if language == "en" else "分析报告",
+                "title": "Analysis Report",
                 "content": content,
                 "analysis_type": "general",
                 "description": "",
@@ -1066,19 +1160,6 @@ IMPORTANT:
 
     def _fallback_report(self, narrative: str, stats: Dict, language: str) -> str:
         """Generate a minimal fallback report when LLM call fails."""
-        zh = language == "zh"
-        if zh:
-            return f"""## [abstract] 摘要
-本报告由自动化监控系统生成。分析过程共监控 {stats['total_steps_monitored']} 个步骤，
-发现 {stats['steps_with_technical_issues']} 个技术问题，
-PI介入 {stats['pi_escalations']} 次。
-
-## [analysis_overview] 分析流程总览
-{narrative[:3000]}
-
-## [conclusions] 结论
-报告生成模型调用失败，以上为原始分析记录。请参考分析日志获取完整信息。
-"""
         return f"""## [abstract] Abstract
 This report was generated by the automated monitoring system. Analysis monitored {stats['total_steps_monitored']} steps,
 found {stats['steps_with_technical_issues']} technical issues,
@@ -1195,7 +1276,6 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         """Generate a standalone HTML report with embedded images and download links."""
         import html as html_module
 
-        zh = language == "zh"
 
         # Build figure base64 cache for embedding
         figure_b64_cache: Dict[str, str] = {}
@@ -1241,7 +1321,7 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
             if fig_path:
                 pdf_p = fig_path.with_suffix(".pdf")
                 if pdf_p.exists():
-                    dl_label = "下载 PDF (高清)" if zh else "Download PDF (High-Res)"
+                    dl_label = "Download PDF (High-Res)"
                     pdf_link = (
                         f'<a href="figures/{html_module.escape(pdf_p.name)}" '
                         f'class="download-link" download>{dl_label}</a>'
@@ -1311,7 +1391,7 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         # Append any unplaced figures as a supplementary section
         unplaced = [fn for fn in figure_b64_cache if fn not in placed_figures and not fn.startswith("graphic_abstract.")]
         if unplaced:
-            supp_title = "补充图表" if zh else "Supplementary Figures"
+            supp_title = "Supplementary Figures"
             supp_figs = "".join(_build_figure_html(fn) for fn in unplaced)
             sections_html.append(f'''
             <div class="section" id="supplementary_figures">
@@ -1323,7 +1403,7 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         title = report.get("title", "Analysis Report")
 
         html_content = f'''<!DOCTYPE html>
-<html lang="{"zh" if zh else "en"}">
+<html lang="{"en"}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1370,26 +1450,26 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
 <h1>{html_module.escape(title)}</h1>
 
 <div class="abstract">
-<h3>{"摘要" if zh else "Abstract"}</h3>
+<h3>{"Abstract"}</h3>
 {self._markdown_to_html(abstract)}
 </div>
 
 <div class="toc">
-<h3>{"目录" if zh else "Table of Contents"}</h3>
+<h3>{"Table of Contents"}</h3>
 <ol>{"".join(toc_items)}</ol>
 </div>
 
 {"".join(sections_html)}
 
 <div class="conclusions">
-<h3>{"结论" if zh else "Conclusions"}</h3>
+<h3>{"Conclusions"}</h3>
 {self._markdown_to_html(conclusions)}
 </div>
 
-{self._build_appendix_html_section(report, zh)}
+{self._build_appendix_html_section(report)}
 
 <div class="footer">
-    {"由 ScAI 自动生成" if zh else "Auto-generated by ScAI"}
+    {"Auto-generated by ScAI"}
     &bull; {datetime.now().strftime("%Y-%m-%d %H:%M")}
 </div>
 </body>
@@ -1412,6 +1492,17 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
             except Exception as e:
                 logger.warning(f"Could not copy figure {fig_name}: {e}")
 
+        # Copy tables to output for download links
+        tables_out = output_path / "tables"
+        tables_out.mkdir(exist_ok=True)
+        for tbl in report.get("tables", []):
+            tbl_path = tbl.get("path", "")
+            if tbl_path and Path(tbl_path).exists():
+                try:
+                    shutil.copy2(tbl_path, tables_out / os.path.basename(tbl_path))
+                except Exception as e:
+                    logger.warning(f"Could not copy table {tbl_path}: {e}")
+
         # Copy notebook to output for download
         _analysis_state = report.get("_analysis_state")
         if _analysis_state:
@@ -1427,7 +1518,7 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         return html_file
 
     @staticmethod
-    def _build_appendix_html_section(report: Dict, zh: bool) -> str:
+    def _build_appendix_html_section(report: Dict) -> str:
         """Build appendix HTML section from report data."""
         import html as html_module
         appendix = report.get("appendix")
@@ -1438,18 +1529,18 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
 
         parts = []
         parts.append(f'<div class="section" id="appendix">')
-        parts.append(f'<h2>{"附录：分析设置与记录" if zh else "Appendix: Analysis Settings & Records"}</h2>')
+        parts.append(f'<h2>{"Appendix: Analysis Settings & Records"}</h2>')
 
         # Project Information
-        parts.append(f'<h3>{"项目信息" if zh else "Project Information"}</h3>')
+        parts.append(f'<h3>{"Project Information"}</h3>')
         parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-        parts.append(f'<tr><td style="padding:4px 8px;"><strong>{"项目名称" if zh else "Project Name"}</strong></td>'
+        parts.append(f'<tr><td style="padding:4px 8px;"><strong>{"Project Name"}</strong></td>'
                      f'<td style="padding:4px 8px;">{esc(appendix.get("project_name", "-"))}</td></tr>')
         if appendix.get("created_at"):
-            parts.append(f'<tr><td style="padding:4px 8px;"><strong>{"创建时间" if zh else "Created At"}</strong></td>'
+            parts.append(f'<tr><td style="padding:4px 8px;"><strong>{"Created At"}</strong></td>'
                          f'<td style="padding:4px 8px;">{esc(appendix.get("created_at", "-"))}</td></tr>')
         if report.get("generated_at"):
-            parts.append(f'<tr><td style="padding:4px 8px;"><strong>{"报告生成时间" if zh else "Report Generated"}</strong></td>'
+            parts.append(f'<tr><td style="padding:4px 8px;"><strong>{"Report Generated"}</strong></td>'
                          f'<td style="padding:4px 8px;">{esc(report.get("generated_at", "-"))}</td></tr>')
         parts.append('</table>')
 
@@ -1457,10 +1548,10 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         models = appendix.get("agent_models", {})
         temps = appendix.get("agent_temperatures", {})
         if models:
-            parts.append(f'<h3>{"Agent 配置" if zh else "Agent Configuration"}</h3>')
+            parts.append(f'<h3>{"Agent Configuration"}</h3>')
             parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
             parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">Agent</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"模型" if zh else "Model"}</th>'
+                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Model"}</th>'
                          f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">Temperature</th></tr></thead><tbody>')
             for key in sorted(models.keys()):
                 parts.append(f'<tr><td style="padding:4px 8px;">{esc(key.title())}</td>'
@@ -1471,11 +1562,11 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         # Data Files
         data_files = appendix.get("data_files", [])
         if data_files:
-            parts.append(f'<h3>{"数据文件" if zh else "Data Files"}</h3>')
+            parts.append(f'<h3>{"Data Files"}</h3>')
             parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"文件名" if zh else "Filename"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"类型" if zh else "Type"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"类别" if zh else "Section"}</th></tr></thead><tbody>')
+            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Filename"}</th>'
+                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Type"}</th>'
+                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Section"}</th></tr></thead><tbody>')
             for f in data_files:
                 parts.append(f'<tr><td style="padding:4px 8px;font-family:monospace;font-size:0.9em;">{esc(f.get("name", "-"))}</td>'
                              f'<td style="padding:4px 8px;">{esc(f.get("type", "-"))}</td>'
@@ -1485,11 +1576,11 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         # Treatment Groups
         groups = appendix.get("treatment_groups", [])
         if groups:
-            parts.append(f'<h3>{"实验分组" if zh else "Treatment Groups"}</h3>')
+            parts.append(f'<h3>{"Treatment Groups"}</h3>')
             parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"组名" if zh else "Group"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"描述" if zh else "Description"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"样本数" if zh else "Samples"}</th></tr></thead><tbody>')
+            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Group"}</th>'
+                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Description"}</th>'
+                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Samples"}</th></tr></thead><tbody>')
             for g in groups:
                 parts.append(f'<tr><td style="padding:4px 8px;">{esc(g.get("name", "-"))}</td>'
                              f'<td style="padding:4px 8px;">{esc(g.get("description", "-"))}</td>'
@@ -1499,10 +1590,10 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         # Analysis Rounds
         round_results = appendix.get("round_results", [])
         if round_results:
-            parts.append(f'<h3>{"分析轮次" if zh else "Analysis Rounds"}</h3>')
+            parts.append(f'<h3>{"Analysis Rounds"}</h3>')
             parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"轮次" if zh else "Round"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"发现数" if zh else "Findings"}</th></tr></thead><tbody>')
+            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Round"}</th>'
+                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Findings"}</th></tr></thead><tbody>')
             for rr in round_results:
                 parts.append(f'<tr><td style="padding:4px 8px;">{rr.get("round", "-")}</td>'
                              f'<td style="padding:4px 8px;">{rr.get("findings_count", 0)}</td></tr>')
@@ -1514,17 +1605,17 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         dir_selections = user_interactions.get("direction_selection", [])
 
         if cluster_anns or dir_selections:
-            parts.append(f'<h3>{"用户交互记录" if zh else "User Interaction History"}</h3>')
+            parts.append(f'<h3>{"User Interaction History"}</h3>')
 
             if cluster_anns:
-                parts.append(f'<h4>{"细胞注释确认" if zh else "Cell Annotation Decisions"}</h4>')
+                parts.append(f'<h4>{"Cell Annotation Decisions"}</h4>')
                 parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
                 parts.append(f'<thead><tr>'
                              f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">Cluster</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"细胞类型" if zh else "Cell Type"}</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"用户修改" if zh else "User Override"}</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"已确认" if zh else "Confirmed"}</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"置信度" if zh else "Confidence"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Cell Type"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"User Override"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Confirmed"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Confidence"}</th>'
                              f'</tr></thead><tbody>')
                 for ca in cluster_anns:
                     confirmed_icon = "✓" if ca.get("confirmed") else "-"
@@ -1538,11 +1629,11 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                 parts.append('</tbody></table>')
 
             if dir_selections:
-                parts.append(f'<h4>{"研究方向选择" if zh else "Research Direction Selections"}</h4>')
+                parts.append(f'<h4>{"Research Direction Selections"}</h4>')
                 parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
                 parts.append(f'<thead><tr>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"方向" if zh else "Direction"}</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"用户备注" if zh else "User Notes"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Direction"}</th>'
+                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"User Notes"}</th>'
                              f'</tr></thead><tbody>')
                 for d in dir_selections:
                     parts.append(
@@ -1556,18 +1647,18 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         notebook = appendix.get("notebook_filename", "")
 
         if related or notebook:
-            parts.append(f'<h3>{"相关报告与下载" if zh else "Related Reports & Downloads"}</h3>')
+            parts.append(f'<h3>{"Related Reports & Downloads"}</h3>')
             parts.append('<ul style="margin:10px 0;padding-left:20px;">')
             if related.get("exploration_report"):
-                label = "探索阶段报告" if zh else "Exploration Report"
+                label = "Exploration Report"
                 parts.append(f'<li><a href="{esc(related["exploration_report"])}" download '
                              f'style="color:#3182ce;">{label}</a></li>')
             if related.get("annotation_report"):
-                label = "细胞注释报告" if zh else "Annotation Context Report"
+                label = "Annotation Context Report"
                 parts.append(f'<li><a href="{esc(related["annotation_report"])}" download '
                              f'style="color:#3182ce;">{label}</a></li>')
             if notebook:
-                label = "分析 Notebook (.ipynb)" if zh else "Analysis Notebook (.ipynb)"
+                label = "Analysis Notebook (.ipynb)"
                 parts.append(f'<li><a href="{esc(notebook)}" download '
                              f'style="color:#3182ce;">{label}</a></li>')
             parts.append('</ul>')

@@ -7,6 +7,7 @@ import {
   X,
   Sparkles
 } from 'lucide-react'
+import { base64ToDataUri, detectBase64MimeType } from '../../utils/image'
 
 interface GraphicAbstractProps {
   graphicAbstract: GraphicAbstractType
@@ -23,9 +24,10 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
 
   const downloadImage = () => {
     const link = document.createElement('a')
-    const isPng = graphicAbstract.imageBase64.startsWith('iVBOR')
-    link.href = `data:image/${isPng ? 'png' : 'jpeg'};base64,${graphicAbstract.imageBase64}`
-    link.download = isPng ? 'graphic_abstract.png' : 'graphic_abstract.jpg'
+    const mimeType = detectBase64MimeType(graphicAbstract.imageBase64)
+    const ext = mimeType === 'image/jpeg' ? 'jpg' : mimeType.split('/')[1]
+    link.href = base64ToDataUri(graphicAbstract.imageBase64)
+    link.download = `graphic_abstract.${ext}`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -47,7 +49,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
           onClick={() => setShowModal(true)}
         >
           <img
-            src={`data:image/${graphicAbstract.imageBase64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${graphicAbstract.imageBase64}`}
+            src={base64ToDataUri(graphicAbstract.imageBase64)}
             alt="Graphic Abstract"
             className="w-full h-auto max-h-96 object-contain"
           />
@@ -110,7 +112,7 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
 
             {/* Image */}
             <img
-              src={`data:image/${graphicAbstract.imageBase64.startsWith('iVBOR') ? 'png' : 'jpeg'};base64,${graphicAbstract.imageBase64}`}
+              src={base64ToDataUri(graphicAbstract.imageBase64)}
               alt="Graphic Abstract"
               className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl"
             />
