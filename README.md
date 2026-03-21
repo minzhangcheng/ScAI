@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.14.5
+**Version**: 0.14.6
 
 ## Core Features
 
@@ -330,6 +330,19 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.14.6 (2026-03-21)
+
+- **Improvement: Dynamic AnnData discovery in sandbox**: Bioinformatics Agent can now auto-detect AnnData variable names and clustering keys in the Jupyter sandbox, removing hardcoded assumptions about "adata" or "leiden"; cluster annotation workflow adapts to any object naming
+- **Improvement: Faster error recovery**: `MAX_CONSECUTIVE_ERRORS` reduced from 5 to 3; checkpoint save failures no longer interrupt the analysis pipeline
+- **Improvement: Full output visibility**: Removed character truncation limits on code execution output (was 1500 chars), literature search results (was 2000 chars), and paper abstracts (was 200 chars) — LLM now sees complete content
+- **Improvement: Smart PI escalation**: Technical errors (KeyError, TypeError, etc.) are no longer escalated to the PI Agent since PI provides biological guidance, not Python debugging
+- **Improvement: Versioned figure deduplication**: When both a base figure and a versioned variant (e.g., `fig_v2`, `fig_final`) exist, only the latest versioned variant is kept in reports
+- **Improvement: Score definitions in report**: Supervisor Agent now renders a score definitions table in the HTML report showing method, description, parameters, gene lists, and source for each score
+- **Improvement: Faster stall detection**: Consecutive error threshold for stall detection reduced from 3 to 2
+- **Fixed: PubMed XML parsing**: Abstract and title extraction now uses `itertext()` to correctly handle XML text with inline tags (`<i>`, `<sub>`, etc.)
+- **Fixed: Deep Research connection retry**: Transient network errors (ConnectError, ConnectTimeout, OSError) now trigger up to 2 retries with 5/10s delays
+- **Improvement: Removed cluster annotation table from report**: Table removed as `n_cells` field was not correctly populated by the pipeline
 
 ### v0.14.5 (2026-03-20)
 

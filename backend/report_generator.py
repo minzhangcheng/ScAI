@@ -4139,9 +4139,6 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
         # Prepare table of contents
         toc_items = []
-        if self.cluster_annotations:
-            ca_toc_label = "Cell Cluster Annotations"
-            toc_items.append(f'<li><a href="#cluster_annotations">{ca_toc_label}</a></li>')
         for section in report.get("sections", []):
             analysis_type = section.get("analysis_type", "general")
             type_class = "general" if analysis_type == "general" else "specific"
@@ -4476,36 +4473,8 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             except Exception as e:
                 logger.exception("Failed to embed graphic abstract in HTML")
 
-        # Build cluster annotations table HTML
+        # Cluster annotations table removed (n_cells not populated by pipeline)
         ca_html = ""
-        if self.cluster_annotations:
-            ca_title = "Cell Cluster Annotations"
-            ca_header = (
-                "<th>Cluster</th><th>" + ("Cell Type") +
-                "</th><th>" + ("Cell Count") + "</th>"
-            )
-            ca_rows = ""
-            total_cells = 0
-            for cid, info in sorted(self.cluster_annotations.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
-                ct = html_module.escape(info.get("cell_type", "Unknown"))
-                nc = info.get("n_cells", 0)
-                total_cells += nc
-                ca_rows += f"<tr><td>{html_module.escape(cid)}</td><td>{ct}</td><td>{nc:,}</td></tr>"
-            ca_rows += f"<tr style='font-weight:bold;border-top:2px solid #333'><td colspan='2'>Total</td><td>{total_cells:,}</td></tr>"
-            ca_html = f'''
-            <div class="section" id="cluster_annotations">
-                <div class="section-header">
-                    <h2>{ca_title}</h2>
-                </div>
-                <div class="section-content">
-                    <div class="table-wrapper">
-                        <table>
-                            <thead><tr>{ca_header}</tr></thead>
-                            <tbody>{ca_rows}</tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>'''
 
         # Analysis log is no longer shown in the main report
         analysis_log_html = ""

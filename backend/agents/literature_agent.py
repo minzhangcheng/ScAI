@@ -19,6 +19,7 @@ import logging
 import xml.etree.ElementTree as ET
 
 import httpx
+from openai import APIConnectionError as OpenAIConnectionError
 
 from .base import BaseAgent
 
@@ -265,13 +266,35 @@ Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. ht
         )
 
         self._set_llm_context()
-        response = await self.llm_client.chat(
-            model=self.deep_research_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=None,
-            timeout=1800.0,
-        )
+
+        # The LLM client disables retries for timeout>300s (to avoid re-running
+        # expensive long requests). Retry transient *connection* errors here.
+        _max_conn_retries = 2
+        _last_err: Optional[Exception] = None
+        for _attempt in range(_max_conn_retries + 1):
+            try:
+                response = await self.llm_client.chat(
+                    model=self.deep_research_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=None,
+                    timeout=1800.0,
+                )
+                break
+            except (OpenAIConnectionError, httpx.ConnectError, httpx.ConnectTimeout, OSError) as e:
+                _last_err = e
+                if _attempt < _max_conn_retries:
+                    _delay = 5 * (_attempt + 1)
+                    logger.warning(
+                        f"[Literature] Deep research connection error "
+                        f"(attempt {_attempt + 1}/{_max_conn_retries + 1}): "
+                        f"{type(e).__name__}: {str(e)[:150]}. Retrying in {_delay}s..."
+                    )
+                    await asyncio.sleep(_delay)
+                else:
+                    raise
+        else:
+            raise _last_err  # type: ignore[misc]
 
         report_text = response.content or ""
         if not report_text:
@@ -526,12 +549,15 @@ Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. ht
         for article_elem in root.findall(".//PubmedArticle"):
             try:
                 pmid = article_elem.findtext(".//PMID", "")
-                title = article_elem.findtext(".//ArticleTitle", "")
+                title_elem = article_elem.find(".//ArticleTitle")
+                title = ''.join(title_elem.itertext()).strip() if title_elem is not None else ""
 
-                # Concatenate abstract sections
+                # Concatenate abstract sections (use itertext to capture sub-element text like <i>, <sub>)
                 abstract_parts = article_elem.findall(".//AbstractText")
                 abstract = " ".join(
-                    p.text for p in abstract_parts if p.text
+                    ''.join(p.itertext()).strip()
+                    for p in abstract_parts
+                    if ''.join(p.itertext()).strip()
                 )
 
                 year = article_elem.findtext(".//PubDate/Year", "")
@@ -661,7 +687,7 @@ Respond in JSON format:
         """LLM evaluates PubMed results and suggests refined queries."""
         # Include truncated abstracts for better relevance judgment
         articles_summary = "\n".join(
-            f"- [{a.get('year', 'N/A')}] {a['title']}\n  Abstract: {a.get('abstract', 'N/A')[:200]}"
+            f"- [{a.get('year', 'N/A')}] {a['title']}\n  Abstract: {a.get('abstract', 'N/A')}"
             for a in articles[:15]
         )
 

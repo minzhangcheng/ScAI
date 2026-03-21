@@ -398,6 +398,45 @@ class BioinformaticsAgent(BaseAgent):
                 parts.append(f"{key}: {value}")
         return "\n".join(parts)
 
+    async def _discover_adata_in_sandbox(self) -> Tuple[Optional[str], Optional[str]]:
+        """Discover the active AnnData variable name and clustering key in the sandbox.
+
+        Iterates over sandbox globals to find an AnnData object with a known clustering
+        column (leiden, louvain, cluster).
+
+        Returns:
+            Tuple of (variable_name, clustering_key), or (None, None) on failure.
+        """
+        if not self.sandbox:
+            return (None, None)
+
+        discover_code = (
+            "import json as _json, anndata as _ad\n"
+            "_result = {}\n"
+            "for _name, _obj in list(globals().items()):\n"
+            "    if isinstance(_obj, _ad.AnnData) and not _name.startswith('_'):\n"
+            "        for _key in ['leiden', 'louvain', 'cluster']:\n"
+            "            if _key in _obj.obs.columns:\n"
+            "                _result = {'var': _name, 'cluster_key': _key}\n"
+            "                break\n"
+            "        if _result:\n"
+            "            break\n"
+            "print(_json.dumps(_result))\n"
+        )
+        try:
+            result = await self.sandbox.execute(discover_code, save_to_history=False, skip_safety_check=True)
+            if result.success and result.output and result.output.strip():
+                parsed = json.loads(result.output.strip())
+                var_name = parsed.get("var")
+                cluster_key = parsed.get("cluster_key")
+                if var_name and cluster_key:
+                    logger.info(f"[Bioinformatics] Discovered AnnData var={var_name}, cluster_key={cluster_key}")
+                    return (var_name, cluster_key)
+        except Exception as e:
+            logger.warning(f"[Bioinformatics] AnnData discovery failed: {e}")
+
+        return (None, None)
+
     async def run_autonomous_analysis(
         self,
         state: AnalysisState,
@@ -804,30 +843,33 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         figure_iteration_count = 0
         MAX_FIGURE_ITERATIONS = 5  # Max figure-only iterations excluded from step count
         consecutive_errors = 0
-        MAX_CONSECUTIVE_ERRORS = 5  # Force report_findings after this many consecutive code errors
+        MAX_CONSECUTIVE_ERRORS = 3  # Force report_findings after this many consecutive code errors
 
         while step_count < max_steps and not completed:
             step_count += 1
 
             # Save checkpoint periodically
             if checkpoint_mgr.should_checkpoint(step_count):
-                checkpoint_data = {
-                    'step_name': f'step_{step_count}',
-                    'session_id': state.id,
-                    'round_number': state.current_round,
-                    'step_number': step_count,
-                    'total_steps': max_steps,
-                    'messages': messages,
-                    'findings': all_findings,
-                    'figures': all_figures,
-                    'code_history': [ce.model_dump() for ce in self.code_history],
-                    'analysis_log': [step.model_dump() for step in analysis_log],
-                    'analysis_context': self.analysis_context,
-                    'completed': False
-                }
-                await checkpoint_mgr.save(checkpoint_data)
-                # Also save sandbox session for Python environment recovery
-                await self.sandbox.save_session()
+                try:
+                    checkpoint_data = {
+                        'step_name': f'step_{step_count}',
+                        'session_id': state.id,
+                        'round_number': state.current_round,
+                        'step_number': step_count,
+                        'total_steps': max_steps,
+                        'messages': messages,
+                        'findings': all_findings,
+                        'figures': all_figures,
+                        'code_history': [ce.model_dump() for ce in self.code_history],
+                        'analysis_log': [step.model_dump() for step in analysis_log],
+                        'analysis_context': self.analysis_context,
+                        'completed': False
+                    }
+                    await checkpoint_mgr.save(checkpoint_data)
+                    # Also save sandbox session for Python environment recovery
+                    await self.sandbox.save_session()
+                except Exception as e:
+                    logger.warning(f"[Bioinformatics] Checkpoint save failed at step {step_count}: {e}")
             
             self._set_llm_context()
 
@@ -1083,7 +1125,7 @@ plt.close('all')
 
                     tool_result = f"Execution {'successful' if not result.error else 'failed'}.\n"
                     if result.output:
-                        tool_result += f"Output:\n{result.output[:1500]}\n"
+                        tool_result += f"Output:\n{result.output}\n"
                     if result.error:
                         tool_result += f"Error: {result.error}\n"
                         # Hint: if a module is missing, remind the agent to pip install
@@ -1171,7 +1213,7 @@ plt.close('all')
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": f"Literature findings: {lit_result[:2000]}"
+                        "content": f"Literature findings: {lit_result}"
                     })
 
                     # Record search_literature step in analysis log
@@ -1189,16 +1231,35 @@ plt.close('all')
 
                     n_clusters = len(cluster_markers)
 
+                    # Discover the active AnnData variable and clustering key in sandbox
+                    adata_var, cluster_key = await self._discover_adata_in_sandbox()
+
+                    if adata_var is None:
+                        tool_result = (
+                            "Error: Could not find an AnnData object with a clustering column "
+                            "(leiden/louvain/cluster) in the sandbox. Before calling annotate_clusters, "
+                            "you must: (1) load data into an AnnData variable, (2) run clustering "
+                            "(e.g., sc.tl.leiden(adata)), and (3) run differential expression "
+                            "(sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon'))."
+                        )
+                        logger.warning("[Bioinformatics] annotate_clusters called but no AnnData with clustering found")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_result
+                        })
+                        continue
+
                     # Auto-extract markers from kernel adata if LLM didn't provide them
                     if n_clusters == 0 and self.sandbox:
-                        logger.info("[Bioinformatics] cluster_markers empty, auto-extracting from adata.uns['rank_genes_groups']")
+                        logger.info(f"[Bioinformatics] cluster_markers empty, auto-extracting from {adata_var}.uns['rank_genes_groups']")
                         extract_code = (
                             "import json as _json\n"
                             "_markers = {}\n"
                             "try:\n"
                             "    import scanpy as sc\n"
-                            "    for _cl in adata.obs['leiden'].cat.categories:\n"
-                            "        _df = sc.get.rank_genes_groups_df(adata, group=str(_cl))\n"
+                            f"    for _cl in {adata_var}.obs['{cluster_key}'].cat.categories:\n"
+                            f"        _df = sc.get.rank_genes_groups_df({adata_var}, group=str(_cl))\n"
                             "        _df = _df[_df['pvals_adj'] < 0.05]\n"
                             "        _markers[str(_cl)] = _df.head(15)['names'].tolist()\n"
                             "except Exception as _e:\n"
@@ -1225,11 +1286,11 @@ plt.close('all')
 
                     if n_clusters == 0:
                         tool_result = (
-                            "Error: cluster_markers is empty and auto-extraction from "
-                            "adata.uns['rank_genes_groups'] failed. You must first run "
-                            "sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon') "
-                            "and ensure it completes successfully before calling "
-                            "annotate_clusters."
+                            f"Error: cluster_markers is empty and auto-extraction from "
+                            f"{adata_var}.uns['rank_genes_groups'] failed. You must first run "
+                            f"sc.tl.rank_genes_groups({adata_var}, '{cluster_key}', method='wilcoxon') "
+                            f"and ensure it completes successfully before calling "
+                            f"annotate_clusters."
                         )
                         messages.append({
                             "role": "tool",
@@ -1287,9 +1348,9 @@ plt.close('all')
                     }
                     dict_str = json.dumps(cell_type_dict, ensure_ascii=False)
                     result_lines.append(
-                        "\nYou can now assign these annotations to adata.obs['cell_type'] using:\n"
+                        f"\nYou can now assign these annotations to {adata_var}.obs['cell_type'] using:\n"
                         f"cluster_to_celltype = {dict_str}\n"
-                        "adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')"
+                        f"{adata_var}.obs['cell_type'] = {adata_var}.obs['{cluster_key}'].astype(str).map(cluster_to_celltype).fillna('Unknown')"
                     )
 
                     tool_result = "\n".join(result_lines)
@@ -1304,8 +1365,8 @@ plt.close('all')
                         inject_code = (
                             "import json as _json\n"
                             f"_ct_map = _json.loads({json.dumps(json.dumps(cell_type_dict, ensure_ascii=False))})\n"
-                            "adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(_ct_map).fillna('Unknown')\n"
-                            "print(f'cell_type applied: {adata.obs[\"cell_type\"].value_counts().to_dict()}')\n"
+                            f"{adata_var}.obs['cell_type'] = {adata_var}.obs['{cluster_key}'].astype(str).map(_ct_map).fillna('Unknown')\n"
+                            f"print(f'cell_type applied: {{{adata_var}.obs[\"cell_type\"].value_counts().to_dict()}}')\n"
                         )
                         try:
                             inject_result = await self.sandbox.execute(inject_code)
@@ -1323,7 +1384,7 @@ plt.close('all')
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": tool_result[:5000]
+                        "content": tool_result
                     })
 
                     # Record annotate_clusters step in analysis log
@@ -1337,7 +1398,7 @@ plt.close('all')
                         step_number=step_count, step_type="annotate_clusters",
                         agent_reasoning=agent_reasoning,
                         cluster_markers_summary=markers_summary, annotation_tissue=tissue,
-                        annotation_organism=organism, annotation_result_summary=(tool_result or "")[:2000],
+                        annotation_organism=organism, annotation_result_summary=(tool_result or ""),
                     ))
 
                 elif tool_name == "report_findings":
@@ -1447,6 +1508,13 @@ plt.close('all')
                             state=state,
                             review_callback=review_callback
                         )
+
+                    # Pass publication figure to supervisor for vision review
+                    safe_fig_name = "".join(c if c.isalnum() or c == '_' else '_' for c in figure_name)
+                    for pub_fig in state.publication_figures:
+                        if pub_fig.name == safe_fig_name and pub_fig.png_base64:
+                            _step_figures.append(pub_fig.png_base64)
+                            break
 
                     messages.append({
                         "role": "tool",

@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.14.5
-**Last Updated**: 2026-03-20
+**Version**: 0.14.6
+**Last Updated**: 2026-03-21
 
 ## Project Overview
 
@@ -1462,6 +1462,21 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.14.6 (2026-03-21)
+
+- **Dynamic AnnData discovery** (`bioinformatics_agent.py` new `_discover_adata_in_sandbox()`): New helper method iterates over sandbox global variables to find AnnData objects containing leiden/louvain/cluster columns. Returns `(var_name, cluster_key)` pairs. Cluster annotation workflow now calls this instead of hardcoding `"adata"` and `"leiden"`, supporting any user-defined variable names.
+- **Faster consecutive error recovery** (`bioinformatics_agent.py`): `MAX_CONSECUTIVE_ERRORS` reduced from 5 to 3, triggering forced report generation sooner when analysis is stuck. Checkpoint save is now wrapped in try-except to prevent checkpoint failures from aborting the main pipeline.
+- **Full output visibility** (`bioinformatics_agent.py`, `literature_agent.py`): Removed truncation on code execution output (`output[:1500]` → full), literature search results (`[:2000]` → full), and PubMed paper abstracts (`[:200]` → full). LLM receives complete content for better decision-making.
+- **Cluster annotation auto-injects publication figures** (`bioinformatics_agent.py`): When `publication_figures` are available in state, they are injected into the annotation prompt for Supervisor visual review, without requiring bioinformatics agent to regenerate them.
+- **Smart PI escalation filter** (`supervisor_agent.py` new `_is_technical_error()`): New `_TECHNICAL_ERROR_TYPES` frozenset contains Python runtime exception names (KeyError, TypeError, IndexError, etc.). `_is_technical_error()` checks if error message starts with any known exception type. Errors matching this list are no longer escalated to PI — PI provides biological guidance, not Python debugging.
+- **Versioned figure deduplication** (`supervisor_agent.py`): When collecting figures for the report, if a base figure name (e.g., `umap`) and a versioned variant (e.g., `umap_v2`, `umap_final`) both exist, only the versioned variant is retained. Prevents duplicate figures in report.
+- **Score definitions HTML table** (`supervisor_agent.py` new `_build_score_definitions_html()`): Renders a structured HTML table of all score definitions including score name, method, description, parameters, gene list, and source. Included in `score_definitions` field of the final report.
+- **Faster stall detection** (`supervisor_agent.py`): Consecutive error threshold reduced from 3 to 2 for faster detection of stuck analysis loops.
+- **Truncation limits removed** (`supervisor_agent.py`): `agent_reasoning` (was 500 chars), `code_output` (was 500 chars), and `annotation_result_summary` (was 2000 chars) now display without truncation.
+- **PubMed XML `itertext()` fix** (`literature_agent.py`): Abstract and title extraction changed from `findtext()` to `"".join(element.itertext())` to correctly reconstruct text containing inline XML tags (`<i>`, `<sub>`, `<sup>`, etc.) that `findtext()` would silently drop.
+- **Deep Research connection retry** (`literature_agent.py`): Added retry wrapper around the Deep Research API call (max 2 retries, 5s/10s delays) catching `OpenAIConnectionError`, `httpx.ConnectError`, `httpx.ConnectTimeout`, `OSError`. Addresses transient network failures in long-running 1800s-timeout requests.
+- **Cluster annotation table removed from report** (`report_generator.py`): Removed TOC entry and table generation for cluster annotations. The `n_cells` field was not correctly populated by the pipeline, making the table incomplete. Analysis log display also removed from the main report body.
 
 #### v0.14.5 (2026-03-20)
 

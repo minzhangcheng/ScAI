@@ -22,6 +22,20 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep
+
+# Python exception types that are purely technical (no PI guidance needed)
+_TECHNICAL_ERROR_TYPES = frozenset({
+    "KeyError", "TypeError", "IndexError", "ValueError",
+    "ModuleNotFoundError", "AttributeError", "NameError",
+    "SyntaxError", "ImportError", "FileNotFoundError",
+    "ZeroDivisionError", "RuntimeError", "OSError",
+    "IOError", "PermissionError", "StopIteration",
+    "UnicodeDecodeError", "UnicodeEncodeError",
+    "RecursionError", "OverflowError", "NotImplementedError",
+    "UnboundLocalError",
+    # Library-specific technical errors (no PI guidance needed)
+    "InvalidIndexError", "AnnDataReadError", "SparseDataError",
+})
 from ..utils.llm_client import OpenAICompatibleClient
 
 
@@ -179,7 +193,7 @@ class SupervisorAgent:
             code_output=step.code_output[-2000:] if step.code_output else None,
             code_error=step.code_error[:400] if step.code_error else None,
             saved_figure_filenames=list(step.saved_figure_filenames),
-            agent_reasoning=step.agent_reasoning[:500] if step.agent_reasoning else None,
+            agent_reasoning=step.agent_reasoning if step.agent_reasoning else None,
             literature_topic=step.literature_topic,
             literature_result=step.literature_result[:500] if step.literature_result else None,
         )
@@ -219,22 +233,29 @@ class SupervisorAgent:
             severity = llm_result.get("severity", "none")
             message = llm_result.get("message", "")
 
-            # Critical → inject feedback + escalate to PI
+            # Critical → inject feedback + conditionally escalate to PI
             if severity == "critical":
                 if message:
                     feedback_parts.append(f"CRITICAL: {message}")
                 redirect = llm_result.get("redirect_instruction", "")
                 if redirect:
                     feedback_parts.append(f"Suggested action: {redirect}")
-                # Escalate to PI
-                pi_resp = await self._escalate_to_pi(
-                    f"Critical issue at step {step.step_number}: {message}",
-                    self._build_step_context(step),
-                )
-                if pi_resp:
-                    record.pi_escalated = True
-                    record.pi_response = pi_resp
-                    feedback_parts.append(f"PI guidance: {pi_resp}")
+                # Only escalate to PI for non-technical errors
+                # (PI gives biological guidance; can't help with KeyError/TypeError etc.)
+                if self._is_technical_error(step.code_error):
+                    logger.info(
+                        f"[{self.session_id}] Skipping PI escalation for technical error "
+                        f"at step {step.step_number}"
+                    )
+                else:
+                    pi_resp = await self._escalate_to_pi(
+                        f"Critical issue at step {step.step_number}: {message}",
+                        self._build_step_context(step),
+                    )
+                    if pi_resp:
+                        record.pi_escalated = True
+                        record.pi_response = pi_resp
+                        feedback_parts.append(f"PI guidance: {pi_resp}")
 
             elif severity == "warning" and message:
                 feedback_parts.append(message)
@@ -474,6 +495,7 @@ class SupervisorAgent:
             "current_step": "Complete",
             "appendix": appendix_data,
             "analysis_log": all_records,
+            "score_definitions": [sd.model_dump(mode="json") for sd in analysis_state.score_definitions] if analysis_state.score_definitions else [],
         }
 
         # Sanitize NaN/Infinity
@@ -501,6 +523,30 @@ class SupervisorAgent:
         return report
 
     # ------------------------------------------------------------------
+    # Internal: Error classification
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_technical_error(code_error: Optional[str]) -> bool:
+        """Return True if the error is a pure Python/technical exception (no PI help needed)."""
+        if not code_error:
+            return False
+        for line in reversed(code_error.strip().split('\n')):
+            line = line.strip()
+            if not line or line.startswith('File ') or line.startswith('Traceback'):
+                continue
+            err_type = line.split(':')[0].strip()
+            if '.' in err_type:
+                err_type = err_type.rsplit('.', 1)[-1]
+            # Skip lines that don't look like exception class names
+            if ' ' in err_type or not err_type or not err_type[0].isupper():
+                continue
+            if err_type.endswith(('Error', 'Exception')) or err_type in _TECHNICAL_ERROR_TYPES:
+                return err_type in _TECHNICAL_ERROR_TYPES
+            continue
+        return False
+
+    # ------------------------------------------------------------------
     # Internal: Rule-based checks
     # ------------------------------------------------------------------
 
@@ -518,9 +564,9 @@ class SupervisorAgent:
             if len(self._recent_errors) > 5:
                 self._recent_errors = self._recent_errors[-5:]
 
-            # Check for 3 consecutive errors of the same type
-            if len(self._recent_errors) >= 3:
-                last_3 = self._recent_errors[-3:]
+            # Check for 2 consecutive errors of the same type
+            if len(self._recent_errors) >= 2:
+                last_2 = self._recent_errors[-2:]
                 # Extract error type from traceback (e.g. "ZeroDivisionError")
                 def _extract_error_type(e: str) -> str:
                     for line in reversed(e.split('\n')):
@@ -528,16 +574,16 @@ class SupervisorAgent:
                         if line and ':' in line and not line.startswith('File'):
                             return line.split(':')[0].strip()
                     return e[:50]
-                error_types = [_extract_error_type(e) for e in last_3]
-                if all(e == last_3[0] for e in last_3):
+                error_types = [_extract_error_type(e) for e in last_2]
+                if all(e == last_2[0] for e in last_2):
                     issues.append(
-                        "WARNING: Agent appears stuck — same error occurred 3 times in a row. "
+                        "WARNING: Agent appears stuck — same error occurred 2 times in a row. "
                         "Consider a different approach."
                     )
                 elif all(t == error_types[0] for t in error_types):
                     issues.append(
                         f"WARNING: Agent appears stuck — same error type ({error_types[0]}) "
-                        "occurred 3 times in a row. Consider a completely different approach "
+                        "occurred 2 times in a row. Consider a completely different approach "
                         "or skip this analysis step."
                     )
         else:
@@ -582,7 +628,7 @@ class SupervisorAgent:
         # Build text context
         parts = [f"Step {step.step_number} | Type: {step.step_type}"]
         if step.agent_reasoning:
-            parts.append(f"Agent reasoning: {step.agent_reasoning[:500]}")
+            parts.append(f"Agent reasoning: {step.agent_reasoning}")
         if step.code:
             if len(step.code) > 2000:
                 parts.append(f"Code (last 2000 chars of {len(step.code)}):\n```python\n{step.code[-2000:]}\n```")
@@ -690,7 +736,7 @@ class SupervisorAgent:
         """Build context string for a step (used in PI escalation for critical issues)."""
         parts = [f"Step {step.step_number} ({step.step_type})"]
         if step.code_output:
-            parts.append(f"Output: {step.code_output[-500:]}")
+            parts.append(f"Output: {step.code_output}")
         if step.code_error:
             parts.append(f"Error: {step.code_error[:300]}")
         return "\n".join(parts)
@@ -714,7 +760,7 @@ class SupervisorAgent:
         if step.code_output:
             parts.append(f"\nMost recent output:\n{step.code_output[-1000:]}")
         if step.annotation_result_summary:
-            parts.append(f"\nAnnotation result: {step.annotation_result_summary[:500]}")
+            parts.append(f"\nAnnotation result: {step.annotation_result_summary}")
         if step.findings:
             parts.append(f"\nFindings: {'; '.join(step.findings[:5])}")
 
@@ -943,6 +989,23 @@ class SupervisorAgent:
                     continue
                 seen_stems.add(img_file.stem)
                 figure_map[img_file.name] = img_file
+
+        # Deduplicate versioned figures: when both base and _v2/_v3/_final/_revised
+        # exist, keep only the highest version and remove the base figure.
+        _version_re = re.compile(r'^(.+?)_(v(\d+)|final|revised)$')
+        base_to_versioned: Dict[str, List[str]] = {}
+        for stem in list(seen_stems):
+            m = _version_re.match(stem)
+            if m:
+                base_to_versioned.setdefault(m.group(1), []).append(stem)
+        for base, versions in base_to_versioned.items():
+            if base in seen_stems:
+                # Remove the base version from figure_map, keep the versioned one(s)
+                for fname in list(figure_map.keys()):
+                    if Path(fname).stem == base:
+                        del figure_map[fname]
+                        logger.debug(f"Removed base figure {fname} in favor of versioned: {versions}")
+                        break
 
         logger.info(f"Collected {len(figure_map)} figures for report "
                      f"({len(records)} supervision records, workspace={workspace_path})")
@@ -1466,6 +1529,8 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
 {self._markdown_to_html(conclusions)}
 </div>
 
+{self._build_score_definitions_html(report)}
+
 {self._build_appendix_html_section(report)}
 
 <div class="footer">
@@ -1516,6 +1581,54 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
 
         logger.info(f"HTML report generated: {html_file}")
         return html_file
+
+    @staticmethod
+    def _build_score_definitions_html(report: Dict) -> str:
+        """Build score definitions HTML table from report data."""
+        import html as html_module
+        score_defs = report.get("score_definitions", [])
+        if not score_defs:
+            return ""
+        rows = ""
+        for sd in score_defs:
+            genes_raw = sd.get("gene_list", [])
+            genes = html_module.escape(", ".join(genes_raw[:10]))
+            if len(genes_raw) > 10:
+                genes += f" ... ({len(genes_raw)} total)"
+            params = sd.get("parameters", {})
+            params_str = html_module.escape(
+                ", ".join(f"{k}={v}" for k, v in params.items()) if params else "default"
+            )
+            rows += f"""<tr>
+                <td>{html_module.escape(sd.get("score_name", ""))}</td>
+                <td><code>{html_module.escape(sd.get("method", ""))}</code></td>
+                <td>{html_module.escape(sd.get("description", ""))}</td>
+                <td style="font-size:0.85em">{params_str}</td>
+                <td style="font-size:0.85em">{genes}</td>
+                <td style="font-size:0.85em">{html_module.escape(sd.get("gene_list_source", "") or "N/A")}</td>
+            </tr>"""
+        return f"""
+        <div class="section" id="score-definitions">
+            <h2>Score Definitions</h2>
+            <div class="section-content">
+                <p>The following scores were computed during the analysis. Each score's methodology is documented for transparency and reproducibility.</p>
+                <table style="width:100%; border-collapse:collapse; font-size:0.9em; margin-top:10px;">
+                    <thead>
+                        <tr style="background:#f7fafc; border-bottom:2px solid #e2e8f0;">
+                            <th style="padding:8px; text-align:left;">Score Name</th>
+                            <th style="padding:8px; text-align:left;">Method</th>
+                            <th style="padding:8px; text-align:left;">Description</th>
+                            <th style="padding:8px; text-align:left;">Parameters</th>
+                            <th style="padding:8px; text-align:left;">Gene List</th>
+                            <th style="padding:8px; text-align:left;">Source</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows}
+                    </tbody>
+                </table>
+            </div>
+        </div>"""
 
     @staticmethod
     def _build_appendix_html_section(report: Dict) -> str:
