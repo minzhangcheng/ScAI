@@ -108,7 +108,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "report_findings",
-            "description": "Report key findings and conclusions from the analysis. Use this when you have completed a major analysis phase.",
+            "description": "Report key findings and conclusions. Call this ONLY when you have completed ALL assigned tasks. In the exploration phase, you MUST complete the full pipeline including annotate_clusters BEFORE calling this tool.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -572,7 +572,7 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
 2. consult_pi - Ask PI for biological decisions (analysis direction, pathway selection, interpretation)
 3. search_literature - Search for marker genes, pathways, biological knowledge
 4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
-5. report_findings - Report conclusions when analysis phase is complete
+5. report_findings - Report conclusions ONLY after ALL assigned tasks are complete (including annotate_clusters in exploration)
 6. generate_publication_figure - Generate publication-quality figures with PI review
 7. register_score - Register a computed score's methodology for the final report
    IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
@@ -837,6 +837,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             self.last_result = None
 
         completed = False
+        annotation_completed = False  # Mandatory step tracker for exploration phase
         llm_error: Optional[str] = None
         text_response_count = 0
         MAX_TEXT_RESPONSES = 2
@@ -1151,17 +1152,29 @@ plt.close('all')
                         "content": tool_result
                     })
 
-                    # Circuit breaker: too many consecutive errors → force report
+                    # Circuit breaker: too many consecutive errors → force report or redirect
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive code errors, forcing report")
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "[System] Too many consecutive code execution errors. "
-                                "Stop trying to fix the code. Report your findings so far "
-                                "using the report_findings tool and move on."
-                            )
-                        })
+                        if state.analysis_phase == "exploration" and not annotation_completed:
+                            logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive errors, redirecting to mandatory steps")
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[System] Too many consecutive code execution errors. "
+                                    "However, mandatory steps are not yet complete. "
+                                    "Try a simpler approach: run sc.tl.rank_genes_groups(adata_hvg, 'leiden', method='wilcoxon') "
+                                    "then call annotate_clusters."
+                                )
+                            })
+                        else:
+                            logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive code errors, forcing report")
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[System] Too many consecutive code execution errors. "
+                                    "Stop trying to fix the code. Report your findings so far "
+                                    "using the report_findings tool and move on."
+                                )
+                            })
 
                 elif tool_name == "consult_pi":
                     has_substantive_work = True
@@ -1400,8 +1413,30 @@ plt.close('all')
                         cluster_markers_summary=markers_summary, annotation_tissue=tissue,
                         annotation_organism=organism, annotation_result_summary=(tool_result or ""),
                     ))
+                    annotation_completed = True
 
                 elif tool_name == "report_findings":
+                    # Enforce mandatory pipeline in exploration phase
+                    if state.analysis_phase == "exploration" and not annotation_completed:
+                        logger.warning(
+                            f"[Bioinformatics] report_findings rejected: annotate_clusters not yet called"
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": (
+                                "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                "cell type annotation via annotate_clusters. "
+                                "You MUST first run sc.tl.rank_genes_groups(), then call annotate_clusters, "
+                                "before reporting findings."
+                            )
+                        })
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="report_findings",
+                            agent_reasoning=agent_reasoning,
+                            findings=[], findings_summary="REJECTED: annotate_clusters not completed",
+                        ))
+                        continue
                     has_substantive_work = True
                     findings = args.get("findings", [])
                     summary = args.get("summary", "")

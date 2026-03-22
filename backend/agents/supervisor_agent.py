@@ -18,6 +18,7 @@ import io
 import base64
 import shutil
 from pathlib import Path
+from urllib.parse import quote as url_quote
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,546 @@ _TECHNICAL_ERROR_TYPES = frozenset({
     "InvalidIndexError", "AnnDataReadError", "SparseDataError",
 })
 from ..utils.llm_client import OpenAICompatibleClient
+
+# Section IDs that represent specific/targeted analysis
+_SPECIFIC_SECTION_IDS = frozenset({
+    "differential_expression", "key_findings", "integrated_findings",
+    "exploration_findings",
+})
+
+# ---------------------------------------------------------------------------
+# Rich HTML report CSS (shared with DetailedReportGenerator template)
+# ---------------------------------------------------------------------------
+_REPORT_CSS = """
+:root {
+    --primary-color: #4f46e5;
+    --primary-light: #eef2ff;
+    --text-color: #1e293b;
+    --text-secondary: #64748b;
+    --border-color: #e2e8f0;
+    --bg-color: #f8fafc;
+    --white: #ffffff;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    line-height: 1.6;
+    color: var(--text-color);
+    background: var(--bg-color);
+    padding: 20px;
+}
+
+.container {
+    max-width: 1000px;
+    margin: 0 auto;
+    background: var(--white);
+    border-radius: 16px;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
+}
+
+.header {
+    background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+    color: white;
+    padding: 40px;
+    text-align: center;
+}
+
+.header h1 {
+    font-size: 2rem;
+    margin-bottom: 10px;
+}
+
+.header .meta {
+    opacity: 0.9;
+    font-size: 0.9rem;
+}
+
+.content {
+    padding: 40px;
+}
+
+.section {
+    margin-bottom: 40px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.section-header {
+    background: var(--primary-light);
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.section-header h2 {
+    font-size: 1.25rem;
+    color: var(--primary-color);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.section-header .badge {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    background: var(--primary-color);
+    color: white;
+    font-weight: 500;
+}
+
+.section-content {
+    padding: 24px;
+}
+
+.section-content p {
+    margin-bottom: 16px;
+    text-align: justify;
+}
+
+.section-content strong {
+    font-weight: 600;
+    color: #1e40af;
+}
+
+.section-content em {
+    font-style: italic;
+    color: #6b7280;
+}
+
+.section-content code {
+    background: #f1f5f9;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 0.9em;
+    color: #dc2626;
+}
+
+.graphic-abstract {
+    text-align: center;
+    margin-bottom: 30px;
+    padding: 20px 24px;
+    background: linear-gradient(135deg, #fdf2f8 0%, #fce7f3 100%);
+    border-left: 4px solid #ec4899;
+    border-radius: 0 8px 8px 0;
+}
+
+.graphic-abstract h2 {
+    color: #be185d;
+    margin-bottom: 16px;
+}
+
+.graphic-abstract img {
+    max-width: 100%;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.abstract {
+    background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+    border-left: 4px solid #0ea5e9;
+    padding: 20px 24px;
+    margin-bottom: 30px;
+    border-radius: 0 8px 8px 0;
+}
+
+.abstract h2 {
+    color: #0369a1;
+    margin-bottom: 12px;
+}
+
+.conclusions {
+    background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+    border-left: 4px solid #22c55e;
+    padding: 20px 24px;
+    margin-top: 30px;
+    border-radius: 0 8px 8px 0;
+}
+
+.conclusions h2 {
+    color: #15803d;
+    margin-bottom: 12px;
+}
+
+.figure-container {
+    margin: 24px 0;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-color);
+}
+
+.figure-image {
+    text-align: center;
+    padding: 16px;
+    background: white;
+}
+
+.figure-image img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+}
+
+.figure-caption {
+    padding: 16px;
+    border-top: 1px solid var(--border-color);
+    background: var(--white);
+}
+
+.figure-caption h4 {
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+    color: var(--text-color);
+}
+
+.figure-caption p {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.figure-interpretation {
+    margin-top: 12px;
+    padding: 12px;
+    background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+    border-radius: 8px;
+    border-left: 3px solid #0ea5e9;
+}
+
+.figure-interpretation strong {
+    color: #0369a1;
+    font-size: 0.85rem;
+}
+
+.figure-interpretation p {
+    font-size: 0.85rem;
+    color: var(--text-color);
+    margin-top: 8px;
+    text-align: justify;
+}
+
+.table-interpretation {
+    margin-top: 12px;
+    padding: 12px;
+    background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+    border-radius: 8px;
+    border-left: 3px solid #22c55e;
+}
+
+.table-interpretation strong {
+    color: #047857;
+    font-size: 0.85rem;
+}
+
+.table-interpretation p {
+    font-size: 0.85rem;
+    color: var(--text-color);
+    margin-top: 8px;
+    text-align: justify;
+}
+
+.figure-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.download-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    font-size: 0.8rem;
+    border-radius: 6px;
+    text-decoration: none;
+    transition: all 0.2s;
+}
+
+.download-btn.png {
+    background: #fce7f3;
+    color: #be185d;
+}
+
+.download-btn.png:hover {
+    background: #fbcfe8;
+}
+
+.download-btn.pdf {
+    background: #fee2e2;
+    color: #dc2626;
+}
+
+.download-btn.pdf:hover {
+    background: #fecaca;
+}
+
+.table-container {
+    margin: 24px 0;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.table-header {
+    background: #ecfdf5;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.table-header h4 {
+    color: #047857;
+    font-size: 0.95rem;
+}
+
+.download-btn.csv {
+    background: #d1fae5;
+    color: #047857;
+}
+
+.download-btn.csv:hover {
+    background: #a7f3d0;
+}
+
+.table-wrapper {
+    overflow-x: auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+th {
+    background: #f1f5f9;
+    padding: 10px 12px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 2px solid var(--border-color);
+}
+
+td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+tr:hover {
+    background: #f8fafc;
+}
+
+.table-info {
+    padding: 12px 16px;
+    background: #f8fafc;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.toc {
+    background: var(--bg-color);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 30px;
+}
+
+.toc h3 {
+    margin-bottom: 16px;
+    color: var(--text-color);
+}
+
+.toc ul {
+    list-style: none;
+}
+
+.toc li {
+    padding: 8px 0;
+    border-bottom: 1px dashed var(--border-color);
+}
+
+.toc li:last-child {
+    border-bottom: none;
+}
+
+.toc a {
+    color: var(--primary-color);
+    text-decoration: none;
+}
+
+.toc a:hover {
+    text-decoration: underline;
+}
+
+.toc .section-type {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 8px;
+}
+
+.toc .general {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.toc .specific {
+    background: #fef3c7;
+    color: #b45309;
+}
+
+.analysis-type-badge {
+    font-size: 0.7rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    margin-left: 8px;
+    font-weight: 500;
+}
+
+.analysis-type-badge.general {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.analysis-type-badge.specific {
+    background: #fef3c7;
+    color: #b45309;
+}
+
+.appendix {
+    background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+    border-left: 4px solid #f59e0b;
+    padding: 20px 24px;
+    margin-top: 30px;
+    border-radius: 0 8px 8px 0;
+}
+
+.appendix h2 {
+    color: #b45309;
+    margin-bottom: 16px;
+}
+
+.appendix h3 {
+    color: #92400e;
+    margin-top: 20px;
+    margin-bottom: 10px;
+    font-size: 1.05rem;
+    border-bottom: 1px solid #fbbf24;
+    padding-bottom: 6px;
+}
+
+.appendix table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    margin: 10px 0 16px 0;
+    background: white;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.appendix th {
+    background: #fef3c7;
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 2px solid #fbbf24;
+    color: #92400e;
+}
+
+.appendix td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #fde68a;
+}
+
+.appendix .human-input-item {
+    background: white;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 8px 0;
+    border: 1px solid #fde68a;
+}
+
+.appendix .human-input-item .round-tag {
+    display: inline-block;
+    background: #fbbf24;
+    color: #78350f;
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    margin-right: 8px;
+}
+
+.appendix .human-input-item .timestamp {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.appendix .human-input-item .message {
+    margin-top: 6px;
+    white-space: pre-wrap;
+}
+
+.appendix .human-input-item .files {
+    margin-top: 6px;
+    font-size: 0.85rem;
+    color: #b45309;
+}
+
+.appendix ul {
+    margin: 6px 0 12px 20px;
+    font-size: 0.9rem;
+}
+
+.appendix li {
+    margin-bottom: 4px;
+}
+
+.score-definitions {
+    margin-bottom: 40px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.score-definitions .section-header {
+    background: #f0fdf4;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.score-definitions .section-header h2 {
+    color: #15803d;
+}
+
+.score-definitions .section-content {
+    padding: 24px;
+}
+
+@media print {
+    body {
+        background: white;
+        padding: 0;
+    }
+    .container {
+        box-shadow: none;
+    }
+    .download-btn {
+        display: none;
+    }
+}
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +852,36 @@ class SupervisorAgent:
         self._recent_errors = []
         self._pi_question_hashes = set()
 
+    def restore_log_from_saved(self, records: List[Dict]):
+        """Restore supervision log from saved analysis_log dicts (e.g., from report.json)."""
+        restored = []
+        for d in records:
+            ts = d.get("timestamp", "")
+            try:
+                timestamp = datetime.fromisoformat(ts) if ts else datetime.now()
+            except (ValueError, TypeError):
+                timestamp = datetime.now()
+            restored.append(SupervisorRecord(
+                step_number=d.get("step_number", 0),
+                step_type=d.get("step_type", ""),
+                timestamp=timestamp,
+                technical_issues=d.get("technical_issues", []),
+                checkpoint_type=d.get("checkpoint_type"),
+                llm_severity=d.get("llm_severity"),
+                pi_escalated=d.get("pi_escalated", False),
+                pi_response=d.get("pi_response"),
+                feedback_injected=d.get("feedback_injected"),
+                literature_topic=d.get("literature_topic"),
+                literature_result=d.get("literature_result"),
+                code=d.get("code"),
+                code_output=d.get("code_output"),
+                code_error=d.get("code_error"),
+                saved_figure_filenames=d.get("saved_figure_filenames", []),
+                agent_reasoning=d.get("agent_reasoning"),
+            ))
+        # Store all restored records in supervision_log (flat, not split by rounds)
+        self.supervision_log = restored
+
     def get_supervision_log(self) -> List[Dict]:
         """Return serializable log of all rounds + current round."""
         all_records = []
@@ -429,6 +1000,7 @@ class SupervisorAgent:
                 ],
                 temperature=0.3,
                 max_tokens=32768,
+                timeout=900.0,  # 15 min — large narratives need long generation time
             )
             report_content = response.content or ""
         except Exception as e:
@@ -1160,10 +1732,16 @@ Format each section as:
 ## [section_id] Section Title
 Content...
 
-When referencing a figure, embed it inline using the marker: [FIGURE: exact_filename.png]
-Place the marker on its own line, immediately after the paragraph discussing that figure.
-Each figure should appear exactly once in the most relevant section.
-Do NOT create a separate figure appendix or figure descriptions section.
+When referencing a figure, use this exact format (each marker on its own line):
+[FIGURE: exact_filename.png]
+[FIGURE_CAPTION: A concise scientific caption (1-2 sentences) describing what this figure shows and key observations]
+
+When referencing a data table, use this exact format (each marker on its own line):
+[TABLE: exact_filename.csv]
+[TABLE_CAPTION: A concise scientific caption (1-2 sentences) describing key data in this table and its significance]
+
+Each figure and table should appear exactly once in the most relevant section.
+Do NOT create separate figure/table appendix or listing sections.
 
 IMPORTANT:
 - Write as a formal scientific research report, NOT a monitoring or system log.
@@ -1171,6 +1749,8 @@ IMPORTANT:
 - Innovation phase sections are CRITICAL — they contain the novel research findings and MUST be written in detail.
 - Reference specific figures, genes, pathways, cell types, statistical results, and quantitative findings.
 - Include ALL available figures — assign each figure to the most relevant section using [FIGURE: filename] markers.
+- Include ALL available tables — assign each table to the most relevant section using [TABLE: filename.csv] markers.
+- Every [FIGURE:] and [TABLE:] marker MUST be followed by its corresponding [FIGURE_CAPTION:] or [TABLE_CAPTION:] marker on the next line.
 """
         return prompt
 
@@ -1197,11 +1777,16 @@ IMPORTANT:
             end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
             section_content = content[start:end].strip()
 
+            analysis_type = (
+                "specific"
+                if section_id in _SPECIFIC_SECTION_IDS or section_id.startswith("innovation_")
+                else "general"
+            )
             sections.append({
                 "id": section_id,
                 "title": title,
                 "content": section_content,
-                "analysis_type": "general",
+                "analysis_type": analysis_type,
                 "description": "",
                 "figures": [],
                 "tables": [],
@@ -1353,9 +1938,13 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         # Build TOC
         toc_items = []
         for sec in sections:
+            a_type = sec.get("analysis_type", "general")
+            type_class = "general" if a_type == "general" else "specific"
+            type_label = "General" if a_type == "general" else "Specific"
             toc_items.append(
                 f'<li><a href="#{html_module.escape(sec["id"])}">'
-                f'{html_module.escape(sec["title"])}</a></li>'
+                f'{html_module.escape(sec["title"])}</a>'
+                f'<span class="section-type {type_class}">{type_label}</span></li>'
             )
 
         # Build publication figure description lookup
@@ -1371,43 +1960,147 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                         "interpretation": pf.interpretation or "",
                     }
 
-        def _build_figure_html(fig_name: str) -> str:
+        def _build_figure_html(fig_name: str, caption: str = "") -> str:
             """Build inline figure HTML block for a given figure filename."""
             fig_b64 = figure_b64_cache.get(fig_name, "")
             if not fig_b64:
                 return ""
             # Determine MIME type from extension
             mime = "image/jpeg" if fig_name.lower().endswith((".jpg", ".jpeg")) else "image/png"
-            # PDF download link
-            pdf_link = ""
+
+            # Figure description: prefer LLM caption, fallback to publication figures
+            fig_desc = pub_fig_descriptions.get(fig_name, {})
+            display_name = fig_desc.get("name", fig_name.replace("_", " ").rsplit(".", 1)[0].title())
+            description = fig_desc.get("description", "")
+            interpretation = caption or fig_desc.get("interpretation", "")
+
+            # Description paragraph
+            desc_html = ""
+            if description:
+                desc_html = f'<p><em>{html_module.escape(description)}</em></p>'
+
+            # Interpretation block
+            interp_html = ""
+            if interpretation:
+                interp_html = (
+                    f'<div class="figure-interpretation">'
+                    f'<strong>Interpretation</strong>'
+                    f'<p>{html_module.escape(interpretation)}</p>'
+                    f'</div>'
+                )
+
+            # Download buttons
             fig_path = figure_map.get(fig_name)
+            png_btn = (
+                f'<a href="figures/{html_module.escape(fig_name)}" '
+                f'download class="download-btn png">Download PNG</a>'
+            )
+            pdf_btn = ""
             if fig_path:
                 pdf_p = fig_path.with_suffix(".pdf")
                 if pdf_p.exists():
-                    dl_label = "Download PDF (High-Res)"
-                    pdf_link = (
+                    pdf_btn = (
                         f'<a href="figures/{html_module.escape(pdf_p.name)}" '
-                        f'class="download-link" download>{dl_label}</a>'
+                        f'download class="download-btn pdf">Download PDF</a>'
                     )
-            # Figure description from publication figures
-            fig_desc = pub_fig_descriptions.get(fig_name, {})
-            display_name = fig_desc.get("name", fig_name.replace("_", " ").rsplit(".", 1)[0].title())
-            interpretation = fig_desc.get("interpretation", "") or fig_desc.get("description", "")
-            meta_html = ""
-            if interpretation:
-                meta_html = f'<div class="figure-meta"><p>{html_module.escape(interpretation)}</p></div>'
+
             return f'''
-                <div class="figure-inline">
-                    <img src="data:{mime};base64,{fig_b64}"
-                         alt="{html_module.escape(fig_name)}"/>
-                    <div class="figure-name">{html_module.escape(display_name)}</div>
-                    {meta_html}
-                    <div>{pdf_link}</div>
+                <div class="figure-container">
+                    <div class="figure-image">
+                        <img src="data:{mime};base64,{fig_b64}"
+                             alt="{html_module.escape(fig_name)}"/>
+                    </div>
+                    <div class="figure-caption">
+                        <h4>{html_module.escape(display_name)}</h4>
+                        {desc_html}
+                        {interp_html}
+                        <div class="figure-actions">
+                            {png_btn}
+                            {pdf_btn}
+                        </div>
+                    </div>
                 </div>
             '''
 
         # Track which figures have been placed
         placed_figures: set = set()
+
+        # Build table lookup for inline embedding
+        table_lookup: Dict[str, Dict] = {}
+        for tbl in report.get("tables", []):
+            table_lookup[tbl["filename"]] = tbl
+        placed_tables: set = set()
+
+        def _build_table_html(tbl_filename: str, caption: str = "") -> str:
+            """Build inline table HTML block for a given CSV filename."""
+            tbl_info = table_lookup.get(tbl_filename)
+            if not tbl_info:
+                return ""
+            tbl_path = tbl_info.get("path", "")
+            if not tbl_path or not Path(tbl_path).exists():
+                return ""
+
+            display_name = tbl_info.get("name", tbl_filename.replace("_", " ").rsplit(".", 1)[0].title())
+            csv_url = url_quote(tbl_filename)
+
+            # Read preview data (up to 10 rows) from CSV
+            columns = tbl_info.get("columns", [])
+            total_rows = tbl_info.get("total_rows", 0)
+            preview_data = []
+            try:
+                import pandas as pd
+                df_preview = pd.read_csv(tbl_path, nrows=10)
+                columns = list(df_preview.columns)
+                preview_data = df_preview.to_dict('records')
+                if not total_rows:
+                    total_rows = sum(1 for _ in open(tbl_path)) - 1
+            except Exception:
+                logger.debug("Failed to read CSV preview for HTML table: %s", tbl_path)
+
+            if not columns:
+                return ""
+
+            table_header = "".join(
+                f"<th>{html_module.escape(str(col))}</th>" for col in columns
+            )
+            table_rows = ""
+            for row in preview_data[:10]:
+                row_cells = "".join(
+                    f"<td>{html_module.escape(str(row.get(col, '-')))}</td>" for col in columns
+                )
+                table_rows += f"<tr>{row_cells}</tr>"
+
+            row_info = ""
+            if total_rows > 10:
+                row_info = f'<div class="table-info">Showing 10 of {total_rows} rows</div>'
+
+            caption_html = ""
+            if caption:
+                caption_html = (
+                    f'<div class="table-interpretation">'
+                    f'<strong>Interpretation</strong>'
+                    f'<p>{html_module.escape(caption)}</p>'
+                    f'</div>'
+                )
+
+            return f'''
+                <div class="table-container">
+                    <div class="table-header">
+                        <h4>{html_module.escape(display_name)}</h4>
+                        <a href="tables/{csv_url}" download class="download-btn csv">
+                            Download CSV
+                        </a>
+                    </div>
+                    <div class="table-wrapper">
+                        <table>
+                            <thead><tr>{table_header}</tr></thead>
+                            <tbody>{table_rows}</tbody>
+                        </table>
+                    </div>
+                    {row_info}
+                    {caption_html}
+                </div>
+            '''
 
         # Build sections HTML with inline figure embedding
         sections_html = []
@@ -1415,19 +2108,39 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
             raw_content = sec.get("content", "")
             content_html = self._markdown_to_html(raw_content)
 
-            # Replace [FIGURE: filename] markers with inline figure HTML
+            # Replace [FIGURE: filename] + optional [FIGURE_CAPTION: ...] markers
             def _replace_figure_marker(m):
                 fname = m.group(1).strip()
-                fig_html = _build_figure_html(fname)
+                caption = (m.group(2) or "").strip() if m.lastindex >= 2 else ""
+                fig_html = _build_figure_html(fname, caption=caption)
                 if fig_html:
                     placed_figures.add(fname)
                     return fig_html
                 logger.warning(f"Figure referenced in report but not found: {fname}")
                 return f'<div class="figure-missing" style="color:#b91c1c;font-style:italic;margin:10px 0;">[Figure not found: {html_module.escape(fname)}]</div>'
 
+            # Match [FIGURE: name] optionally followed by [FIGURE_CAPTION: text]
             content_html = re.sub(
-                r'\[FIGURE:\s*([^\]]+)\]',
+                r'\[FIGURE:\s*([^\]]+)\](?:\s*(?:<[^>]*>\s*)*\[FIGURE_CAPTION:\s*([^\]]+)\])?',
                 _replace_figure_marker,
+                content_html,
+            )
+
+            # Replace [TABLE: filename] + optional [TABLE_CAPTION: ...] markers
+            def _replace_table_marker(m):
+                fname = m.group(1).strip()
+                caption = (m.group(2) or "").strip() if m.lastindex >= 2 else ""
+                tbl_html = _build_table_html(fname, caption=caption)
+                if tbl_html:
+                    placed_tables.add(fname)
+                    return tbl_html
+                logger.warning(f"Table referenced in report but not found: {fname}")
+                return f'<div class="table-missing" style="color:#b91c1c;font-style:italic;margin:10px 0;">[Table not found: {html_module.escape(fname)}]</div>'
+
+            # Match [TABLE: name] optionally followed by [TABLE_CAPTION: text]
+            content_html = re.sub(
+                r'\[TABLE:\s*([^\]]+)\](?:\s*(?:<[^>]*>\s*)*\[TABLE_CAPTION:\s*([^\]]+)\])?',
+                _replace_table_marker,
                 content_html,
             )
 
@@ -1442,11 +2155,34 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                         placed_figures.add(fig_name)
                         remaining_fig_parts.append(fig_html)
 
+            # Fallback: embed tables referenced by filename in text but without markers
+            remaining_tbl_parts = []
+            for tbl_filename in table_lookup:
+                if tbl_filename in placed_tables:
+                    continue
+                if tbl_filename.lower() in raw_content.lower():
+                    tbl_html = _build_table_html(tbl_filename)
+                    if tbl_html:
+                        placed_tables.add(tbl_filename)
+                        remaining_tbl_parts.append(tbl_html)
+
+            a_type = sec.get("analysis_type", "general")
+            type_class = "general" if a_type == "general" else "specific"
+            type_label = "General" if a_type == "general" else "Specific"
+
             sec_html = f'''
             <div class="section" id="{html_module.escape(sec["id"])}">
-                <h2>{html_module.escape(sec["title"])}</h2>
-                <div class="section-content">{content_html}</div>
-                {"".join(remaining_fig_parts)}
+                <div class="section-header">
+                    <h2>
+                        {html_module.escape(sec["title"])}
+                        <span class="analysis-type-badge {type_class}">{type_label}</span>
+                    </h2>
+                </div>
+                <div class="section-content">
+                    {content_html}
+                    {"".join(remaining_fig_parts)}
+                    {"".join(remaining_tbl_parts)}
+                </div>
             </div>
             '''
             sections_html.append(sec_html)
@@ -1458,84 +2194,79 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
             supp_figs = "".join(_build_figure_html(fn) for fn in unplaced)
             sections_html.append(f'''
             <div class="section" id="supplementary_figures">
-                <h2>{supp_title}</h2>
-                {supp_figs}
+                <div class="section-header">
+                    <h2>{supp_title}</h2>
+                </div>
+                <div class="section-content">
+                    {supp_figs}
+                </div>
             </div>
             ''')
 
+        # Append any unplaced tables as a supplementary section
+        unplaced_tables = [fn for fn in table_lookup if fn not in placed_tables]
+        if unplaced_tables:
+            supp_tbl_title = "Supplementary Data Tables"
+            supp_tbl_parts = []
+            for fn in unplaced_tables:
+                tbl_html = _build_table_html(fn)
+                if tbl_html:
+                    supp_tbl_parts.append(tbl_html)
+            if supp_tbl_parts:
+                sections_html.append(f'''
+                <div class="section" id="supplementary_tables">
+                    <div class="section-header">
+                        <h2>{supp_tbl_title}</h2>
+                    </div>
+                    <div class="section-content">
+                        <p>The following data tables were generated during analysis and are provided for download and reference.</p>
+                        {"".join(supp_tbl_parts)}
+                    </div>
+                </div>
+                ''')
+
         title = report.get("title", "Analysis Report")
 
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+
         html_content = f'''<!DOCTYPE html>
-<html lang="{"en"}">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{html_module.escape(title)}</title>
 <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-           max-width: 1000px; margin: 0 auto; padding: 20px; color: #333; line-height: 1.6; }}
-    h1 {{ color: #1a365d; border-bottom: 3px solid #2b6cb0; padding-bottom: 10px; }}
-    h2 {{ color: #2c5282; border-bottom: 1px solid #bee3f8; padding-bottom: 5px; margin-top: 2em; }}
-    .abstract {{ background: #ebf8ff; border-left: 4px solid #3182ce; padding: 15px 20px;
-                 margin: 20px 0; border-radius: 0 8px 8px 0; }}
-    .section {{ margin: 30px 0; }}
-    .section-content {{ margin: 10px 0; }}
-    .section-content p {{ margin: 8px 0; }}
-    .figure-inline {{ margin: 20px 0; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; background: #fafbfc; }}
-    .figure-inline img {{ max-width: 100%; height: auto; border-radius: 4px; }}
-    .figure-inline .figure-meta {{ margin-top: 10px; font-size: 0.95em; color: #4a5568; }}
-    .figure-inline .figure-name {{ font-weight: 600; margin-bottom: 4px; color: #2c5282; }}
-    .figure-inline .download-link {{ color: #3182ce; text-decoration: none; font-size: 0.9em; }}
-    .figure-inline .download-link:hover {{ text-decoration: underline; }}
-    .figure-container {{ text-align: center; margin: 20px 0; }}
-    .report-figure {{ max-width: 100%; height: auto; border: 1px solid #e2e8f0;
-                      border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-    .figure-caption {{ font-size: 0.9em; color: #718096; margin-top: 8px; }}
-    .download-link {{ color: #3182ce; text-decoration: none; margin-left: 10px;
-                      font-weight: 500; }}
-    .download-link:hover {{ text-decoration: underline; }}
-    pre {{ background: #f7fafc; border: 1px solid #e2e8f0; padding: 12px;
-           border-radius: 6px; overflow-x: auto; font-size: 0.9em; }}
-    code {{ background: #edf2f7; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
-    pre code {{ background: none; padding: 0; }}
-    .toc {{ background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px;
-             padding: 15px 20px 15px 40px; margin: 20px 0; }}
-    .toc li {{ margin: 5px 0; }}
-    .toc a {{ color: #2b6cb0; text-decoration: none; }}
-    .toc a:hover {{ text-decoration: underline; }}
-    .conclusions {{ background: #f0fff4; border-left: 4px solid #38a169; padding: 15px 20px;
-                    margin: 20px 0; border-radius: 0 8px 8px 0; }}
-    .footer {{ text-align: center; color: #a0aec0; font-size: 0.85em; margin-top: 40px;
-               padding-top: 20px; border-top: 1px solid #e2e8f0; }}
+{_REPORT_CSS}
 </style>
 </head>
 <body>
-<h1>{html_module.escape(title)}</h1>
+<div class="container">
+    <div class="header">
+        <h1>{html_module.escape(title)}</h1>
+        <div class="meta">Generated: {generated_at}</div>
+    </div>
+    <div class="content">
+        <div class="toc">
+            <h3>Table of Contents</h3>
+            <ul>{"".join(toc_items)}</ul>
+        </div>
 
-<div class="abstract">
-<h3>{"Abstract"}</h3>
-{self._markdown_to_html(abstract)}
-</div>
+        <div class="abstract">
+            <h2>Abstract</h2>
+            {self._markdown_to_html(abstract)}
+        </div>
 
-<div class="toc">
-<h3>{"Table of Contents"}</h3>
-<ol>{"".join(toc_items)}</ol>
-</div>
+        {"".join(sections_html)}
 
-{"".join(sections_html)}
+        <div class="conclusions">
+            <h2>Conclusions</h2>
+            {self._markdown_to_html(conclusions)}
+        </div>
 
-<div class="conclusions">
-<h3>{"Conclusions"}</h3>
-{self._markdown_to_html(conclusions)}
-</div>
+        {self._build_score_definitions_html(report)}
 
-{self._build_score_definitions_html(report)}
-
-{self._build_appendix_html_section(report)}
-
-<div class="footer">
-    {"Auto-generated by ScAI"}
-    &bull; {datetime.now().strftime("%Y-%m-%d %H:%M")}
+        {self._build_appendix_html_section(report)}
+    </div>
 </div>
 </body>
 </html>'''
@@ -1603,24 +2334,26 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                 <td>{html_module.escape(sd.get("score_name", ""))}</td>
                 <td><code>{html_module.escape(sd.get("method", ""))}</code></td>
                 <td>{html_module.escape(sd.get("description", ""))}</td>
-                <td style="font-size:0.85em">{params_str}</td>
-                <td style="font-size:0.85em">{genes}</td>
-                <td style="font-size:0.85em">{html_module.escape(sd.get("gene_list_source", "") or "N/A")}</td>
+                <td>{params_str}</td>
+                <td>{genes}</td>
+                <td>{html_module.escape(sd.get("gene_list_source", "") or "N/A")}</td>
             </tr>"""
         return f"""
-        <div class="section" id="score-definitions">
-            <h2>Score Definitions</h2>
+        <div class="score-definitions" id="score-definitions">
+            <div class="section-header">
+                <h2>Score Definitions</h2>
+            </div>
             <div class="section-content">
                 <p>The following scores were computed during the analysis. Each score's methodology is documented for transparency and reproducibility.</p>
-                <table style="width:100%; border-collapse:collapse; font-size:0.9em; margin-top:10px;">
+                <table>
                     <thead>
-                        <tr style="background:#f7fafc; border-bottom:2px solid #e2e8f0;">
-                            <th style="padding:8px; text-align:left;">Score Name</th>
-                            <th style="padding:8px; text-align:left;">Method</th>
-                            <th style="padding:8px; text-align:left;">Description</th>
-                            <th style="padding:8px; text-align:left;">Parameters</th>
-                            <th style="padding:8px; text-align:left;">Gene List</th>
-                            <th style="padding:8px; text-align:left;">Source</th>
+                        <tr>
+                            <th>Score Name</th>
+                            <th>Method</th>
+                            <th>Description</th>
+                            <th>Parameters</th>
+                            <th>Gene List</th>
+                            <th>Source</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1641,75 +2374,75 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         esc = html_module.escape
 
         parts = []
-        parts.append(f'<div class="section" id="appendix">')
-        parts.append(f'<h2>{"Appendix: Analysis Settings & Records"}</h2>')
+        parts.append('<div class="appendix" id="appendix">')
+        parts.append('<h2>Appendix: Analysis Settings &amp; Records</h2>')
 
         # Project Information
-        parts.append(f'<h3>{"Project Information"}</h3>')
-        parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-        parts.append(f'<tr><td style="padding:4px 8px;"><strong>{"Project Name"}</strong></td>'
-                     f'<td style="padding:4px 8px;">{esc(appendix.get("project_name", "-"))}</td></tr>')
+        parts.append('<h3>Project Information</h3>')
+        parts.append('<table>')
+        parts.append(f'<tr><td><strong>Project Name</strong></td>'
+                     f'<td>{esc(appendix.get("project_name", "-"))}</td></tr>')
         if appendix.get("created_at"):
-            parts.append(f'<tr><td style="padding:4px 8px;"><strong>{"Created At"}</strong></td>'
-                         f'<td style="padding:4px 8px;">{esc(appendix.get("created_at", "-"))}</td></tr>')
+            parts.append(f'<tr><td><strong>Created At</strong></td>'
+                         f'<td>{esc(appendix.get("created_at", "-"))}</td></tr>')
         if report.get("generated_at"):
-            parts.append(f'<tr><td style="padding:4px 8px;"><strong>{"Report Generated"}</strong></td>'
-                         f'<td style="padding:4px 8px;">{esc(report.get("generated_at", "-"))}</td></tr>')
+            parts.append(f'<tr><td><strong>Report Generated</strong></td>'
+                         f'<td>{esc(report.get("generated_at", "-"))}</td></tr>')
         parts.append('</table>')
 
         # Agent Configuration
         models = appendix.get("agent_models", {})
         temps = appendix.get("agent_temperatures", {})
         if models:
-            parts.append(f'<h3>{"Agent Configuration"}</h3>')
-            parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">Agent</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Model"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">Temperature</th></tr></thead><tbody>')
+            parts.append('<h3>Agent Configuration</h3>')
+            parts.append('<table>')
+            parts.append('<thead><tr><th>Agent</th>'
+                         '<th>Model</th>'
+                         '<th>Temperature</th></tr></thead><tbody>')
             for key in sorted(models.keys()):
-                parts.append(f'<tr><td style="padding:4px 8px;">{esc(key.title())}</td>'
-                             f'<td style="padding:4px 8px;font-family:monospace;font-size:0.9em;">{esc(str(models[key]))}</td>'
-                             f'<td style="padding:4px 8px;">{temps.get(key, "-")}</td></tr>')
+                parts.append(f'<tr><td>{esc(key.title())}</td>'
+                             f'<td><code>{esc(str(models[key]))}</code></td>'
+                             f'<td>{temps.get(key, "-")}</td></tr>')
             parts.append('</tbody></table>')
 
         # Data Files
         data_files = appendix.get("data_files", [])
         if data_files:
-            parts.append(f'<h3>{"Data Files"}</h3>')
-            parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Filename"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Type"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Section"}</th></tr></thead><tbody>')
+            parts.append('<h3>Data Files</h3>')
+            parts.append('<table>')
+            parts.append('<thead><tr><th>Filename</th>'
+                         '<th>Type</th>'
+                         '<th>Section</th></tr></thead><tbody>')
             for f in data_files:
-                parts.append(f'<tr><td style="padding:4px 8px;font-family:monospace;font-size:0.9em;">{esc(f.get("name", "-"))}</td>'
-                             f'<td style="padding:4px 8px;">{esc(f.get("type", "-"))}</td>'
-                             f'<td style="padding:4px 8px;">{esc(f.get("section", "-"))}</td></tr>')
+                parts.append(f'<tr><td><code>{esc(f.get("name", "-"))}</code></td>'
+                             f'<td>{esc(f.get("type", "-"))}</td>'
+                             f'<td>{esc(f.get("section", "-"))}</td></tr>')
             parts.append('</tbody></table>')
 
         # Treatment Groups
         groups = appendix.get("treatment_groups", [])
         if groups:
-            parts.append(f'<h3>{"Treatment Groups"}</h3>')
-            parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Group"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Description"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Samples"}</th></tr></thead><tbody>')
+            parts.append('<h3>Treatment Groups</h3>')
+            parts.append('<table>')
+            parts.append('<thead><tr><th>Group</th>'
+                         '<th>Description</th>'
+                         '<th>Samples</th></tr></thead><tbody>')
             for g in groups:
-                parts.append(f'<tr><td style="padding:4px 8px;">{esc(g.get("name", "-"))}</td>'
-                             f'<td style="padding:4px 8px;">{esc(g.get("description", "-"))}</td>'
-                             f'<td style="padding:4px 8px;">{g.get("sample_count", 0)}</td></tr>')
+                parts.append(f'<tr><td>{esc(g.get("name", "-"))}</td>'
+                             f'<td>{esc(g.get("description", "-"))}</td>'
+                             f'<td>{g.get("sample_count", 0)}</td></tr>')
             parts.append('</tbody></table>')
 
         # Analysis Rounds
         round_results = appendix.get("round_results", [])
         if round_results:
-            parts.append(f'<h3>{"Analysis Rounds"}</h3>')
-            parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-            parts.append(f'<thead><tr><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Round"}</th>'
-                         f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Findings"}</th></tr></thead><tbody>')
+            parts.append('<h3>Analysis Rounds</h3>')
+            parts.append('<table>')
+            parts.append('<thead><tr><th>Round</th>'
+                         '<th>Findings</th></tr></thead><tbody>')
             for rr in round_results:
-                parts.append(f'<tr><td style="padding:4px 8px;">{rr.get("round", "-")}</td>'
-                             f'<td style="padding:4px 8px;">{rr.get("findings_count", 0)}</td></tr>')
+                parts.append(f'<tr><td>{rr.get("round", "-")}</td>'
+                             f'<td>{rr.get("findings_count", 0)}</td></tr>')
             parts.append('</tbody></table>')
 
         # User Interaction History
@@ -1718,40 +2451,40 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         dir_selections = user_interactions.get("direction_selection", [])
 
         if cluster_anns or dir_selections:
-            parts.append(f'<h3>{"User Interaction History"}</h3>')
+            parts.append('<h3>User Interaction History</h3>')
 
             if cluster_anns:
-                parts.append(f'<h4>{"Cell Annotation Decisions"}</h4>')
-                parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-                parts.append(f'<thead><tr>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">Cluster</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Cell Type"}</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"User Override"}</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Confirmed"}</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Confidence"}</th>'
-                             f'</tr></thead><tbody>')
+                parts.append('<h4>Cell Annotation Decisions</h4>')
+                parts.append('<table>')
+                parts.append('<thead><tr>'
+                             '<th>Cluster</th>'
+                             '<th>Cell Type</th>'
+                             '<th>User Override</th>'
+                             '<th>Confirmed</th>'
+                             '<th>Confidence</th>'
+                             '</tr></thead><tbody>')
                 for ca in cluster_anns:
                     confirmed_icon = "✓" if ca.get("confirmed") else "-"
                     parts.append(
-                        f'<tr><td style="padding:4px 8px;">{esc(str(ca.get("cluster_id", "-")))}</td>'
-                        f'<td style="padding:4px 8px;">{esc(ca.get("cell_type", "-"))}</td>'
-                        f'<td style="padding:4px 8px;">{esc(ca.get("user_override", "-") or "-")}</td>'
-                        f'<td style="padding:4px 8px;">{confirmed_icon}</td>'
-                        f'<td style="padding:4px 8px;">{esc(ca.get("confidence", "-"))}</td></tr>'
+                        f'<tr><td>{esc(str(ca.get("cluster_id", "-")))}</td>'
+                        f'<td>{esc(ca.get("cell_type", "-"))}</td>'
+                        f'<td>{esc(ca.get("user_override", "-") or "-")}</td>'
+                        f'<td>{confirmed_icon}</td>'
+                        f'<td>{esc(ca.get("confidence", "-"))}</td></tr>'
                     )
                 parts.append('</tbody></table>')
 
             if dir_selections:
-                parts.append(f'<h4>{"Research Direction Selections"}</h4>')
-                parts.append('<table style="width:100%;border-collapse:collapse;margin-bottom:1em;">')
-                parts.append(f'<thead><tr>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"Direction"}</th>'
-                             f'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #e2e8f0;">{"User Notes"}</th>'
-                             f'</tr></thead><tbody>')
+                parts.append('<h4>Research Direction Selections</h4>')
+                parts.append('<table>')
+                parts.append('<thead><tr>'
+                             '<th>Direction</th>'
+                             '<th>User Notes</th>'
+                             '</tr></thead><tbody>')
                 for d in dir_selections:
                     parts.append(
-                        f'<tr><td style="padding:4px 8px;">{esc(d.get("direction", "-"))}</td>'
-                        f'<td style="padding:4px 8px;">{esc(d.get("notes", "-") or "-")}</td></tr>'
+                        f'<tr><td>{esc(d.get("direction", "-"))}</td>'
+                        f'<td>{esc(d.get("notes", "-") or "-")}</td></tr>'
                     )
                 parts.append('</tbody></table>')
 
@@ -1760,20 +2493,17 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         notebook = appendix.get("notebook_filename", "")
 
         if related or notebook:
-            parts.append(f'<h3>{"Related Reports & Downloads"}</h3>')
-            parts.append('<ul style="margin:10px 0;padding-left:20px;">')
+            parts.append('<h3>Related Reports &amp; Downloads</h3>')
+            parts.append('<ul>')
             if related.get("exploration_report"):
-                label = "Exploration Report"
-                parts.append(f'<li><a href="{esc(related["exploration_report"])}" download '
-                             f'style="color:#3182ce;">{label}</a></li>')
+                parts.append(f'<li><a href="{esc(related["exploration_report"])}" download>'
+                             f'Exploration Report</a></li>')
             if related.get("annotation_report"):
-                label = "Annotation Context Report"
-                parts.append(f'<li><a href="{esc(related["annotation_report"])}" download '
-                             f'style="color:#3182ce;">{label}</a></li>')
+                parts.append(f'<li><a href="{esc(related["annotation_report"])}" download>'
+                             f'Annotation Context Report</a></li>')
             if notebook:
-                label = "Analysis Notebook (.ipynb)"
-                parts.append(f'<li><a href="{esc(notebook)}" download '
-                             f'style="color:#3182ce;">{label}</a></li>')
+                parts.append(f'<li><a href="{esc(notebook)}" download>'
+                             f'Analysis Notebook (.ipynb)</a></li>')
             parts.append('</ul>')
 
         parts.append('</div>')

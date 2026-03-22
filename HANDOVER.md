@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.14.6
-**Last Updated**: 2026-03-21
+**Version**: 0.15.7
+**Last Updated**: 2026-03-22
 
 ## Project Overview
 
@@ -1413,6 +1413,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.15.7 | 2026-03-22 | Mandatory annotate_clusters enforcement before report_findings in exploration; smarter circuit breaker redirects to annotation; inline [TABLE:] markers in HTML reports; SupervisorAgent.restore_log_from_saved() + generate_detailed_report() replaces DetailedReportGenerator; sandbox allows locals(), os.system pip-install, importlib.reload; annotation confirmation decoupled from phase |
 | 0.14.5 | 2026-03-20 | directions_queue type mismatch fix (d.strip() → d.get("direction","").strip()), countdown timeout status reset to RUNNING + state sync, PI callback uses chat_without_history(), annotation callback tissue_summary field fix + already_confirmed, literature search fallback to objective/groups when no findings, multi-direction correlation by name not index, analysis_log capped at 2000 entries, skip_nodes injected into graph state on resume, JsonPlusSerializer explicit schema allowlist, figure review_status init "pending" not "approved", _db_conn=None after close, PI merge_strategy/cluster_comparison_strategy passed to bioinformatics, exploration per-cell-type figure requirement, PI English-only prompt |
 | 0.14.4 | 2026-03-17 | Project renamed InteSc→ScAI, directory restructure (intesc_data→data, intesc_dep→dep, intesc→scai), SCAI_DATA_DIR env var, configurable start.sh (--host/--port/--backport), GitHub repo renamed |
 | 0.14.3 | 2026-03-17 | JPG figure output (quality 85, optimized) replaces PNG for web; larger matplotlib fonts (title 16pt, labels 14pt, ticks 12pt); decoupler v2.x API (dc.op.* + dc.mt.ulm); gseapy lowercase organism; defensive empty-DataFrame guards; Harmony dimension-mismatch prevention; supervisor inline figure embedding ([FIGURE:] markers, stats bar removed, user interaction history in appendix, notebook download); painter retry logic (3 attempts, exponential backoff, skip 4xx); literature hashlib.md5 cache key; pathology image loaded once; frontend JPG MIME detection; WebSocket message merge race condition fix; chat stale closure fix; 100MB generic upload limit; stop handles GENERATING_REPORT; path traversal validation on HTML report endpoints; catch-all report file endpoint; async version lock (asyncio.Lock) |
@@ -1462,6 +1463,15 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.15.7 (2026-03-22)
+
+- **Mandatory exploration pipeline enforcement** (`bioinformatics_agent.py`): Added `annotation_completed` boolean tracker (initialized to `False`). `report_findings` now checks this flag in exploration phase and rejects the call with a `[REJECTED]` tool response if `annotate_clusters` has not yet been called, instructing the agent to complete `rank_genes_groups → annotate_clusters` first. `annotation_completed` is set to `True` when `annotate_clusters` tool call succeeds.
+- **Smarter circuit breaker in exploration phase** (`bioinformatics_agent.py`): When `consecutive_errors >= MAX_CONSECUTIVE_ERRORS` and the analysis is in exploration phase with annotation not yet done, the circuit breaker now sends a redirect message asking the agent to try a simpler approach (`sc.tl.rank_genes_groups` + `annotate_clusters`) rather than forcing a premature report. The original force-report behavior is preserved for all other cases.
+- **Inline table support in HTML reports** (`supervisor_agent.py`): `_build_table_html()` helper reads up to 10 rows from CSV files and renders them as styled HTML tables with a download button. Report renderer now replaces `[TABLE: filename]` (optionally followed by `[TABLE_CAPTION: text]`) markers inline. Any tables referenced in text but not yet placed are appended as a supplementary section at the end of the report.
+- **Supervision log restoration for report regeneration** (`supervisor_agent.py`, `main.py`): New `SupervisorAgent.restore_log_from_saved()` deserializes supervision records from a list of dicts (e.g., loaded from `report.json`), converting ISO timestamp strings back to `datetime` objects and populating `self.supervision_log`. `_generate_report_task` in `main.py` now instantiates `SupervisorAgent`, restores the log from `report.json` if present, then calls `supervisor.generate_detailed_report()`. `DetailedReportGenerator` path temporarily disabled (commented out).
+- **Sandbox safety refinements** (`sandbox.py`): `locals()` removed from `DANGEROUS_PATTERNS` — it is read-only and commonly used in data-science code. `os.system()` validation now checks whether ALL usages in the code are pip install commands (regex: `os.system\(["'](?:pip|pip3)\s+install`); if so, the block is skipped. `importlib.reload` added to the importlib safe-use allowlist alongside `import_module` and `util.find_spec`.
+- **Annotation confirmation decoupled from analysis phase** (`workflow.py`): The guard for triggering PI review and user confirmation of cluster annotations changed from `if state.analysis_phase == "exploration"` to `if not (state.annotation_state and state.annotation_state.confirmed)`, ensuring the confirmation dialog fires whenever annotations are pending regardless of the current phase.
 
 #### v0.14.6 (2026-03-21)
 

@@ -2999,7 +2999,8 @@ if __name__ == "__main__":
 
 # ============== Detailed Report Generation ==============
 
-from .report_generator import DetailedReportGenerator
+from .report_generator import DetailedReportGenerator  # TEMPORARILY DISABLED - kept for reference
+from .agents.supervisor_agent import SupervisorAgent
 
 
 def _sanitize_nan(obj):
@@ -3121,20 +3122,49 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     
     try:
         workspace_dir = str(get_session_workspace(session_id))
-        generator = DetailedReportGenerator(
+
+        # Use SupervisorAgent path for report generation
+        supervisor = SupervisorAgent(
             llm_client=llm_client,
-            pi_model=pi_model,
-            bio_model=bio_model,
+            model=pi_model,
+            session_id=session_id,
+        )
+
+        # Restore supervision log from previously saved report.json
+        report_json_path = Path(output_dir) / "report.json"
+        if report_json_path.exists():
+            try:
+                with open(report_json_path, encoding="utf-8") as f:
+                    saved_report = json.load(f)
+                saved_log = saved_report.get("analysis_log", [])
+                if saved_log:
+                    supervisor.restore_log_from_saved(saved_log)
+                    logger.info(f"Restored {len(saved_log)} supervision records from report.json")
+            except Exception as e:
+                logger.warning(f"Failed to restore supervision log from report.json: {e}")
+
+        report = await supervisor.generate_detailed_report(
+            analysis_state=state,
+            report_model=pi_model,
             output_dir=output_dir,
             workspace_dir=workspace_dir,
             progress_callback=progress_callback,
-            session_id=session_id
         )
-
-        # Generate report (sandbox is created internally)
-        report = await generator.generate_report(state)
         detailed_reports[session_id] = report
-        
+
+        # TEMPORARILY DISABLED - DetailedReportGenerator path
+        # generator = DetailedReportGenerator(
+        #     llm_client=llm_client,
+        #     pi_model=pi_model,
+        #     bio_model=bio_model,
+        #     output_dir=output_dir,
+        #     workspace_dir=workspace_dir,
+        #     progress_callback=progress_callback,
+        #     session_id=session_id
+        # )
+        # report = await generator.generate_report(state)
+        # detailed_reports[session_id] = report
+
         # Notify completion via WebSocket
         if session_id in report_websockets:
             try:

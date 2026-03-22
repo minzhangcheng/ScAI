@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.14.6
+**Version**: 0.15.7
 
 ## Core Features
 
@@ -330,6 +330,15 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.15.7 (2026-03-22)
+
+- **New: Mandatory exploration pipeline enforcement**: Bioinformatics Agent now enforces that `annotate_clusters` must be called before `report_findings` in the exploration phase; a new `annotation_completed` tracker blocks premature reporting; `report_findings` is rejected with a redirect message if annotation has not yet been performed
+- **Improvement: Smarter circuit breaker in exploration phase**: Consecutive errors in exploration now redirect the agent toward mandatory annotation steps (e.g., `rank_genes_groups` → `annotate_clusters`) instead of forcing a premature report
+- **New: Inline table support in HTML reports**: Supervisor Agent HTML report now supports `[TABLE: filename]` markers, embedding CSV data as styled inline tables with row preview and a download button
+- **New: Supervision log restoration for report regeneration**: `SupervisorAgent.restore_log_from_saved()` restores the supervision log from a prior `report.json`, enabling accurate report regeneration without re-running analysis; report generation in `_generate_report_task` now uses `SupervisorAgent.generate_detailed_report()` directly
+- **Improvement: Sandbox safety refinements**: `locals()` removed from blocked patterns (it is read-only and commonly used in data-science code); `os.system()` is now allowed when exclusively used for pip install commands; `importlib.reload` added to the importlib allowlist
+- **Improvement: Annotation confirmation decoupled from analysis phase**: PI review and user confirmation for cluster annotation are now triggered by `annotation_state.confirmed` rather than checking `analysis_phase == "exploration"`, correctly handling annotation re-confirmation in non-exploration contexts
 
 ### v0.14.6 (2026-03-21)
 

@@ -48,7 +48,7 @@ DANGEROUS_PATTERNS = [
     (r'\b__subclasses__\s*\(', '__subclasses__ access'),
     # globals() and getattr-with-dunder are commonly used by scanpy/anndata
     # and pose no additional risk in an already-isolated Jupyter kernel.
-    (r'\blocals\s*\(\s*\)', 'locals() function'),
+    # locals() is read-only (same as globals()) and commonly used in data-science code.
     (r'\bsetattr\s*\([^,]+,\s*["\']__', 'setattr with dunder'),
     (r'\bdelattr\s*\([^,]+,\s*["\']__', 'delattr with dunder'),
     (r'\bvars\s*\(\s*\)', 'vars() function'),
@@ -108,6 +108,15 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
     """
     for pattern, description in DANGEROUS_PATTERNS:
         if re.search(pattern, code):
+            # Allow os.system when ALL usages are pip install commands
+            if 'os.system' in description:
+                os_system_lines = [
+                    line.strip() for line in code.splitlines()
+                    if re.search(r'\bos\.system\b', line)
+                ]
+                pip_pattern = r'os\.system\s*\(\s*["\'](?:pip|pip3)\s+install'
+                if os_system_lines and all(re.search(pip_pattern, line) for line in os_system_lines):
+                    continue
             # Allow subprocess when ALL usages are pip install commands
             if 'subprocess' in description:
                 subprocess_lines = [
@@ -132,7 +141,7 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
                 # Block dangerous submodules: importlib.machinery, importlib.abc, etc.
                 safe_import_pattern = r'^import\s+importlib\s*$'
                 safe_from_pattern = r'^from\s+importlib(?:\.util)?\s+import\s+'
-                safe_use_pattern = r'importlib\.(?:import_module|util\.find_spec)\s*\('
+                safe_use_pattern = r'importlib\.(?:import_module|util\.find_spec|reload)\s*\('
                 if all(
                     re.match(safe_import_pattern, line)
                     or re.match(safe_from_pattern, line)

@@ -594,7 +594,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
     ) -> Dict[str, Any]:
         """Callback for bioinformatics agent to annotate all clusters via literature.
 
-        In the exploration phase, this callback additionally:
+        When annotations have not yet been confirmed by the user, this callback additionally:
         1. Has PI Agent review annotations and assign confidence scores
         2. Blocks execution until the user confirms annotations via frontend
         """
@@ -655,8 +655,8 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 AgentType.LITERATURE
             )
 
-            # --- PI review + user confirmation (exploration phase only) ---
-            if state.analysis_phase == "exploration":
+            # --- PI review + user confirmation (if not already confirmed) ---
+            if not (state.annotation_state and state.annotation_state.confirmed):
                 # Supplement key_markers with top markers from rank_genes_groups
                 # so PI and user can judge cell types with at least 10 genes
                 for cid, info in annotations.items():
@@ -1571,7 +1571,7 @@ PI's analysis goals for this round:
 
 This is Round {analysis_state.current_round}. The Jupyter kernel retains all variables from previous rounds.
 Focus on PI's specific goals above — do NOT re-run completed steps (QC, clustering, cell annotation, etc.).
-Report key findings when you complete each major analysis phase."""
+Call report_findings ONLY after completing ALL assigned tasks above."""
 
         await self._send_message("prompt", instruction, AgentType.PI)
         
