@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.15.7
-**Last Updated**: 2026-03-22
+**Version**: 0.15.8
+**Last Updated**: 2026-03-23
 
 ## Project Overview
 
@@ -1413,6 +1413,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.15.8 | 2026-03-23 | Figure save path tracking (set→dict, auto PDF for manual saves, revision counter after success); supervisor feedback deduplication (_recent_rule_feedback_hashes); _alt_ext_name() .png↔.jpg fallback; dynamic download button extension labels; report_generator unified .jpg default + stem-based PDF path; WebSocket send-failure log downgraded to debug; PromptsPanel Vision requirement clarifications |
 | 0.15.7 | 2026-03-22 | Mandatory annotate_clusters enforcement before report_findings in exploration; smarter circuit breaker redirects to annotation; inline [TABLE:] markers in HTML reports; SupervisorAgent.restore_log_from_saved() + generate_detailed_report() replaces DetailedReportGenerator; sandbox allows locals(), os.system pip-install, importlib.reload; annotation confirmation decoupled from phase |
 | 0.14.5 | 2026-03-20 | directions_queue type mismatch fix (d.strip() → d.get("direction","").strip()), countdown timeout status reset to RUNNING + state sync, PI callback uses chat_without_history(), annotation callback tissue_summary field fix + already_confirmed, literature search fallback to objective/groups when no findings, multi-direction correlation by name not index, analysis_log capped at 2000 entries, skip_nodes injected into graph state on resume, JsonPlusSerializer explicit schema allowlist, figure review_status init "pending" not "approved", _db_conn=None after close, PI merge_strategy/cluster_comparison_strategy passed to bioinformatics, exploration per-cell-type figure requirement, PI English-only prompt |
 | 0.14.4 | 2026-03-17 | Project renamed InteSc→ScAI, directory restructure (intesc_data→data, intesc_dep→dep, intesc→scai), SCAI_DATA_DIR env var, configurable start.sh (--host/--port/--backport), GitHub repo renamed |
@@ -1463,6 +1464,16 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.15.8 (2026-03-23)
+
+- **Figure save path tracking** (`bioinformatics_agent.py`): `_explicitly_saved_figs` changed from `set` to `dict` mapping figure names to full file paths. `_tracking_savefig` now captures the resolved path on each `savefig` call. After saving, if no companion PDF exists, one is auto-generated at 600 dpi preserving the original layout. Revision counter (`_figure_revision_count`) is incremented only after revised code executes successfully, preventing inflated counts on failed attempts.
+- **Supervisor feedback deduplication** (`supervisor_agent.py`): New `_recent_rule_feedback_hashes` set stores SHA hashes of rule-based feedback messages. Before sending feedback, a hash is computed; if already present the message is suppressed. The set is cleared alongside `_recent_error_hashes` when the error stream resets, giving fresh deduplication context for the next analysis segment.
+- **Figure extension fallback** (`supervisor_agent.py` new `_alt_ext_name()`): When a figure lookup fails, `_alt_ext_name()` returns the alternate common extension (`.png` → `.jpg`, `.jpg`/`.jpeg` → `.png`). The caller retries with the alternate path before reporting a missing figure.
+- **Dynamic download button labels** (`supervisor_agent.py`, `report_generator.py`): Download buttons for figures now extract the actual file extension from the filename and display it in uppercase (e.g., "JPG", "PNG") instead of a hardcoded "PNG" label. Consistent across supervisor HTML reports and report generator output.
+- **Unified `.jpg` default in report generator** (`report_generator.py`): JSON schema examples and LLM prompt guidance updated to use `.jpg` as the default figure extension, matching actual pipeline output. PDF companion path is now derived using `Path(fig).stem + ".pdf"` for correct handling of any source extension.
+- **WebSocket log noise reduced** (`main.py`): `_safe_send_ws()` send failures are now logged at `debug` level (was `exception`) with a message indicating normal connection-close, reducing log noise during routine disconnects.
+- **Model recommendation updates** (`PromptsPanel.tsx`): PI Agent description now notes Vision capability is required for figure quality review. Bioinformatics Agent description explicitly states Vision is required for figure revision and removes outdated model name. Supervisor Agent description emphasizes Vision capability for real-time monitoring and labels it as a lightweight real-time component.
 
 #### v0.15.7 (2026-03-22)
 

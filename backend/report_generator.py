@@ -2387,7 +2387,7 @@ Return a JSON object with this structure:
     "methodology_overview": "200-300 word overview of ALL methods, parameters, and tools used across the entire analysis pipeline, from raw data processing to final results",
     "workflow_summary": "Step-by-step workflow as a numbered list, from raw data to final results. Include specific methods and parameters at each step.",
     "key_results": "All key quantitative results discovered: cell counts before/after filtering, number of clusters, cell types identified, significant genes found, key pathways, etc.",
-    "figure_descriptions": {{"filename.png": "Description of what this figure shows based on visual inspection"}},
+    "figure_descriptions": {{"filename.jpg": "Description of what this figure shows based on visual inspection"}},
     "parameters_used": {{"parameter_name": "value and brief rationale"}}
 }}
 
@@ -2516,7 +2516,7 @@ Return a JSON object with this exact structure:
     "analysis_results": "All key quantitative findings. Include: cell counts before/after filtering, number of clusters identified, cell types annotated, number of significant DEGs found, key pathways enriched, and any other quantitative results. Be specific with numbers.",
 
     "figure_descriptions": {{
-        "filename.png": "Description of what this figure actually shows visually and its scientific significance (50-100 words per figure)"
+        "filename.jpg": "Description of what this figure actually shows visually and its scientific significance (50-100 words per figure)"
     }},
 
     "parameters_used": {{
@@ -3265,7 +3265,7 @@ Return a COMPACT JSON (keep it short to avoid truncation):
             "title": "Section Title",
             "description": "Brief description of what this section covers (1 sentence)",
             "analysis_type": "general",
-            "existing_figures": [{{"filename": "exact_filename.png"}}],
+            "existing_figures": [{{"filename": "exact_filename.jpg"}}],
             "existing_tables": [{{"filename": "exact_filename.csv"}}]
         }}
     ]
@@ -3284,6 +3284,7 @@ Then create sections in this EXACT order.
 ### CRITICAL RULES:
 - Include ALL {len(existing_figures)} figures — assign every figure to a section by EXACT filename
 - Include ALL {len(existing_tables)} tables — assign every table to a section by EXACT filename
+- ONLY use filenames from the "Available Figures" and "Available Tables" lists above. Do NOT invent or guess filenames
 - Each major analysis step gets its OWN section (sub-clustering, CCC, metabolic analysis, etc.)
 - Do NOT merge unrelated analyses into a single section
 - Keep descriptions brief (1 sentence) — detailed narratives will be written separately
@@ -3485,7 +3486,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 {{
     "narrative": "A detailed scientific narrative (300-500 words) that:
         - Introduces the purpose of this analysis step
-        - References each figure by filename (e.g., 'As shown in umap_cell_types.png...')
+        - References each figure by its EXACT filename from the list above (e.g., 'As shown in umap_cell_types.jpg...')
         - Explains the methodology used with specific methods and parameters
         - Presents the key observations with quantitative details
         - Discusses the biological significance
@@ -3493,7 +3494,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 
     "figures": [
         {{
-            "filename": "exact_filename.png",
+            "filename": "exact_filename.jpg",
             "caption": "Detailed figure caption (50-100 words) — describe what the figure actually shows",
             "interpretation": "Scientific interpretation (100-200 words)"
         }}
@@ -3558,7 +3559,8 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 
                     pdf_path = fig.get("pdf_path")
                     if not pdf_path and filename:
-                        candidate = self.figures_dir / filename.replace(".png", ".pdf")
+                        stem = Path(filename).stem
+                        candidate = self.figures_dir / f"{stem}.pdf"
                         if candidate.exists():
                             pdf_path = str(candidate)
 
@@ -4208,6 +4210,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
 
                 png_filename = url_quote(os.path.basename(png_path)) if png_path else ""
                 pdf_filename = url_quote(os.path.basename(pdf_path)) if pdf_path else ""
+                img_ext = os.path.splitext(png_path)[1].lstrip('.').upper() if png_path else "JPG"
 
                 # Check if image file exists
                 image_exists = png_path and os.path.exists(png_path)
@@ -4249,7 +4252,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                             {interpretation_section}
                             <div class="figure-actions">
                                 <a href="figures/{png_filename}" download class="download-btn png">
-                                    {"Download PNG"}
+                                    Download {img_ext}
                                 </a>
                                 {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("Download PDF (High-Res)") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
                             </div>
@@ -4342,6 +4345,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 pdf_path = fig_info["pdf_path"]
                 png_filename = url_quote(os.path.basename(png_path))
                 pdf_filename = url_quote(os.path.basename(pdf_path)) if pdf_path else ""
+                img_ext = os.path.splitext(png_path)[1].lstrip('.').upper() if png_path else "JPG"
 
                 img_src = compress_image_to_base64(png_path, max_width=900, quality=85) if os.path.exists(png_path) else ""
                 img_tag = f"<img src='{img_src}' alt='{html_module.escape(fig_name)}' />" if img_src else ("<p>" + ("Image not available") + "</p>")
@@ -4355,7 +4359,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                             <h4>{"Supp. Fig."} {idx}: {html_module.escape(fig_name)}</h4>
                             <div class="figure-actions">
                                 <a href="figures/{png_filename}" download class="download-btn png">
-                                    {"Download PNG"}
+                                    Download {img_ext}
                                 </a>
                                 {"<a href='figures/" + pdf_filename + "' download class='download-btn pdf'>" + ("Download PDF (High-Res)") + "</a>" if pdf_path and os.path.exists(pdf_path) else ""}
                             </div>

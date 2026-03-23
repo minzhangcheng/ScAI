@@ -2769,7 +2769,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             except Exception as e:
                 # Mark as closed to prevent further attempts
                 ws_closed = True
-                logger.exception(f"[{session_id}] Failed to send WS message, marking as closed")
+                logger.debug(f"[{session_id}] WebSocket closed during send, marking as closed: {e}")
 
     # Helper to safely send JSON
     async def safe_send(data: dict):

@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.15.7
+**Version**: 0.15.8
 
 ## Core Features
 
@@ -330,6 +330,16 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.15.8 (2026-03-23)
+
+- **Improvement: Figure save path tracking** (`bioinformatics_agent.py`): `_explicitly_saved_figs` changed from a set to a dict that records full file paths of user-saved figures; auto-generates companion PDF at 600 dpi for figures saved manually by the agent; revision counter is now incremented only after revised code executes successfully
+- **Improvement: Supervisor feedback deduplication** (`supervisor_agent.py`): New `_recent_rule_feedback_hashes` set prevents the same rule-based feedback message from being sent repeatedly; the cache is cleared when the error stream resets
+- **Improvement: Figure extension fallback** (`supervisor_agent.py`): New `_alt_ext_name()` helper automatically retries with an alternate extension (`.png` ↔ `.jpg`/`.jpeg`) when a requested figure file is not found
+- **Improvement: Dynamic download button labels** (`supervisor_agent.py`, `report_generator.py`): Figure download buttons now display the actual file extension (JPG, PNG, etc.) instead of a hardcoded "PNG" label
+- **Improvement: Unified `.jpg` default in report generator** (`report_generator.py`): JSON examples and prompt guidance updated to use `.jpg` as the default figure extension; PDF path generation now uses file stem for correct handling of any extension
+- **Improvement: WebSocket log noise reduced** (`main.py`): WebSocket send-failure events downgraded from `exception` to `debug` log level to reduce noise in normal connection-close scenarios
+- **Improvement: Model recommendation updates** (`PromptsPanel.tsx`): Clarified Vision capability requirements for PI Agent (figure quality review), Bioinformatics Agent (figure revision), and Supervisor Agent (real-time visual monitoring); removed outdated model name references
 
 ### v0.15.7 (2026-03-22)
 

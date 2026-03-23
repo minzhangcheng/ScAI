@@ -698,6 +698,7 @@ class SupervisorAgent:
         self._step_count: int = 0
         self._recent_errors: List[str] = []
         self._pi_question_hashes: set = set()  # De-duplicate PI escalations
+        self._recent_rule_feedback_hashes: set = set()  # De-duplicate rule-based feedback
 
         # All rounds archive
         self.all_rounds_log: List[List[SupervisorRecord]] = []
@@ -745,7 +746,12 @@ class SupervisorAgent:
         rule_issues = self._rule_check(step)
         if rule_issues:
             record.technical_issues.extend(rule_issues)
-            feedback_parts.extend(rule_issues)
+            # De-duplicate rule feedback to avoid repeating the same message
+            for issue in rule_issues:
+                issue_hash = hash(issue[:100])
+                if issue_hash not in self._recent_rule_feedback_hashes:
+                    feedback_parts.append(issue)
+                    self._recent_rule_feedback_hashes.add(issue_hash)
 
         # Phase 2: LLM evaluation (sampled to reduce cost)
         # Only invoke LLM on steps that are likely to need it
@@ -1159,9 +1165,10 @@ class SupervisorAgent:
                         "or skip this analysis step."
                     )
         else:
-            # Reset error streak on success
+            # Reset error streak and feedback dedup on success
             if self._recent_errors:
                 self._recent_errors = []
+                self._recent_rule_feedback_hashes.clear()
 
         # Check output patterns
         if step.code_output:
@@ -1732,8 +1739,9 @@ Format each section as:
 ## [section_id] Section Title
 Content...
 
-When referencing a figure, use this exact format (each marker on its own line):
-[FIGURE: exact_filename.png]
+When referencing a figure, use this exact format (each marker on its own line).
+IMPORTANT: Use the EXACT filename from the Available Figures list above (including the correct extension — most are .jpg, NOT .png):
+[FIGURE: exact_filename_from_list_above.jpg]
 [FIGURE_CAPTION: A concise scientific caption (1-2 sentences) describing what this figure shows and key observations]
 
 When referencing a data table, use this exact format (each marker on its own line):
@@ -1960,9 +1968,24 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                         "interpretation": pf.interpretation or "",
                     }
 
+        def _alt_ext_name(name: str) -> str:
+            """Return filename with alternate image extension (.png↔.jpg/.jpeg)."""
+            stem, ext = os.path.splitext(name)
+            lower_ext = ext.lower()
+            if lower_ext in (".jpg", ".jpeg"):
+                return stem + ".png"
+            return stem + ".jpg"
+
         def _build_figure_html(fig_name: str, caption: str = "") -> str:
             """Build inline figure HTML block for a given figure filename."""
             fig_b64 = figure_b64_cache.get(fig_name, "")
+            # Fallback: try alternate extension (.png ↔ .jpg/.jpeg) if exact name not found
+            if not fig_b64:
+                alt_name = _alt_ext_name(fig_name)
+                fig_b64 = figure_b64_cache.get(alt_name, "")
+                if fig_b64:
+                    logger.info(f"Figure extension fallback: '{fig_name}' → '{alt_name}'")
+                    fig_name = alt_name
             if not fig_b64:
                 return ""
             # Determine MIME type from extension
@@ -1989,11 +2012,12 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                     f'</div>'
                 )
 
-            # Download buttons
-            fig_path = figure_map.get(fig_name)
-            png_btn = (
+            # Download buttons — label matches actual file extension
+            fig_path = figure_map.get(fig_name) or figure_map.get(_alt_ext_name(fig_name))
+            img_ext = os.path.splitext(fig_name)[1].lstrip('.').upper() or "PNG"
+            img_btn = (
                 f'<a href="figures/{html_module.escape(fig_name)}" '
-                f'download class="download-btn png">Download PNG</a>'
+                f'download class="download-btn png">Download {img_ext}</a>'
             )
             pdf_btn = ""
             if fig_path:
@@ -2015,7 +2039,7 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                         {desc_html}
                         {interp_html}
                         <div class="figure-actions">
-                            {png_btn}
+                            {img_btn}
                             {pdf_btn}
                         </div>
                     </div>

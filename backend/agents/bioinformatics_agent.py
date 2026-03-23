@@ -1017,12 +1017,14 @@ plt.rcParams.update({{
 _figures_dir = Path({figures_dir_repr})
 _figures_dir.mkdir(exist_ok=True)
 
-# Track figures explicitly saved by user code to avoid duplicate saves
-_explicitly_saved_figs = set()
+# Track figures explicitly saved by user code: map fig_number → list of saved paths
+_explicitly_saved_figs = {{}}
 _prev_fig_savefig = _mpl_figure.Figure.savefig
-def _tracking_savefig(self, *_a, **_kw):
-    _explicitly_saved_figs.add(self.number)
-    return _prev_fig_savefig(self, *_a, **_kw)
+def _tracking_savefig(self, fname=None, *_a, **_kw):
+    _explicitly_saved_figs.setdefault(self.number, [])
+    if fname is not None:
+        _explicitly_saved_figs[self.number].append(str(fname))
+    return _prev_fig_savefig(self, fname, *_a, **_kw)
 _mpl_figure.Figure.savefig = _tracking_savefig
 
 # Temporarily disable plt.close/plt.show to keep figures alive for auto-save
@@ -1048,12 +1050,25 @@ for _fig_num in _fig_nums:
         # Display figure to trigger capture via display_data message (always)
         display(_fig)
 
-        # Skip file saving for figures already saved by user code
+        _fig_id = f"fig_{timestamp}_{{_fig_num}}"
+
+        # For figures already saved by user code, skip JPG but supplement PDF if missing
         if _fig_num in _explicitly_saved_figs:
-            print(f"[Auto-save] Skipped figure {{_fig_num}} (already saved by code)")
+            _saved_paths = _explicitly_saved_figs[_fig_num]
+            _has_pdf = any(_p.lower().endswith('.pdf') for _p in _saved_paths)
+            if not _has_pdf and _saved_paths:
+                # Derive PDF path from the first saved image path
+                _src_path = Path(_saved_paths[0])
+                _pdf_supplement = _src_path.with_suffix('.pdf')
+                try:
+                    _fig.savefig(str(_pdf_supplement), dpi=300, bbox_inches='tight', format='pdf')
+                    print(f"[Auto-save] Supplemented PDF: {{_pdf_supplement}}")
+                except Exception as _pdf_err:
+                    print(f"[Auto-save] Warning: could not supplement PDF: {{_pdf_err}}")
+            else:
+                print(f"[Auto-save] Skipped figure {{_fig_num}} (already saved by code with PDF)")
             continue
 
-        _fig_id = f"fig_{timestamp}_{{_fig_num}}"
         _jpg_path = _figures_dir / f"{{_fig_id}}.jpg"
         _pdf_path = _figures_dir / f"{{_fig_id}}.pdf"
 
@@ -1923,24 +1938,29 @@ plt.close('all')
 
                 figure.pi_feedback = feedback
                 figure.revision_history = revision_history
+
+                if revision_count >= 3:
+                    # Out of revision budget
+                    break
+
+                # Try to revise the figure
+                await self._notify("status", f"Revising figure based on PI feedback...")
+                logger.info(f"[Bioinformatics] Revising figure {figure_name}: {feedback}")
+
+                # Generate revised code with full revision history
+                try:
+                    revised_code = await self._revise_figure_code(
+                        current_code, feedback, suggestions, must_fix, figure_type, state, figure.png_base64,
+                        revision_history=revision_history
+                    )
+                except Exception as revise_err:
+                    logger.error(f"[Bioinformatics] _revise_figure_code failed: {revise_err}, keeping current version")
+                    await self._notify("status", f"Figure revision failed ({revise_err}), keeping current version")
+                    break
+
+                # Only increment revision count after successful code generation
                 revision_count += 1
                 figure.revision_count = revision_count
-
-                if revision_count <= 3:
-                    # Try to revise the figure
-                    await self._notify("status", f"Revising figure based on PI feedback...")
-                    logger.info(f"[Bioinformatics] Revising figure {figure_name}: {feedback}")
-
-                    # Generate revised code with full revision history
-                    try:
-                        revised_code = await self._revise_figure_code(
-                            current_code, feedback, suggestions, must_fix, figure_type, state, figure.png_base64,
-                            revision_history=revision_history
-                        )
-                    except Exception as revise_err:
-                        logger.error(f"[Bioinformatics] _revise_figure_code failed: {revise_err}, keeping current version")
-                        await self._notify("status", f"Figure revision failed ({revise_err}), keeping current version")
-                        break
 
                     # Validate revised code before execution
                     is_valid, error_msg = self._validate_code(revised_code)
