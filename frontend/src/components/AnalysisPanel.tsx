@@ -45,7 +45,7 @@ export interface RoundSummary {
 export function AnalysisPanel() {
   const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors, readMode, addMessage } = useAppStore()
   const { startAnalysis, resumeAnalysis, continueRound, pauseAnalysis, stopAnalysis } = useSession()
-  const { checkStatus, validateApiKey } = useConfig()
+  const { checkStatus, validateApiKey, saveConfig } = useConfig()
   const { t } = useTranslation(language)
 
   // Round results state
@@ -283,12 +283,22 @@ export function AnalysisPanel() {
     try {
       // Step 1: Check if API key exists at all
       const { apiConfig } = useAppStore.getState()
-      const status = await checkStatus()
-      if (!status.configured || !apiConfig.apiKey) {
-        if (showConfigPanel) {
-          showConfigPanel()
-        }
+
+      // If frontend has no API key, show config panel
+      if (!apiConfig.apiKey) {
+        if (showConfigPanel) showConfigPanel()
         return
+      }
+
+      // Check backend config status; if not configured, auto-sync from frontend
+      let status = await checkStatus()
+      if (!status.configured) {
+        try {
+          await saveConfig()
+          status = await checkStatus()
+        } catch (e) {
+          console.warn('[ScAI] Auto-sync config failed:', e)
+        }
       }
 
       // Step 2: Validate the API key via actual API call

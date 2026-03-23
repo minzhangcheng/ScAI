@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.15.8
+**Version**: 0.15.9
 **Last Updated**: 2026-03-23
 
 ## Project Overview
@@ -1413,6 +1413,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.15.9 | 2026-03-23 | Bioinformatics figure revision loop indentation fix (code blocks erroneously nested one level deep); frontend auto-sync API config from localStorage to backend on startup and before analysis start; checkStatus error logging |
 | 0.15.8 | 2026-03-23 | Figure save path tracking (set→dict, auto PDF for manual saves, revision counter after success); supervisor feedback deduplication (_recent_rule_feedback_hashes); _alt_ext_name() .png↔.jpg fallback; dynamic download button extension labels; report_generator unified .jpg default + stem-based PDF path; WebSocket send-failure log downgraded to debug; PromptsPanel Vision requirement clarifications |
 | 0.15.7 | 2026-03-22 | Mandatory annotate_clusters enforcement before report_findings in exploration; smarter circuit breaker redirects to annotation; inline [TABLE:] markers in HTML reports; SupervisorAgent.restore_log_from_saved() + generate_detailed_report() replaces DetailedReportGenerator; sandbox allows locals(), os.system pip-install, importlib.reload; annotation confirmation decoupled from phase |
 | 0.14.5 | 2026-03-20 | directions_queue type mismatch fix (d.strip() → d.get("direction","").strip()), countdown timeout status reset to RUNNING + state sync, PI callback uses chat_without_history(), annotation callback tissue_summary field fix + already_confirmed, literature search fallback to objective/groups when no findings, multi-direction correlation by name not index, analysis_log capped at 2000 entries, skip_nodes injected into graph state on resume, JsonPlusSerializer explicit schema allowlist, figure review_status init "pending" not "approved", _db_conn=None after close, PI merge_strategy/cluster_comparison_strategy passed to bioinformatics, exploration per-cell-type figure requirement, PI English-only prompt |
@@ -1464,6 +1465,13 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.15.9 (2026-03-23)
+
+- **Figure revision loop indentation fix** (`bioinformatics_agent.py`): Code blocks for `_validate_code`, sandbox `execute()`, and auto-retry logic in the figure revision loop were indented one level too deep — erroneously nested inside a non-existent block. Corrected indentation aligns these blocks directly under the `while` loop iteration, restoring correct Python scope and execution flow.
+- **Auto-sync API config on startup** (`App.tsx`): On startup, if `checkStatus()` reports the backend is not configured but the frontend `apiConfig.apiKey` is non-empty (saved in localStorage), the app automatically calls `saveConfig()` and sets `configured = true` without showing the config panel. A warning is logged if auto-sync fails and the normal config panel flow proceeds.
+- **Auto-sync API config before analysis** (`AnalysisPanel.tsx`): Before starting an analysis, the config-check logic is split into two cases: missing `apiConfig.apiKey` on the frontend immediately shows the config panel; a backend `not configured` status triggers a silent `saveConfig()` + `checkStatus()` retry, preventing unnecessary config panel interruptions after a backend restart.
+- **Config status check error logging** (`useApi.ts`): The `catch` block in `checkStatus()` now logs a `console.warn` with the caught error instead of silently returning `{ configured: false, has_api_key: false }`.
 
 #### v0.15.8 (2026-03-23)
 

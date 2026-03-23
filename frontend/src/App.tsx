@@ -31,7 +31,7 @@ import {
 
 function App() {
   const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, chatDelegationActive } = useAppStore()
-  const { checkStatus } = useConfig()
+  const { checkStatus, saveConfig } = useConfig()
   const { connect, disconnect, connected } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
@@ -81,15 +81,26 @@ function App() {
     }
   }, [isResizing, handleMouseMove, handleMouseUp])
 
-  // Check API config status
+  // Check API config status; auto-sync from localStorage if backend lost config
   useEffect(() => {
-    checkStatus().then((status) => {
-      setConfigured(status.configured)
+    checkStatus().then(async (status) => {
       if (!status.configured) {
+        const { apiConfig } = useAppStore.getState()
+        if (apiConfig.apiKey) {
+          // Frontend has saved config but backend doesn't — auto-sync
+          try {
+            await saveConfig()
+            setConfigured(true)
+            return
+          } catch (e) {
+            console.warn('[ScAI] Auto-sync config on startup failed:', e)
+          }
+        }
         setShowConfig(true)
       }
+      setConfigured(status.configured)
     })
-  }, [checkStatus])
+  }, [checkStatus, saveConfig])
 
   // Register the showConfigPanel callback for other components (e.g., AnalysisPanel)
   useEffect(() => {

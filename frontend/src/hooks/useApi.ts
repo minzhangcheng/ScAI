@@ -96,7 +96,8 @@ export function useConfig() {
         has_api_key: boolean
       }>('/config/status')
       return status
-    } catch {
+    } catch (e) {
+      console.warn('[ScAI] checkStatus failed:', e)
       return { configured: false, has_api_key: false }
     }
   }, [])

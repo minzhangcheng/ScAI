@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.15.8
+**Version**: 0.15.9
 
 ## Core Features
 
@@ -330,6 +330,13 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.15.9 (2026-03-23)
+
+- **Fix: Figure revision loop indentation** (`bioinformatics_agent.py`): Code blocks for `_validate_code`, sandbox `execute()`, and auto-retry logic in the figure revision loop were incorrectly indented one level too deep, causing Python scope errors. Corrected to align directly under the `while` loop iteration.
+- **Improvement: Auto-sync API config on startup** (`App.tsx`): If the backend has lost its configuration (e.g., after a server restart) but the frontend localStorage still holds a saved API key, the app now automatically re-syncs the config to the backend at startup instead of showing the config panel.
+- **Improvement: Auto-sync API config before analysis** (`AnalysisPanel.tsx`): Before starting an analysis, the panel separates the "no API key" case (shows config panel) from "backend not configured" (auto-syncs config and retries), preventing unnecessary config prompts after server restarts.
+- **Improvement: Config status check error logging** (`useApi.ts`): `checkStatus` now logs a warning on failure instead of silently returning a default value.
 
 ### v0.15.8 (2026-03-23)
 
