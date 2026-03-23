@@ -1962,15 +1962,15 @@ plt.close('all')
                 revision_count += 1
                 figure.revision_count = revision_count
 
-                    # Validate revised code before execution
-                    is_valid, error_msg = self._validate_code(revised_code)
-                    if not is_valid:
-                        logger.warning(f"[Bioinformatics] Revised code failed validation: {error_msg}")
-                        break
+                # Validate revised code before execution
+                is_valid, error_msg = self._validate_code(revised_code)
+                if not is_valid:
+                    logger.warning(f"[Bioinformatics] Revised code failed validation: {error_msg}")
+                    break
 
-                    # Re-execute with revised code (rebuild wrapper instead of str.replace to avoid corruption)
-                    indented_revised_code = textwrap.indent(revised_code, '    ')
-                    revised_wrapped = f'''
+                # Re-execute with revised code (rebuild wrapper instead of str.replace to avoid corruption)
+                indented_revised_code = textwrap.indent(revised_code, '    ')
+                revised_wrapped = f'''
 import matplotlib.pyplot as plt
 from pathlib import Path
 
@@ -2021,35 +2021,35 @@ except Exception as _save_err:
 
 plt.close('all')
 '''
-                    result = await self.sandbox.execute(revised_wrapped)
+                result = await self.sandbox.execute(revised_wrapped)
 
-                    if not result.error and jpg_path.exists():
-                        # Detect blank revised figure
-                        if jpg_path.stat().st_size < 2000:
-                            logger.warning(f"[Bioinformatics] Revised figure appears blank (size: {jpg_path.stat().st_size} bytes)")
-                            break
-                        # Update figure with new image
-                        figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
-                        await self._notify("figure", figure.png_base64)
-                        current_code = revised_code
-                    else:
-                        logger.warning(f"[Bioinformatics] Revision failed: {result.error}")
-                        # Auto-retry: feed error back to LLM for a single fix attempt
-                        error_msg = str(result.error)[:1000]
-                        logger.info(f"[Bioinformatics] Auto-retrying revision with error context")
-                        try:
-                            retry_code = await self._revise_figure_code(
-                                revised_code,
-                                f"The previous code revision caused a runtime error:\n{error_msg}\nFix this error while keeping ALL the style improvements from the revision.",
-                                [f"Fix the runtime error: {error_msg}"],
-                                ["The code must execute without errors"],
-                                figure_type, state, figure.png_base64,
-                                revision_history=revision_history
-                            )
-                            is_valid_retry, err_retry = self._validate_code(retry_code)
-                            if is_valid_retry:
-                                indented_retry_code = textwrap.indent(retry_code, '    ')
-                                retry_wrapped = f'''
+                if not result.error and jpg_path.exists():
+                    # Detect blank revised figure
+                    if jpg_path.stat().st_size < 2000:
+                        logger.warning(f"[Bioinformatics] Revised figure appears blank (size: {jpg_path.stat().st_size} bytes)")
+                        break
+                    # Update figure with new image
+                    figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
+                    await self._notify("figure", figure.png_base64)
+                    current_code = revised_code
+                else:
+                    logger.warning(f"[Bioinformatics] Revision failed: {result.error}")
+                    # Auto-retry: feed error back to LLM for a single fix attempt
+                    error_msg = str(result.error)[:1000]
+                    logger.info(f"[Bioinformatics] Auto-retrying revision with error context")
+                    try:
+                        retry_code = await self._revise_figure_code(
+                            revised_code,
+                            f"The previous code revision caused a runtime error:\n{error_msg}\nFix this error while keeping ALL the style improvements from the revision.",
+                            [f"Fix the runtime error: {error_msg}"],
+                            ["The code must execute without errors"],
+                            figure_type, state, figure.png_base64,
+                            revision_history=revision_history
+                        )
+                        is_valid_retry, err_retry = self._validate_code(retry_code)
+                        if is_valid_retry:
+                            indented_retry_code = textwrap.indent(retry_code, '    ')
+                            retry_wrapped = f'''
 import matplotlib.pyplot as plt
 from pathlib import Path
 
@@ -2099,18 +2099,18 @@ except Exception as _save_err:
 
 plt.close('all')
 '''
-                                retry_result = await self.sandbox.execute(retry_wrapped)
-                                if not retry_result.error and jpg_path.exists() and jpg_path.stat().st_size >= 2000:
-                                    logger.info(f"[Bioinformatics] Auto-retry succeeded for {figure_name}")
-                                    figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
-                                    await self._notify("figure", figure.png_base64)
-                                    current_code = retry_code
-                                    continue  # Back to review loop
-                                else:
-                                    logger.warning(f"[Bioinformatics] Auto-retry also failed: {retry_result.error}")
-                        except Exception as retry_err:
-                            logger.warning(f"[Bioinformatics] Auto-retry exception: {retry_err}")
-                        break  # Both attempts failed
+                            retry_result = await self.sandbox.execute(retry_wrapped)
+                            if not retry_result.error and jpg_path.exists() and jpg_path.stat().st_size >= 2000:
+                                logger.info(f"[Bioinformatics] Auto-retry succeeded for {figure_name}")
+                                figure.png_base64 = self._compress_image_to_base64(jpg_path, max_width=800)
+                                await self._notify("figure", figure.png_base64)
+                                current_code = retry_code
+                                continue  # Back to review loop
+                            else:
+                                logger.warning(f"[Bioinformatics] Auto-retry also failed: {retry_result.error}")
+                    except Exception as retry_err:
+                        logger.warning(f"[Bioinformatics] Auto-retry exception: {retry_err}")
+                    break  # Both attempts failed
 
             # After 3 attempts, save with revision_requested status
             figure.review_status = FigureReviewStatus.REVISION_REQUESTED
