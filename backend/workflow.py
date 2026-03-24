@@ -2403,6 +2403,7 @@ Return ONLY the JSON array, nothing else."""
                     try:
                         b64 = compress_image_to_base64(wf["path"], max_width=800)
                     except Exception:
+                        logger.warning("Failed to compress image", exc_info=True)
                         b64 = None
                     figures_data.append({
                         "id": str(uuid.uuid4()),

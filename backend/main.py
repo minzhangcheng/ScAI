@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="1.0.0"
+    version="0.15.9"
 )
 
 # CORS
@@ -500,17 +500,6 @@ async def set_config(request: ConfigRequest):
     config.api.api_key = request.api_key
     config.api.llm_base_url = request.llm_base_url
     config.api.proxy_url = request.proxy_url
-    
-    # Set proxy environment variables if provided
-    if request.proxy_url:
-        os.environ['HTTP_PROXY'] = request.proxy_url
-        os.environ['HTTPS_PROXY'] = request.proxy_url
-        os.environ['http_proxy'] = request.proxy_url
-        os.environ['https_proxy'] = request.proxy_url
-    else:
-        # Clear proxy environment variables if not set
-        for var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
-            os.environ.pop(var, None)
 
     logger.info(f"Config saved: base_url={config.api.llm_base_url}, proxy={'configured' if config.api.proxy_url else 'none'}")
     return APIResponse(
@@ -1681,7 +1670,7 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
                     "timestamp": datetime.now().isoformat()
                 })
             except Exception:
-                logger.debug("Failed to send termination status via WebSocket")
+                logger.warning("Failed to send termination status via WebSocket", exc_info=True)
         return APIResponse(success=True, message="Analysis terminated")
 
     elif req.action == "summarize":
@@ -1775,7 +1764,7 @@ async def send_human_input(session_id: str, request: HumanInputRequest):
                 "timestamp": datetime.now().isoformat()
             })
         except Exception:
-            logger.debug("Failed to buffer human input to WebSocket")
+            logger.warning("Failed to buffer human input to WebSocket", exc_info=True)
 
     # Signal the workflow to continue if it's waiting for user input
     async with _state_lock:
@@ -1975,7 +1964,7 @@ async def request_human_input(session_id: str):
                 "timestamp": datetime.now().isoformat()
             })
         except Exception:
-            logger.debug("Failed to send human_input_requested via WebSocket")
+            logger.warning("Failed to send human_input_requested via WebSocket", exc_info=True)
 
     return APIResponse(
         success=True,
@@ -2619,10 +2608,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "timestamp": datetime.now().isoformat()
                         })
                     except Exception:
-                        logger.debug("Observer WebSocket ping failed, closing")
+                        logger.warning("Observer WebSocket ping failed, closing", exc_info=True)
                         break
                 except Exception:
-                    logger.debug("Observer WebSocket receive failed, closing")
+                    logger.warning("Observer WebSocket receive failed, closing", exc_info=True)
                     break
         except WebSocketDisconnect:
             logger.info(f"WebSocket observer disconnected for session {session_id}")
@@ -2769,7 +2758,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             except Exception as e:
                 # Mark as closed to prevent further attempts
                 ws_closed = True
-                logger.debug(f"[{session_id}] WebSocket closed during send, marking as closed: {e}")
+                logger.warning(f"[{session_id}] WebSocket closed during send, marking as closed: {e}", exc_info=True)
 
     # Helper to safely send JSON
     async def safe_send(data: dict):
@@ -2794,7 +2783,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await current_ws.send_json(data)
                 return True
             except Exception:
-                logger.debug("WebSocket send_json failed, marking closed")
+                logger.warning("WebSocket send_json failed, marking closed", exc_info=True)
                 ws_closed = True
                 return False
     
@@ -2847,7 +2836,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                     "timestamp": datetime.now().isoformat()
                                 })
                             except Exception:
-                                logger.debug(f"[{session_id}] WebSocket ping failed, marking closed")
+                                logger.warning(f"[{session_id}] WebSocket ping failed, marking closed", exc_info=True)
                                 ws_closed = True
                                 break
         except WebSocketDisconnect:
@@ -3095,7 +3084,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                     **data
                 })
             except Exception as e:
-                logger.debug(f"Failed to send progress update for session {session_id}: {e}")
+                logger.warning(f"Failed to send progress update for session {session_id}: {e}", exc_info=True)
     
     # Create LLM client using global config
     if config is None:
@@ -3107,7 +3096,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                     "message": "API configuration not set"
                 })
             except Exception as e:
-                logger.debug(f"Failed to send error to WebSocket for session {session_id}: {e}")
+                logger.warning(f"Failed to send error to WebSocket for session {session_id}: {e}", exc_info=True)
         return
     
     llm_client = OpenAICompatibleClient(
@@ -3173,7 +3162,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                     "report": report
                 })
             except Exception as e:
-                logger.debug(f"Failed to send completion to WebSocket for session {session_id}: {e}")
+                logger.warning(f"Failed to send completion to WebSocket for session {session_id}: {e}", exc_info=True)
 
     except Exception as e:
         logger.exception("Report generation failed")
@@ -3186,7 +3175,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                     "message": str(e)
                 })
             except Exception as ws_error:
-                logger.debug(f"Failed to send error to WebSocket for session {session_id}: {ws_error}")
+                logger.warning(f"Failed to send error to WebSocket for session {session_id}: {ws_error}", exc_info=True)
 
 
 @app.websocket("/ws/report/{session_id}")
@@ -4236,7 +4225,7 @@ async def _generate_figures_in_chat(
         try:
             await sandbox.stop()
         except Exception:
-            logger.debug("Failed to stop chat code sandbox during cleanup")
+            logger.warning("Failed to stop chat code sandbox during cleanup", exc_info=True)
 
     return generated_figures
 
@@ -4490,7 +4479,7 @@ async def _execute_chat_agent(
             try:
                 await sandbox.stop()
             except Exception:
-                logger.debug("Failed to stop delegation sandbox during cleanup")
+                logger.warning("Failed to stop delegation sandbox during cleanup", exc_info=True)
 
     elif agent_name == "pathology":
         from .agents.pathology_agent import PathologyAgent
@@ -4586,7 +4575,7 @@ async def _run_chat_delegation(
                         "id": msg.id,
                     })
                 except Exception:
-                    logger.debug(f"[{session_id}] Failed to send chat delegation message via WebSocket")
+                    logger.warning(f"[{session_id}] Failed to send chat delegation message via WebSocket", exc_info=True)
             # Persist to realtime_messages
             if hasattr(state, 'realtime_messages'):
                 state.realtime_messages.append(msg)
@@ -4776,7 +4765,7 @@ async def _run_chat_delegation(
             await _update_session_cache(session_id, state)
             await async_save_session(session_id, state)
         except Exception:
-            logger.warning(f"[{session_id}] Failed to save session during cancellation")
+            logger.warning(f"[{session_id}] Failed to save session during cancellation", exc_info=True)
         raise
 
     except Exception as e:
@@ -4803,7 +4792,7 @@ async def _run_chat_delegation(
             try:
                 await llm_manager.close()
             except Exception:
-                logger.debug("Failed to close LLM manager")
+                logger.warning("Failed to close LLM manager", exc_info=True)
 
 
 @app.post("/api/session/{session_id}/chat")
@@ -4892,7 +4881,7 @@ async def chat_with_pi(
                     content_preview = f.read(5000)
                 data_file_contents.append(f"--- {dest.name} ---\n{content_preview}")
             except Exception as e:
-                logger.debug(f"Failed to read file preview for {dest}: {e}")
+                logger.warning(f"Failed to read file preview for {dest}: {e}", exc_info=True)
 
     # --- Register files to target agent state (per-file) ---
     _agent_section_map = {"pathology": "pathology", "bioinformatics": "sequencing", "biochemistry": "biochemistry"}

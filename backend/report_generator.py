@@ -2180,7 +2180,7 @@ Be specific and actionable. Include:
                             down = sig[sig[fc_col] < 0]
                             parts.append(f"  Upregulated: {len(up)}, Downregulated: {len(down)}")
                         except Exception:
-                            logger.debug("Failed to compute up/down regulation counts")
+                            logger.warning("Failed to compute up/down regulation counts", exc_info=True)
 
                 # Add data preview
                 preview = df.head(max_rows).to_string(max_colwidth=40)
@@ -2969,7 +2969,7 @@ IMPORTANT:
                     try:
                         shutil.copy2(str(pdf_file), str(dest_pdf))
                     except Exception:
-                        logger.debug("Failed to copy PDF for figure %s", pdf_file.name)
+                        logger.warning("Failed to copy PDF for figure %s", pdf_file.name, exc_info=True)
 
                 fig_info = {
                     "filename": png_file.name,
@@ -3016,7 +3016,7 @@ IMPORTANT:
                 preview_data = df_preview.to_dict('records')
                 total_rows = pd.read_csv(csv_file, usecols=[0]).shape[0]
             except Exception:
-                logger.debug("Failed to read CSV preview: %s", csv_file)
+                logger.warning("Failed to read CSV preview: %s", csv_file, exc_info=True)
 
             tbl_info = {
                 "filename": csv_file.name,
@@ -3635,7 +3635,7 @@ Generate a comprehensive scientific narrative for this section. Your response mu
                         provided_narrative = salvaged
                         logger.info(f"Salvaged narrative from raw LLM response ({len(salvaged)} chars)")
                 except Exception:
-                    logger.debug("Failed to salvage narrative from JSON")
+                    logger.warning("Failed to salvage narrative from JSON", exc_info=True)
             # If no JSON field found but response is substantial prose, use it directly
             if not (provided_narrative and len((provided_narrative or '').strip()) > 50):
                 # Strip markdown code fences and JSON artifacts
@@ -4385,7 +4385,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                         preview_data = df_preview.to_dict('records')
                         total_rows = pd.read_csv(csv_file, usecols=[0]).shape[0]
                     except Exception:
-                        logger.debug("Failed to read CSV preview for HTML: %s", csv_file)
+                        logger.warning("Failed to read CSV preview for HTML: %s", csv_file, exc_info=True)
                     remaining_table_files.append({
                         "name": csv_file.stem.replace("_", " ").title(),
                         "filename": csv_file.name,
@@ -5239,7 +5239,7 @@ def generate_annotation_context_report_html(
                             f'<div class="figure-caption">{caption}</div></div>'
                         )
                     except Exception:
-                        logger.debug("Failed to embed figure in HTML: %s", fpath)
+                        logger.warning("Failed to embed figure in HTML: %s", fpath, exc_info=True)
 
     if figure_blocks:
         figures_html = f"""
