@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.15.9
+**Version**: 0.16.1
 
 ## Core Features
 
@@ -330,6 +330,12 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.16.1 (2026-03-24)
+
+- **Improvement: Vision fallback for figure revision** (`bioinformatics_agent.py`): When the configured model does not support vision input (404/NotFoundError), figure revision now automatically falls back to text-only mode — stripping the attached image and replacing the image reference in the prompt with an explanatory note. Prevents analysis failure when switching to non-vision models.
+- **New: Data integrity check patterns** (`supervisor_agent.py`): Added `_PERCENTAGE_PATTERN` and `_INF_NAN_PATTERN` regex constants for detecting percentage values and Inf/NaN in code output, supporting future data integrity validation in supervisor monitoring.
+- **Improvement: Extended sandbox timeout** (`config.py`): `sandbox_timeout` increased from 3600 s (1 h) to 5400 s (1.5 h) to accommodate longer-running analyses that were previously hitting the timeout limit.
 
 ### v0.15.9 (2026-03-23)
 

@@ -347,7 +347,7 @@ class SystemConfig(BaseModel):
     blank_threshold: float = 0.95  # Threshold for detecting blank tiles
     
     # Local Jupyter kernel settings
-    sandbox_timeout: int = 3600  # Code execution timeout in seconds
+    sandbox_timeout: int = 5400  # Code execution timeout in seconds (1.5 hours)
     
     # Session settings
     max_rounds: int = 3  # Maximum analysis rounds

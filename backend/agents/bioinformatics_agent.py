@@ -2299,13 +2299,35 @@ Return only the Python code:"""
         revision_temp = min(self.config.temperature, 0.2)
         if image_base64:
             # Use vision API so the agent can see the current figure
-            response = await self.llm_client.chat_with_vision(
-                model=self.model,
-                text_prompt=prompt,
-                images=[image_base64],
-                temperature=revision_temp,
-                max_tokens=32768
-            )
+            try:
+                response = await self.llm_client.chat_with_vision(
+                    model=self.model,
+                    text_prompt=prompt,
+                    images=[image_base64],
+                    temperature=revision_temp,
+                    max_tokens=32768
+                )
+            except Exception as vision_err:
+                if "NotFoundError" in type(vision_err).__name__ or "404" in str(vision_err):
+                    # Model does not support vision input — fall back to text-only
+                    logger.warning(
+                        f"[Bioinformatics] Model {self.model} does not support vision, "
+                        f"falling back to text-only for figure revision"
+                    )
+                    prompt = prompt.replace(
+                        "**Current Figure:** An image of the current figure is attached. "
+                        "Review it carefully to understand what needs to be changed.\n\n",
+                        "**Current Figure:** (Image not available — model does not support vision. "
+                        "Revise code based on PI feedback text only.)\n\n",
+                    )
+                    response = await self.llm_client.chat(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=revision_temp,
+                        max_tokens=32768
+                    )
+                else:
+                    raise
         else:
             response = await self.llm_client.chat(
                 model=self.model,

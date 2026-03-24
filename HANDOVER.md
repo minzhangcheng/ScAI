@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.15.9
-**Last Updated**: 2026-03-23
+**Version**: 0.16.1
+**Last Updated**: 2026-03-24
 
 ## Project Overview
 
@@ -1413,6 +1413,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.16.1 | 2026-03-24 | Vision fallback for figure revision (NotFoundError/404 → text-only retry); _PERCENTAGE_PATTERN and _INF_NAN_PATTERN data integrity check regex patterns; sandbox_timeout extended to 5400 s (1.5 h) |
 | 0.15.9 | 2026-03-23 | Bioinformatics figure revision loop indentation fix (code blocks erroneously nested one level deep); frontend auto-sync API config from localStorage to backend on startup and before analysis start; checkStatus error logging |
 | 0.15.8 | 2026-03-23 | Figure save path tracking (set→dict, auto PDF for manual saves, revision counter after success); supervisor feedback deduplication (_recent_rule_feedback_hashes); _alt_ext_name() .png↔.jpg fallback; dynamic download button extension labels; report_generator unified .jpg default + stem-based PDF path; WebSocket send-failure log downgraded to debug; PromptsPanel Vision requirement clarifications |
 | 0.15.7 | 2026-03-22 | Mandatory annotate_clusters enforcement before report_findings in exploration; smarter circuit breaker redirects to annotation; inline [TABLE:] markers in HTML reports; SupervisorAgent.restore_log_from_saved() + generate_detailed_report() replaces DetailedReportGenerator; sandbox allows locals(), os.system pip-install, importlib.reload; annotation confirmation decoupled from phase |
@@ -1465,6 +1466,12 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.16.1 (2026-03-24)
+
+- **Vision fallback for figure revision** (`bioinformatics_agent.py`): The `chat_with_vision` call in the figure revision loop is now wrapped in a try-except. If the model raises a `NotFoundError` or HTTP 404 (indicating no vision support), the image attachment is dropped, the prompt's image reference line is replaced with a text-only fallback notice, and the request retries via `chat()`. All other exceptions are re-raised unchanged.
+- **Data integrity check patterns** (`supervisor_agent.py`): Two module-level compiled regex patterns added: `_PERCENTAGE_PATTERN` (matches `\d+(?:\.\d+)?%`) and `_INF_NAN_PATTERN` (matches `\b(inf|-inf|nan)\b`, case-insensitive). These constants support upcoming data integrity validation logic in supervisor step monitoring.
+- **Extended sandbox execution timeout** (`config.py`): `SystemConfig.sandbox_timeout` increased from 3600 seconds to 5400 seconds (1.5 hours) to prevent premature timeout failures during long-running bioinformatics computations.
 
 #### v0.15.9 (2026-03-23)
 

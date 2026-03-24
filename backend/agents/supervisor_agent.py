@@ -620,6 +620,14 @@ _CRITICAL_OUTPUT_PATTERNS = [
     re.compile(r"InvalidIndexError"),
 ]
 
+# Patterns for data integrity checks on code output
+_PERCENTAGE_PATTERN = re.compile(
+    r"(\d+(?:\.\d+)?)\s*%", re.IGNORECASE
+)
+_INF_NAN_PATTERN = re.compile(
+    r"\b(inf|-inf|nan)\b", re.IGNORECASE
+)
+
 
 # ---------------------------------------------------------------------------
 # System prompt for the cheap LLM evaluator
