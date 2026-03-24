@@ -2140,8 +2140,8 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                 if fig_html:
                     placed_figures.add(fname)
                     return fig_html
-                logger.warning(f"Figure referenced in report but not found: {fname}")
-                return f'<div class="figure-missing" style="color:#b91c1c;font-style:italic;margin:10px 0;">[Figure not found: {html_module.escape(fname)}]</div>'
+                logger.info(f"Figure referenced in report but not found, skipping: {fname}")
+                return ""
 
             # Match [FIGURE: name] optionally followed by [FIGURE_CAPTION: text]
             content_html = re.sub(
@@ -2158,8 +2158,8 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                 if tbl_html:
                     placed_tables.add(fname)
                     return tbl_html
-                logger.warning(f"Table referenced in report but not found: {fname}")
-                return f'<div class="table-missing" style="color:#b91c1c;font-style:italic;margin:10px 0;">[Table not found: {html_module.escape(fname)}]</div>'
+                logger.info(f"Table referenced in report but not found, skipping: {fname}")
+                return ""
 
             # Match [TABLE: name] optionally followed by [TABLE_CAPTION: text]
             content_html = re.sub(
