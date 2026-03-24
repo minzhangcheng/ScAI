@@ -2,158 +2,58 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.16.1
-
-## Core Features
-
-### Multi-Agent Collaboration
-
-Seven specialized AI agents work together to analyze your data from different angles:
-
-- **PI Agent** — The project coordinator. Plans analysis strategy, synthesizes results from all agents, resolves conflicts, and reviews generated figures for publication quality
-- **Pathology Agent** — Analyzes histological section images (H&E and custom staining types), identifying tissue structures, cellular patterns, and pathological changes
-- **Bioinformatics Agent** — Performs autonomous single-cell sequencing data analysis (scRNA-seq, snRNA-seq, bulk RNA-seq). Executes code in a local Jupyter environment, generates publication-quality figures, and can run up to 200 analysis steps per round
-- **Biochemistry Agent** — Interprets biochemical experimental results from structured indicator values and data images, cross-referencing findings from other agents
-- **Literature Agent** — Searches and synthesizes relevant scientific literature. Supports three modes: Deep Research Models (e.g., openai/o4-mini-deep-research), Google Gemini Deep Research, and PubMed + LLM synthesis for targeted searches
-- **Painter Agent** — Generates graphic abstracts summarizing the research findings
-- **Supervisor Agent** — Monitors bioinformatics analysis steps in real-time using a lightweight vision LLM, detecting issues, identifying biological checkpoints, and escalating critical problems to the PI Agent
-
-### Iterative Analysis with Human-in-the-Loop
-
-- Multi-round analysis that progressively deepens — each round builds on previous findings
-- After each round, a feedback dialog shows findings from all agents. You can provide guidance, upload additional data, or let analysis continue automatically
-- From round 2 onwards, PI Agent intelligently decides which agents need to run, saving time and API costs
-- You can pause and resume analysis at any time; all state is preserved
-
-### Interactive Chat
-
-- Chat freely with the PI Agent after analysis to ask questions, request explanations, or explore results further
-- PI can delegate complex questions to specialized agents in the background
-- Upload images and data files directly in the chat for on-the-fly analysis
-- PI can display existing analysis figures or generate new custom figures
-
-### Comprehensive Report Generation
-
-Generate detailed HTML reports with 9 chapters and 40+ analysis items:
-
-1. Quality Control (QC)
-2. Cell Clustering
-3. Cell Type Annotation
-4. Cell Proportion Analysis
-5. Differential Expression Analysis
-6. Pathway Enrichment Analysis (GO/KEGG/GSEA)
-7. Cell-Cell Communication Analysis
-8. Trajectory Analysis
-9. Targeted Analysis (custom)
-
-Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster annotation table.
-
-### Session Management
-
-- **Pause/Resume**: Pause analysis at any time; resume from where you left off with all data and variables intact
-- **Auto-save**: State is automatically saved after each round
-- **Export/Import**: Download complete sessions as archives and restore them on any instance
-- **Session Browser**: Browse and manage all sessions with status and metadata display
-
-### Multi-language Support
-
-- Chinese/English interface switching
-- Agent prompts auto-switch based on language setting
-
-## Use Cases
-
-- **Animal Model Phenotype Analysis**: KO/KI mice, disease models, etc.
-- **Tumor Research**: Comprehensive analysis of tumor vs normal tissue
-- **Drug Toxicology**: Tissue damage assessment after drug treatment
-- **Organ-specific Research**: Liver, heart, kidney, brain, etc.
-- **Developmental Biology**: Comparative analysis across developmental stages
-- **Disease Mechanism Research**: Multi-omics data integration analysis
-
-## System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                   Web Frontend (Port 3000)                   │
-│  ┌──────┐ ┌───────┐ ┌────────┐ ┌───────┐ ┌──────┐ ┌──────┐ │
-│  │ Data │ │Prompts│ │Analysis│ │Results│ │Report│ │ Chat │ │
-│  │Panel │ │ Panel │ │ Panel  │ │ Panel │ │Panel │ │Panel │ │
-│  └──────┘ └───────┘ └────────┘ └───────┘ └──────┘ └──────┘ │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ WebSocket / REST API
-┌─────────────────────────▼───────────────────────────────────┐
-│                    Backend (Port 8000)                       │
-├─────────────────────────────────────────────────────────────┤
-│                  Multi-Agent Workflow Engine                 │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐       │
-│  │   PI    │  │ Pathol. │  │ Bioinfo │  │ Biochem │       │
-│  │  Agent  │  │  Agent  │  │  Agent  │  │  Agent  │       │
-│  └────▲────┘  └─────────┘  └──┬───┬──┘  └─────────┘       │
-│       │                       │   │                         │
-│       │  consult/fig review   │   │  annotate/lit search    │
-│       └───────────────────────┘   │                         │
-│       │                           ▼                         │
-│  ┌────┴──────┐ ┌───────────┐ ┌─────────────┐               │
-│  │Supervisor │ │  Painter  │ │  Literature │               │
-│  │   Agent   │ │   Agent   │ │    Agent    │               │
-│  └───────────┘ └───────────┘ └─────────────┘               │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │  OpenRouter  │  │Local Jupyter │  │ Google APIs  │      │
-│  │  (LLM API)   │  │   Kernel     │  │ (Research +  │      │
-│  │              │  │              │  │  Imagen)     │      │
-│  └──────────────┘  └──────────────┘  └──────────────┘      │
-└─────────────────────────────────────────────────────────────┘
-```
+**Version**: 0.16.2
 
 ## Installation
 
-### 1. Clone the Project
+### Option A: Using Docker (Recommended)
+
+Pull and run the pre-built image from GitHub Container Registry:
+
+```bash
+docker run -p 3000:3000 \
+  -v scai-dep:/dep \
+  -v scai-data:/data \
+  ghcr.io/minzhangcheng/scai:latest
+```
+
+- `/dep` — stores Python venv and Node.js dependencies (installed automatically on first run, persisted across restarts)
+- `/data` — stores session data, uploads, reports, and logs
+
+To build the image locally:
+
+```bash
+docker build -t ghcr.io/minzhangcheng/scai:latest .
+```
+
+Access **http://localhost:3000** to open the web interface.
+
+### Option B: Using Startup Script
 
 ```bash
 git clone <repository-url>
 cd scai
-```
-
-### 2. Install Backend Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Install Frontend Dependencies
-
-```bash
-cd frontend
-npm install
-```
-
-### 4. Start the Application
-
-**Option A: Using Startup Script (Recommended)**
-
-```bash
 ./start.sh
 ```
 
-This will automatically create a virtual environment, install dependencies, and start both backend (http://localhost:8000) and frontend (http://localhost:3000).
+You can customize the host, port, and backend port:
+
+```bash
+./start.sh --host 0.0.0.0 --port 3000 --backport 8000
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--host` | Listen address | `127.0.0.1` |
+| `--port` | Frontend port | `3000` |
+| `--backport` | Backend port | `8000` |
+
+This will automatically create a virtual environment, install dependencies, and start both backend and frontend.
 
 To stop:
 ```bash
 ./stop.sh
 ```
-
-**Option B: Manual Startup**
-
-```bash
-# Terminal 1: Start backend
-uvicorn backend.main:app --reload --port 8000
-
-# Terminal 2: Start frontend
-cd frontend
-npm run dev
-```
-
-Access **http://localhost:3000** to open the web interface.
 
 ## User Guide
 
@@ -312,6 +212,107 @@ Common customizations:
 - Click any session to view or resume it
 - Session name and description can be edited directly in the sidebar
 
+## Core Features
+
+### Multi-Agent Collaboration
+
+Seven specialized AI agents work together to analyze your data from different angles:
+
+- **PI Agent** — The project coordinator. Plans analysis strategy, synthesizes results from all agents, resolves conflicts, and reviews generated figures for publication quality
+- **Pathology Agent** — Analyzes histological section images (H&E and custom staining types), identifying tissue structures, cellular patterns, and pathological changes
+- **Bioinformatics Agent** — Performs autonomous single-cell sequencing data analysis (scRNA-seq, snRNA-seq, bulk RNA-seq). Executes code in a local Jupyter environment, generates publication-quality figures, and can run up to 200 analysis steps per round
+- **Biochemistry Agent** — Interprets biochemical experimental results from structured indicator values and data images, cross-referencing findings from other agents
+- **Literature Agent** — Searches and synthesizes relevant scientific literature. Supports three modes: Deep Research Models (e.g., openai/o4-mini-deep-research), Google Gemini Deep Research, and PubMed + LLM synthesis for targeted searches
+- **Painter Agent** — Generates graphic abstracts summarizing the research findings
+- **Supervisor Agent** — Monitors bioinformatics analysis steps in real-time using a lightweight vision LLM, detecting issues, identifying biological checkpoints, and escalating critical problems to the PI Agent
+
+### Iterative Analysis with Human-in-the-Loop
+
+- Multi-round analysis that progressively deepens — each round builds on previous findings
+- After each round, a feedback dialog shows findings from all agents. You can provide guidance, upload additional data, or let analysis continue automatically
+- From round 2 onwards, PI Agent intelligently decides which agents need to run, saving time and API costs
+- You can pause and resume analysis at any time; all state is preserved
+
+### Interactive Chat
+
+- Chat freely with the PI Agent after analysis to ask questions, request explanations, or explore results further
+- PI can delegate complex questions to specialized agents in the background
+- Upload images and data files directly in the chat for on-the-fly analysis
+- PI can display existing analysis figures or generate new custom figures
+
+### Comprehensive Report Generation
+
+Generate detailed HTML reports with 9 chapters and 40+ analysis items:
+
+1. Quality Control (QC)
+2. Cell Clustering
+3. Cell Type Annotation
+4. Cell Proportion Analysis
+5. Differential Expression Analysis
+6. Pathway Enrichment Analysis (GO/KEGG/GSEA)
+7. Cell-Cell Communication Analysis
+8. Trajectory Analysis
+9. Targeted Analysis (custom)
+
+Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster annotation table.
+
+### Session Management
+
+- **Pause/Resume**: Pause analysis at any time; resume from where you left off with all data and variables intact
+- **Auto-save**: State is automatically saved after each round
+- **Export/Import**: Download complete sessions as archives and restore them on any instance
+- **Session Browser**: Browse and manage all sessions with status and metadata display
+
+### Multi-language Support
+
+- Chinese/English interface switching
+- Agent prompts auto-switch based on language setting
+
+## Use Cases
+
+- **Animal Model Phenotype Analysis**: KO/KI mice, disease models, etc.
+- **Tumor Research**: Comprehensive analysis of tumor vs normal tissue
+- **Drug Toxicology**: Tissue damage assessment after drug treatment
+- **Organ-specific Research**: Liver, heart, kidney, brain, etc.
+- **Developmental Biology**: Comparative analysis across developmental stages
+- **Disease Mechanism Research**: Multi-omics data integration analysis
+
+## System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Web Frontend (Port 3000)                   │
+│  ┌──────┐ ┌───────┐ ┌────────┐ ┌───────┐ ┌──────┐ ┌──────┐ │
+│  │ Data │ │Prompts│ │Analysis│ │Results│ │Report│ │ Chat │ │
+│  │Panel │ │ Panel │ │ Panel  │ │ Panel │ │Panel │ │Panel │ │
+│  └──────┘ └───────┘ └────────┘ └───────┘ └──────┘ └──────┘ │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ WebSocket / REST API
+┌─────────────────────────▼───────────────────────────────────┐
+│                    Backend (Port 8000)                       │
+├─────────────────────────────────────────────────────────────┤
+│                  Multi-Agent Workflow Engine                 │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐       │
+│  │   PI    │  │ Pathol. │  │ Bioinfo │  │ Biochem │       │
+│  │  Agent  │  │  Agent  │  │  Agent  │  │  Agent  │       │
+│  └────▲────┘  └─────────┘  └──┬───┬──┘  └─────────┘       │
+│       │                       │   │                         │
+│       │  consult/fig review   │   │  annotate/lit search    │
+│       └───────────────────────┘   │                         │
+│       │                           ▼                         │
+│  ┌────┴──────┐ ┌───────────┐ ┌─────────────┐               │
+│  │Supervisor │ │  Painter  │ │  Literature │               │
+│  │   Agent   │ │   Agent   │ │    Agent    │               │
+│  └───────────┘ └───────────┘ └─────────────┘               │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │  OpenRouter  │  │Local Jupyter │  │ Google APIs  │      │
+│  │  (LLM API)   │  │   Kernel     │  │ (Research +  │      │
+│  │              │  │              │  │  Imagen)     │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+└─────────────────────────────────────────────────────────────┘
+```
+
 ## Supported Data Formats
 
 | Data Type | Formats | Notes |
@@ -330,6 +331,10 @@ Common customizations:
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.16.2 (2026-03-24)
+
+- **New: Docker packaging** — Added `Dockerfile`, `docker-entrypoint.sh`, `build.sh`, and `.dockerignore` for building and publishing the ScAI Docker image to `ghcr.io/minzhangcheng/scai`. Run with `docker run -p 3000:3000 -v /path/data:/data -v /path/dep:/dep ghcr.io/minzhangcheng/scai`. Dependencies install at first run and persist across restarts via volume mounts.
 
 ### v0.16.1 (2026-03-24)
 
@@ -639,4 +644,4 @@ Common customizations:
 
 ## License
 
-MIT License
+Apache License 2.0

@@ -1,0 +1,11 @@
+node_modules/
+__pycache__/
+*.pyc
+.git/
+dist/
+.env
+dep/
+data/
+*.log*
+.scai.pid
+docs/

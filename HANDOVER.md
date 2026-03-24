@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.16.1
+**Version**: 0.16.2
 **Last Updated**: 2026-03-24
 
 ## Project Overview
@@ -1144,6 +1144,18 @@ cd frontend && npm run build && npx serve -s dist -l 3000 &
 ./stop.sh
 ```
 
+### Docker Image Publishing
+
+To push to GitHub Container Registry:
+
+```bash
+# Login (requires a PAT with write:packages permission)
+echo "YOUR_GITHUB_PAT" | docker login ghcr.io -u YOUR_USERNAME --password-stdin
+
+# Push
+docker push ghcr.io/minzhangcheng/scai:latest
+```
+
 ### Data Backup
 
 **Directories to back up** (located in parent of code directory):
@@ -1413,6 +1425,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.16.2 | 2026-03-24 | Docker packaging: Dockerfile, docker-entrypoint.sh, build.sh, .dockerignore; runtime dependency installation with /dep and /data volume mounts; ghcr.io/minzhangcheng/scai image |
 | 0.16.1 | 2026-03-24 | Vision fallback for figure revision (NotFoundError/404 → text-only retry); _PERCENTAGE_PATTERN and _INF_NAN_PATTERN data integrity check regex patterns; sandbox_timeout extended to 5400 s (1.5 h) |
 | 0.15.9 | 2026-03-23 | Bioinformatics figure revision loop indentation fix (code blocks erroneously nested one level deep); frontend auto-sync API config from localStorage to backend on startup and before analysis start; checkStatus error logging |
 | 0.15.8 | 2026-03-23 | Figure save path tracking (set→dict, auto PDF for manual saves, revision counter after success); supervisor feedback deduplication (_recent_rule_feedback_hashes); _alt_ext_name() .png↔.jpg fallback; dynamic download button extension labels; report_generator unified .jpg default + stem-based PDF path; WebSocket send-failure log downgraded to debug; PromptsPanel Vision requirement clarifications |
@@ -1466,6 +1479,10 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.16.2 (2026-03-24)
+
+- **Docker packaging** (`Dockerfile`, `docker-entrypoint.sh`, `build.sh`, `.dockerignore`): Added Docker support for building and publishing the ScAI image to `ghcr.io/minzhangcheng/scai`. The image is based on `python:3.11-slim` with Node.js 20 and build-essential. Dependencies are not baked into the image — they are installed at first container run and persisted via volume mounts (`/dep` for venv + node_modules, `/data` for application data). Only the frontend port (3000) is exposed; the backend (8000) remains internal with Vite proxying API/WebSocket requests. The `build.sh` script supports `--version` and `--push` flags for CI/CD integration.
 
 #### v0.16.1 (2026-03-24)
 
