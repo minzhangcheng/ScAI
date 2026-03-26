@@ -2,12 +2,12 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.17.2
+**Version**: 0.17.3
 **Last Updated**: 2026-03-26
 
 ## Project Overview
 
-**ScAI** (Single Cell Sequencing Analysis Driven by AI) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of seven specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, Painter, and Supervisor), it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, structured error tracking, and optimized real-time communication.
+**ScAI** (Single Cell Sequencing Analysis Driven by AI) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of seven specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, Painter, and Supervisor) plus a lightweight Technique Agent for API documentation lookup, it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, structured error tracking, and optimized real-time communication.
 
 ## Technical Architecture
 
@@ -1425,6 +1425,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.17.3 | 2026-03-26 | Technique Agent: lightweight API doc lookup via sandbox introspection + LLM summarization; Bioinformatics `lookup_documentation` tool; Supervisor auto-triggers doc lookup on consecutive same-type API errors; hardcoded decoupler/gseapy API rules replaced with dynamic lookup; `error_parsing.py` utility extracted |
 | 0.17.2 | 2026-03-26 | Docker detached mode (`-d --name scai`), container logs appended to `/data/logs/scai.log` via `tee -a` in entrypoint |
 | 0.17.1 | 2026-03-26 | Per-agent LLM server config (agent_server_configs in state, new API endpoints, PromptsPanel UI); Painter dual-path image generation (chat completions + Images API fallback); Google AI Key moved to Literature agent settings; ConfigPanel label "Default LLM Server" |
 | 0.16.2 | 2026-03-24 | Docker packaging: Dockerfile, docker-entrypoint.sh, build.sh, .dockerignore; runtime dependency installation with /dep and /data volume mounts; ghcr.io/minzhangcheng/scai image |
@@ -1481,6 +1482,15 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.17.3 (2026-03-26)
+
+- **Technique Agent** (`technique_agent.py`, new file): Lightweight API documentation lookup agent. Executes `inspect.getdoc()`/`inspect.signature()` in the Jupyter sandbox to extract docstrings from installed packages, then summarizes via a cheap LLM (`google/gemini-3.1-flash-lite-preview`) into concise API references (signature, key parameters, example). Two entry points: `lookup_docs(sandbox, function_path)` for direct lookups and `lookup_from_error(sandbox, error_text, code)` for error-driven lookups. Includes `_parse_error_for_lookup()` to extract module/attribute/function from AttributeError, TypeError, ImportError, and ModuleNotFoundError tracebacks. `_guess_function_path()` resolves short function names to full dotted paths using import statements and common aliases (sc→scanpy, dc→decoupler, etc.). Uses `asyncio.gather` for parallel sandbox calls when looking up both attribute-level and module-level docs.
+- **Bioinformatics Agent integration** (`bioinformatics_agent.py`): New `lookup_documentation` tool added to TOOLS array. Handler delegates to `self.technique_agent.lookup_docs()` when available, falling back to "not available" message. Hardcoded DECOUPLER API and GSEAPY PARAMETER RULES sections in the system prompt replaced with a generic PACKAGE API LOOKUP instruction directing the agent to call `lookup_documentation` before writing code for unfamiliar APIs.
+- **Supervisor Agent integration** (`supervisor_agent.py`): New Phase 1.5 in `_evaluate_step()` — after rule checks but before LLM evaluation, `_should_trigger_technique()` checks if (1) technique_agent and sandbox are available, (2) current step has an API-related error, (3) previous step had the same error type. If triggered, calls `technique_agent.lookup_from_error()` and injects the result as `[Technique Support]` feedback. `set_sandbox()` method added for deferred sandbox injection. Local `_extract_error_type()` replaced with shared `extract_error_type()` from `utils/error_parsing.py`.
+- **Error parsing utility** (`utils/error_parsing.py`, new file): Extracted `extract_error_type(error_text)` function and `API_ERROR_TYPES` frozenset (`AttributeError`, `TypeError`, `ImportError`, `ModuleNotFoundError`) shared between Supervisor and Technique agents.
+- **Configuration** (`config.py`, `schemas.py`): `ModelConfig.technique_model` (default: `google/gemini-3.1-flash-lite-preview`); `AgentTemperatures.technique` (default: 0.1); `AgentType.TECHNIQUE` enum value.
+- **Workflow wiring** (`workflow.py`): `TechniqueAgent` instantiated before other agents and injected into both `BioinformaticsAgent` and `SupervisorAgent`. `supervisor_agent.set_sandbox()` called after sandbox initialization.
 
 #### v0.17.2 (2026-03-26)
 

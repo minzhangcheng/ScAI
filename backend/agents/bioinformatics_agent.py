@@ -227,7 +227,28 @@ TOOLS = [
                 "required": ["score_name", "method", "description"]
             }
         }
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_documentation",
+            "description": "Look up API documentation for an installed Python function/class. Returns a concise summary with signature, key parameters, and usage example. Use when unsure about correct API usage before writing code.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "function_path": {
+                        "type": "string",
+                        "description": "Full dotted path to the function or module (e.g., 'scanpy.tl.umap', 'decoupler.op.collectri', 'gseapy.enrichr')"
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "Optional: specific question about the API (e.g., 'what parameters control batch correction?')"
+                    }
+                },
+                "required": ["function_path"]
+            }
+        }
+    },
 ]
 
 
@@ -266,6 +287,7 @@ class BioinformaticsAgent(BaseAgent):
         message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
         supervisor_callback: Optional[Callable[['AnalysisStep', List[str]], Awaitable[Optional[str]]]] = None,
+        technique_agent=None,
         config: Optional[AgentConfig] = None
     ):
         super().__init__(
@@ -282,6 +304,7 @@ class BioinformaticsAgent(BaseAgent):
         self.message_callback = message_callback
         self.figure_review_callback = figure_review_callback
         self.supervisor_callback = supervisor_callback
+        self.technique_agent = technique_agent
 
         # Track execution history
         self.code_history: List[CodeExecution] = []
@@ -575,6 +598,10 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
 5. report_findings - Report conclusions ONLY after ALL assigned tasks are complete (including annotate_clusters in exploration)
 6. generate_publication_figure - Generate publication-quality figures with PI review
 7. register_score - Register a computed score's methodology for the final report
+8. lookup_documentation - Look up API docs for an installed Python function.
+   Returns concise summary (signature, key params, example).
+   Use when unsure about API usage, especially for: decoupler, gseapy, scvelo, cellrank.
+   Example: lookup_documentation(function_path="decoupler.op.collectri")
    IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
    NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
    Do NOT include plt.close(), plt.show(), or plt.savefig() in the figure code - the system handles saving automatically.
@@ -687,18 +714,11 @@ SPECIES-AWARE GENE NAMES:
   Check convention: print(adata.var_names[:10])
   Convert human→mouse: [g[0].upper() + g[1:].lower() for g in gene_list]
 
-GSEAPY PARAMETER RULES:
-  organism parameter must be LOWERCASE: 'mouse' or 'human' (NOT 'Mouse' or 'Human')
-  Example: gseapy.enrichr(gene_list=genes, gene_sets='KEGG_2019_Mouse', organism='mouse')
-
-DECOUPLER API (CRITICAL - v2.x API, do NOT use old v1.x API):
-- Get networks:
-  `net = dc.op.collectri(organism='mouse')` (for TF regulons)
-  `net = dc.op.progeny(organism='mouse')` (for pathway signatures)
-  `net = dc.op.dorothea(organism='mouse')` (for TF-target interactions)
-- Run activity inference: `dc.mt.ulm(adata, net)` — results in adata.obsm['score_ulm'] and adata.obsm['padj_ulm']
-- DO NOT use old v1.x API: dc.get_collectri, dc.get_progeny, dc.get_dorothea, dc.run_ulm, dc.run_mlm (these no longer exist)
-- Check available methods: `[m for m in dir(dc.mt) if not m.startswith('_')]`
+PACKAGE API LOOKUP:
+  If unsure about the correct API for any package (decoupler, gseapy, scvelo, cellrank, etc.),
+  call lookup_documentation BEFORE writing code.
+  Example: lookup_documentation(function_path="decoupler.op.collectri")
+  The system will also automatically look up documentation if you hit the same API error twice.
 
 DEFENSIVE CODING (CRITICAL — prevents KeyError / empty DataFrame crashes):
   When iterating over clusters or cell types for DE/enrichment analysis, ALWAYS check for empty results:
@@ -1517,6 +1537,35 @@ plt.close('all')
                         step_number=step_count, step_type="register_score",
                         agent_reasoning=agent_reasoning,
                         code_description=f"Score: {score_def.score_name} via {score_def.method}",
+                    ))
+
+                elif tool_name == "lookup_documentation":
+                    function_path = args.get("function_path", "")
+                    question = args.get("question", "")
+
+                    if self.technique_agent:
+                        await self._notify("status", f"Looking up docs: {function_path}...")
+                        try:
+                            doc_result = await self.technique_agent.lookup_docs(
+                                self.sandbox, function_path, question=question
+                            )
+                        except Exception as e:
+                            logger.warning(f"[Bioinformatics] lookup_documentation failed: {e}")
+                            doc_result = f"Documentation lookup failed: {e}"
+                    else:
+                        doc_result = "Documentation lookup not available."
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": doc_result
+                    })
+
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count,
+                        step_type="lookup_documentation",
+                        agent_reasoning=agent_reasoning,
+                        code_description=f"Docs lookup: {function_path}",
                     ))
 
                 elif tool_name == "generate_publication_figure":

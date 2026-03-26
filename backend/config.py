@@ -180,6 +180,7 @@ class ModelConfig(BaseModel):
     painter_model: str = "google/gemini-3.1-flash-image-preview"
     # Supervisor agent uses cheap vision model for real-time monitoring
     supervisor_model: str = "google/gemini-3.1-flash-lite-preview"
+    technique_model: str = "google/gemini-3.1-flash-lite-preview"
 
 class AgentTemperatures(BaseModel):
     """Default temperatures for each agent - centralized configuration"""
@@ -190,6 +191,7 @@ class AgentTemperatures(BaseModel):
     literature: float = Field(default=0.6, ge=0.0, le=2.0)  # Broader exploration
     painter: float = Field(default=0.7, ge=0.0, le=2.0)  # Creative image generation
     supervisor: float = Field(default=0.1, ge=0.0, le=2.0)  # High-certainty evaluation
+    technique: float = Field(default=0.1, ge=0.0, le=2.0)  # Precise documentation lookup
 
     def get(self, agent: str, default: float = 0.5) -> float:
         """Get temperature for an agent by name"""

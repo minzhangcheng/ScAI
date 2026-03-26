@@ -37,6 +37,7 @@ from .agents.biochemistry_agent import BiochemistryAgent
 from .agents.literature_agent import LiteratureAgent
 from .agents.painter_agent import PainterAgent
 from .agents.supervisor_agent import SupervisorAgent
+from .agents.technique_agent import TechniqueAgent
 from .agents.base import AgentConfig
 from .utils.llm_client import LLMManager, OpenAICompatibleClient
 from .utils.sandbox import LocalJupyterSandbox
@@ -339,6 +340,17 @@ class SingleCellAnalysisWorkflow:
         biochemistry_prompt = custom_prompts.get('biochemistry', self.config.prompts.biochemistry_prompt)
         literature_prompt = custom_prompts.get('literature', self.config.prompts.literature_prompt)
 
+        # Technique Agent (lightweight doc lookup, used by Supervisor and Bioinformatics)
+        technique_model = custom_models.get('technique', self.config.models.technique_model)
+        if technique_model and technique_model.strip():
+            self.technique_agent = TechniqueAgent(
+                llm_client=self._get_agent_llm_client('technique'),
+                model=technique_model,
+                temperature=self.temperatures.get('technique', 0.1),
+            )
+        else:
+            self.technique_agent = None
+
         # Initialize required agents (PI and Bioinformatics — always active)
         self.pi_agent = PIAgent(
             llm_client=self._get_agent_llm_client('pi'),
@@ -358,6 +370,7 @@ class SingleCellAnalysisWorkflow:
             annotate_clusters_callback=self._annotate_clusters_callback,
             message_callback=self._agent_message_callback,
             supervisor_callback=self._supervisor_callback,
+            technique_agent=self.technique_agent,
             config=AgentConfig(temperature=self.temperatures.get('bioinformatics', 0.1))
         )
         self.bioinformatics_agent.has_vision = self._vision_settings.get('bioinformatics', True)
@@ -437,8 +450,10 @@ class SingleCellAnalysisWorkflow:
                 session_id=self.session_id,
                 temperature=self.temperatures.get('supervisor', 0.1),
                 system_prompt=supervisor_prompt,
+                technique_agent=self.technique_agent,
             )
             self.supervisor_agent.has_vision = self._vision_settings.get('supervisor', True)
+            self.supervisor_agent.set_sandbox(self.sandbox)
         else:
             self.supervisor_agent = None
             logger.info(f"[{self.session_id}] Supervisor agent disabled (empty model)")

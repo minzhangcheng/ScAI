@@ -5,6 +5,7 @@ from .bioinformatics_agent import BioinformaticsAgent
 from .biochemistry_agent import BiochemistryAgent
 from .literature_agent import LiteratureAgent
 from .painter_agent import PainterAgent
+from .technique_agent import TechniqueAgent
 
 __all__ = [
     "BaseAgent",
@@ -14,5 +15,6 @@ __all__ = [
     "BioinformaticsAgent",
     "BiochemistryAgent",
     "LiteratureAgent",
-    "PainterAgent"
+    "PainterAgent",
+    "TechniqueAgent",
 ]

@@ -23,6 +23,7 @@ from urllib.parse import quote as url_quote
 logger = logging.getLogger(__name__)
 
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep
+from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type
 
 # Python exception types that are purely technical (no PI guidance needed)
 _TECHNICAL_ERROR_TYPES = frozenset({
@@ -691,6 +692,7 @@ class SupervisorAgent:
         session_id: str = "default",
         temperature: float = 0.1,
         system_prompt: str = "",
+        technique_agent=None,
     ):
         self.llm_client = llm_client
         self.model = model
@@ -700,6 +702,8 @@ class SupervisorAgent:
         self.temperature = temperature
         # Use custom system_prompt if provided, otherwise fall back to built-in default
         self.system_prompt = system_prompt.strip() if system_prompt else ""
+        self.technique_agent = technique_agent
+        self._sandbox = None  # Set by workflow when sandbox is available
 
         # Current round state
         self.supervision_log: List[SupervisorRecord] = []
@@ -710,6 +714,10 @@ class SupervisorAgent:
 
         # All rounds archive
         self.all_rounds_log: List[List[SupervisorRecord]] = []
+
+    def set_sandbox(self, sandbox):
+        """Set the sandbox reference for Technique Agent doc lookups."""
+        self._sandbox = sandbox
 
     def _set_llm_context(self):
         """Set LLM client context before each call (since client is shared)"""
@@ -760,6 +768,27 @@ class SupervisorAgent:
                 if issue_hash not in self._recent_rule_feedback_hashes:
                     feedback_parts.append(issue)
                     self._recent_rule_feedback_hashes.add(issue_hash)
+
+        # Phase 1.5: Technique Agent for repeated API errors
+        if self._should_trigger_technique(step):
+            try:
+                logger.info(
+                    f"[{self.session_id}] Triggering Technique Agent for repeated API error "
+                    f"at step {step.step_number}"
+                )
+                await self._notify("status", "Looking up API documentation...")
+                doc_hint = await self.technique_agent.lookup_from_error(
+                    self._sandbox,
+                    step.code_error,
+                    step.code or "",
+                )
+                if doc_hint:
+                    feedback_parts.append(
+                        f"[Technique Support] Repeated API error detected. "
+                        f"Here is the correct API documentation:\n{doc_hint}"
+                    )
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] Technique Agent lookup failed: {e}")
 
         # Phase 2: LLM evaluation (sampled to reduce cost)
         # Only invoke LLM on steps that are likely to need it
@@ -1153,14 +1182,7 @@ class SupervisorAgent:
             # Check for 2 consecutive errors of the same type
             if len(self._recent_errors) >= 2:
                 last_2 = self._recent_errors[-2:]
-                # Extract error type from traceback (e.g. "ZeroDivisionError")
-                def _extract_error_type(e: str) -> str:
-                    for line in reversed(e.split('\n')):
-                        line = line.strip()
-                        if line and ':' in line and not line.startswith('File'):
-                            return line.split(':')[0].strip()
-                    return e[:50]
-                error_types = [_extract_error_type(e) for e in last_2]
+                error_types = [extract_error_type(e) for e in last_2]
                 if all(e == last_2[0] for e in last_2):
                     issues.append(
                         "WARNING: Agent appears stuck — same error occurred 2 times in a row. "
@@ -1203,6 +1225,30 @@ class SupervisorAgent:
                         issues.append("InvalidIndexError — likely caused by duplicate obs_names")
 
         return issues
+
+    def _should_trigger_technique(self, step: AnalysisStep) -> bool:
+        """
+        Check if we should trigger the Technique Agent for documentation lookup.
+
+        Returns True when:
+        1. technique_agent and sandbox are available
+        2. Current step has an API-related error
+        3. Previous step had the same type of error (consecutive same-type)
+        """
+        if not self.technique_agent or not self._sandbox:
+            return False
+        if not step.code_error:
+            return False
+
+        current_type = extract_error_type(step.code_error)
+        if current_type not in API_ERROR_TYPES:
+            return False
+
+        # Need at least 2 recent errors to detect consecutive same-type
+        if len(self._recent_errors) < 2:
+            return False
+        prev_type = extract_error_type(self._recent_errors[-2])
+        return current_type == prev_type
 
     # ------------------------------------------------------------------
     # Internal: LLM evaluation
