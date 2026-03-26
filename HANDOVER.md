@@ -2,12 +2,12 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.17.4
+**Version**: 0.17.5
 **Last Updated**: 2026-03-26
 
 ## Project Overview
 
-**ScAI** (Single Cell Sequencing Analysis Driven by AI) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of seven specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, Painter, and Supervisor) plus a lightweight Technique Agent for API documentation lookup, it automates comprehensive analysis of single-cell sequencing data with parallel execution, state version control, structured error tracking, and optimized real-time communication.
+**ScAI** (Single Cell Sequencing Analysis Driven by AI) is a multi-agent collaboration system for biomedical data analysis. Through the coordination of seven specialized agents (PI, Bioinformatics, Pathology, Biochemistry, Literature, Painter, and Supervisor) plus a lightweight Technique Agent for API documentation lookup, it automates comprehensive analysis of single-cell sequencing data with sequential execution, state version control, structured error tracking, and optimized real-time communication.
 
 ## Technical Architecture
 
@@ -60,7 +60,7 @@ This document is intended for developers and operations personnel, providing tec
 ```
 scai/                           # Code directory
 ├── backend/
-│   ├── main.py                 # FastAPI entry point (~4700 lines)
+│   ├── main.py                 # FastAPI entry point (~5260 lines)
 │   │                           # - REST API endpoints
 │   │                           # - WebSocket real-time communication
 │   │                           # - Session management & persistence
@@ -83,9 +83,9 @@ scai/                           # Code directory
 │   │                           # - Figure path resolution: uses explicit png_path from figure data if present
 │   │                           # - Empty cluster_markers guard in annotation endpoint
 │   │
-│   ├── workflow.py             # LangGraph workflow (~2400 lines)
+│   ├── workflow.py             # LangGraph workflow (~3270 lines)
 │   │                           # - Multi-Agent coordination
-│   │                           # - Parallel execution (Fan-out/Fan-in)
+│   │                           # - Sequential execution with error recovery
 │   │                           # - Human-in-the-loop (wait_for_user_input)
 │   │                           # - Retry with exponential backoff
 │   │                           # - Convergence detection
@@ -110,7 +110,7 @@ scai/                           # Code directory
 │   │                           # - WebSocket heartbeat: ping every 30s in disconnect listener to survive proxies
 │   │                           # - ws_lock held for entire check-and-send sequence (thread-safe WS send)
 │   │
-│   ├── report_generator.py     # Report generator (~4900 lines)
+│   ├── report_generator.py     # Report generator (~5460 lines)
 │   │                           # - No-sandbox report compilation (v0.7.3 rewrite)
 │   │                           # - PI analysis review pre-step (reads notebook, views figures via vision API)
 │   │                           # - Builds analysis record from code_history
@@ -123,9 +123,9 @@ scai/                           # Code directory
 │   │                           # - generate_annotation_context_report_html(): standalone HTML annotation context report
 │   │                           # - Per-round narrative with phase/direction labels; innovation sections required 300-500+ words
 │   │
-│   ├── regenerate_report_html.py # Report HTML regeneration utility (~1479 lines, appendix + analysis log support)
+│   ├── regenerate_report_html.py # Report HTML regeneration utility (~1600 lines, appendix + analysis log support)
 │   │
-│   ├── config.py               # Configuration management (~300 lines)
+│   ├── config.py               # Configuration management (~360 lines)
 │   │                           # - APIConfig: LLM keys + proxy (google_api_key moved to literature_config)
 │   │                           # - ModelConfig: Model selection per agent (incl. literature_model, supervisor_model)
 │   │                           # - AgentTemperatures: Per-agent temperatures (incl. supervisor)
@@ -153,20 +153,21 @@ scai/                           # Code directory
 │   │   │                       #   cell type dict uses json.dumps for safe serialization (injection prevention)
 │   │   ├── pathology_agent.py  # Pathology Agent
 │   │   ├── biochemistry_agent.py    # Biochemistry Agent (3-step v2, ~785 lines)
-│   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~1060 lines)
+│   │   ├── literature_agent.py # Literature Agent (2 research modes + cluster annotation, ~1270 lines)
 │   │   │                       #   result dict includes search_mode field (actual mode used, including fallback chain)
 │   │   │                       #   annotate_clusters cache: keyed by organism+tissue+top-gene fingerprint, skips redundant DR calls
 │   │   │                       #   empty cluster_markers guard: returns error immediately without calling LLM
 │   │   │                       #   previous literature reports included in annotate_clusters context
 │   │   ├── painter_agent.py    # Painter Agent (graphic abstract + revision support)
 │   │   │                       #   token budget management: estimates input tokens, auto-trims to 30K safe limit for gemini-3-pro-image-preview
-│   │   └── supervisor_agent.py # Supervisor Agent (real-time bioinformatics step monitoring, sampled LLM evaluation, PI escalation, custom system_prompt)
+│   │   ├── supervisor_agent.py # Supervisor Agent (real-time bioinformatics step monitoring, sampled LLM evaluation, PI escalation, custom system_prompt, ~2645 lines)
+│   │   └── technique_agent.py  # Technique Agent (API doc lookup via sandbox introspection + LLM, ~340 lines)
 │   │                           #   _set_llm_context(): called before each LLM call to bind shared client to session+agent
 │   │                           #   per-round narrative with phase/direction headers; publication figures in figure map
 │   │                           #   dynamic report sections: [innovation_N] per direction, [exploration_findings] if multi-phase
 │   │
 │   ├── models/
-│   │   └── schemas.py          # Pydantic data models (~570 lines)
+│   │   └── schemas.py          # Pydantic data models (~640 lines)
 │   │                           # - AnalysisState: Core state with version control + treatment_groups + data_files + biochemistry_indicators + analysis_log
 │   │                           #   + score_definitions (List[ScoreDefinition]) + annotation_report_html_path
 │   │                           # - ScoreDefinition: Score methodology record (score_name, method, description, parameters, gene_list, gene_list_source, round_number)
@@ -184,8 +185,8 @@ scai/                           # Code directory
 │   │                           # - Data helper methods: get_files_by_section/group, build_experimental_design_summary
 │   │
 │   ├── utils/
-│   │   ├── llm_client.py       # LLM client (~880 lines, OpenRouter + Google DR, precise retry with InternalServerError)
-│   │   ├── sandbox.py          # Jupyter execution environment (~1110 lines, auto PDF, code safety validation, extract_code_from_markdown)
+│   │   ├── llm_client.py       # LLM client (~980 lines, OpenRouter + Google DR, precise retry with InternalServerError)
+│   │   ├── sandbox.py          # Jupyter execution environment (~1320 lines, auto PDF, code safety validation, extract_code_from_markdown)
 │   │   │                       #   _WORKSPACE_DIR (pathlib.Path) pre-defined in kernel; agent uses this variable for all paths
 │   │   │                       #   savefig redirect: Figure.savefig monkey-patched to auto-redirect workspace-root saves → figures/
 │   │   │                       #   numba cache: /tmp/numba_cache_{session_id} per session to prevent cross-session conflicts
@@ -197,7 +198,8 @@ scai/                           # Code directory
 │   │   ├── checkpoint.py       # Generic checkpoint manager (analysis + report resumption)
 │   │   ├── image_utils.py      # Image processing
 │   │   ├── upload.py           # Chunked upload manager (~398 lines)
-│   │   └── llm_logger.py       # LLM logging
+│   │   ├── error_parsing.py    # Error type extraction utility (~19 lines)
+│   │   └── llm_logger.py       # LLM logging (~216 lines)
 │   │
 │   └── static/                 # Static files (backup)
 │
@@ -256,7 +258,7 @@ dep/                     # Dependencies directory (sibling to code directory)
 
 ### 1. Workflow Engine (workflow.py)
 
-Multi-Agent coordination system based on LangGraph with parallel execution and error recovery:
+Multi-Agent coordination system based on LangGraph with sequential execution and error recovery:
 
 ```python
 class SingleCellAnalysisWorkflow:
@@ -272,40 +274,40 @@ class SingleCellAnalysisWorkflow:
 **Workflow Graph Structure:**
 
 ```
-用户创建Session → 上传数据 → WebSocket连接 → 启动分析
+User creates Session → Upload data → WebSocket connect → Start analysis
                                                  │
   ┌──────────────────────────────────────────────┘
   ▼
 Phase 1: Exploration (Round 1)
   │
-  ├─ initialize_round       处理pending输入, current_round++, status=RUNNING
-  ├─ pi_planning            initial_exploration_instruction() 无偏全面分析计划
-  ├─ biochemistry_analysis  提取指标 → 图像分析 → 综合解读
-  ├─ pathology_analysis     瓦片化 → 视觉API → 综合(依赖biochemistry结论)
-  ├─ bioinformatics_analysis Jupyter自主执行(200步预算)
-  │    ├── QC → 标准化 → 聚类 → 细胞注释
-  │    │       └── [BLOCKING] annotation_confirmation → 用户确认/修正
-  │    └── DEG → GO/KEGG → 细胞通信
-  ├─ literature_research    Deep Research / PubMed+LLM / 快速搜索
-  └─ pi_synthesis           综合发现 → Exploration Report → phase切换 → WAITING_INPUT
+  ├─ initialize_round       Process pending inputs, current_round++, status=RUNNING
+  ├─ pi_planning            initial_exploration_instruction(): unbiased comprehensive plan
+  ├─ biochemistry_analysis  Extract indicators → Image analysis → Synthesize interpretation
+  ├─ pathology_analysis     Tiling → Vision API → Synthesis (depends on biochemistry results)
+  ├─ bioinformatics_analysis Jupyter autonomous execution (200-step budget)
+  │    ├── QC → Normalization → Clustering → Cell Annotation
+  │    │       └── [BLOCKING] annotation_confirmation → User confirms/corrects
+  │    └── DEG → GO/KEGG → Cell Communication
+  ├─ literature_research    Deep Research / PubMed+LLM / Quick search
+  └─ pi_synthesis           Synthesize findings → Exploration Report → Phase switch → WAITING_INPUT
                                 │
-                  [exploration_report dialog: 用户选择方向]
+                  [exploration_report dialog: User selects direction]
                                 │
 Phase 2: Innovation (Round 2+)
   │
-  ├─ 方向调度
-  │    ├── 单方向: user_chosen_direction
-  │    ├── 多方向: directions_queue (轮次间自动推进, 跳过wait)
-  │    └── PI自选: [PI_DECIDE] → select_best_directions() → directions_queue
+  ├─ Direction scheduling
+  │    ├── Single direction: user_chosen_direction
+  │    ├── Multiple directions: directions_queue (auto-advance between rounds, skip wait)
+  │    └── PI-selected: [PI_DECIDE] → select_best_directions() → directions_queue
   │
-  ├─ initialize_round       (同Phase 1)
-  ├─ pi_planning            innovation_instruction() + 选择性agent激活
-  ├─ [biochemistry/pathology/bioinformatics/literature] 按PI指令运行(可skip)
+  ├─ initialize_round       (same as Phase 1)
+  ├─ pi_planning            innovation_instruction() + selective agent activation
+  ├─ [biochemistry/pathology/bioinformatics/literature] Run per PI instruction (may skip)
   ├─ pi_synthesis
-  │    └── directions_queue空时: 触发多方向correlation分析
+  │    └── When directions_queue empty: trigger multi-direction correlation analysis
   │
   ├─ wait_for_user_input  ◄── configurable (-1=manual, 0=no-wait, >0=countdown+60s)
-  │    │   directions_queue非空时: 自动跳过wait
+  │    │   When directions_queue non-empty: auto-skip wait
   │    │
   ┌───┴───┐
   │       │
@@ -315,17 +317,17 @@ Phase 2: Innovation (Round 2+)
   │  generate_final_report
   │       │
   │       ▼
-  │  generate_graphic_abstract  (PI review + Painter revision × 2 + best selection)
+  │  generate_graphic_abstract  (PI review + Painter revision x2 + best selection)
   │       │
   │       ▼
-  │  generate_detailed_report   (9章 HTML报告, checkpoint续写)
+  │  generate_detailed_report   (9-chapter HTML report, checkpoint resume)
   │       │
   │       ▼
   │      END
   │
-  └───► check_convergence ──────────────────► initialize_round (下一轮)
-           │  连续2轮无新发现 → stop
-           └─ max_rounds达到 → stop (除非用户输入扩展)
+  └───► check_convergence ──────────────────► initialize_round (next round)
+           │  2 consecutive rounds with no new findings → stop
+           └─ max_rounds reached → stop (unless user input extends)
 ```
 
 **Key Features:**
@@ -409,7 +411,7 @@ Since v0.5.1, the biochemistry agent uses a 3-step analysis pipeline:
 
 This approach is more robust against vision API inconsistencies (see Known Issues).
 
-### 1.2 Literature Agent (2 Research Modes + Cluster Annotation, ~1060 lines)
+### 1.2 Literature Agent (2 Research Modes + Cluster Annotation, ~1270 lines)
 
 The Literature Agent supports 2 research modes with automatic fallback:
 
@@ -482,7 +484,26 @@ When a user's chat request requires specialized analysis beyond PI's direct know
 - `_build_synthesis_prompt()`: Builds PI synthesis prompt from agent results
 - `_collect_session_figures()`: Collects figures from workspace (both `figures/` subdir and workspace root, deduped by stem, optionally filtered by creation time)
 
-### 1.5 Session Export/Import (main.py)
+### 1.5 Technique Agent (technique_agent.py, ~340 lines)
+
+Lightweight API documentation lookup agent. Not autonomous — called by other agents as a utility.
+
+**Purpose:** Extracts docstrings from installed Python packages via Jupyter sandbox introspection, then summarizes them into concise API references using a cheap LLM (`google/gemini-3.1-flash-lite-preview`).
+
+**Two entry points:**
+- `lookup_docs(sandbox, function_path)`: Direct API doc lookup. Executes `inspect.getdoc()` and `inspect.signature()` in the sandbox, returns formatted reference (signature, key parameters, example)
+- `lookup_from_error(sandbox, error_text, code)`: Error-driven lookup. Parses error tracebacks (`AttributeError`, `TypeError`, `ImportError`, `ModuleNotFoundError`) to identify the problematic function, then looks up correct API usage
+
+**Integration points:**
+- **Bioinformatics Agent**: `lookup_documentation` tool in TOOLS array. Agent can proactively look up API docs before writing code for unfamiliar packages (decoupler, gseapy, scvelo, cellrank, etc.)
+- **Supervisor Agent**: Auto-triggered when the same API error type occurs in 2 consecutive steps (`_should_trigger_technique()`). Injects corrective guidance as `[Technique Support]` feedback
+
+**Key helper:**
+- `_guess_function_path()`: Resolves short function names to full dotted paths using import statements and common aliases (sc→scanpy, dc→decoupler, etc.)
+- `_parse_error_for_lookup()`: Extracts module/attribute/function from error tracebacks
+- Uses `asyncio.gather` for parallel sandbox calls when looking up both attribute-level and module-level docs
+
+### 1.6 Session Export/Import (main.py)
 
 **Export** (Two-phase flow, since v0.9.0):
 - **Phase 1: Prepare** (`POST /api/session/{session_id}/export/prepare`):
@@ -590,7 +611,7 @@ class LocalJupyterSandbox:
 - **Centralized code safety**: `DANGEROUS_PATTERNS` and `validate_code_safety()` moved here from bioinformatics agent, enforced at sandbox level so all callers are protected. Internal code (kernel init, session restore/save) uses `skip_safety_check=True`
 - **Code extraction**: `extract_code_from_markdown()` shared utility for extracting code from LLM responses, replacing duplicated regex-based extraction across agents
 
-### 4. Report Generator (report_generator.py, ~4400 lines)
+### 4. Report Generator (report_generator.py, ~5460 lines)
 
 **9 Chapters + Cluster Annotation Table:**
 
@@ -674,7 +695,7 @@ class DetailedReportGenerator:
 
 **Cluster Annotation Extraction**: `_extract_cluster_annotations_from_state()` extracts cluster annotations from state data (no sandbox needed). Stored in `self.cluster_annotations` dict, rendered as HTML table in report, and included in LLM prompts so narrative uses cell type names instead of cluster numbers.
 
-### 5. LLM Client (llm_client.py, ~872 lines)
+### 5. LLM Client (llm_client.py, ~980 lines)
 
 **Three client classes:**
 
@@ -1335,43 +1356,46 @@ Check if `sessions/{id}.json` file exists and is properly formatted.
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| FastAPI server, session mgmt, chat, delegation, export/import & session editing | `main.py` | ~4423 lines |
-| Report generator (no-sandbox, PI analysis review, appendix) | `report_generator.py` | ~4683 lines |
-| Workflow graph, orchestration, DR optimization, selective activation & GA revision loop | `workflow.py` | ~2133 lines |
-| Bioinformatics Agent (autonomous + figure budget + pip install + vision revision + cumulative history) | `bioinformatics_agent.py` | ~1628 lines |
-| PI Agent (coordinator + reviewer + GA reviewer + agent activation + data fidelity + brief figure curation) | `pi_agent.py` | ~1642 lines |
-| Literature Agent (2 modes + annotation) | `literature_agent.py` | ~1060 lines |
-| LLM client (OpenRouter + Google DR + MIME detection + precise retry) | `llm_client.py` | ~914 lines |
-| Jupyter sandbox (+ auto PDF) | `sandbox.py` | ~793 lines |
+| FastAPI server, session mgmt, chat, delegation, export/import & session editing | `main.py` | ~5260 lines |
+| Report generator (no-sandbox, PI analysis review, appendix) | `report_generator.py` | ~5460 lines |
+| Workflow graph, orchestration, DR optimization, selective activation & GA revision loop | `workflow.py` | ~3270 lines |
+| Supervisor Agent (real-time step monitoring + PI escalation + detailed report generation) | `supervisor_agent.py` | ~2645 lines |
+| Bioinformatics Agent (autonomous + figure budget + pip install + vision revision + cumulative history) | `bioinformatics_agent.py` | ~2396 lines |
+| PI Agent (coordinator + reviewer + GA reviewer + agent activation + data fidelity + brief figure curation) | `pi_agent.py` | ~2353 lines |
+| Report HTML regeneration (appendix + analysis log support) | `regenerate_report_html.py` | ~1600 lines |
+| Literature Agent (2 modes + annotation) | `literature_agent.py` | ~1270 lines |
+| Jupyter sandbox (+ auto PDF + I/O sandbox) | `sandbox.py` | ~1316 lines |
+| LLM client (OpenRouter + Google DR + MIME detection + precise retry) | `llm_client.py` | ~980 lines |
 | Biochemistry Agent (3-step v2) | `biochemistry_agent.py` | ~785 lines |
-| Pathology Agent (batch size 5 + dynamic timeout) | `pathology_agent.py` | ~453 lines |
-| Chunked upload manager | `upload.py` | ~398 lines |
-| Data models & schemas | `schemas.py` | ~486 lines |
-| Painter Agent (graphic abstract + revision) | `painter_agent.py` | ~440 lines |
-| Supervisor Agent (real-time step monitoring + PI escalation) | `supervisor_agent.py` | ~442 lines |
-| Configuration & prompts (+ supervisor/painter prompt fields) | `config.py` | ~300 lines |
-| Agent base class | `base.py` | ~246 lines |
+| Painter Agent (graphic abstract + revision + dual-path image generation) | `painter_agent.py` | ~647 lines |
+| Data models & schemas | `schemas.py` | ~642 lines |
+| Pathology Agent (batch size 5 + dynamic timeout) | `pathology_agent.py` | ~460 lines |
+| Chunked upload manager | `upload.py` | ~400 lines |
+| Configuration & prompts (+ supervisor/painter/technique prompt fields) | `config.py` | ~364 lines |
+| Technique Agent (API doc lookup via sandbox introspection + LLM) | `technique_agent.py` | ~342 lines |
+| Agent base class | `base.py` | ~299 lines |
+| Error type extraction utility | `error_parsing.py` | ~19 lines |
 
 ### Frontend
 
 | Feature | File | Approximate Size |
 |---------|------|-----------------|
-| API hooks + WebSocket + session editing | `useApi.ts` | ~1184 lines |
-| Data upload (queue + per-file progress) + download interface | `DataPanel.tsx` | ~1070 lines |
-| Real-time message streaming + delegation | `MessageStream.tsx` | ~846 lines |
-| Report generation & download | `ReportPanel.tsx` | ~789 lines |
-| Analysis control + agent status | `AnalysisPanel.tsx` | ~751 lines |
-| Session mgmt + export/import + session editing | `Sidebar.tsx` | ~778 lines |
-| PI Agent chat + delegation | `ChatPanel.tsx` | ~657 lines |
-| Agent prompt + literature config | `PromptsPanel.tsx` | ~521 lines |
-| Round feedback dialog (configurable timer) | `RoundFeedbackDialog.tsx` | ~600 lines |
-| Zustand global state (+ delegation) | `appStore.ts` | ~509 lines |
-| Round results + publication outputs | `ResultsPanel.tsx` | ~359 lines |
-| Main application (+ About dialog) | `App.tsx` | ~313 lines |
-| About dialog (project info) | `AboutDialog.tsx` | ~135 lines |
-| Cell annotation confirmation dialog (Phase 1) | `AnnotationConfirmationDialog.tsx` | ~400 lines |
-| Exploration report & direction selection dialog | `ExplorationReportDialog.tsx` | ~264 lines |
-| API + literature configuration + DR warning | `ConfigPanel.tsx` | ~261 lines |
+| API hooks + WebSocket + session editing | `useApi.ts` | ~1230 lines |
+| Data upload (queue + per-file progress) + download interface | `DataPanel.tsx` | ~1098 lines |
+| Analysis control + agent status | `AnalysisPanel.tsx` | ~1072 lines |
+| Real-time message streaming + delegation | `MessageStream.tsx` | ~963 lines |
+| Agent prompt + literature config + per-agent LLM server | `PromptsPanel.tsx` | ~960 lines |
+| Report generation & download | `ReportPanel.tsx` | ~945 lines |
+| Session mgmt + export/import + session editing | `Sidebar.tsx` | ~759 lines |
+| PI Agent chat + delegation | `ChatPanel.tsx` | ~674 lines |
+| Round feedback dialog (configurable timer) | `RoundFeedbackDialog.tsx` | ~634 lines |
+| Zustand global state (+ delegation) | `appStore.ts` | ~615 lines |
+| Exploration report & direction selection dialog | `ExplorationReportDialog.tsx` | ~486 lines |
+| Cell annotation confirmation dialog (Phase 1) | `AnnotationConfirmationDialog.tsx` | ~386 lines |
+| Round results + publication outputs | `ResultsPanel.tsx` | ~372 lines |
+| Main application (+ About dialog) | `App.tsx` | ~347 lines |
+| API + literature configuration + DR warning | `ConfigPanel.tsx` | ~210 lines |
+| About dialog (project info) | `AboutDialog.tsx` | ~108 lines |
 
 ## Known Issues
 
@@ -1423,66 +1447,11 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
-| Version | Date | Key Changes |
-|---------|------|-------------|
-| 0.17.4 | 2026-03-26 | Frontend "Scientific Elegance" redesign: Source Serif 4 + IBM Plex Sans typography; indigo accent + surface color system; dark sidebar; underline tabs; dot-grid background; gradient agent badges; scale-in/fade-in-up animations; enhanced scrollbars; pill status badges; prefers-reduced-motion support. Zero new dependencies |
-| 0.17.3 | 2026-03-26 | Technique Agent: lightweight API doc lookup via sandbox introspection + LLM summarization; Bioinformatics `lookup_documentation` tool; Supervisor auto-triggers doc lookup on consecutive same-type API errors; hardcoded decoupler/gseapy API rules replaced with dynamic lookup; `error_parsing.py` utility extracted |
-| 0.17.2 | 2026-03-26 | Docker detached mode (`-d --name scai`), container logs appended to `/data/logs/scai.log` via `tee -a` in entrypoint |
-| 0.17.1 | 2026-03-26 | Per-agent LLM server config (agent_server_configs in state, new API endpoints, PromptsPanel UI); Painter dual-path image generation (chat completions + Images API fallback); Google AI Key moved to Literature agent settings; ConfigPanel label "Default LLM Server" |
-| 0.16.2 | 2026-03-24 | Docker packaging: Dockerfile, docker-entrypoint.sh, build.sh, .dockerignore; runtime dependency installation with /dep and /data volume mounts; ghcr.io/minzhangcheng/scai image |
-| 0.16.1 | 2026-03-24 | Vision fallback for figure revision (NotFoundError/404 → text-only retry); _PERCENTAGE_PATTERN and _INF_NAN_PATTERN data integrity check regex patterns; sandbox_timeout extended to 5400 s (1.5 h) |
-| 0.15.9 | 2026-03-23 | Bioinformatics figure revision loop indentation fix (code blocks erroneously nested one level deep); frontend auto-sync API config from localStorage to backend on startup and before analysis start; checkStatus error logging |
-| 0.15.8 | 2026-03-23 | Figure save path tracking (set→dict, auto PDF for manual saves, revision counter after success); supervisor feedback deduplication (_recent_rule_feedback_hashes); _alt_ext_name() .png↔.jpg fallback; dynamic download button extension labels; report_generator unified .jpg default + stem-based PDF path; WebSocket send-failure log downgraded to debug; PromptsPanel Vision requirement clarifications |
-| 0.15.7 | 2026-03-22 | Mandatory annotate_clusters enforcement before report_findings in exploration; smarter circuit breaker redirects to annotation; inline [TABLE:] markers in HTML reports; SupervisorAgent.restore_log_from_saved() + generate_detailed_report() replaces DetailedReportGenerator; sandbox allows locals(), os.system pip-install, importlib.reload; annotation confirmation decoupled from phase |
-| 0.14.5 | 2026-03-20 | directions_queue type mismatch fix (d.strip() → d.get("direction","").strip()), countdown timeout status reset to RUNNING + state sync, PI callback uses chat_without_history(), annotation callback tissue_summary field fix + already_confirmed, literature search fallback to objective/groups when no findings, multi-direction correlation by name not index, analysis_log capped at 2000 entries, skip_nodes injected into graph state on resume, JsonPlusSerializer explicit schema allowlist, figure review_status init "pending" not "approved", _db_conn=None after close, PI merge_strategy/cluster_comparison_strategy passed to bioinformatics, exploration per-cell-type figure requirement, PI English-only prompt |
-| 0.14.4 | 2026-03-17 | Project renamed InteSc→ScAI, directory restructure (intesc_data→data, intesc_dep→dep, intesc→scai), SCAI_DATA_DIR env var, configurable start.sh (--host/--port/--backport), GitHub repo renamed |
-| 0.14.3 | 2026-03-17 | JPG figure output (quality 85, optimized) replaces PNG for web; larger matplotlib fonts (title 16pt, labels 14pt, ticks 12pt); decoupler v2.x API (dc.op.* + dc.mt.ulm); gseapy lowercase organism; defensive empty-DataFrame guards; Harmony dimension-mismatch prevention; supervisor inline figure embedding ([FIGURE:] markers, stats bar removed, user interaction history in appendix, notebook download); painter retry logic (3 attempts, exponential backoff, skip 4xx); literature hashlib.md5 cache key; pathology image loaded once; frontend JPG MIME detection; WebSocket message merge race condition fix; chat stale closure fix; 100MB generic upload limit; stop handles GENERATING_REPORT; path traversal validation on HTML report endpoints; catch-all report file endpoint; async version lock (asyncio.Lock) |
-| 0.14.2 | 2026-03-16 | obs/var names auto-fix after every execute (make_unique), _WORKSPACE_DIR kernel variable, savefig redirect (workspace root → figures/), numba cache isolation, open() safety check refined (allows known safe paths), checkpoint round validation, step budget fix on resume, annotate_clusters separate-step requirement, gene scoring guidance (use_raw + species names), security restrictions in prompt, literature annotate_clusters cache + empty guard, painter token budget management, supervisor _set_llm_context(), _normalize_tasks() utility, confirmed annotation cache in workflow, WS heartbeat ping, thread-safe WS send, PI_DECIDE max_rounds extension, figure path resolution, exploration report dialog timing fix, painter model recommendation updated |
-| 0.14.1 | 2026-03-15 | human-input signals workflow (signal_continue on WAITING_INPUT), stale should_continue cleared in initialize_round, current_round_direction set before PI call + cleared on failure, annotation pause respects PAUSED status, multi_dir_completed guard uses len() > 1, exploration report failure notified to frontend |
-| 0.14.0 | 2026-03-15 | register_score tool (ScoreDefinition model, consult PI → compute → register workflow), Jupyter I/O sandbox (intercepts open/mkdir/write_text/write_bytes), kernel dead detection (_kernel_dead flag), working directory context in kernel init (os.chdir + figures/tables subdirs + sc.settings.figdir), annotation dialog: alternative_cell_types + low_confidence_reason + expandable rows + HTML report download, annotation context HTML report endpoint, per-round report structure with phase/direction labels + innovation sections, publication figures in report figure map, thread-safe session cache (_update_session_cache), innovation phase user guidance merging (supplementary, not override), direction pop persistence, message trim orphan prevention, direction validation + resume guard, clear_queue in HumanInputRequest, user override sanitization, literature search_mode tracking |
-| 0.13.4 | 2026-03-13 | Pause/resume deadlock fix (WAITING_INPUT status guard), multi-direction max_rounds guard, retry status:failed field, Round 3+ task fallback, bioinformatics message history cap (80), supervisor sampled LLM evaluation, report_generator dead code removal (~700 lines), pre-existing IndentationError fix, docs update |
-| 0.13.1 | 2026-03-12 | Multi-direction research workflow (directions_queue, auto-continue between directions), enhanced direction candidate evaluation (innovation/novelty/reliability scores), exploration report HTML export, PI select_best_directions(), bioinformatics LLM error status, session eviction race fix, sidebar max-rounds removed |
-| 0.13.0 | 2026-03-12 | Two-phase workflow (Exploration Phase + Innovation Phase), cell annotation confirmation dialog (WAITING_ANNOTATION status), exploration report with research direction selection, new data models (ClusterAnnotation, AnnotationConfirmationState, ExplorationReport) |
-| 0.12.4 | 2026-03-11 | Session-centric data directory restructure, backward-compatible path resolution, data migration script |
-| 0.12.3 | 2026-03-10 | Report markdown rendering fix (headers/lists in HTML), conclusions formatting cleanup, frontend ReactMarkdown rendering, frontend appendix display, supervisor agent HTML appendix |
-| 0.12.2 | 2026-03-10 | Analysis stop/pause support, publication figure checklist, figure revision auto-retry, progressive figure review leniency, WebSocket reconnection improvements |
-| 0.10.3 | 2026-03-09 | Comprehensive analysis log (AnalysisStep model, all tool call types), analysis log timeline in reports, figure/table scientific interpretation, PI history reset on synthesis, code history cap (100), agent auto-activation from PI tasks, pathology→bioinformatics context sharing, code history dedup by ID, deep research availability refactor |
-| 0.10.2 | 2026-03-08 | Sandbox kernel timeout recovery (full reconnection + session restore), plt.close/plt.show safety (try/finally in 3 code templates), blank figure detection (<2KB threshold), sandbox timeout 300s→1800s, architecture docs updated (sequential execution) |
-| 0.10.1 | 2026-03-07 | Literature fallback model (quick search uses PI model), deep research max_tokens fix (None instead of 262144), deep research model passthrough in chat mode, upload cancellation (abort in-progress + remove pending) |
-| 0.10.0 | 2026-03-07 | Deep Research mode (OpenRouter: o4-mini-deep-research, sonar-deep-research), 3 literature modes (deep_research/gemini/pubmed_llm), fallback chain, LLM-based query generation, model upgrades (claude-sonnet-4.6), cross-agent context, bug fixes |
-| 0.9.1 | 2026-03-07 | Cross-agent context passing (biochemistry + literature receive current round findings), PubMed query degradation (`_validate_and_degrade_query`), LLM-driven research context (`_build_research_context` replaces hardcoded `_build_research_query`), skip_nodes reset bug fix, skipped node result clarity, race condition fix (`_continue_event.clear()` moved to `_pi_synthesis`), PI synthesis error awareness, literature findings in round summary, fallback task assignment, human guidance source fix, max_tokens unified to 32768, bioinformatics text_response_count reset + `completed_with_fallback` status, JSON parse failure logging |
-| 0.9.0 | 2026-03-04 | PI analysis review before report (reads notebook + views figures via vision API), report appendix (project info, agent config, data summary, round history, user inputs), graphic abstract revision loop (PI review + Painter revision + best selection), cumulative figure revision history, in-place session editing (name + instruction via sidebar), two-phase export (prepare + download with size preview), upload queue with per-file progress, "Other" sequencing type (bulk RNA-seq support), sample count safety guard, workspace figure downloads (PDF/PNG), figure gallery API fallback on reload, Deep Research cost warning |
-| 0.8.9 | 2026-03-03 | Import proxy timeout resilience (pre-generated `import_id`, early job registration, upload-finished detection, polling retry with 404 tolerance), import UX (success/failure icons, confirmation dialog), branding update ("Integrated & Intelligent Single Cell Analysis") |
-| 0.8.7 | 2026-03-02 | Data page scroll fix (`overflow: hidden` on html/body), footer i18n (Chinese/English), About page version/date update |
-| 0.8.6 | 2026-03-02 | Async session import (background tar.gz extraction + polling endpoint, avoids proxy timeout), first-visit disclaimer dialog (AI reliability warning, localStorage), About button text label, footer copyright |
-| 0.8.5 | 2026-02-28 | Tool message history fix (single raw_assistant_message per response, Gemini thought_signature), AI-curated brief figures (`select_brief_figures`), workspace figure collection (root + figures/ dirs), image MIME type detection, export GET endpoint + browser-native download UX |
-| 0.8.4 | 2026-02-21 | About dialog (project info, author, affiliation, contact, GitHub link) |
-| 0.8.3 | 2026-02-21 | Manual round wait fix (`_wait_for_user_input` now respects `round_wait_seconds`: -1=indefinite, 0=immediate, >0=countdown+60s buffer; previously hardcoded 600s timeout) |
-| 0.8.2 | 2026-02-21 | Default model update (PI/Pathology/Biochemistry → `gemini-3.1-pro-preview`), proxy fix (4 `OpenAICompatibleClient` instances missing explicit `proxy_url`) |
-| 0.8.1 | 2026-02-20 | Figure data fidelity (experimental design constraints in figure review/revision pipeline), vision-based figure revision (`chat_with_vision` in `_revise_figure_code`), PI Data Fidelity review criterion |
-| 0.8.0 | 2026-02-16 | Unified data model (`DataFile` + `TreatmentGroup` + `BiochemistryIndicator` replace per-type models), multi-group multi-sample support, unified `/upload/data` endpoint, group CRUD, upload selectors in feedback dialog & chat, simplified pathology types (H&E + Other), DataPanel rewrite |
-| 0.7.5 | 2026-02-15 | Selective agent activation (PI decides which agents to activate from round 2+, `agents_for_next_round`), Docker pip install support for bioinformatics agent |
-| 0.7.4 | 2026-02-14 | Figure step budget (MAX_FIGURE_ITERATIONS=5), figure revision max_tokens fix, data download buttons, agent status display fix (generating_report), figure gallery preview + review status fix, MIME type correction |
-| 0.7.3 | 2026-02-13 | Chat delegation, no-sandbox report generation, report-only resume, auto PDF, Deep Research optimization, bioinformatics session restore, batch effect check, configurable round timer, pathology reliability, .pkl in export/import |
-| 0.7.2 | 2026-02-11 | Bug fixes for chat file handling, sandbox message filtering, import path validation |
-| 0.7.1 | 2026-02-11 | ChatPanel UX improvements (per-file agent selector, resizable textarea), Sidebar export/import UX polish |
-| 0.7.0 | 2026-02-11 | Chat tab (PI Agent free-form chat with figure display/generation), session export/import (tar.gz), session browser |
-| 0.6.3 | 2026-02-11 | Literature-based cluster annotation tool, round context enrichment, per-session literature config, ConfigPanel redesign, LLM reasoning model support, timer wall-clock fix |
-| 0.6.2 | 2026-02-10 | Literature Agent rewrite (2 modes), annotate_clusters method, cluster annotations in report, session recovery, localStorage overflow fix, read mode |
-| 0.6.1 | 2026-02-10 | Bug fixes (partialize null safety, session not found, report dict keys) |
-| 0.6.0 | 2026-02-09 | Human-in-the-loop round feedback dialog, workflow wait_for_user_input node, cell annotation + report fixes |
-| 0.5.5 | 2026-02-09 | WebSocket reconnect with full session data, report loading retry, annotation workflow improvements |
-| 0.5.4 | 2026-02-09 | Bug fixes (bioinformatics, session handling, sandbox, UI) |
-| 0.5.3 | 2026-02-09 | Report generation and bioinformatics enhancements |
-| 0.5.1 | 2026-02-08 | Biochemistry Agent v2 (3-step workflow), major refactoring |
-| 0.5.0 | 2026-02-06 | Real-time message optimization |
-| 0.4.1 | 2026-02-05 | Painter agent improvements, bug fixes |
-| 0.4.0 | 2026-02-05 | Report generation rebuilt |
-| 0.3.0 | 2026-02-04 | Parallel execution, Painter Agent, state versioning, error tracking |
-| 0.2.x | 2026-01 | Report features development |
-| 0.1.x | 2026-01 | Initial functional version |
+#### v0.17.5 (2026-03-26)
 
-### Detailed Changelog
+- **Fix: Loading spinner not animating** (`globals.css`, `AnalysisPanel.tsx`): Loader2 spinner icons were rendered as static icons because the `@media (prefers-reduced-motion: reduce)` rule in `globals.css` applied `animation-duration: 0.01ms !important` to all elements, overriding both inline styles and Tailwind classes. Fixed by excluding `.animate-spin` elements from the reduced-motion selector. Additionally, standardized 3 inline `style={{ animation: 'spin 1s linear infinite' }}` usages in `AnalysisPanel.tsx` to Tailwind's `animate-spin` class for consistency.
+- **Improvement: Sidebar project description adaptive height** (`Sidebar.tsx`): Long project descriptions previously pushed Export/Import/API Settings buttons off-screen. Merged the Current Session section and spacer into a single `flex-1 min-h-0` flex container. Title bar and status bar use `shrink-0` to stay visible; the description `<p>` uses `overflow-y-auto min-h-0` to scroll only when exceeding available space. Short descriptions display fully without wasted whitespace.
+- **Improvement: Sidebar description readability** (`Sidebar.tsx`): Increased description font size from `text-xs` (12px) to `text-sm` (14px). Changed text color from `text-accent-300/70` (low-contrast translucent purple) to `text-surface-300` (clear light gray) for better readability on the dark sidebar background.
 
 #### v0.17.4 (2026-03-26)
 
@@ -2011,5 +1980,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-20*
-*Version: 0.14.5*
+*Document updated: 2026-03-26*
+*Version: 0.17.5*

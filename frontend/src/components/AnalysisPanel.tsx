@@ -608,20 +608,17 @@ export function AnalysisPanel() {
       )}
 
       {/* Header - Compact */}
-      <div className="flex items-center justify-between pb-4 border-b border-slate-200">
+      <div className="flex items-center justify-between pb-2 border-b border-slate-200">
         <div>
           <h2 className="font-display text-lg font-semibold text-slate-900">{t('analysisControl')}</h2>
-          <p className="text-sm text-slate-500 truncate max-w-md">
-            {currentSession.instruction}
-          </p>
         </div>
-        
-        <div className="flex items-center gap-3">
+
+        <div className="flex items-center gap-3 shrink-0">
           {currentSession.status === 'pending' && (
             <button
               onClick={handleStart}
               disabled={readMode}
-              className={`flex items-center gap-2 px-5 py-2.5 text-white rounded-xl font-medium transition-colors ${
+              className={`flex items-center gap-2 px-4 py-1.5 text-white rounded-lg font-medium transition-colors ${
                 readMode
                   ? 'bg-slate-400 cursor-not-allowed'
                   : 'bg-green-600 hover:bg-green-700'
@@ -635,20 +632,20 @@ export function AnalysisPanel() {
           
           {isRunning && (
             <div className="flex items-center gap-2">
-              <div className="flex items-center gap-2 px-4 py-2 bg-blue-100 text-blue-700 rounded-xl">
+              <div className="flex items-center gap-2 px-3 py-1 bg-blue-100 text-blue-700 rounded-lg">
                 <Loader2 className="w-4 h-4 animate-spin" />
                 <span className="font-medium">Round {currentSession.currentRound}</span>
               </div>
               <button
                 onClick={handlePause}
-                className="flex items-center gap-1.5 px-3 py-2 bg-amber-100 hover:bg-amber-200 text-amber-700 rounded-xl text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-amber-100 hover:bg-amber-200 text-amber-700 rounded-lg text-sm font-medium transition-colors"
               >
                 <Pause className="w-4 h-4" />
                 {language === 'zh' ? '暂停' : 'Pause'}
               </button>
               <button
                 onClick={() => setShowStopDialog(true)}
-                className="flex items-center gap-1.5 px-3 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-xl text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition-colors"
               >
                 <Square className="w-3.5 h-3.5" />
                 {language === 'zh' ? '停止' : 'Stop'}
@@ -658,7 +655,7 @@ export function AnalysisPanel() {
 
           {isWaitingInput && (
             <div className="flex items-center gap-2">
-              <div className={`flex items-center gap-2 px-4 py-2 rounded-xl ${
+              <div className={`flex items-center gap-2 px-3 py-1 rounded-lg ${
                 currentSession.status === 'waiting_annotation'
                   ? 'bg-accent-100 text-accent-700'
                   : 'bg-amber-100 text-amber-700'
@@ -672,16 +669,16 @@ export function AnalysisPanel() {
               </div>
               <button
                 onClick={() => setShowStopDialog(true)}
-                className="flex items-center gap-1.5 px-3 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-xl text-sm font-medium transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition-colors"
               >
                 <Square className="w-3.5 h-3.5" />
                 {language === 'zh' ? '停止' : 'Stop'}
               </button>
             </div>
           )}
-          
+
           {isCompleted && (
-            <div className="flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-xl">
+            <div className="flex items-center gap-2 px-3 py-1 bg-green-100 text-green-700 rounded-lg">
               <CheckCircle2 className="w-4 h-4" />
               <span className="font-medium">{t('analysisComplete')}</span>
             </div>
@@ -691,7 +688,7 @@ export function AnalysisPanel() {
 
       {/* Agent Status - Compact Row */}
       <div className="py-3 border-b border-slate-200">
-        <div className="flex items-center gap-2 overflow-x-auto">
+        <div className="flex items-center gap-2 flex-wrap">
           {agents.map((agent) => {
             const status = getAgentStatus(agent.id)
             const Icon = agent.icon
@@ -785,7 +782,7 @@ export function AnalysisPanel() {
           
           {roundSummaries.length === 0 && isRunning && (
             <div className="p-6 bg-blue-50 border border-blue-200 rounded-xl text-center">
-              <Loader2 className="w-8 h-8 text-blue-500 animate-spin mx-auto mb-3" />
+              <Loader2 className="w-8 h-8 text-blue-500 mx-auto mb-3 animate-spin" />
               <p className="font-medium text-blue-900">
                 {language === 'zh' ? 'Round 1 分析进行中...' : 'Round 1 analysis in progress...'}
               </p>

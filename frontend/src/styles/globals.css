@@ -194,9 +194,16 @@ pre {
   }
 }
 
-/* Reduced motion */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Reduced motion — keep functional spinners running */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *:not(.animate-spin):not([style*="spin"]),
+  *:not(.animate-spin):not([style*="spin"])::before,
+  *:not(.animate-spin):not([style*="spin"])::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

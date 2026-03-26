@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.17.4
+**Version**: 0.17.5
 
 ## Installation
 
@@ -341,6 +341,12 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 
 ## Changelog
 
+### v0.17.5 (2026-03-26)
+
+- **Fix: Loading spinner not animating** — Spinner icons (Loader2) were static due to `prefers-reduced-motion` CSS override killing all animations with `!important`. Fixed by exempting functional `.animate-spin` elements from the reduced-motion rule. Also standardized all inline `style={{ animation: 'spin ...' }}` to Tailwind's `animate-spin` class.
+- **Improvement: Sidebar project description adaptive height** — Long project descriptions no longer push Export/Import/API Settings off-screen. The description area now dynamically uses available sidebar space and scrolls only when content exceeds it.
+- **Improvement: Sidebar description readability** — Increased description font size (12px → 14px) and improved text contrast for better readability on the dark sidebar.
+
 ### v0.17.4 (2026-03-26)
 
 - **Improvement: Frontend visual redesign ("Scientific Elegance")** — Complete UI beautification with no new dependencies. New typography (Source Serif 4 for headings, IBM Plex Sans for body), refined color system (indigo accent + surface gray scale), dark sidebar theme, underline-style tab navigation, scientific dot-grid content background, gradient agent badges in message stream, modal scale-in animations, card fade-in-up entrance animations, enhanced scrollbars, pill-shaped status badges, and `prefers-reduced-motion` accessibility support.
@@ -452,25 +458,14 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 - Graphic abstract revision with PI feedback; bulk RNA-seq support.
 - Session name editing; multi-file upload queue; export file size preview.
 
-### v0.8.0 – v0.8.9 (2026-02-16 – 2026-03-03)
+### v0.3.0 – v0.8.9 (2026-02-04 – 2026-03-03)
 
-- **New: Treatment group system** — Define experimental groups, assign data to groups via unified upload interface.
-- **New: About dialog**; first-visit disclaimer; AI-curated figure selection in brief reports.
-- PI Agent decides which agents to activate each round.
-- Figure generation no longer counts toward step budget; auto PDF generation.
-- Session import/export; background import for large sessions.
-
-### v0.7.2 – v0.7.5 (2026-02-11 – 2026-02-15)
-
-- **New: Chat panel** for free-form conversation with PI Agent.
-- PI delegates chat questions to specialized agents; configurable round wait timer.
-- Automatic batch effect detection for multi-sample datasets.
-
-### v0.3.0 – v0.6.x (2026-02-04 – 2026-02-11)
-
-- Painter Agent for graphic abstract generation; report generation system.
-- Literature-based cluster annotation; human-in-the-loop round feedback.
-- Biochemistry Agent with 3-step analysis workflow; session recovery on refresh.
+- Treatment group system, unified data model, multi-group multi-sample support
+- Chat panel for PI Agent conversation with delegation to specialized agents
+- Painter Agent for graphic abstracts; comprehensive report generation with PI review
+- Literature-based cluster annotation; human-in-the-loop round feedback
+- Biochemistry Agent 3-step workflow; session export/import; auto PDF generation
+- Selective agent activation from round 2+; batch effect detection
 
 ## License
 

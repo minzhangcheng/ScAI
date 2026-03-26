@@ -625,95 +625,94 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
         </div>
       )}
 
-      {/* Current Session */}
-      {currentSession && (
-        <div className="px-3 pb-3">
-          <div className="p-3 bg-accent-900/30 border border-accent-700/40 rounded-xl">
-            {editingSession ? (
-              <div className="space-y-2">
-                <input
-                  type="text"
-                  defaultValue={currentSession.name}
-                  onBlur={(e) => {
-                    const val = e.target.value.trim()
-                    if (val && val !== currentSession.name) updateSessionInfo({ name: val })
-                  }}
-                  className="w-full px-2 py-1 border border-accent-700/40 rounded text-sm font-medium bg-surface-900 text-white"
-                  autoFocus
-                />
-                <textarea
-                  defaultValue={currentSession.instruction}
-                  onBlur={(e) => {
-                    const val = e.target.value.trim()
-                    if (val !== currentSession.instruction) updateSessionInfo({ instruction: val })
-                  }}
-                  className="w-full px-2 py-1 border border-accent-700/40 rounded text-xs bg-surface-900 text-white resize-y"
-                  rows={8}
-                />
-                <button
-                  onClick={() => setEditingSession(false)}
-                  className="text-xs text-accent-400 hover:underline"
-                >
-                  {language === 'zh' ? '完成' : 'Done'}
-                </button>
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-white">
-                    {currentSession.name}
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => setEditingSession(true)}
-                      className="p-1 hover:bg-accent-800/40 rounded"
-                      title={language === 'zh' ? '编辑' : 'Edit'}
-                    >
-                      <Pencil className="w-3.5 h-3.5 text-accent-400" />
-                    </button>
-                    <button
-                      onClick={handleRefreshSession}
-                      className="p-1 hover:bg-accent-800/40 rounded"
-                      title={language === 'zh' ? '刷新状态' : 'Refresh status'}
-                    >
-                      <RefreshCw className="w-3.5 h-3.5 text-accent-400" />
-                    </button>
-                    <button
-                      onClick={handleClearSession}
-                      className="p-1 hover:bg-red-100 rounded"
-                      title={language === 'zh' ? '清除项目' : 'Clear project'}
-                    >
-                      <Trash2 className="w-3.5 h-3.5 text-red-500" />
-                    </button>
-                  </div>
+      {/* Current Session + Spacer */}
+      <div className="flex-1 min-h-0 flex flex-col">
+        {currentSession && (
+          <div className="px-3 pb-3 min-h-0 flex flex-col">
+            <div className="p-3 bg-accent-900/30 border border-accent-700/40 rounded-xl min-h-0 flex flex-col">
+              {editingSession ? (
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    defaultValue={currentSession.name}
+                    onBlur={(e) => {
+                      const val = e.target.value.trim()
+                      if (val && val !== currentSession.name) updateSessionInfo({ name: val })
+                    }}
+                    className="w-full px-2 py-1 border border-accent-700/40 rounded text-sm font-medium bg-surface-900 text-white"
+                    autoFocus
+                  />
+                  <textarea
+                    defaultValue={currentSession.instruction}
+                    onBlur={(e) => {
+                      const val = e.target.value.trim()
+                      if (val !== currentSession.instruction) updateSessionInfo({ instruction: val })
+                    }}
+                    className="w-full px-2 py-1 border border-accent-700/40 rounded text-xs bg-surface-900 text-white resize-y"
+                    rows={8}
+                  />
+                  <button
+                    onClick={() => setEditingSession(false)}
+                    className="text-xs text-accent-400 hover:underline"
+                  >
+                    {language === 'zh' ? '完成' : 'Done'}
+                  </button>
                 </div>
-                <p className="text-xs text-accent-300/70 mt-1 line-clamp-2">
-                  {currentSession.instruction}
-                </p>
-              </>
-            )}
-            <div className="flex items-center gap-2 mt-2">
-              <span className={`text-xs px-2 py-0.5 rounded-full ${
-                currentSession.status === 'completed' && !reportGenerated
-                  ? 'bg-amber-100 text-amber-700'
-                  : `status-${currentSession.status}`
-              }`}>
-                {currentSession.status === 'completed'
-                  ? (reportGenerated
-                      ? (language === 'zh' ? '已完成' : 'completed')
-                      : (language === 'zh' ? '分析完成' : 'analysis done'))
-                  : currentSession.status}
-              </span>
-              <span className="text-xs text-accent-400">
-                Round {currentSession.currentRound}
-              </span>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between shrink-0">
+                    <span className="text-sm font-medium text-white">
+                      {currentSession.name}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setEditingSession(true)}
+                        className="p-1 hover:bg-accent-800/40 rounded"
+                        title={language === 'zh' ? '编辑' : 'Edit'}
+                      >
+                        <Pencil className="w-3.5 h-3.5 text-accent-400" />
+                      </button>
+                      <button
+                        onClick={handleRefreshSession}
+                        className="p-1 hover:bg-accent-800/40 rounded"
+                        title={language === 'zh' ? '刷新状态' : 'Refresh status'}
+                      >
+                        <RefreshCw className="w-3.5 h-3.5 text-accent-400" />
+                      </button>
+                      <button
+                        onClick={handleClearSession}
+                        className="p-1 hover:bg-red-100 rounded"
+                        title={language === 'zh' ? '清除项目' : 'Clear project'}
+                      >
+                        <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-sm text-surface-300 mt-1 overflow-y-auto min-h-0">
+                    {currentSession.instruction}
+                  </p>
+                </>
+              )}
+              <div className="flex items-center gap-2 mt-2 shrink-0">
+                <span className={`text-xs px-2 py-0.5 rounded-full ${
+                  currentSession.status === 'completed' && !reportGenerated
+                    ? 'bg-amber-100 text-amber-700'
+                    : `status-${currentSession.status}`
+                }`}>
+                  {currentSession.status === 'completed'
+                    ? (reportGenerated
+                        ? (language === 'zh' ? '已完成' : 'completed')
+                        : (language === 'zh' ? '分析完成' : 'analysis done'))
+                    : currentSession.status}
+                </span>
+                <span className="text-xs text-accent-400">
+                  Round {currentSession.currentRound}
+                </span>
+              </div>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Spacer */}
-      <div className="flex-1" />
+        )}
+      </div>
 
       {/* Bottom Actions */}
       <div className="p-3 border-t border-surface-800 space-y-1">
