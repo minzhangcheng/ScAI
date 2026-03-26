@@ -11,12 +11,15 @@ import {
   BookOpen,
   Palette,
   Eye,
+  EyeOff,
   Save,
   RotateCcw,
   Cpu,
   Thermometer,
   Search,
   AlertCircle,
+  Server,
+  Key,
 } from 'lucide-react'
 
 // Color styles mapping for Tailwind - use complete class names to prevent purging
@@ -88,13 +91,14 @@ const colorStyles: Record<string, {
 
 export function PromptsPanel() {
   const {
-    currentSession, language,
+    currentSession, language, apiConfig,
     prompts, setPrompt,
     models, setModel,
     temperatures, setTemperature,
+    agentServerConfigs, setAgentServerConfig,
     literatureMode, setLiteratureMode,
     deepResearchModel, setDeepResearchModel,
-    googleApiKey,
+    googleApiKey, setGoogleApiKey,
     pubmedEmail,
     literatureMaxSearchRounds, setLiteratureMaxSearchRounds,
   } = useAppStore()
@@ -105,6 +109,10 @@ export function PromptsPanel() {
   const [editedPrompt, setEditedPrompt] = useState(prompts[selectedAgent] ?? defaultPrompts[selectedAgent] ?? '')
   const [editedModel, setEditedModel] = useState(models[selectedAgent] ?? DEFAULT_MODELS[selectedAgent] ?? '')
   const [editedTemperature, setEditedTemperature] = useState(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
+  const [editedLlmBaseUrl, setEditedLlmBaseUrl] = useState(agentServerConfigs[selectedAgent]?.llmBaseUrl || apiConfig.llmBaseUrl)
+  const [editedApiKey, setEditedApiKey] = useState(agentServerConfigs[selectedAgent]?.apiKey || apiConfig.apiKey)
+  const [showAgentApiKey, setShowAgentApiKey] = useState(false)
+  const [showGoogleKey, setShowGoogleKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -117,12 +125,14 @@ export function PromptsPanel() {
     }
   }, [])
 
-  // Update edited prompt, model, and temperature when selected agent changes
+  // Update edited prompt, model, temperature, and server config when selected agent changes
   useEffect(() => {
     setEditedPrompt(prompts[selectedAgent] ?? defaultPrompts[selectedAgent] ?? '')
     setEditedModel(models[selectedAgent] ?? DEFAULT_MODELS[selectedAgent] ?? '')
     setEditedTemperature(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
-  }, [selectedAgent, prompts, models, temperatures, defaultPrompts])
+    setEditedLlmBaseUrl(agentServerConfigs[selectedAgent]?.llmBaseUrl || apiConfig.llmBaseUrl)
+    setEditedApiKey(agentServerConfigs[selectedAgent]?.apiKey || apiConfig.apiKey)
+  }, [selectedAgent, prompts, models, temperatures, defaultPrompts, agentServerConfigs, apiConfig])
 
   const agentConfig: {
     id: AgentType
@@ -187,6 +197,8 @@ export function PromptsPanel() {
     setEditedPrompt(prompts[agentId] ?? defaultPrompts[agentId] ?? '')
     setEditedModel(models[agentId] ?? DEFAULT_MODELS[agentId] ?? '')
     setEditedTemperature(temperatures[agentId] ?? DEFAULT_TEMPERATURES[agentId] ?? 0.5)
+    setEditedLlmBaseUrl(agentServerConfigs[agentId]?.llmBaseUrl || apiConfig.llmBaseUrl)
+    setEditedApiKey(agentServerConfigs[agentId]?.apiKey || apiConfig.apiKey)
     setSaved(false)
   }
 
@@ -194,10 +206,34 @@ export function PromptsPanel() {
     setSaving(true)
     setSaveError(null)
     try {
+      // Only persist per-agent server config if different from global defaults
+      const isCustomServer = editedLlmBaseUrl !== apiConfig.llmBaseUrl || editedApiKey !== apiConfig.apiKey
+      if (isCustomServer) {
+        setAgentServerConfig(selectedAgent, { llmBaseUrl: editedLlmBaseUrl, apiKey: editedApiKey })
+      } else {
+        // Clear per-agent override (use global)
+        setAgentServerConfig(selectedAgent, { llmBaseUrl: '', apiKey: '' })
+      }
+
       if (currentSession) {
         await savePrompt(selectedAgent, editedPrompt)
         await saveModel(selectedAgent, editedModel)
         await saveTemperature(selectedAgent, editedTemperature)
+
+        // Save per-agent server config to backend
+        try {
+          await apiFetch(`/session/${currentSession.id}/agent-server-config`, {
+            method: 'POST',
+            body: JSON.stringify({
+              agent: selectedAgent,
+              llm_base_url: editedLlmBaseUrl,
+              api_key: editedApiKey,
+            }),
+          })
+        } catch (e) {
+          console.error('Failed to save agent server config:', e)
+          throw e
+        }
 
         // Also save literature config if on literature agent
         if (selectedAgent === 'literature') {
@@ -214,7 +250,7 @@ export function PromptsPanel() {
             })
           } catch (e) {
             console.error('Failed to save literature config:', e)
-            throw e  // Re-throw to prevent false success indicator
+            throw e
           }
         }
       } else {
@@ -244,6 +280,10 @@ export function PromptsPanel() {
     // Reset temperature to default
     setEditedTemperature(DEFAULT_TEMPERATURES[selectedAgent])
     setTemperature(selectedAgent, DEFAULT_TEMPERATURES[selectedAgent])
+    // Reset server config to global defaults
+    setEditedLlmBaseUrl(apiConfig.llmBaseUrl)
+    setEditedApiKey(apiConfig.apiKey)
+    setAgentServerConfig(selectedAgent, { llmBaseUrl: '', apiKey: '' })
 
     // Reset literature config if on literature agent
     if (selectedAgent === 'literature') {
@@ -393,6 +433,34 @@ export function PromptsPanel() {
                           </a>
                         </p>
                       </div>
+                      {literatureMode === 'gemini_deep_research' && (
+                        <div className="mt-2 space-y-1.5">
+                          <label className="block text-xs font-medium text-slate-600">
+                            {t('literatureGoogleApiKey')}
+                          </label>
+                          <div className="relative">
+                            <input
+                              type={showGoogleKey ? 'text' : 'password'}
+                              value={googleApiKey}
+                              onChange={(e) => { setGoogleApiKey(e.target.value); setSaved(false) }}
+                              placeholder="AIza..."
+                              className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowGoogleKey(!showGoogleKey)}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600"
+                            >
+                              {showGoogleKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            </button>
+                          </div>
+                          <p className="text-xs text-slate-400">
+                            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                              {language === 'zh' ? '获取 Google AI API Key' : 'Get Google AI API Key'}
+                            </a>
+                          </p>
+                        </div>
+                      )}
                     </div>
                   </label>
                 </div>
@@ -483,6 +551,54 @@ export function PromptsPanel() {
           </>
         )}
 
+        {/* Per-Agent LLM Server */}
+        <div className="mb-4 p-4 bg-slate-50 rounded-xl">
+          <div className="flex items-center gap-3 mb-2">
+            <Server className="w-5 h-5 text-slate-500" />
+            <label className="text-sm font-medium text-slate-700">
+              {t('agentLlmServer')}
+            </label>
+            <input
+              type="text"
+              value={editedLlmBaseUrl}
+              onChange={(e) => {
+                setEditedLlmBaseUrl(e.target.value)
+                setSaved(false)
+              }}
+              className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+              placeholder="https://openrouter.ai/api/v1"
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <Key className="w-5 h-5 text-slate-500" />
+            <label className="text-sm font-medium text-slate-700">
+              {t('agentApiKey')}
+            </label>
+            <div className="flex-1 relative">
+              <input
+                type={showAgentApiKey ? 'text' : 'password'}
+                value={editedApiKey}
+                onChange={(e) => {
+                  setEditedApiKey(e.target.value)
+                  setSaved(false)
+                }}
+                className="w-full px-3 py-2 pr-10 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+                placeholder="sk-..."
+              />
+              <button
+                type="button"
+                onClick={() => setShowAgentApiKey(!showAgentApiKey)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
+              >
+                {showAgentApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+          <p className="text-xs text-slate-500 mt-2 ml-8">
+            {t('agentServerHint')}
+          </p>
+        </div>
+
         {/* Model Selection */}
         <div className="mb-4 p-4 bg-slate-50 rounded-xl">
           <div className="flex items-center gap-3">
@@ -521,6 +637,9 @@ export function PromptsPanel() {
               selectedAgent === 'supervisor' ? 'Uses a cheap, fast, Vision-capable model for real-time monitoring (evaluates figure quality). Recommended: google/gemini-3.1-flash-lite-preview, openai/gpt-5.4-nano' :
               'Use OpenRouter model format'
             )}
+          </p>
+          <p className="text-xs text-slate-400 mt-1 ml-8">
+            {t('agentModelHint')}
           </p>
         </div>
 

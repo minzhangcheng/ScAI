@@ -1,8 +1,10 @@
 """
-Painter Agent - Generates graphic abstracts using LLM image generation via OpenRouter
+Painter Agent - Generates graphic abstracts using LLM image generation
 
-This agent uses the user-configured LLM hosting service (default: OpenRouter) to call
-image generation models like Google Gemini with modalities=["image", "text"].
+This agent uses the user-configured LLM hosting service to call image generation models.
+Supports multiple platforms via dual-path strategy:
+1. Chat completions with modalities=["image", "text"] (OpenRouter)
+2. Images API (/v1/images/generations) fallback (OpenAI, Google AI Studio, SiliconFlow, etc.)
 """
 from typing import Dict, Any, Optional, List
 import logging
@@ -413,6 +415,8 @@ The graphic abstract should tell the story of the research at a glance, highligh
                         if isinstance(part, dict):
                             if "inlineData" in part:
                                 return part["inlineData"].get("data", "")
+                            if "inline_data" in part:
+                                return part["inline_data"].get("data", "")
                             if part.get("type") == "image_url":
                                 url = part.get("image_url", {}).get("url", "")
                                 if url.startswith("data:image"):
@@ -474,18 +478,22 @@ The graphic abstract should tell the story of the research at a glance, highligh
             )
             prompt = prompt[:len(prompt) - excess_chars] + "\n... [trimmed to fit token limit]"
 
-        logger.debug(f"[{self.session_id}][Painter] Calling image generation via OpenRouter")
+        logger.debug(f"[{self.session_id}][Painter] Calling image generation")
+
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": prompt}
+        ]
 
         try:
+            # Strategy 1: Try chat completions with modalities (works on OpenRouter)
+            chat_error = None
             last_error = None
             for attempt in range(3):
                 try:
                     response = await self.llm_client.client.chat.completions.create(
                         model=self.model,
-                        messages=[
-                            {"role": "system", "content": self.system_prompt},
-                            {"role": "user", "content": prompt}
-                        ],
+                        messages=messages,
                         temperature=self.config.temperature,
                         max_tokens=4096,
                         extra_body={
@@ -501,12 +509,43 @@ The graphic abstract should tell the story of the research at a glance, highligh
                     if attempt < 2:
                         delay = 2 ** attempt
                         logger.warning(
-                            f"[{self.session_id}][Painter] Generation attempt {attempt + 1} failed: {e}, "
+                            f"[{self.session_id}][Painter] Chat generation attempt {attempt + 1} failed: {e}, "
                             f"retrying in {delay}s"
                         )
                         await asyncio.sleep(delay)
-            raise last_error
+            chat_error = last_error
 
+            # Strategy 2: Try Images API (/v1/images/generations)
+            # This works on OpenAI, Google AI Studio, SiliconFlow, etc.
+            logger.info(
+                f"[{self.session_id}][Painter] Chat completions image gen failed ({chat_error}), "
+                f"trying Images API fallback"
+            )
+            try:
+                response = await self.llm_client.client.images.generate(
+                    model=self.model,
+                    prompt=prompt,
+                    n=1,
+                    response_format="b64_json",
+                )
+                if response.data and len(response.data) > 0:
+                    img_data = response.data[0].b64_json
+                    if img_data:
+                        return img_data
+                raise ValueError("Images API returned no image data")
+            except Exception as images_error:
+                logger.warning(
+                    f"[{self.session_id}][Painter] Images API also failed: {images_error}"
+                )
+                # Raise the original chat error as primary, mention images API failure
+                raise ValueError(
+                    f"Image generation failed. "
+                    f"Chat completions: {chat_error}. "
+                    f"Images API: {images_error}"
+                ) from chat_error
+
+        except ValueError:
+            raise
         except Exception as e:
             logger.exception(f"[{self.session_id}][Painter] Error generating image")
             raise ValueError(f"Image generation failed: {e}") from e

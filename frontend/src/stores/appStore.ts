@@ -153,6 +153,11 @@ export interface AgentTemperatures {
   supervisor: number
 }
 
+export interface AgentServerConfig {
+  llmBaseUrl: string
+  apiKey: string
+}
+
 // Default models
 export const DEFAULT_MODELS: AgentModels = {
   pi: 'google/gemini-3.1-pro-preview',
@@ -224,6 +229,10 @@ interface AppState {
   // Round Wait Time (-1=manual, 0=no wait, positive=countdown seconds)
   roundWaitSeconds: number
   setRoundWaitSeconds: (seconds: number) => void
+
+  // Per-agent LLM server overrides
+  agentServerConfigs: Partial<Record<AgentType, AgentServerConfig>>
+  setAgentServerConfig: (agent: AgentType, config: AgentServerConfig) => void
 
   // Literature agent config
   literatureMode: 'gemini_deep_research' | 'pubmed_llm' | 'deep_research'
@@ -384,6 +393,12 @@ export const useAppStore = create<AppState>()(
       roundWaitSeconds: 300,
       setRoundWaitSeconds: (seconds) => set({ roundWaitSeconds: seconds }),
 
+      // Per-agent LLM server overrides
+      agentServerConfigs: {},
+      setAgentServerConfig: (agent, config) => set((state) => ({
+        agentServerConfigs: { ...state.agentServerConfigs, [agent]: config }
+      })),
+
       // Literature agent config
       literatureMode: 'deep_research' as AppState['literatureMode'],
       setLiteratureMode: (mode) => set({ literatureMode: mode }),
@@ -476,6 +491,7 @@ export const useAppStore = create<AppState>()(
         if (ps.models && (typeof ps.models !== 'object' || Array.isArray(ps.models))) delete ps.models
         if (ps.temperatures && (typeof ps.temperatures !== 'object' || Array.isArray(ps.temperatures))) delete ps.temperatures
         if (ps.prompts && (typeof ps.prompts !== 'object' || Array.isArray(ps.prompts))) delete ps.prompts
+        if (ps.agentServerConfigs && (typeof ps.agentServerConfigs !== 'object' || Array.isArray(ps.agentServerConfigs))) delete ps.agentServerConfigs
         if (ps.language && typeof ps.language !== 'string') delete ps.language
         if (ps.maxRounds && typeof ps.maxRounds !== 'number') delete ps.maxRounds
         if (ps.messages && !Array.isArray(ps.messages)) delete ps.messages
@@ -496,6 +512,7 @@ export const useAppStore = create<AppState>()(
         temperatures: state.temperatures,
         maxRounds: state.maxRounds,
         roundWaitSeconds: state.roundWaitSeconds,
+        agentServerConfigs: state.agentServerConfigs,
         literatureMode: state.literatureMode,
         deepResearchModel: state.deepResearchModel,
         googleApiKey: state.googleApiKey,

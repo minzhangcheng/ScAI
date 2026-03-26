@@ -241,9 +241,37 @@ class SingleCellAnalysisWorkflow:
         """Signal that user has confirmed cell type annotations"""
         self._annotation_event.set()
 
+    def _get_agent_llm_client(self, agent_name: str) -> OpenAICompatibleClient:
+        """Get LLM client for an agent, using per-agent override if different from global."""
+        agent_server_configs = getattr(self, '_agent_server_configs', {})
+        agent_cfg = agent_server_configs.get(agent_name, {})
+        agent_url = agent_cfg.get("llm_base_url", "")
+        agent_key = agent_cfg.get("api_key", "")
+        # If same as global config, share the default client
+        if (not agent_url or agent_url == self.config.api.llm_base_url) and \
+           (not agent_key or agent_key == self.config.api.api_key):
+            return self.llm_manager.openrouter
+        # Otherwise create a separate client
+        client = OpenAICompatibleClient(
+            api_key=agent_key or self.config.api.api_key,
+            base_url=agent_url or self.config.api.llm_base_url,
+            proxy_url=self.config.api.proxy_url,
+            session_id=self.session_id,
+            agent_name=agent_name,
+        )
+        self._extra_llm_clients.append(client)
+        return client
+
     async def initialize(self):
         """Initialize all components"""
         logger.info(f"[{self.session_id}] Initializing workflow components")
+        # Close any leftover per-agent clients from a previous initialize() call (e.g. resume)
+        for old_client in getattr(self, '_extra_llm_clients', []):
+            try:
+                await old_client.close()
+            except Exception:
+                pass
+        self._extra_llm_clients: list = []
         
         # Initialize checkpointer if not exists
         if self._db_conn is None:
@@ -304,14 +332,14 @@ class SingleCellAnalysisWorkflow:
         
         # Initialize agents with resolved models, prompts, and temperatures
         self.pi_agent = PIAgent(
-            llm_client=self.llm_manager.openrouter,
+            llm_client=self._get_agent_llm_client('pi'),
             model=pi_model,
             system_prompt=pi_prompt,
             config=AgentConfig(temperature=self.temperatures.get('pi', 0.5))
         )
 
         self.pathology_agent = PathologyAgent(
-            llm_client=self.llm_manager.openrouter,
+            llm_client=self._get_agent_llm_client('pathology'),
             model=pathology_model,
             system_prompt=pathology_prompt,
             tile_size=self.config.image_tile_size,
@@ -320,7 +348,7 @@ class SingleCellAnalysisWorkflow:
         )
 
         self.bioinformatics_agent = BioinformaticsAgent(
-            llm_client=self.llm_manager.openrouter,
+            llm_client=self._get_agent_llm_client('bioinformatics'),
             model=bioinformatics_model,
             system_prompt=bioinformatics_prompt,
             sandbox=self.sandbox,
@@ -333,7 +361,7 @@ class SingleCellAnalysisWorkflow:
         )
 
         self.biochemistry_agent = BiochemistryAgent(
-            llm_client=self.llm_manager.openrouter,
+            llm_client=self._get_agent_llm_client('biochemistry'),
             model=biochemistry_model,
             system_prompt=biochemistry_prompt,
             config=AgentConfig(temperature=self.temperatures.get('biochemistry', 0.2))
@@ -342,7 +370,7 @@ class SingleCellAnalysisWorkflow:
         # Literature agent with mode-specific configuration
         literature_config = getattr(self, '_literature_config', {})
         self.literature_agent = LiteratureAgent(
-            llm_client=self.llm_manager.openrouter,
+            llm_client=self._get_agent_llm_client('literature'),
             model=literature_model,
             system_prompt=literature_prompt,
             config=AgentConfig(temperature=self.temperatures.get('literature', 0.6)),
@@ -355,10 +383,10 @@ class SingleCellAnalysisWorkflow:
             fallback_model=pi_model,
         )
 
-        # Initialize Painter Agent for graphic abstract generation (uses OpenRouter like other agents)
+        # Initialize Painter Agent for graphic abstract generation
         painter_model = custom_models.get('painter', self.config.models.painter_model)
         self.painter_agent = PainterAgent(
-            llm_client=self.llm_manager.openrouter,
+            llm_client=self._get_agent_llm_client('painter'),
             model=painter_model,
             config=AgentConfig(temperature=self.temperatures.get('painter', 0.7))
         )
@@ -368,7 +396,7 @@ class SingleCellAnalysisWorkflow:
         supervisor_model = custom_models.get('supervisor', self.config.models.supervisor_model)
         supervisor_prompt = custom_prompts.get('supervisor', getattr(self.config.prompts, 'supervisor_prompt', ''))
         self.supervisor_agent = SupervisorAgent(
-            llm_client=self.llm_manager.openrouter,
+            llm_client=self._get_agent_llm_client('supervisor'),
             model=supervisor_model,
             pi_callback=self._pi_callback,
             message_callback=self._supervisor_message_callback,
@@ -2642,12 +2670,8 @@ Return ONLY the JSON array, nothing else."""
                     AgentType.PI
                 )
 
-            # Create LLM client
-            llm_client = OpenAICompatibleClient(
-                api_key=self.config.api.api_key,
-                base_url=self.config.api.llm_base_url,
-                proxy_url=self.config.api.proxy_url
-            )
+            # Create LLM client (use PI agent's server config for report generation)
+            llm_client = self._get_agent_llm_client('pi')
 
             # Get models from state or use defaults
             pi_model = analysis_state.custom_models.get("pi", self.config.models.pi_model)
@@ -2737,7 +2761,8 @@ Return ONLY the JSON array, nothing else."""
         self._custom_prompts = initial_state.custom_prompts
         self._custom_temperatures = initial_state.custom_temperatures
         self._literature_config = initial_state.literature_config
-        
+        self._agent_server_configs = initial_state.agent_server_configs
+
         try:
             await self._send_message("status", "Initializing analysis system...")
             await self.initialize()
@@ -2747,7 +2772,7 @@ Return ONLY the JSON array, nothing else."""
             await self._send_message("error", f"Initialization failed: {str(e)}")
             initial_state.status = TaskStatus.FAILED
             return initial_state
-        
+
         # Create initial workflow state
         workflow_state: WorkflowState = {
             "analysis_state": initial_state,
@@ -2810,6 +2835,7 @@ Return ONLY the JSON array, nothing else."""
         self._custom_prompts = initial_state.custom_prompts
         self._custom_temperatures = initial_state.custom_temperatures
         self._literature_config = initial_state.literature_config
+        self._agent_server_configs = initial_state.agent_server_configs
 
         try:
             await self._send_message("status", "Resuming report generation (analysis already complete)...")
@@ -2889,6 +2915,7 @@ Return ONLY the JSON array, nothing else."""
                 self._custom_prompts = analysis_state.custom_prompts
                 self._custom_temperatures = analysis_state.custom_temperatures
                 self._literature_config = analysis_state.literature_config
+                self._agent_server_configs = analysis_state.agent_server_configs
             logger.info(f"[{self.session_id}] Re-initializing workflow components for resume")
             await self.initialize()
 
@@ -2973,6 +3000,13 @@ Return ONLY the JSON array, nothing else."""
                 logger.info(f"[{self.session_id}] LLM manager closed")
             except Exception as e:
                 logger.exception(f"[{self.session_id}] Error closing LLM manager")
+
+        # Close per-agent LLM clients that differ from the shared manager
+        for client in getattr(self, '_extra_llm_clients', []):
+            try:
+                await client.close()
+            except Exception:
+                pass
     
     def get_notebook_path(self) -> Optional[str]:
         """Get path to the saved Jupyter notebook"""

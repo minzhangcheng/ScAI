@@ -209,6 +209,10 @@ export const translations = {
     
     // Prompts Panel
     selectAgent: '选择 Agent',
+    agentLlmServer: 'LLM 服务器',
+    agentApiKey: 'API Key',
+    agentServerHint: '当前使用默认 LLM 服务器设置，如需为此 Agent 使用不同平台请修改',
+    agentModelHint: '注意：不同平台的模型名格式可能不同（如 OpenRouter 使用 provider/model 格式）',
     reset: '重置',
     save: '保存',
     promptTips: '提示词编写建议',
@@ -574,6 +578,10 @@ Please provide a detailed literature review report with specific citation inform
     
     // Prompts Panel
     selectAgent: 'Select Agent',
+    agentLlmServer: 'LLM Server',
+    agentApiKey: 'API Key',
+    agentServerHint: 'Currently using default LLM server settings. Modify to use a different platform for this agent',
+    agentModelHint: 'Note: Model name format may vary by platform (e.g., OpenRouter uses provider/model format)',
     reset: 'Reset',
     save: 'Save',
     promptTips: 'Prompt Writing Tips',

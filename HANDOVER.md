@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.16.2
-**Last Updated**: 2026-03-24
+**Version**: 0.17.1
+**Last Updated**: 2026-03-26
 
 ## Project Overview
 
@@ -1425,6 +1425,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.17.1 | 2026-03-26 | Per-agent LLM server config (agent_server_configs in state, new API endpoints, PromptsPanel UI); Painter dual-path image generation (chat completions + Images API fallback); Google AI Key moved to Literature agent settings; ConfigPanel label "Default LLM Server" |
 | 0.16.2 | 2026-03-24 | Docker packaging: Dockerfile, docker-entrypoint.sh, build.sh, .dockerignore; runtime dependency installation with /dep and /data volume mounts; ghcr.io/minzhangcheng/scai image |
 | 0.16.1 | 2026-03-24 | Vision fallback for figure revision (NotFoundError/404 → text-only retry); _PERCENTAGE_PATTERN and _INF_NAN_PATTERN data integrity check regex patterns; sandbox_timeout extended to 5400 s (1.5 h) |
 | 0.15.9 | 2026-03-23 | Bioinformatics figure revision loop indentation fix (code blocks erroneously nested one level deep); frontend auto-sync API config from localStorage to backend on startup and before analysis start; checkStatus error logging |
@@ -1479,6 +1480,13 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.17.1 (2026-03-26)
+
+- **Per-agent LLM server configuration** (`schemas.py`, `workflow.py`, `main.py`, `PromptsPanel.tsx`, `appStore.ts`): New `agent_server_configs` field in `AnalysisState` maps agent names to per-agent `llm_base_url` and `api_key` overrides. New `_get_agent_llm_client()` helper in both `workflow.py` and `main.py` creates per-agent clients that fall back to global config when no override is set. All 7 agents now receive per-agent clients during workflow initialization. Extra per-agent clients are tracked and cleaned up on workflow end. Two new API endpoints: `POST/GET /api/session/{session_id}/agent-server-config`. PromptsPanel UI adds LLM Server and API Key fields per agent, persisted to `localStorage` and backend. Reset clears per-agent overrides to global defaults.
+- **Painter Agent dual-path image generation** (`painter_agent.py`): Image generation now uses a two-strategy approach: (1) chat completions with `modalities=["image", "text"]` (works on OpenRouter), (2) Images API fallback via `/v1/images/generations` (works on OpenAI, Google AI Studio, SiliconFlow). Also handles both `inlineData` and `inline_data` response formats. Error messages combine failures from both strategies.
+- **Config panel simplification** (`ConfigPanel.tsx`, `PromptsPanel.tsx`): Google AI API Key input removed from ConfigPanel and moved to Literature agent section in PromptsPanel (shown only when `gemini_deep_research` mode is selected). "LLM Server" label renamed to "Default LLM Server".
+- **i18n updates** (`translations.ts`): Added `agentLlmServer`, `agentApiKey`, `agentServerHint`, `agentModelHint` translation keys for both Chinese and English.
 
 #### v0.16.2 (2026-03-24)
 

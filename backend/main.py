@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.16.2"
+    version="0.17.1"
 )
 
 # CORS
@@ -99,6 +99,29 @@ _initializing_sessions: set = set()
 
 # Lock for protecting concurrent access to global dicts
 _state_lock = asyncio.Lock()
+
+
+def _get_agent_llm_client(
+    state: AnalysisState, cfg: SystemConfig, agent_name: str, session_id: str
+) -> OpenAICompatibleClient:
+    """Get LLM client for an agent, using per-agent override if different from global.
+
+    Always creates a new client (caller should close it when done).
+    Uses per-agent config if it differs from the global config, otherwise uses global.
+    """
+    agent_cfg = state.agent_server_configs.get(agent_name, {})
+    agent_url = agent_cfg.get("llm_base_url", "")
+    agent_key = agent_cfg.get("api_key", "")
+    # Use per-agent values if they differ from global, otherwise use global
+    effective_url = agent_url if (agent_url and agent_url != cfg.api.llm_base_url) else cfg.api.llm_base_url
+    effective_key = agent_key if (agent_key and agent_key != cfg.api.api_key) else cfg.api.api_key
+    return OpenAICompatibleClient(
+        api_key=effective_key,
+        base_url=effective_url,
+        proxy_url=cfg.api.proxy_url,
+        session_id=session_id,
+        agent_name=agent_name,
+    )
 
 
 async def _update_session_cache(session_id: str, state):
@@ -452,6 +475,12 @@ class LiteratureConfigRequest(BaseModel):
     google_api_key: str = ""
     pubmed_email: str = ""
     max_search_rounds: int = Field(default=5, ge=1, le=20)
+
+
+class AgentServerConfigRequest(BaseModel):
+    agent: Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor"]
+    llm_base_url: str = ""
+    api_key: str = ""
 
 
 class BiochemistryInput(BaseModel):
@@ -1469,6 +1498,38 @@ async def get_literature_config(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     return state.literature_config
+
+
+@app.post("/api/session/{session_id}/agent-server-config")
+async def update_agent_server_config(session_id: str, request: AgentServerConfigRequest):
+    """Update per-agent LLM server configuration"""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    state.agent_server_configs[request.agent] = {
+        "llm_base_url": request.llm_base_url,
+        "api_key": request.api_key,
+    }
+
+    await async_save_session(session_id, state)
+
+    return APIResponse(
+        success=True,
+        message=f"Server config for {request.agent} updated"
+    )
+
+
+@app.get("/api/session/{session_id}/agent-server-config")
+async def get_agent_server_configs(session_id: str):
+    """Get per-agent LLM server configurations"""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return state.agent_server_configs
 
 
 @app.post("/api/session/{session_id}/run")
@@ -3099,16 +3160,12 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                 logger.warning(f"Failed to send error to WebSocket for session {session_id}: {e}", exc_info=True)
         return
     
-    llm_client = OpenAICompatibleClient(
-        api_key=config.api.api_key,
-        base_url=config.api.llm_base_url,
-        proxy_url=config.api.proxy_url
-    )
+    llm_client = _get_agent_llm_client(state, config, "pi", session_id)
 
     # Get models from state or use defaults
     pi_model = state.custom_models.get("pi", config.models.pi_model)
     bio_model = state.custom_models.get("bioinformatics", config.models.bioinformatics_model)
-    
+
     try:
         workspace_dir = str(get_session_workspace(session_id))
 
@@ -4120,11 +4177,7 @@ async def _generate_figures_in_chat(
                 f"Figure request: {desc}"
             )
 
-            llm_client = OpenAICompatibleClient(
-                api_key=config.api.api_key,
-                base_url=config.api.llm_base_url,
-                proxy_url=config.api.proxy_url,
-            )
+            llm_client = _get_agent_llm_client(state, config, "bioinformatics", session_id)
             bio_model = state.custom_models.get("bioinformatics", "google/gemini-3.1-pro-preview")
             code_resp = await llm_client.chat(
                 model=bio_model,
@@ -4553,7 +4606,7 @@ async def _run_chat_delegation(
             "agents": agent_names,
         })
 
-        # 2. Create shared LLM client
+        # 2. Create shared LLM client (default, used as fallback)
         llm_manager = LLMManager(
             api_key=config.api.api_key,
             base_url=config.api.llm_base_url,
@@ -4561,6 +4614,8 @@ async def _run_chat_delegation(
             session_id=session_id,
             agent_name="chat_delegation"
         )
+        # Per-agent clients for delegation
+        _delegation_extra_clients: List[OpenAICompatibleClient] = []
 
         # 3. Create message callback that sends to WebSocket + persists
         async def chat_msg_callback(msg: WebSocketMessage):
@@ -4609,9 +4664,12 @@ async def _run_chat_delegation(
                 d = group[0]
                 agent_name = d.get("agent", "unknown")
                 try:
+                    agent_client = _get_agent_llm_client(state, config, agent_name, session_id)
+                    if agent_client is not llm_manager.openrouter:
+                        _delegation_extra_clients.append(agent_client)
                     result = await _execute_chat_agent(
                         session_id, state, agent_name, d.get("instruction", ""),
-                        llm_manager.openrouter, chat_msg_callback, saved_files
+                        agent_client, chat_msg_callback, saved_files
                     )
                     agent_results[agent_name] = result
                     if "figures" in result:
@@ -4629,9 +4687,13 @@ async def _run_chat_delegation(
                 # Multiple agents at same priority — execute in parallel
                 tasks = []
                 for d in group:
+                    a_name = d.get("agent", "unknown")
+                    a_client = _get_agent_llm_client(state, config, a_name, session_id)
+                    if a_client is not llm_manager.openrouter:
+                        _delegation_extra_clients.append(a_client)
                     tasks.append(_execute_chat_agent(
-                        session_id, state, d.get("agent", "unknown"), d.get("instruction", ""),
-                        llm_manager.openrouter, chat_msg_callback, saved_files
+                        session_id, state, a_name, d.get("instruction", ""),
+                        a_client, chat_msg_callback, saved_files
                     ))
                 # Global timeout to prevent indefinite hang if an agent's LLM call stalls
                 CHAT_DELEGATION_TIMEOUT = 600  # 10 minutes
@@ -4793,6 +4855,11 @@ async def _run_chat_delegation(
                 await llm_manager.close()
             except Exception:
                 logger.warning("Failed to close LLM manager", exc_info=True)
+        for extra_client in _delegation_extra_clients:
+            try:
+                await extra_client.close()
+            except Exception:
+                pass
 
 
 @app.post("/api/session/{session_id}/chat")
@@ -4994,11 +5061,7 @@ async def chat_with_pi(
 
     # --- Call LLM ---
     try:
-        llm_client = OpenAICompatibleClient(
-            api_key=config.api.api_key,
-            base_url=config.api.llm_base_url,
-            proxy_url=config.api.proxy_url
-        )
+        llm_client = _get_agent_llm_client(state, config, "pi", session_id)
 
         if image_b64_list:
             # Vision API for images

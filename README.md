@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.16.2
+**Version**: 0.17.1
 
 ## Installation
 
@@ -331,6 +331,12 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.17.1 (2026-03-26)
+
+- **New: Per-agent LLM server configuration** — Each agent can now use a different LLM provider and API key. Configure per-agent server settings in the Prompts Panel; agents default to the global LLM server when no override is set.
+- **Improvement: Painter Agent dual-path image generation** — Image generation now tries chat completions with `modalities=["image"]` first, then falls back to the Images API (`/v1/images/generations`), supporting OpenAI, Google AI Studio, SiliconFlow, and other providers.
+- **Improvement: Config panel simplification** — Google AI API Key moved from main config panel to Literature agent settings in Prompts Panel; "LLM Server" label renamed to "Default LLM Server" for clarity.
 
 ### v0.16.2 (2026-03-24)
 

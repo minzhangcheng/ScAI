@@ -402,6 +402,9 @@ class AnalysisState(BaseModel):
     # Agent temperatures (can be customized per session)
     custom_temperatures: Dict[str, float] = Field(default_factory=dict)
 
+    # Per-agent LLM server overrides (agent_name -> {"llm_base_url": ..., "api_key": ...})
+    agent_server_configs: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+
     # Literature agent configuration
     literature_config: Dict[str, Any] = Field(default_factory=lambda: {
         "mode": "deep_research",              # deep_research | gemini_deep_research | pubmed_llm
