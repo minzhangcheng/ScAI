@@ -312,40 +312,41 @@ class SingleCellAnalysisWorkflow:
         custom_models = getattr(self, '_custom_models', {})
         custom_prompts = getattr(self, '_custom_prompts', {})
         custom_temperatures = getattr(self, '_custom_temperatures', {})
+        custom_vision_settings = getattr(self, '_agent_vision_settings', {})
+
+        # Store vision settings for use in callbacks
+        self._vision_settings = {
+            t.value: custom_vision_settings.get(t.value, True)
+            for t in AgentType
+        }
 
         # Merge custom temperatures with defaults from centralized config
         self.temperatures = self.config.temperatures.merge_custom(custom_temperatures)
-        
+
         # Determine models to use (custom takes precedence)
-        pi_model = custom_models.get('pi', self.config.models.pi_model)
+        # PI and Bioinformatics are always required — fallback to config defaults if empty
+        pi_model = custom_models.get('pi', self.config.models.pi_model) or self.config.models.pi_model
+        bioinformatics_model = custom_models.get('bioinformatics', self.config.models.bioinformatics_model) or self.config.models.bioinformatics_model
+        # Optional agents — empty model means disabled
         pathology_model = custom_models.get('pathology', self.config.models.pathology_model)
-        bioinformatics_model = custom_models.get('bioinformatics', self.config.models.bioinformatics_model)
         biochemistry_model = custom_models.get('biochemistry', self.config.models.biochemistry_model)
         literature_model = custom_models.get('literature', self.config.models.literature_model)
-        
+
         # Determine prompts to use (custom takes precedence)
         pi_prompt = custom_prompts.get('pi', self.config.prompts.pi_prompt)
         pathology_prompt = custom_prompts.get('pathology', self.config.prompts.pathology_prompt)
         bioinformatics_prompt = custom_prompts.get('bioinformatics', self.config.prompts.bioinformatics_prompt)
         biochemistry_prompt = custom_prompts.get('biochemistry', self.config.prompts.biochemistry_prompt)
         literature_prompt = custom_prompts.get('literature', self.config.prompts.literature_prompt)
-        
-        # Initialize agents with resolved models, prompts, and temperatures
+
+        # Initialize required agents (PI and Bioinformatics — always active)
         self.pi_agent = PIAgent(
             llm_client=self._get_agent_llm_client('pi'),
             model=pi_model,
             system_prompt=pi_prompt,
             config=AgentConfig(temperature=self.temperatures.get('pi', 0.5))
         )
-
-        self.pathology_agent = PathologyAgent(
-            llm_client=self._get_agent_llm_client('pathology'),
-            model=pathology_model,
-            system_prompt=pathology_prompt,
-            tile_size=self.config.image_tile_size,
-            max_tiles=50,
-            config=AgentConfig(temperature=self.temperatures.get('pathology', 0.2))
-        )
+        self.pi_agent.has_vision = self._vision_settings.get('pi', True)
 
         self.bioinformatics_agent = BioinformaticsAgent(
             llm_client=self._get_agent_llm_client('bioinformatics'),
@@ -359,13 +360,34 @@ class SingleCellAnalysisWorkflow:
             supervisor_callback=self._supervisor_callback,
             config=AgentConfig(temperature=self.temperatures.get('bioinformatics', 0.1))
         )
+        self.bioinformatics_agent.has_vision = self._vision_settings.get('bioinformatics', True)
 
-        self.biochemistry_agent = BiochemistryAgent(
-            llm_client=self._get_agent_llm_client('biochemistry'),
-            model=biochemistry_model,
-            system_prompt=biochemistry_prompt,
-            config=AgentConfig(temperature=self.temperatures.get('biochemistry', 0.2))
-        )
+        # Initialize optional agents — disabled if model is empty
+        if pathology_model and pathology_model.strip():
+            self.pathology_agent = PathologyAgent(
+                llm_client=self._get_agent_llm_client('pathology'),
+                model=pathology_model,
+                system_prompt=pathology_prompt,
+                tile_size=self.config.image_tile_size,
+                max_tiles=50,
+                config=AgentConfig(temperature=self.temperatures.get('pathology', 0.2))
+            )
+            self.pathology_agent.has_vision = self._vision_settings.get('pathology', True)
+        else:
+            self.pathology_agent = None
+            logger.info(f"[{self.session_id}] Pathology agent disabled (empty model)")
+
+        if biochemistry_model and biochemistry_model.strip():
+            self.biochemistry_agent = BiochemistryAgent(
+                llm_client=self._get_agent_llm_client('biochemistry'),
+                model=biochemistry_model,
+                system_prompt=biochemistry_prompt,
+                config=AgentConfig(temperature=self.temperatures.get('biochemistry', 0.2))
+            )
+            self.biochemistry_agent.has_vision = self._vision_settings.get('biochemistry', True)
+        else:
+            self.biochemistry_agent = None
+            logger.info(f"[{self.session_id}] Biochemistry agent disabled (empty model)")
 
         # Literature agent with mode-specific configuration
         literature_config = getattr(self, '_literature_config', {})
@@ -376,6 +398,8 @@ class SingleCellAnalysisWorkflow:
             config=AgentConfig(temperature=self.temperatures.get('literature', 0.6)),
             literature_mode=literature_config.get('mode', 'deep_research'),
             deep_research_model=literature_config.get('deep_research_model', ''),
+            deep_research_llm_base_url=literature_config.get('deep_research_llm_base_url', ''),
+            deep_research_api_key=literature_config.get('deep_research_api_key', ''),
             google_api_key=literature_config.get('google_api_key', ''),
             pubmed_email=literature_config.get('pubmed_email', ''),
             max_search_rounds=literature_config.get('max_search_rounds', 5),
@@ -383,29 +407,43 @@ class SingleCellAnalysisWorkflow:
             fallback_model=pi_model,
         )
 
-        # Initialize Painter Agent for graphic abstract generation
-        painter_model = custom_models.get('painter', self.config.models.painter_model)
-        self.painter_agent = PainterAgent(
-            llm_client=self._get_agent_llm_client('painter'),
-            model=painter_model,
-            config=AgentConfig(temperature=self.temperatures.get('painter', 0.7))
-        )
-        self.painter_agent.set_session(self.session_id)
+        # Register deep research LLM client for cleanup (if literature agent created one)
+        if hasattr(self.literature_agent, '_deep_research_llm_client') and self.literature_agent._deep_research_llm_client:
+            self._extra_llm_clients.append(self.literature_agent._deep_research_llm_client)
 
-        # Initialize Supervisor Agent for real-time analysis monitoring
+        # Initialize Painter Agent for graphic abstract generation (optional)
+        painter_model = custom_models.get('painter', self.config.models.painter_model)
+        if painter_model and painter_model.strip():
+            self.painter_agent = PainterAgent(
+                llm_client=self._get_agent_llm_client('painter'),
+                model=painter_model,
+                config=AgentConfig(temperature=self.temperatures.get('painter', 0.7))
+            )
+            self.painter_agent.set_session(self.session_id)
+            self.painter_agent.has_vision = self._vision_settings.get('painter', True)
+        else:
+            self.painter_agent = None
+            logger.info(f"[{self.session_id}] Painter agent disabled (empty model)")
+
+        # Initialize Supervisor Agent for real-time analysis monitoring (optional)
         supervisor_model = custom_models.get('supervisor', self.config.models.supervisor_model)
         supervisor_prompt = custom_prompts.get('supervisor', getattr(self.config.prompts, 'supervisor_prompt', ''))
-        self.supervisor_agent = SupervisorAgent(
-            llm_client=self._get_agent_llm_client('supervisor'),
-            model=supervisor_model,
-            pi_callback=self._pi_callback,
-            message_callback=self._supervisor_message_callback,
-            session_id=self.session_id,
-            temperature=self.temperatures.get('supervisor', 0.1),
-            system_prompt=supervisor_prompt,
-        )
+        if supervisor_model and supervisor_model.strip():
+            self.supervisor_agent = SupervisorAgent(
+                llm_client=self._get_agent_llm_client('supervisor'),
+                model=supervisor_model,
+                pi_callback=self._pi_callback,
+                message_callback=self._supervisor_message_callback,
+                session_id=self.session_id,
+                temperature=self.temperatures.get('supervisor', 0.1),
+                system_prompt=supervisor_prompt,
+            )
+            self.supervisor_agent.has_vision = self._vision_settings.get('supervisor', True)
+        else:
+            self.supervisor_agent = None
+            logger.info(f"[{self.session_id}] Supervisor agent disabled (empty model)")
 
-        logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model}, Literature={literature_model}, Painter={painter_model}, Supervisor={supervisor_model}")
+        logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model or 'DISABLED'}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model or 'DISABLED'}, Literature={literature_model}, Painter={painter_model or 'DISABLED'}, Supervisor={supervisor_model or 'DISABLED'}")
 
         # Build workflow graph
         self._build_graph()
@@ -855,6 +893,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
     async def _figure_review_callback(self, figure: PublicationFigure) -> Dict[str, Any]:
         """
         Callback for bioinformatics agent to get PI review of generated figures.
+        Routes to different reviewers based on vision capability settings.
 
         Args:
             figure: PublicationFigure to review
@@ -862,6 +901,74 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         Returns:
             Dict with review results (approved, feedback, suggestions)
         """
+        pi_vision = self._vision_settings.get('pi', True)
+        bio_vision = self._vision_settings.get('bioinformatics', True)
+        sup_vision = (
+            self._vision_settings.get('supervisor', True)
+            if self.supervisor_agent else False
+        )
+
+        # 4.1: All models in the chain lack vision → skip image review
+        if not pi_vision and not bio_vision and not sup_vision:
+            logger.info(f"[{self.session_id}] All agents lack vision, auto-approving figure: {figure.name}")
+            review = {
+                "approved": True,
+                "quality_score": 7,
+                "feedback": "Auto-approved (no vision-capable model in pipeline)",
+                "suggestions": [],
+                "must_fix": [],
+            }
+            await self._send_message(
+                "figure_approved",
+                {
+                    "figure_id": figure.id,
+                    "figure_name": figure.name,
+                    "approved": True,
+                    "quality_score": 7,
+                    "feedback": review["feedback"],
+                    "suggestions": [],
+                    "must_fix": []
+                },
+                AgentType.PI
+            )
+            return review
+
+        # 4.3.2: PI has no vision
+        if not pi_vision:
+            if bio_vision:
+                # Bioinformatics agent self-reviews its own figure
+                logger.info(f"[{self.session_id}] PI lacks vision, bio agent self-reviewing figure: {figure.name}")
+                review = await self._bio_self_figure_review(figure)
+            elif sup_vision and self.supervisor_agent:
+                # 4.3.3: Both PI and bio lack vision → supervisor guides review
+                logger.info(f"[{self.session_id}] PI and bio lack vision, supervisor reviewing figure: {figure.name}")
+                review = await self._supervisor_figure_review(figure)
+            else:
+                # No one can see the figure — auto-approve
+                review = {
+                    "approved": True,
+                    "quality_score": 7,
+                    "feedback": "Auto-approved (no vision-capable reviewer available)",
+                    "suggestions": [],
+                    "must_fix": [],
+                }
+
+            await self._send_message(
+                "figure_approved" if review.get("approved") else "figure_revision",
+                {
+                    "figure_id": figure.id,
+                    "figure_name": figure.name,
+                    "approved": review.get("approved", False),
+                    "quality_score": review.get("quality_score", 5),
+                    "feedback": review.get("feedback", ""),
+                    "suggestions": review.get("suggestions", []),
+                    "must_fix": review.get("must_fix", [])
+                },
+                AgentType.BIOINFORMATICS if bio_vision else AgentType.SUPERVISOR
+            )
+            return review
+
+        # Default: PI reviews with vision (existing flow)
         logger.info(f"[{self.session_id}] PI reviewing figure: {figure.name}")
 
         await self._send_message(
@@ -877,17 +984,14 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             AgentType.PI
         )
 
-        # Get current analysis state
         state = self._current_analysis_state if self._current_analysis_state else AnalysisState()
 
-        # Call PI Agent to review the figure
         review = await self.pi_agent.review_figure(
             state,
             figure,
             figure.png_base64
         )
 
-        # Send review result to frontend
         await self._send_message(
             "figure_approved" if review.get("approved") else "figure_revision",
             {
@@ -903,6 +1007,129 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         )
 
         return review
+
+    async def _vision_figure_review(
+        self,
+        agent,
+        figure: PublicationFigure,
+        prompt: str,
+        image_b64: str,
+        temperature: float = 0.3,
+        label: str = "agent",
+        **vision_kwargs,
+    ) -> Dict[str, Any]:
+        """Shared helper: call an agent's vision API to review a figure and parse the result."""
+        try:
+            agent._set_llm_context()
+            response = await agent.llm_client.chat_with_vision(
+                model=agent.model,
+                text_prompt=prompt,
+                images=[image_b64],
+                temperature=temperature,
+                **vision_kwargs,
+            )
+            response_text = response.content if response and response.content else ""
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] {label} figure review vision failed: {e}")
+            return {
+                "approved": True,
+                "quality_score": 7,
+                "feedback": f"{label} vision review failed, auto-approved",
+                "suggestions": [],
+                "must_fix": [],
+            }
+
+        if hasattr(agent, '_safe_parse_json'):
+            data = agent._safe_parse_json(response_text, default={})
+        elif hasattr(agent, '_parse_supervisor_response'):
+            data = agent._parse_supervisor_response(response_text) if response_text else {}
+        else:
+            data = {}
+        if data and ("approved" in data or "quality_score" in data):
+            score = int(data.get("quality_score", 7))
+            return {
+                "approved": data.get("approved", score >= 7),
+                "quality_score": score,
+                "feedback": data.get("feedback", ""),
+                "suggestions": data.get("suggestions", []),
+                "must_fix": data.get("must_fix", []),
+                "requires_reanalysis": data.get("requires_reanalysis", False),
+            }
+        return {
+            "approved": True,
+            "quality_score": 7,
+            "feedback": "Could not parse review response, auto-approved",
+            "suggestions": [],
+            "must_fix": [],
+        }
+
+    async def _bio_self_figure_review(self, figure: PublicationFigure) -> Dict[str, Any]:
+        """Bioinformatics agent self-reviews its own figure using vision."""
+        prompt = f"""## Figure Self-Review for Publication Quality
+
+You generated this figure and now need to review it for publication quality.
+
+**Figure Information:**
+- Name: {figure.name}
+- Type: {figure.figure_type}
+- Description: {figure.description}
+- Revision count: {figure.revision_count}
+
+**Review Criteria:**
+1. Scientific Accuracy: Does the figure accurately represent the data?
+2. Clarity: Are labels clear and readable?
+3. Aesthetics: Is the color scheme appropriate and layout clean?
+4. Completeness: Are all necessary elements present (legend, axis labels, titles)?
+5. Publication Quality: Would this be acceptable in a high-impact journal?
+
+**Respond in JSON format:**
+```json
+{{
+    "approved": true/false,
+    "quality_score": 1-10,
+    "feedback": "Detailed assessment",
+    "suggestions": ["suggestion 1"],
+    "must_fix": ["critical issue"],
+    "requires_reanalysis": false
+}}
+```
+Be strict but fair. Approve if quality_score >= 7."""
+
+        return await self._vision_figure_review(
+            self.bioinformatics_agent, figure, prompt, figure.png_base64,
+            temperature=0.3, label="Bio self-review",
+        )
+
+    async def _supervisor_figure_review(self, figure: PublicationFigure) -> Dict[str, Any]:
+        """Supervisor agent reviews figure using vision."""
+        compressed = self.supervisor_agent._compress_base64_figure(figure.png_base64)
+
+        prompt = f"""## Figure Quality Review
+
+Review this figure for publication quality.
+- Name: {figure.name}
+- Type: {figure.figure_type}
+- Description: {figure.description}
+
+Check for: blank/empty plots, missing labels, overlapping text, poor color choices,
+missing legends, unreadable fonts. Score 1-10.
+
+Respond in JSON:
+```json
+{{
+    "approved": true/false,
+    "quality_score": 1-10,
+    "feedback": "assessment",
+    "suggestions": ["suggestion"],
+    "must_fix": ["critical issue"]
+}}
+```
+Approve if quality_score >= 7."""
+
+        return await self._vision_figure_review(
+            self.supervisor_agent, figure, prompt, compressed,
+            temperature=0.2, label="Supervisor", max_tokens=1024,
+        )
 
     # --- Round context helpers ---
 
@@ -1357,6 +1584,10 @@ IMPORTANT: Respond in English only. Do not use any other language."""
     @with_retry("pathology_analysis")
     async def _pathology_analysis(self, state: WorkflowState) -> WorkflowState:
         """Pathology agent analyzes images"""
+        if not self.pathology_agent:
+            logger.info(f"[{self.session_id}] Pathology agent disabled, skipping")
+            return {**state, "failed_node": None, "pathology_result": {"findings": [], "status": "skipped"}}
+
         analysis_state = state["analysis_state"]
         instructions = state["pi_instructions"]
 
@@ -1718,6 +1949,10 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
     @with_retry("biochemistry_analysis")
     async def _biochemistry_analysis(self, state: WorkflowState) -> WorkflowState:
         """Biochemistry agent analyzes experimental results"""
+        if not self.biochemistry_agent:
+            logger.info(f"[{self.session_id}] Biochemistry agent disabled, skipping")
+            return {**state, "failed_node": None, "biochemistry_result": {"findings": [], "status": "skipped"}}
+
         analysis_state = state["analysis_state"]
         instructions = state["pi_instructions"]
 
@@ -2491,6 +2726,11 @@ Return ONLY the JSON array, nothing else."""
         """Generate graphic abstract with revision loop (max 2 revisions, PI selects best)"""
         analysis_state = state["analysis_state"]
 
+        # Skip if painter agent is disabled
+        if not self.painter_agent:
+            logger.info(f"[{self.session_id}] Painter agent disabled, skipping graphic abstract generation")
+            return state
+
         logger.info(f"[{self.session_id}] Generating graphic abstract")
         await self._send_message("status", "Generating graphic abstract...", AgentType.PAINTER)
 
@@ -2760,6 +3000,7 @@ Return ONLY the JSON array, nothing else."""
         self._custom_models = initial_state.custom_models
         self._custom_prompts = initial_state.custom_prompts
         self._custom_temperatures = initial_state.custom_temperatures
+        self._agent_vision_settings = initial_state.agent_vision_settings
         self._literature_config = initial_state.literature_config
         self._agent_server_configs = initial_state.agent_server_configs
 
@@ -2834,6 +3075,7 @@ Return ONLY the JSON array, nothing else."""
         self._custom_models = initial_state.custom_models
         self._custom_prompts = initial_state.custom_prompts
         self._custom_temperatures = initial_state.custom_temperatures
+        self._agent_vision_settings = initial_state.agent_vision_settings
         self._literature_config = initial_state.literature_config
         self._agent_server_configs = initial_state.agent_server_configs
 
@@ -2914,6 +3156,7 @@ Return ONLY the JSON array, nothing else."""
                 self._custom_models = analysis_state.custom_models
                 self._custom_prompts = analysis_state.custom_prompts
                 self._custom_temperatures = analysis_state.custom_temperatures
+                self._agent_vision_settings = analysis_state.agent_vision_settings
                 self._literature_config = analysis_state.literature_config
                 self._agent_server_configs = analysis_state.agent_server_configs
             logger.info(f"[{self.session_id}] Re-initializing workflow components for resume")

@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.17.1
+**Version**: 0.17.2
 **Last Updated**: 2026-03-26
 
 ## Project Overview
@@ -1425,6 +1425,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.17.2 | 2026-03-26 | Docker detached mode (`-d --name scai`), container logs appended to `/data/logs/scai.log` via `tee -a` in entrypoint |
 | 0.17.1 | 2026-03-26 | Per-agent LLM server config (agent_server_configs in state, new API endpoints, PromptsPanel UI); Painter dual-path image generation (chat completions + Images API fallback); Google AI Key moved to Literature agent settings; ConfigPanel label "Default LLM Server" |
 | 0.16.2 | 2026-03-24 | Docker packaging: Dockerfile, docker-entrypoint.sh, build.sh, .dockerignore; runtime dependency installation with /dep and /data volume mounts; ghcr.io/minzhangcheng/scai image |
 | 0.16.1 | 2026-03-24 | Vision fallback for figure revision (NotFoundError/404 → text-only retry); _PERCENTAGE_PATTERN and _INF_NAN_PATTERN data integrity check regex patterns; sandbox_timeout extended to 5400 s (1.5 h) |
@@ -1480,6 +1481,10 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.17.2 (2026-03-26)
+
+- **Docker detached mode** (`docker-entrypoint.sh`, `README.md`): Docker run command updated to use `-d` (detached) and `--name scai` flags so the container runs as a background service without occupying the terminal. All stdout/stderr output from the entrypoint script (including backend and frontend logs) is redirected via `exec > >(tee -a "$LOG_FILE") 2>&1` to `/data/logs/scai.log` in append mode, preserving logs across container restarts. Users can view logs via `docker logs -f scai` or by reading the log file directly.
 
 #### v0.17.1 (2026-03-26)
 

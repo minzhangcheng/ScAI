@@ -1828,20 +1828,28 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
 """
 
         # Use vision capability to analyze the figure
-        try:
+        if self.has_vision:
+            try:
+                self._set_llm_context()
+                response = await self.llm_client.chat_with_vision(
+                    model=self.model,
+                    text_prompt=prompt,
+                    images=[image_base64],
+                    temperature=0.3
+                )
+                response_text = response.content if response and response.content else ""
+            except Exception as e:
+                # User claimed vision support but it failed — fallback to text-only
+                logger.warning(f"[PI] Vision API failed despite user setting, falling back to text-only: {e}")
+                response_text = await self.chat(
+                    f"{prompt}\n\n[Note: Unable to view image directly. Please provide general guidance based on figure type and description.]",
+                    temperature=0.3
+                )
+        else:
+            # User explicitly marked model as no-vision — skip vision call
             self._set_llm_context()
-            response = await self.llm_client.chat_with_vision(
-                model=self.model,
-                text_prompt=prompt,
-                images=[image_base64],
-                temperature=0.3
-            )
-            response_text = response.content if response and response.content else ""
-        except Exception as e:
-            # Fallback to text-only if vision not available
-            logger.warning(f"[PI] Vision API failed, using text-only review: {e}")
             response_text = await self.chat(
-                f"{prompt}\n\n[Note: Unable to view image directly. Please provide general guidance based on figure type and description.]",
+                f"{prompt}\n\n[Note: Vision not available for this model. Please provide general guidance based on figure type and description.]",
                 temperature=0.3
             )
 
@@ -1954,6 +1962,18 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
 {"- Since this is round " + str(len(revision_history) + 1) + ", focus on whether previous issues were addressed. Be more lenient on minor aesthetic issues." if revision_history else ""}
 """
 
+        if not self.has_vision:
+            # No vision capability — cannot meaningfully review graphic abstract
+            logger.info(f"[PI] Skipping graphic abstract vision review (has_vision=False)")
+            return {
+                "quality_score": 6,
+                "feedback": "Vision not available for this model. General improvement: ensure clear visual hierarchy and complete representation of key findings.",
+                "strengths": [],
+                "issues": [],
+                "suggestions": ["Ensure all key findings are visually represented", "Use clear labels and professional colors"],
+                "must_fix": []
+            }
+
         try:
             self._set_llm_context()
             response = await self.llm_client.chat_with_vision(
@@ -2055,6 +2075,11 @@ Consider:
 }}
 ```
 """
+
+        if not self.has_vision:
+            # No vision — default to last candidate (most revised)
+            logger.info(f"[PI] Skipping graphic abstract selection (has_vision=False), using last candidate")
+            return len(candidates) - 1
 
         try:
             self._set_llm_context()

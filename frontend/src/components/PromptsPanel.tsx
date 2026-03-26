@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { usePrompts } from '../hooks/useApi'
-import { useAppStore, AgentType, DEFAULT_MODELS, DEFAULT_TEMPERATURES } from '../stores/appStore'
+import { useAppStore, AgentType, DEFAULT_MODELS, DEFAULT_TEMPERATURES, DEFAULT_VISION_SETTINGS } from '../stores/appStore'
 import { useTranslation, getDefaultPrompts } from '../i18n/translations'
 import { apiFetch } from '../hooks/useApi'
 import {
@@ -20,6 +20,8 @@ import {
   AlertCircle,
   Server,
   Key,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react'
 
 // Color styles mapping for Tailwind - use complete class names to prevent purging
@@ -96,8 +98,11 @@ export function PromptsPanel() {
     models, setModel,
     temperatures, setTemperature,
     agentServerConfigs, setAgentServerConfig,
+    agentVisionSettings, setAgentVisionSetting,
     literatureMode, setLiteratureMode,
     deepResearchModel, setDeepResearchModel,
+    deepResearchLlmBaseUrl, setDeepResearchLlmBaseUrl,
+    deepResearchApiKey, setDeepResearchApiKey,
     googleApiKey, setGoogleApiKey,
     pubmedEmail,
     literatureMaxSearchRounds, setLiteratureMaxSearchRounds,
@@ -111,8 +116,11 @@ export function PromptsPanel() {
   const [editedTemperature, setEditedTemperature] = useState(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
   const [editedLlmBaseUrl, setEditedLlmBaseUrl] = useState(agentServerConfigs[selectedAgent]?.llmBaseUrl || apiConfig.llmBaseUrl)
   const [editedApiKey, setEditedApiKey] = useState(agentServerConfigs[selectedAgent]?.apiKey || apiConfig.apiKey)
+  const [editedVisionEnabled, setEditedVisionEnabled] = useState(agentVisionSettings[selectedAgent] ?? DEFAULT_VISION_SETTINGS[selectedAgent] ?? true)
   const [showAgentApiKey, setShowAgentApiKey] = useState(false)
   const [showGoogleKey, setShowGoogleKey] = useState(false)
+  const [showDeepResearchApiKey, setShowDeepResearchApiKey] = useState(false)
+  const [serverExpanded, setServerExpanded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -132,7 +140,8 @@ export function PromptsPanel() {
     setEditedTemperature(temperatures[selectedAgent] ?? DEFAULT_TEMPERATURES[selectedAgent] ?? 0.5)
     setEditedLlmBaseUrl(agentServerConfigs[selectedAgent]?.llmBaseUrl || apiConfig.llmBaseUrl)
     setEditedApiKey(agentServerConfigs[selectedAgent]?.apiKey || apiConfig.apiKey)
-  }, [selectedAgent, prompts, models, temperatures, defaultPrompts, agentServerConfigs, apiConfig])
+    setEditedVisionEnabled(agentVisionSettings[selectedAgent] ?? DEFAULT_VISION_SETTINGS[selectedAgent] ?? true)
+  }, [selectedAgent, prompts, models, temperatures, defaultPrompts, agentServerConfigs, apiConfig, agentVisionSettings])
 
   const agentConfig: {
     id: AgentType
@@ -199,6 +208,7 @@ export function PromptsPanel() {
     setEditedTemperature(temperatures[agentId] ?? DEFAULT_TEMPERATURES[agentId] ?? 0.5)
     setEditedLlmBaseUrl(agentServerConfigs[agentId]?.llmBaseUrl || apiConfig.llmBaseUrl)
     setEditedApiKey(agentServerConfigs[agentId]?.apiKey || apiConfig.apiKey)
+    setServerExpanded(false)
     setSaved(false)
   }
 
@@ -235,6 +245,20 @@ export function PromptsPanel() {
           throw e
         }
 
+        // Save vision setting to backend
+        try {
+          await apiFetch(`/session/${currentSession.id}/vision-settings`, {
+            method: 'POST',
+            body: JSON.stringify({
+              agent: selectedAgent,
+              vision_enabled: editedVisionEnabled,
+            }),
+          })
+        } catch (e) {
+          console.error('Failed to save vision setting:', e)
+          throw e
+        }
+
         // Also save literature config if on literature agent
         if (selectedAgent === 'literature') {
           try {
@@ -243,6 +267,8 @@ export function PromptsPanel() {
               body: JSON.stringify({
                 mode: literatureMode,
                 deep_research_model: deepResearchModel,
+                deep_research_llm_base_url: deepResearchLlmBaseUrl,
+                deep_research_api_key: deepResearchApiKey,
                 google_api_key: googleApiKey,
                 pubmed_email: pubmedEmail,
                 max_search_rounds: literatureMaxSearchRounds,
@@ -257,6 +283,7 @@ export function PromptsPanel() {
         setPrompt(selectedAgent, editedPrompt)
         setModel(selectedAgent, editedModel)
         setTemperature(selectedAgent, editedTemperature)
+        setAgentVisionSetting(selectedAgent, editedVisionEnabled)
       }
       setSaved(true)
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
@@ -284,6 +311,9 @@ export function PromptsPanel() {
     setEditedLlmBaseUrl(apiConfig.llmBaseUrl)
     setEditedApiKey(apiConfig.apiKey)
     setAgentServerConfig(selectedAgent, { llmBaseUrl: '', apiKey: '' })
+    // Reset vision setting to default
+    setEditedVisionEnabled(DEFAULT_VISION_SETTINGS[selectedAgent])
+    setAgentVisionSetting(selectedAgent, DEFAULT_VISION_SETTINGS[selectedAgent])
 
     // Reset literature config if on literature agent
     if (selectedAgent === 'literature') {
@@ -401,6 +431,26 @@ export function PromptsPanel() {
               </div>
 
               <div className="space-y-2">
+                {/* Disabled */}
+                <div className={`rounded-lg transition-all ${
+                  literatureMode === 'disabled' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
+                }`}>
+                  <label className="flex items-start gap-3 p-3 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="literatureMode"
+                      value="disabled"
+                      checked={literatureMode === 'disabled'}
+                      onChange={() => { setLiteratureMode('disabled'); setSaved(false) }}
+                      className="mt-0.5 accent-blue-600"
+                    />
+                    <div className="flex-1">
+                      <span className="text-sm font-medium text-slate-800">{language === 'zh' ? '不启用' : 'Disabled'}</span>
+                      <p className="text-xs text-slate-500 mt-0.5">{language === 'zh' ? '不使用文献 Agent 进行文献检索' : 'Do not use Literature Agent for literature search'}</p>
+                    </div>
+                  </label>
+                </div>
+
                 {/* Gemini Deep Research */}
                 <div className={`rounded-lg transition-all ${
                   literatureMode === 'gemini_deep_research' ? 'bg-white border border-blue-200 shadow-sm' : 'hover:bg-white/50'
@@ -482,18 +532,65 @@ export function PromptsPanel() {
                       <span className="text-sm font-medium text-slate-800">{t('literatureDeepResearch')}</span>
                       <p className="text-xs text-slate-500 mt-0.5">{t('literatureDeepResearchDesc')}</p>
                       {literatureMode === 'deep_research' && (
-                        <div className="mt-2 space-y-1.5">
-                          <label className="block text-xs font-medium text-slate-600">
-                            {t('literatureDeepResearchModel')}
-                          </label>
-                          <input
-                            type="text"
-                            value={deepResearchModel}
-                            placeholder={t('literatureDeepResearchModelPlaceholder')}
-                            onChange={(e) => { setDeepResearchModel(e.target.value); setSaved(false) }}
-                            className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                          />
-                          <p className="text-xs text-slate-400">{t('literatureDeepResearchNote')}</p>
+                        <div className="mt-2 space-y-2.5">
+                          <div className="space-y-1.5">
+                            <label className="block text-xs font-medium text-slate-600">
+                              {t('literatureDeepResearchModel')}
+                            </label>
+                            <input
+                              type="text"
+                              value={deepResearchModel}
+                              placeholder={t('literatureDeepResearchModelPlaceholder')}
+                              onChange={(e) => { setDeepResearchModel(e.target.value); setSaved(false) }}
+                              className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            />
+                            <p className="text-xs text-slate-400">{t('literatureDeepResearchNote')}</p>
+                          </div>
+                          {/* Collapsible server/key for deep research */}
+                          <div className="border border-slate-200 rounded-lg">
+                            <button
+                              type="button"
+                              onClick={() => setServerExpanded(!serverExpanded)}
+                              className="flex items-center gap-2 w-full text-left p-2"
+                            >
+                              {serverExpanded ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-500" />}
+                              <Server className="w-3.5 h-3.5 text-slate-500" />
+                              <span className="text-xs font-medium text-slate-700">
+                                {t('literatureDeepResearchServer')} / {t('literatureDeepResearchApiKey')}
+                              </span>
+                              {!serverExpanded && (
+                                <span className="text-xs text-slate-500 ml-auto truncate max-w-[200px]">
+                                  {deepResearchLlmBaseUrl || editedLlmBaseUrl || apiConfig.llmBaseUrl || 'https://openrouter.ai/api/v1'}
+                                </span>
+                              )}
+                            </button>
+                            {serverExpanded && (
+                              <div className="px-2 pb-2 space-y-1.5">
+                                <input
+                                  type="text"
+                                  value={deepResearchLlmBaseUrl || editedLlmBaseUrl || apiConfig.llmBaseUrl || 'https://openrouter.ai/api/v1'}
+                                  onChange={(e) => { setDeepResearchLlmBaseUrl(e.target.value); setSaved(false) }}
+                                  className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                />
+                                <div className="relative">
+                                  <input
+                                    type={showDeepResearchApiKey ? 'text' : 'password'}
+                                    value={deepResearchApiKey || editedApiKey || apiConfig.apiKey || ''}
+                                    onChange={(e) => { setDeepResearchApiKey(e.target.value); setSaved(false) }}
+                                    className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowDeepResearchApiKey(!showDeepResearchApiKey)}
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600"
+                                  >
+                                    {showDeepResearchApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                  </button>
+                                </div>
+                                <p className="text-xs text-slate-400">{t('literatureDeepResearchServerHint')}</p>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -522,84 +619,125 @@ export function PromptsPanel() {
               </div>
             </div>
 
-            {/* PubMed Settings - search rounds */}
-            <div className="mb-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+            {/* PubMed Search Settings - includes LLM config, greyed out when disabled */}
+            <div className={`mb-4 p-4 rounded-xl border transition-all ${
+              literatureMode === 'disabled'
+                ? 'bg-slate-100 border-slate-200 opacity-50 pointer-events-none'
+                : 'bg-slate-50 border-slate-200'
+            }`}>
               <div className="flex items-center justify-between mb-3">
                 <label className="text-sm font-medium text-slate-700">
                   {t('literaturePubmedSettings')}
                 </label>
                 <span className="text-xs text-slate-400">{t('literaturePubmedSettingsNote')}</span>
               </div>
-              <div className="space-y-1.5">
-                <label className="block text-xs font-medium text-slate-600">
-                  {t('literatureMaxSearchRounds')}
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="20"
-                  value={literatureMaxSearchRounds}
-                  onChange={(e) => {
-                    setLiteratureMaxSearchRounds(parseInt(e.target.value) || 5)
-                    setSaved(false)
-                  }}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <p className="text-xs text-slate-400">{t('literatureMaxSearchRoundsNote')}</p>
+              <div className="space-y-3">
+                {/* Max Search Rounds */}
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-medium text-slate-600">
+                    {t('literatureMaxSearchRounds')}
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={literatureMaxSearchRounds}
+                    disabled={literatureMode === 'disabled'}
+                    onChange={(e) => {
+                      setLiteratureMaxSearchRounds(parseInt(e.target.value) || 5)
+                      setSaved(false)
+                    }}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-400"
+                  />
+                  <p className="text-xs text-slate-400">{t('literatureMaxSearchRoundsNote')}</p>
+                </div>
+
+                {/* Model */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <Cpu className="w-4 h-4 text-slate-500" />
+                    <label className="block text-xs font-medium text-slate-600">
+                      {language === 'zh' ? '模型' : 'Model'}
+                    </label>
+                  </div>
+                  <input
+                    type="text"
+                    value={editedModel}
+                    disabled={literatureMode === 'disabled'}
+                    onChange={(e) => {
+                      setEditedModel(e.target.value)
+                      setSaved(false)
+                    }}
+                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-400"
+                    placeholder="e.g., google/gemini-3.1-pro-preview"
+                  />
+                  <p className="text-xs text-slate-400">
+                    {language === 'zh'
+                      ? '用于 PubMed 模式文献分析的 LLM 模型，推荐: google/gemini-3.1-flash-lite-preview、google/gemini-3-flash-preview、openai/gpt-5.4-nano、openai/gpt-5.4-mini'
+                      : 'LLM model for PubMed mode literature analysis. Recommended: google/gemini-3.1-flash-lite-preview, google/gemini-3-flash-preview, openai/gpt-5.4-nano, openai/gpt-5.4-mini'}
+                  </p>
+                </div>
+
+                {/* Collapsible LLM Server / API Key */}
+                <div className="border border-slate-200 rounded-lg">
+                  <button
+                    type="button"
+                    onClick={() => { if (literatureMode !== 'disabled') setServerExpanded(!serverExpanded) }}
+                    className="flex items-center gap-2 w-full text-left p-2"
+                  >
+                    {serverExpanded ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-500" />}
+                    <Server className="w-3.5 h-3.5 text-slate-500" />
+                    <span className="text-xs font-medium text-slate-700">
+                      {t('agentLlmServer')} / {t('agentApiKey')}
+                    </span>
+                    {!serverExpanded && (
+                      <span className="text-xs text-slate-500 ml-auto truncate max-w-[180px]">
+                        {editedLlmBaseUrl || apiConfig.llmBaseUrl || 'https://openrouter.ai/api/v1'}
+                      </span>
+                    )}
+                  </button>
+                  {serverExpanded && literatureMode !== 'disabled' && (
+                    <div className="px-2 pb-2 space-y-1.5">
+                      <input
+                        type="text"
+                        value={editedLlmBaseUrl}
+                        onChange={(e) => {
+                          setEditedLlmBaseUrl(e.target.value)
+                          setSaved(false)
+                        }}
+                        className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="https://openrouter.ai/api/v1"
+                      />
+                      <div className="relative">
+                        <input
+                          type={showAgentApiKey ? 'text' : 'password'}
+                          value={editedApiKey}
+                          onChange={(e) => {
+                            setEditedApiKey(e.target.value)
+                            setSaved(false)
+                          }}
+                          className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                          placeholder="sk-..."
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowAgentApiKey(!showAgentApiKey)}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600"
+                        >
+                          {showAgentApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-400">{t('agentServerHint')}</p>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </>
         )}
 
-        {/* Per-Agent LLM Server */}
-        <div className="mb-4 p-4 bg-slate-50 rounded-xl">
-          <div className="flex items-center gap-3 mb-2">
-            <Server className="w-5 h-5 text-slate-500" />
-            <label className="text-sm font-medium text-slate-700">
-              {t('agentLlmServer')}
-            </label>
-            <input
-              type="text"
-              value={editedLlmBaseUrl}
-              onChange={(e) => {
-                setEditedLlmBaseUrl(e.target.value)
-                setSaved(false)
-              }}
-              className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
-              placeholder="https://openrouter.ai/api/v1"
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <Key className="w-5 h-5 text-slate-500" />
-            <label className="text-sm font-medium text-slate-700">
-              {t('agentApiKey')}
-            </label>
-            <div className="flex-1 relative">
-              <input
-                type={showAgentApiKey ? 'text' : 'password'}
-                value={editedApiKey}
-                onChange={(e) => {
-                  setEditedApiKey(e.target.value)
-                  setSaved(false)
-                }}
-                className="w-full px-3 py-2 pr-10 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
-                placeholder="sk-..."
-              />
-              <button
-                type="button"
-                onClick={() => setShowAgentApiKey(!showAgentApiKey)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
-              >
-                {showAgentApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
-          </div>
-          <p className="text-xs text-slate-500 mt-2 ml-8">
-            {t('agentServerHint')}
-          </p>
-        </div>
-
-        {/* Model Selection */}
+        {/* Model + Vision Selection - hidden for literature agent (shown in PubMed settings) */}
+        {selectedAgent !== 'literature' && (
         <div className="mb-4 p-4 bg-slate-50 rounded-xl">
           <div className="flex items-center gap-3">
             <Cpu className="w-5 h-5 text-slate-500" />
@@ -617,31 +755,123 @@ export function PromptsPanel() {
               placeholder="e.g., google/gemini-3.1-pro-preview"
             />
           </div>
+
+          {/* Vision Support Toggle - between model input and description */}
+          {['pi', 'bioinformatics', 'biochemistry', 'painter', 'supervisor'].includes(selectedAgent) && (
+            <div className="flex items-center gap-3 mt-2 ml-8">
+              <Eye className="w-4 h-4 text-slate-500" />
+              <label className="text-xs font-medium text-slate-600">
+                {t('visionSupport')}
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditedVisionEnabled(!editedVisionEnabled)
+                  setSaved(false)
+                }}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                  editedVisionEnabled ? 'bg-violet-600' : 'bg-slate-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    editedVisionEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+          )}
+
           <p className="text-xs text-slate-500 mt-2 ml-8">
             {language === 'zh' ? (
-              selectedAgent === 'pi' ? '需要支持 Vision（图片识别）的模型用于审核图片质量。推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4' :
-              selectedAgent === 'pathology' ? '需要具有病理图片识别能力的模型，强烈推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4' :
-              selectedAgent === 'bioinformatics' ? '需要 coding 能力较强且支持 Vision 的模型（用于图片修订）。推荐: anthropic/claude-sonnet-4.6、anthropic/claude-opus-4.6 或 google/gemini-3.1-pro-preview' :
-              selectedAgent === 'biochemistry' ? '推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4。若上传了生化结果图片，需要选择支持 Vision 的模型' :
-              selectedAgent === 'literature' ? '用于 PubMed 模式文献分析的 LLM 模型，推荐: google/gemini-3.1-flash-lite-preview、google/gemini-3-flash-preview、openai/gpt-5.4-nano、openai/gpt-5.4-mini' :
-              selectedAgent === 'painter' ? '需要具有图片生成能力的模型，推荐: google/gemini-3.1-flash-image-preview、google/gemini-3-pro-image-preview' :
-              selectedAgent === 'supervisor' ? '使用低成本、快速且支持 Vision 的模型进行实时监控（用于评估图片质量）。推荐: google/gemini-3.1-flash-lite-preview、openai/gpt-5.4-nano' :
+              selectedAgent === 'pi' ? '推荐支持 Vision（图片识别）的模型用于审核图片质量。推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4' :
+              selectedAgent === 'pathology' ? '推荐具有病理图片识别能力的模型，强烈推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4' :
+              selectedAgent === 'bioinformatics' ? '推荐 coding 能力较强且支持 Vision 的模型（用于图片修订）。推荐: anthropic/claude-sonnet-4.6、anthropic/claude-opus-4.6 或 google/gemini-3.1-pro-preview' :
+              selectedAgent === 'biochemistry' ? '推荐: google/gemini-3.1-pro-preview、openai/gpt-5.4。若上传了生化结果图片，推荐选择支持 Vision 的模型' :
+              selectedAgent === 'painter' ? '推荐具有图片生成能力的模型，推荐: google/gemini-3.1-flash-image-preview、google/gemini-3-pro-image-preview' :
+              selectedAgent === 'supervisor' ? '推荐低成本、快速且支持 Vision 的模型进行实时监控（用于评估图片质量）。推荐: google/gemini-3.1-flash-lite-preview、openai/gpt-5.4-nano' :
               '使用 OpenRouter 模型格式'
             ) : (
-              selectedAgent === 'pi' ? 'Requires Vision-capable model for figure quality review. Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
-              selectedAgent === 'pathology' ? 'Requires pathology image recognition capability. Strongly recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
-              selectedAgent === 'bioinformatics' ? 'Requires strong coding capability and Vision support (for figure revision). Recommended: anthropic/claude-sonnet-4.6, anthropic/claude-opus-4.6, or google/gemini-3.1-pro-preview' :
-              selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4. If biochemistry images are uploaded, a Vision-capable model is required' :
-              selectedAgent === 'literature' ? 'LLM model for PubMed mode literature analysis. Recommended: google/gemini-3.1-flash-lite-preview, google/gemini-3-flash-preview, openai/gpt-5.4-nano, openai/gpt-5.4-mini' :
-              selectedAgent === 'painter' ? 'Requires image generation capability. Recommended: google/gemini-3.1-flash-image-preview, google/gemini-3-pro-image-preview' :
-              selectedAgent === 'supervisor' ? 'Uses a cheap, fast, Vision-capable model for real-time monitoring (evaluates figure quality). Recommended: google/gemini-3.1-flash-lite-preview, openai/gpt-5.4-nano' :
+              selectedAgent === 'pi' ? 'Vision-capable model recommended for figure quality review. Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
+              selectedAgent === 'pathology' ? 'Model with pathology image recognition recommended. Strongly recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4' :
+              selectedAgent === 'bioinformatics' ? 'Model with strong coding capability and Vision support recommended (for figure revision). Recommended: anthropic/claude-sonnet-4.6, anthropic/claude-opus-4.6, or google/gemini-3.1-pro-preview' :
+              selectedAgent === 'biochemistry' ? 'Recommended: google/gemini-3.1-pro-preview, openai/gpt-5.4. If biochemistry images are uploaded, a Vision-capable model is recommended' :
+              selectedAgent === 'painter' ? 'Model with image generation capability recommended. Recommended: google/gemini-3.1-flash-image-preview, google/gemini-3-pro-image-preview' :
+              selectedAgent === 'supervisor' ? 'A cheap, fast, Vision-capable model recommended for real-time monitoring (evaluates figure quality). Recommended: google/gemini-3.1-flash-lite-preview, openai/gpt-5.4-nano' :
               'Use OpenRouter model format'
             )}
           </p>
-          <p className="text-xs text-slate-400 mt-1 ml-8">
-            {t('agentModelHint')}
-          </p>
+          {['pathology', 'biochemistry', 'painter', 'supervisor'].includes(selectedAgent) && (
+            <p className="text-xs text-amber-600 mt-1 ml-8">
+              {t('agentDisableHint')}
+            </p>
+          )}
         </div>
+        )}
+
+        {/* Per-Agent LLM Server - collapsible, hidden for literature agent */}
+        {selectedAgent !== 'literature' && (
+        <div className="mb-4 p-4 bg-slate-50 rounded-xl">
+          <button
+            type="button"
+            onClick={() => setServerExpanded(!serverExpanded)}
+            className="flex items-center gap-2 w-full text-left"
+          >
+            {serverExpanded ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
+            <Server className="w-4 h-4 text-slate-500" />
+            <span className="text-sm font-medium text-slate-700">
+              {t('agentLlmServer')} / {t('agentApiKey')}
+            </span>
+            {!serverExpanded && (
+              <span className="text-xs text-slate-400 ml-auto truncate max-w-[200px]">
+                {editedLlmBaseUrl || 'https://openrouter.ai/api/v1'}
+              </span>
+            )}
+          </button>
+          {serverExpanded && (
+            <div className="mt-3 space-y-2 pl-6">
+              <div className="flex items-center gap-3">
+                <Server className="w-4 h-4 text-slate-400" />
+                <input
+                  type="text"
+                  value={editedLlmBaseUrl}
+                  onChange={(e) => {
+                    setEditedLlmBaseUrl(e.target.value)
+                    setSaved(false)
+                  }}
+                  className="flex-1 px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+                  placeholder="https://openrouter.ai/api/v1"
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <Key className="w-4 h-4 text-slate-400" />
+                <div className="flex-1 relative">
+                  <input
+                    type={showAgentApiKey ? 'text' : 'password'}
+                    value={editedApiKey}
+                    onChange={(e) => {
+                      setEditedApiKey(e.target.value)
+                      setSaved(false)
+                    }}
+                    className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+                    placeholder="sk-..."
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowAgentApiKey(!showAgentApiKey)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600"
+                  >
+                    {showAgentApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs text-slate-400">
+                {t('agentServerHint')}
+              </p>
+            </div>
+          )}
+        </div>
+        )}
 
         {/* Temperature Control */}
         <div className="mb-4 p-4 bg-slate-50 rounded-xl">

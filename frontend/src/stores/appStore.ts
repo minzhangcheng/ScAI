@@ -158,6 +158,26 @@ export interface AgentServerConfig {
   apiKey: string
 }
 
+export interface AgentVisionSettings {
+  pi: boolean
+  pathology: boolean
+  bioinformatics: boolean
+  biochemistry: boolean
+  literature: boolean
+  painter: boolean
+  supervisor: boolean
+}
+
+export const DEFAULT_VISION_SETTINGS: AgentVisionSettings = {
+  pi: true,
+  pathology: true,
+  bioinformatics: true,
+  biochemistry: true,
+  literature: false,
+  painter: true,
+  supervisor: true,
+}
+
 // Default models
 export const DEFAULT_MODELS: AgentModels = {
   pi: 'google/gemini-3.1-pro-preview',
@@ -234,11 +254,19 @@ interface AppState {
   agentServerConfigs: Partial<Record<AgentType, AgentServerConfig>>
   setAgentServerConfig: (agent: AgentType, config: AgentServerConfig) => void
 
+  // Agent vision capability settings
+  agentVisionSettings: AgentVisionSettings
+  setAgentVisionSetting: (agent: AgentType, enabled: boolean) => void
+
   // Literature agent config
-  literatureMode: 'gemini_deep_research' | 'pubmed_llm' | 'deep_research'
+  literatureMode: 'gemini_deep_research' | 'pubmed_llm' | 'deep_research' | 'disabled'
   setLiteratureMode: (mode: AppState['literatureMode']) => void
   deepResearchModel: string
   setDeepResearchModel: (model: string) => void
+  deepResearchLlmBaseUrl: string
+  setDeepResearchLlmBaseUrl: (url: string) => void
+  deepResearchApiKey: string
+  setDeepResearchApiKey: (key: string) => void
   googleApiKey: string
   setGoogleApiKey: (key: string) => void
   pubmedEmail: string
@@ -247,7 +275,7 @@ interface AppState {
   setLiteratureMaxSearchRounds: (rounds: number) => void
 
   // Chat messages (PI Agent free-form chat)
-  chatMessages: { role: 'user' | 'assistant'; content: string; timestamp: string; files?: { filename: string; type: string }[]; figures?: { name: string; path?: string; base64?: string; pdfPath?: string }[] }[]
+  chatMessages: { id?: string; role: 'user' | 'assistant'; content: string; timestamp: string; files?: { filename: string; type: string }[]; figures?: { name: string; path?: string; base64?: string; pdfPath?: string }[] }[]
   addChatMessage: (msg: AppState['chatMessages'][0]) => void
   setChatMessages: (msgs: AppState['chatMessages']) => void
   chatLoading: boolean
@@ -399,11 +427,21 @@ export const useAppStore = create<AppState>()(
         agentServerConfigs: { ...state.agentServerConfigs, [agent]: config }
       })),
 
+      // Agent vision capability settings
+      agentVisionSettings: { ...DEFAULT_VISION_SETTINGS },
+      setAgentVisionSetting: (agent, enabled) => set((state) => ({
+        agentVisionSettings: { ...state.agentVisionSettings, [agent]: enabled }
+      })),
+
       // Literature agent config
       literatureMode: 'deep_research' as AppState['literatureMode'],
       setLiteratureMode: (mode) => set({ literatureMode: mode }),
       deepResearchModel: 'openai/o4-mini-deep-research',
       setDeepResearchModel: (model) => set({ deepResearchModel: model }),
+      deepResearchLlmBaseUrl: '',
+      setDeepResearchLlmBaseUrl: (url) => set({ deepResearchLlmBaseUrl: url }),
+      deepResearchApiKey: '',
+      setDeepResearchApiKey: (key) => set({ deepResearchApiKey: key }),
       googleApiKey: '',
       setGoogleApiKey: (key) => set({ googleApiKey: key }),
       pubmedEmail: '',
@@ -513,8 +551,11 @@ export const useAppStore = create<AppState>()(
         maxRounds: state.maxRounds,
         roundWaitSeconds: state.roundWaitSeconds,
         agentServerConfigs: state.agentServerConfigs,
+        agentVisionSettings: state.agentVisionSettings,
         literatureMode: state.literatureMode,
         deepResearchModel: state.deepResearchModel,
+        deepResearchLlmBaseUrl: state.deepResearchLlmBaseUrl,
+        deepResearchApiKey: state.deepResearchApiKey,
         googleApiKey: state.googleApiKey,
         pubmedEmail: state.pubmedEmail,
         literatureMaxSearchRounds: state.literatureMaxSearchRounds,

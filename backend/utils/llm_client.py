@@ -216,13 +216,13 @@ class OpenAICompatibleClient:
         }
         if proxy_url:
             http_client_kwargs["proxy"] = proxy_url
-        http_client = httpx.AsyncClient(**http_client_kwargs)
+        self.http_client = httpx.AsyncClient(**http_client_kwargs)
         logger.info(f"[{agent_name}] LLM client initialized (session={session_id}, proxy={'set' if proxy_url else 'none'})")
-        
+
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=self.base_url,
-            http_client=http_client,
+            http_client=self.http_client,
             timeout=300.0,  # Safety net; deep research uses per-request timeout=1800 override
             max_retries=0,  # Disable SDK internal retries; retry_with_backoff handles all retries
             default_headers={
@@ -238,6 +238,7 @@ class OpenAICompatibleClient:
         
     async def close(self):
         await self.client.close()
+        await self.http_client.aclose()
         
     def _extract_content_from_message(self, message, response=None) -> str:
         """Extract text content from a chat completion message, handling multiple formats.

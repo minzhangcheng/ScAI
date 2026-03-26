@@ -4,13 +4,8 @@ import { devLog } from '../utils/logger'
 import type {
   SessionLoadResponse,
   SessionInfoUpdateResponse,
-  GroupAddResponse,
   GroupUpdateResponse,
-  IndicatorAddResponse,
-  ResumeResponse,
-  SessionListItem,
   SessionListResponse,
-  ReportResponse,
   RawRoundResult,
   RawDataFile,
   RawPublicationFigure,
@@ -198,11 +193,11 @@ export function useSession() {
           biochemistryFindings: Array.isArray(r.biochemistry_findings) ? r.biochemistry_findings : [],
           literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
         }
-      }).filter((r: RawRoundResult | null) => r !== null)
+      }).filter((r): r is RoundResult => r !== null)
 
       // Validate status is a known value
-      const validStatuses = ['pending', 'running', 'paused', 'waiting_input', 'waiting_annotation', 'completed', 'failed', 'generating_report'] as const
-      const status = validStatuses.includes(data.status) ? data.status : 'pending'
+      const validStatuses: readonly Session['status'][] = ['pending', 'running', 'paused', 'waiting_input', 'waiting_annotation', 'completed', 'failed', 'generating_report']
+      const status: Session['status'] = validStatuses.includes(data.status as Session['status']) ? data.status as Session['status'] : 'pending'
 
       const session: Session = {
         id: data.session_id,
@@ -238,7 +233,7 @@ export function useSession() {
           pngPath: f.png_path || f.pngPath || '',
           pdfPath: f.pdf_path || f.pdfPath || '',
           pngBase64: f.png_base64 || f.pngBase64,
-          reviewStatus: f.review_status || f.reviewStatus || 'pending',
+          reviewStatus: (f.review_status || f.reviewStatus || 'pending') as FigureReviewStatus,
           piFeedback: f.pi_feedback || f.piFeedback,
           revisionCount: f.revision_count ?? f.revisionCount ?? 0,
           createdAt: f.created_at || f.createdAt || '',
@@ -261,7 +256,7 @@ export function useSession() {
           createdAt: data.graphic_abstract.created_at || data.graphic_abstract.createdAt || '',
         } : undefined,
         integratedReport: data.integrated_report || undefined,
-        explorationReportUrl: data.exploration_report_url || data.explorationReportUrl,
+        explorationReportUrl: data.exploration_report_url || (data as any).explorationReportUrl,
         analysisPhase: data.analysis_phase || undefined,
       }
 
@@ -577,7 +572,7 @@ export function useSession() {
 
     // Sync remaining settings in parallel (max_rounds is now dynamically set by direction selection)
     const roundWaitSeconds = useAppStore.getState().roundWaitSeconds
-    const { literatureMode, googleApiKey, pubmedEmail, literatureMaxSearchRounds, deepResearchModel } = useAppStore.getState()
+    const { literatureMode, googleApiKey, pubmedEmail, literatureMaxSearchRounds, deepResearchModel, deepResearchLlmBaseUrl, deepResearchApiKey } = useAppStore.getState()
 
     await Promise.allSettled([
       apiFetch(`/session/${currentSession.id}/round-wait`, {
@@ -589,6 +584,8 @@ export function useSession() {
         body: JSON.stringify({
           mode: literatureMode,
           deep_research_model: deepResearchModel,
+          deep_research_llm_base_url: deepResearchLlmBaseUrl,
+          deep_research_api_key: deepResearchApiKey,
           google_api_key: googleApiKey,
           pubmed_email: pubmedEmail,
           max_search_rounds: literatureMaxSearchRounds,

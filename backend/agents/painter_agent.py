@@ -12,6 +12,8 @@ import base64
 import json
 import asyncio
 
+import httpx
+
 from .base import BaseAgent, AgentConfig
 from ..models.schemas import AgentType, AnalysisState, GraphicAbstract
 from ..utils.llm_client import OpenAICompatibleClient
@@ -207,22 +209,30 @@ class PainterAgent(BaseAgent):
 
         try:
             # Build multimodal message: current image + revision instructions
-            # Gemini supports image-in + image-out
-            from ..utils.llm_client import _detect_image_mime_type
-            mime_type = _detect_image_mime_type(current_image_base64)
-
-            user_content = [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{mime_type};base64,{current_image_base64}"
+            if self.has_vision:
+                # Vision enabled: send current image so model can see and modify it
+                from ..utils.llm_client import _detect_image_mime_type
+                mime_type = _detect_image_mime_type(current_image_base64)
+                user_content = [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{current_image_base64}"
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": revision_prompt
                     }
-                },
-                {
-                    "type": "text",
-                    "text": revision_prompt
-                }
-            ]
+                ]
+            else:
+                # No vision: only send text, model regenerates based on feedback alone
+                logger.info(f"[{self.session_id}][Painter] Vision disabled, revising with text-only prompt")
+                # Remove reference to attached image from prompt
+                text_only_prompt = revision_prompt.replace(
+                    "- Look at the attached current graphic abstract image carefully\n", ""
+                )
+                user_content = [{"type": "text", "text": text_only_prompt}]
 
             last_error = None
             for attempt in range(3):
@@ -445,9 +455,27 @@ The graphic abstract should tell the story of the research at a glance, highligh
 
         raise ValueError("No image data found in response")
 
+    async def _download_image_as_base64(self, url: str) -> str:
+        """Download image from URL and return as base64 string.
+
+        Used for providers (e.g. SiliconFlow) that return temporary image URLs
+        instead of base64-encoded data.  Reuses the llm_client's httpx client
+        so proxy and timeout settings are inherited.
+        """
+        # Reuse the shared httpx client (inherits proxy config)
+        resp = await self.llm_client.http_client.get(url, timeout=60.0)
+        resp.raise_for_status()
+        return base64.b64encode(resp.content).decode('utf-8')
+
     async def _generate_image(self, prompt: str) -> str:
         """
-        Call image generation API via OpenRouter.
+        Call image generation API with multi-provider compatibility.
+
+        Supports OpenRouter, OpenAI, Google AI Studio, n1n.ai, and SiliconFlow
+        via a cascade of strategies:
+        1. Chat completions with modalities (OpenRouter, OpenAI, n1n.ai)
+        2. Images API with b64_json (OpenAI, Google AI Studio, n1n.ai)
+        3. Images API with URL response (SiliconFlow)
 
         Args:
             prompt: The prompt for image generation
@@ -516,22 +544,60 @@ The graphic abstract should tell the story of the research at a glance, highligh
             chat_error = last_error
 
             # Strategy 2: Try Images API (/v1/images/generations)
-            # This works on OpenAI, Google AI Studio, SiliconFlow, etc.
+            # Works on OpenAI, Google AI Studio, n1n.ai, SiliconFlow, etc.
             logger.info(
                 f"[{self.session_id}][Painter] Chat completions image gen failed ({chat_error}), "
                 f"trying Images API fallback"
             )
             try:
-                response = await self.llm_client.client.images.generate(
-                    model=self.model,
-                    prompt=prompt,
-                    n=1,
-                    response_format="b64_json",
-                )
+                # Try with b64_json first (OpenAI, Google AI Studio, n1n.ai)
+                # then fall back without it (SiliconFlow only supports URL responses)
+                try:
+                    response = await self.llm_client.client.images.generate(
+                        model=self.model,
+                        prompt=prompt,
+                        n=1,
+                        response_format="b64_json",
+                    )
+                except Exception as b64_err:
+                    # Only fall back for client errors (400/422 = unsupported param);
+                    # propagate transient/auth errors immediately
+                    if not _is_client_error(b64_err):
+                        raise
+                    logger.info(
+                        f"[{self.session_id}][Painter] Images API with b64_json failed ({b64_err}), "
+                        f"trying without response_format"
+                    )
+                    response = await self.llm_client.client.images.generate(
+                        model=self.model,
+                        prompt=prompt,
+                        n=1,
+                    )
+
+                # Extract image from response
                 if response.data and len(response.data) > 0:
-                    img_data = response.data[0].b64_json
-                    if img_data:
-                        return img_data
+                    img_item = response.data[0]
+                    # Prefer b64_json (OpenAI, Google AI Studio)
+                    if hasattr(img_item, 'b64_json') and img_item.b64_json:
+                        return img_item.b64_json
+                    # Fall back to URL and download (SiliconFlow returns temporary URLs)
+                    if hasattr(img_item, 'url') and img_item.url:
+                        logger.info(f"[{self.session_id}][Painter] Downloading image from URL")
+                        return await self._download_image_as_base64(img_item.url)
+
+                # SiliconFlow non-standard format: 'images' array instead of 'data'
+                if hasattr(response, 'model_dump'):
+                    raw = response.model_dump()
+                    if 'images' in raw and raw['images']:
+                        for img in raw['images']:
+                            url = img.get('url', '') if isinstance(img, dict) else ''
+                            if url:
+                                logger.info(
+                                    f"[{self.session_id}][Painter] Downloading image from "
+                                    f"non-standard response format"
+                                )
+                                return await self._download_image_as_base64(url)
+
                 raise ValueError("Images API returned no image data")
             except Exception as images_error:
                 logger.warning(

@@ -50,6 +50,7 @@ class BaseAgent(ABC):
         self.message_history: List[Dict[str, Any]] = []
         self.session_id = session_id
         self.config = config or AgentConfig()
+        self.has_vision: bool = True
     
     def _safe_parse_json(self, response: str, default: Dict[str, Any] = None) -> Dict[str, Any]:
         """

@@ -2297,7 +2297,7 @@ Return only the Python code:"""
         self._set_llm_context()
         # Use slightly lower temperature for code revision (needs precision)
         revision_temp = min(self.config.temperature, 0.2)
-        if image_base64:
+        if image_base64 and self.has_vision:
             # Use vision API so the agent can see the current figure
             try:
                 response = await self.llm_client.chat_with_vision(

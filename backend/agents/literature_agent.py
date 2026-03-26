@@ -52,6 +52,8 @@ class LiteratureAgent(BaseAgent):
         # Literature-specific parameters
         literature_mode: str = "deep_research",
         deep_research_model: str = "",
+        deep_research_llm_base_url: str = "",
+        deep_research_api_key: str = "",
         google_api_key: str = "",
         pubmed_email: str = "",
         max_search_rounds: int = 5,
@@ -75,6 +77,15 @@ class LiteratureAgent(BaseAgent):
         self.max_search_rounds = max(1, min(20, max_search_rounds))
         self.proxy_url = proxy_url
         self.fallback_model = fallback_model
+
+        # Separate LLM client for deep research mode (optional)
+        self._deep_research_llm_client: Optional[OpenAICompatibleClient] = None
+        if deep_research_llm_base_url and deep_research_api_key:
+            self._deep_research_llm_client = OpenAICompatibleClient(
+                api_key=deep_research_api_key,
+                base_url=deep_research_llm_base_url,
+                proxy_url=proxy_url,
+            )
 
         # Create GoogleDeepResearchClient only when needed (Gemini mode)
         self._deep_research: Optional[GoogleDeepResearchClient] = None
@@ -100,6 +111,10 @@ class LiteratureAgent(BaseAgent):
         **kwargs
     ) -> Dict[str, Any]:
         """Process literature research instruction"""
+        if self.literature_mode == "disabled":
+            logger.info("[Literature] Literature agent is disabled, skipping")
+            return {"report": "", "status": "disabled"}
+
         topic = kwargs.get("topic", instruction)
         use_deep_research = kwargs.get("use_deep_research", True)
         current_round_findings = kwargs.get("current_round_findings", None)
@@ -267,13 +282,16 @@ Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. ht
 
         self._set_llm_context()
 
+        # Use separate deep research LLM client if configured
+        dr_client = self._deep_research_llm_client or self.llm_client
+
         # The LLM client disables retries for timeout>300s (to avoid re-running
         # expensive long requests). Retry transient *connection* errors here.
         _max_conn_retries = 2
         _last_err: Optional[Exception] = None
         for _attempt in range(_max_conn_retries + 1):
             try:
-                response = await self.llm_client.chat(
+                response = await dr_client.chat(
                     model=self.deep_research_model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.3,
@@ -1043,6 +1061,10 @@ Please return in JSON format:
         Returns:
             Dict with annotations per cluster, literature_report, references, status
         """
+        if self.literature_mode == "disabled":
+            logger.info("[Literature] Literature agent is disabled, skipping annotate_clusters")
+            return {"annotations": {}, "literature_report": "", "references": [], "status": "disabled"}
+
         # --- Cache check: avoid redundant Deep Research calls ---
         all_genes_for_key: set = set()
         for genes in cluster_markers.values():

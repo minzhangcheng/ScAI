@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.17.1
+**Version**: 0.17.2
 
 ## Installation
 
@@ -11,10 +11,19 @@
 Pull and run the pre-built image from GitHub Container Registry:
 
 ```bash
-docker run -p 3000:3000 \
+docker run -d --name scai \
+  -p 3000:3000 \
   -v scai-dep:/dep \
   -v scai-data:/data \
   ghcr.io/minzhangcheng/scai:latest
+```
+
+View logs:
+
+```bash
+docker logs -f scai
+# or check the log file inside the data volume:
+# docker exec scai cat /data/logs/scai.log
 ```
 
 - `/dep` — stores Python venv and Node.js dependencies (installed automatically on first run, persisted across restarts)
@@ -332,6 +341,10 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 
 ## Changelog
 
+### v0.17.2 (2026-03-26)
+
+- **Improvement: Docker run as background service** — `docker run` now uses `-d --name scai` to run the container in detached mode, freeing the terminal. All container logs (stdout/stderr) are appended to `/data/logs/scai.log` inside the data volume for persistent access across restarts.
+
 ### v0.17.1 (2026-03-26)
 
 - **New: Per-agent LLM server configuration** — Each agent can now use a different LLM provider and API key. Configure per-agent server settings in the Prompts Panel; agents default to the global LLM server when no override is set.
@@ -340,7 +353,7 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 
 ### v0.16.2 (2026-03-24)
 
-- **New: Docker packaging** — Added `Dockerfile`, `docker-entrypoint.sh`, `build.sh`, and `.dockerignore` for building and publishing the ScAI Docker image to `ghcr.io/minzhangcheng/scai`. Run with `docker run -p 3000:3000 -v /path/data:/data -v /path/dep:/dep ghcr.io/minzhangcheng/scai`. Dependencies install at first run and persist across restarts via volume mounts.
+- **New: Docker packaging** — Added `Dockerfile`, `docker-entrypoint.sh`, `build.sh`, and `.dockerignore` for building and publishing the ScAI Docker image to `ghcr.io/minzhangcheng/scai`. Run with `docker run -d --name scai -p 3000:3000 -v /path/data:/data -v /path/dep:/dep ghcr.io/minzhangcheng/scai`. Dependencies install at first run and persist across restarts via volume mounts.
 
 ### v0.16.1 (2026-03-24)
 

@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.17.1"
+    version="0.17.2"
 )
 
 # CORS
@@ -469,9 +469,16 @@ class TemperatureUpdateRequest(BaseModel):
     temperature: float = Field(ge=0.0, le=2.0)
 
 
+class VisionSettingUpdateRequest(BaseModel):
+    agent: VALID_AGENTS
+    vision_enabled: bool
+
+
 class LiteratureConfigRequest(BaseModel):
-    mode: Literal["deep_research", "gemini_deep_research", "pubmed_llm"] = Field(default="deep_research")
+    mode: Literal["deep_research", "gemini_deep_research", "pubmed_llm", "disabled"] = Field(default="deep_research")
     deep_research_model: str = ""
+    deep_research_llm_base_url: str = ""
+    deep_research_api_key: str = ""
     google_api_key: str = ""
     pubmed_email: str = ""
     max_search_rounds: int = Field(default=5, ge=1, le=20)
@@ -1417,6 +1424,33 @@ async def get_temperatures(session_id: str):
     return merged.model_dump()
 
 
+@app.post("/api/session/{session_id}/vision-settings")
+async def update_vision_settings(session_id: str, request: VisionSettingUpdateRequest):
+    """Update agent vision capability setting"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    state.agent_vision_settings[request.agent] = request.vision_enabled
+
+    await async_save_session(session_id, state)
+
+    return APIResponse(
+        success=True,
+        message=f"Vision setting updated for {request.agent}: {request.vision_enabled}"
+    )
+
+
+@app.get("/api/session/{session_id}/vision-settings")
+async def get_vision_settings(session_id: str):
+    """Get agent vision capability settings"""
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {"vision_settings": state.agent_vision_settings}
+
+
 class MaxRoundsRequest(BaseModel):
     max_rounds: int = Field(ge=1, le=50, default=3)
 
@@ -1477,6 +1511,8 @@ async def update_literature_config(session_id: str, request: LiteratureConfigReq
     state.literature_config = {
         "mode": request.mode,
         "deep_research_model": request.deep_research_model,
+        "deep_research_llm_base_url": request.deep_research_llm_base_url,
+        "deep_research_api_key": request.deep_research_api_key,
         "google_api_key": request.google_api_key,
         "pubmed_email": request.pubmed_email,
         "max_search_rounds": request.max_search_rounds,
@@ -4464,6 +4500,8 @@ async def _execute_chat_agent(
             config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
             literature_mode=lit_config.get("mode", "deep_research"),
             deep_research_model=lit_config.get("deep_research_model", ""),
+            deep_research_llm_base_url=lit_config.get("deep_research_llm_base_url", ""),
+            deep_research_api_key=lit_config.get("deep_research_api_key", ""),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
             max_search_rounds=lit_config.get("max_search_rounds", 5),
@@ -4572,6 +4610,8 @@ async def _execute_chat_agent(
             config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
             literature_mode=lit_config.get("mode", "deep_research"),
             deep_research_model=lit_config.get("deep_research_model", ""),
+            deep_research_llm_base_url=lit_config.get("deep_research_llm_base_url", ""),
+            deep_research_api_key=lit_config.get("deep_research_api_key", ""),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
             max_search_rounds=lit_config.get("max_search_rounds", 5),

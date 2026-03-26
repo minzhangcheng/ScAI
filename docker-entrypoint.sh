@@ -8,10 +8,17 @@ VENV_DIR="$DEP_DIR/venv"
 NODE_MODULES_DIR="$DEP_DIR/node_modules"
 
 # ── Data directories ──────────────────────────────────────────────
-echo "Setting up data directories..."
+# Create directories before redirecting output (logs dir must exist first)
 for sub in uploads sessions states workspace reports logs upload_temp; do
     mkdir -p "$DATA_DIR/$sub"
 done
+
+# ── Redirect all output to log file (append mode) ────────────────
+LOG_FILE="$DATA_DIR/logs/scai.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo ""
+echo "========== ScAI starting at $(date) =========="
+
 export SCAI_DATA_DIR="$DATA_DIR"
 
 # ── Python venv & dependencies ────────────────────────────────────

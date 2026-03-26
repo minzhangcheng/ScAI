@@ -1253,8 +1253,8 @@ class SupervisorAgent:
             else _SUPERVISOR_SYSTEM_PROMPT
         )
 
-        # If we have figures, try vision evaluation
-        if figures:
+        # If we have figures and vision is enabled, try vision evaluation
+        if figures and self.has_vision:
             try:
                 compressed = []
                 for fig_b64 in figures[:3]:  # Max 3 figures per evaluation
