@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.17.3"
+    version="0.17.4"
 )
 
 # CORS
@@ -451,7 +451,7 @@ class StartRequest(BaseModel):
     session_name: Optional[str] = None
 
 
-VALID_AGENTS = Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor"]
+VALID_AGENTS = Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor", "technique"]
 
 
 class PromptUpdateRequest(BaseModel):
@@ -485,7 +485,7 @@ class LiteratureConfigRequest(BaseModel):
 
 
 class AgentServerConfigRequest(BaseModel):
-    agent: Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor"]
+    agent: Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor", "technique"]
     llm_base_url: str = ""
     api_key: str = ""
 
@@ -1345,9 +1345,10 @@ async def get_prompts(session_id: str):
         "biochemistry": state.custom_prompts.get("biochemistry", config.prompts.biochemistry_prompt if config else ""),
         "literature": state.custom_prompts.get("literature", config.prompts.literature_prompt if config else ""),
         "painter": state.custom_prompts.get("painter", config.prompts.painter_prompt if config else ""),
-        "supervisor": state.custom_prompts.get("supervisor", config.prompts.supervisor_prompt if config else "")
+        "supervisor": state.custom_prompts.get("supervisor", config.prompts.supervisor_prompt if config else ""),
+        "technique": state.custom_prompts.get("technique", ""),
     }
-    
+
     return prompts
 
 
@@ -1386,7 +1387,8 @@ async def get_models(session_id: str):
         "biochemistry": state.custom_models.get("biochemistry", config.models.biochemistry_model if config else ""),
         "literature": state.custom_models.get("literature", config.models.literature_model if config else "google/gemini-3-flash-preview"),
         "painter": state.custom_models.get("painter", config.models.painter_model if config else "gemini-2.0-flash-exp-image-generation"),
-        "supervisor": state.custom_models.get("supervisor", config.models.supervisor_model if config else "google/gemini-3.1-flash-lite-preview")
+        "supervisor": state.custom_models.get("supervisor", config.models.supervisor_model if config else "google/gemini-3.1-flash-lite-preview"),
+        "technique": state.custom_models.get("technique", config.models.technique_model if config else "google/gemini-3.1-flash-lite-preview"),
     }
 
     return models

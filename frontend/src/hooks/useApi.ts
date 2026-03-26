@@ -546,7 +546,7 @@ export function useSession() {
     // Get current models, prompts, and temperatures from store
     const { models, prompts, temperatures } = useAppStore.getState()
     const syncFailures: string[] = []
-    const agents = ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature', 'painter', 'supervisor'] as const
+    const agents = ['pi', 'pathology', 'bioinformatics', 'biochemistry', 'literature', 'painter', 'supervisor', 'technique'] as const
 
     // Sync all agent settings in parallel (models, prompts, temperatures)
     await Promise.allSettled([

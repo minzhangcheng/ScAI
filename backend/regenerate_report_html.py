@@ -1067,7 +1067,7 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
     agent_rows = ""
     models = appendix.get("agent_models", {})
     temps = appendix.get("agent_temperatures", {})
-    for key in ["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter"]:
+    for key in ["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor", "technique"]:
         model = models.get(key, "-")
         temp = temps.get(key, "-")
         agent_rows += f"<tr><td>{esc(key.title())}</td><td>{esc(str(model))}</td><td>{temp}</td></tr>\n"

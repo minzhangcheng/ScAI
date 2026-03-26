@@ -372,14 +372,14 @@ export function ChatPanel() {
               className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
               {msg.role === 'assistant' && (
-                <div className="shrink-0 w-8 h-8 rounded-full bg-violet-100 flex items-center justify-center">
-                  <Bot className="w-4 h-4 text-violet-600" />
+                <div className="shrink-0 w-8 h-8 rounded-full bg-accent-100 flex items-center justify-center">
+                  <Bot className="w-4 h-4 text-accent-600" />
                 </div>
               )}
               <div
                 className={`max-w-[80%] rounded-2xl px-4 py-3 ${
                   msg.role === 'user'
-                    ? 'bg-violet-600 text-white'
+                    ? 'bg-accent-600 text-white'
                     : 'bg-slate-100 text-slate-800'
                 }`}
               >
@@ -390,7 +390,7 @@ export function ChatPanel() {
                       <div
                         key={j}
                         className={`flex items-center gap-1.5 text-xs rounded-lg px-2 py-1 ${
-                          msg.role === 'user' ? 'bg-violet-500/30' : 'bg-slate-200'
+                          msg.role === 'user' ? 'bg-accent-500/30' : 'bg-slate-200'
                         }`}
                       >
                         {isImageFile(f.filename) ? (
@@ -401,7 +401,7 @@ export function ChatPanel() {
                         <span className="truncate">{f.filename}</span>
                         {f.target_agent && f.target_agent !== 'pi' && (
                           <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                            msg.role === 'user' ? 'bg-violet-400/40' : 'bg-violet-100 text-violet-700'
+                            msg.role === 'user' ? 'bg-accent-400/40' : 'bg-accent-100 text-accent-700'
                           }`}>
                             {f.target_agent}
                           </span>
@@ -441,7 +441,7 @@ export function ChatPanel() {
                               <a
                                 href={`/api/file?path=${encodeURIComponent(fig.pdfPath)}`}
                                 download={`${fig.name}.pdf`}
-                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-violet-700 bg-violet-50 hover:bg-violet-100 rounded-md transition-colors"
+                                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-accent-700 bg-accent-50 hover:bg-accent-100 rounded-md transition-colors"
                               >
                                 <Download className="w-3 h-3" />
                                 PDF
@@ -465,7 +465,7 @@ export function ChatPanel() {
                 )}
               </div>
               {msg.role === 'user' && (
-                <div className="shrink-0 w-8 h-8 rounded-full bg-violet-600 flex items-center justify-center">
+                <div className="shrink-0 w-8 h-8 rounded-full bg-accent-600 flex items-center justify-center">
                   <User className="w-4 h-4 text-white" />
                 </div>
               )}
@@ -474,20 +474,20 @@ export function ChatPanel() {
         )}
         {(chatLoading || chatDelegationActive) && (
           <div className="flex gap-3 justify-start">
-            <div className="shrink-0 w-8 h-8 rounded-full bg-violet-100 flex items-center justify-center">
-              <Bot className="w-4 h-4 text-violet-600" />
+            <div className="shrink-0 w-8 h-8 rounded-full bg-accent-100 flex items-center justify-center">
+              <Bot className="w-4 h-4 text-accent-600" />
             </div>
             <div className="bg-slate-100 rounded-2xl px-4 py-3">
               {chatDelegationActive ? (
                 <div className="flex items-center gap-2 text-sm text-slate-600">
-                  <Loader2 className="w-4 h-4 animate-spin text-violet-500 shrink-0" />
+                  <Loader2 className="w-4 h-4 animate-spin text-accent-500 shrink-0" />
                   <div>
-                    <div className="font-medium text-violet-700">{chatDelegationPlan || 'Coordinating agents...'}</div>
+                    <div className="font-medium text-accent-700">{chatDelegationPlan || 'Coordinating agents...'}</div>
                     <div className="text-xs text-slate-400 mt-0.5">{language === 'zh' ? '分析进度请查看 Analysis 标签页' : 'Progress in Analysis tab'}</div>
                   </div>
                 </div>
               ) : (
-                <Loader2 className="w-4 h-4 animate-spin text-violet-500" />
+                <Loader2 className="w-4 h-4 animate-spin text-accent-500" />
               )}
             </div>
           </div>
@@ -530,7 +530,7 @@ export function ChatPanel() {
                   <select
                     value={sf.targetAgent}
                     onChange={(e) => handleFileAgentChange(i, e.target.value)}
-                    className="ml-auto shrink-0 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-600 bg-white focus:ring-1 focus:ring-violet-500"
+                    className="ml-auto shrink-0 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-600 bg-white focus:ring-1 focus:ring-accent-500"
                   >
                     {AGENT_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>
@@ -607,7 +607,7 @@ export function ChatPanel() {
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={chatLoading}
-            className="shrink-0 p-3 text-slate-500 hover:text-violet-600 hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-50"
+            className="shrink-0 p-3 text-slate-500 hover:text-accent-600 hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-50"
             title={t('chatAttach')}
           >
             <Paperclip className="w-5 h-5" />
@@ -618,7 +618,7 @@ export function ChatPanel() {
             value={defaultAgent}
             onChange={(e) => setDefaultAgent(e.target.value)}
             disabled={chatLoading}
-            className="shrink-0 px-2 py-3 border border-slate-300 rounded-xl text-xs text-slate-600 bg-white focus:ring-2 focus:ring-violet-500 focus:border-violet-500 disabled:opacity-50"
+            className="shrink-0 px-2 py-3 border border-slate-300 rounded-xl text-xs text-slate-600 bg-white focus:ring-2 focus:ring-accent-500 focus:border-accent-500 disabled:opacity-50"
             title={language === 'zh' ? '新文件默认Agent' : 'Default agent for new files'}
           >
             {AGENT_OPTIONS.map((opt) => (
@@ -635,7 +635,7 @@ export function ChatPanel() {
               onMouseDown={handleResizeMouseDown}
               className="flex justify-center py-1 cursor-ns-resize group"
             >
-              <div className="w-8 h-1 rounded-full bg-slate-300 group-hover:bg-violet-400 transition-colors" />
+              <div className="w-8 h-1 rounded-full bg-slate-300 group-hover:bg-accent-400 transition-colors" />
             </div>
             <textarea
               ref={textareaRef}
@@ -643,7 +643,7 @@ export function ChatPanel() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={t('chatPlaceholder')}
-              className="w-full resize-none px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 text-sm"
+              className="w-full resize-none px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 text-sm"
               style={{ height: textareaHeight + 'px' }}
               disabled={chatLoading}
             />
@@ -662,7 +662,7 @@ export function ChatPanel() {
             <button
               onClick={handleSend}
               disabled={!input.trim() && selectedFiles.length === 0}
-              className="shrink-0 p-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="shrink-0 p-3 bg-accent-600 hover:bg-accent-700 text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Send className="w-5 h-5" />
             </button>

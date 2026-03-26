@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.17.3
+**Version**: 0.17.4
 
 ## Installation
 
@@ -340,6 +340,10 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.17.4 (2026-03-26)
+
+- **Improvement: Frontend visual redesign ("Scientific Elegance")** — Complete UI beautification with no new dependencies. New typography (Source Serif 4 for headings, IBM Plex Sans for body), refined color system (indigo accent + surface gray scale), dark sidebar theme, underline-style tab navigation, scientific dot-grid content background, gradient agent badges in message stream, modal scale-in animations, card fade-in-up entrance animations, enhanced scrollbars, pill-shaped status badges, and `prefers-reduced-motion` accessibility support.
 
 ### v0.17.3 (2026-03-26)
 

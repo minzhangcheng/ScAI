@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.17.3
+**Version**: 0.17.4
 **Last Updated**: 2026-03-26
 
 ## Project Overview
@@ -1425,6 +1425,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 0.17.4 | 2026-03-26 | Frontend "Scientific Elegance" redesign: Source Serif 4 + IBM Plex Sans typography; indigo accent + surface color system; dark sidebar; underline tabs; dot-grid background; gradient agent badges; scale-in/fade-in-up animations; enhanced scrollbars; pill status badges; prefers-reduced-motion support. Zero new dependencies |
 | 0.17.3 | 2026-03-26 | Technique Agent: lightweight API doc lookup via sandbox introspection + LLM summarization; Bioinformatics `lookup_documentation` tool; Supervisor auto-triggers doc lookup on consecutive same-type API errors; hardcoded decoupler/gseapy API rules replaced with dynamic lookup; `error_parsing.py` utility extracted |
 | 0.17.2 | 2026-03-26 | Docker detached mode (`-d --name scai`), container logs appended to `/data/logs/scai.log` via `tee -a` in entrypoint |
 | 0.17.1 | 2026-03-26 | Per-agent LLM server config (agent_server_configs in state, new API endpoints, PromptsPanel UI); Painter dual-path image generation (chat completions + Images API fallback); Google AI Key moved to Literature agent settings; ConfigPanel label "Default LLM Server" |
@@ -1482,6 +1483,25 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 | 0.1.x | 2026-01 | Initial functional version |
 
 ### Detailed Changelog
+
+#### v0.17.4 (2026-03-26)
+
+- **Frontend visual redesign — "Scientific Elegance"** (`index.html`, `tailwind.config.js`, `globals.css`, `App.tsx`, `Sidebar.tsx`, `MessageStream.tsx`, all dialog and panel components): Complete UI beautification with zero new npm dependencies. All changes are CSS/Tailwind-only.
+  - **Typography**: Google Fonts updated from Inter to Source Serif 4 (display/headings, serif) + IBM Plex Sans (body, technical sans-serif) + JetBrains Mono (code, unchanged). Tailwind `fontFamily` extended with `display`, `sans`, `mono`. New `font-display` class applied to all panel headings, modal titles, app branding, and session names for academic journal aesthetic.
+  - **Color system**: New `surface` color scale (blue-gray, 50–950) for backgrounds/text/borders replaces raw `slate-*` in chrome areas. New `accent` color scale (indigo #6366f1, 50–900) replaces `violet-*` as primary accent throughout all components. Agent identity colors (pi=violet, pathology=red, bioinformatics=green, biochemistry=amber, literature=blue) preserved unchanged. Agent CSS variables extended with `--light` variants for gradient effects.
+  - **Dark sidebar** (`Sidebar.tsx`): Background changed from `bg-white` to `bg-surface-900`. All text/borders/inputs/buttons adapted to dark palette. Logo gets `shadow-glow-accent`. "New Analysis" button gets gradient + hover lift micro-interaction (`hover:-translate-y-0.5`). Session card uses `bg-accent-900/30` with `border-accent-700/40`. Custom `.dark-scrollbar` class applied.
+  - **Header & tabs** (`App.tsx`): Header height reduced to `h-14` with enhanced `backdrop-blur-md` and subtle box-shadow. Tabs redesigned from pill-style (`bg-slate-100 rounded-lg p-1`) to underline-style with animated bottom indicator (`animate-tab-indicator`). Footer text set to `uppercase tracking-wider` at 10px.
+  - **Loading screen** (`App.tsx`): Dark background (`bg-surface-900`) with DNA icon, accent gradient badge, and `shadow-glow-accent`.
+  - **Content area** (`App.tsx`): `.bg-science-grid` CSS class adds subtle dot-grid pattern (`radial-gradient`, 24px spacing, indigo at 5% opacity) evoking graph paper / microscopy grid.
+  - **Message stream** (`MessageStream.tsx`): New `agentGradients` record maps each agent to gradient classes. Agent headers now show gradient-background icon badges with white icons. Message cards get `animate-fade-in-up` entrance animation and `shadow-card`. Stream header uses `backdrop-blur-sm` with accent-colored message count badge. Background changed to `bg-surface-50`.
+  - **Animations** (`tailwind.config.js`, `globals.css`): New keyframes — `fade-in-up` (0.4s cubic-bezier for cards), `scale-in` (0.25s for modals), `shimmer` (loading glow), `glow-pulse` (active agent indicator), `tab-indicator` (tab underline). Stagger utilities (`.stagger-1` to `.stagger-5`). `@media (prefers-reduced-motion: reduce)` disables all animations.
+  - **Shadows** (`tailwind.config.js`): Five new tokens — `subtle`, `card`, `elevated`, `modal`, `glow-accent`. Applied to message cards (`shadow-card`), all modals (`shadow-modal`), logo (`shadow-glow-accent`).
+  - **Modals** (all dialog components): `animate-scale-in` added to all 6 dialog containers. `shadow-modal` replaces `shadow-2xl`/`shadow-xl`. Gradient headers unified to `accent-*` palette.
+  - **Scrollbars** (`globals.css`): Reduced to 6px width, transparent track, rounded thumb. `.dark-scrollbar` variant for dark backgrounds.
+  - **Status badges** (`globals.css`): Redesigned from flat backgrounds to pill-shaped with fine borders (`rounded-full`, `border`, `inline-block`).
+  - **Glass effects** (`globals.css`): `.glass` enhanced with `saturate(1.5)` and translucent border. New `.glass-dark` variant.
+  - **Input styling** (`globals.css`): New `.input-science` component class with unified focus ring, border transitions.
+  - **Resizable divider** (`App.tsx`): Width increased to 3px, accent color on hover.
 
 #### v0.17.3 (2026-03-26)
 

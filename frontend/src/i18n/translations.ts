@@ -120,6 +120,8 @@ export const translations = {
     painterAgentDesc: '图形摘要绘制',
     supervisorAgent: '监督 Agent',
     supervisorAgentDesc: '实时分析监控与质量控制',
+    techniqueAgent: '技术 Agent',
+    techniqueAgentDesc: 'API文档查询与错误摘要',
 
     // Publication figures and reports
     figureGallery: '图片库',
@@ -226,6 +228,7 @@ export const translations = {
     visionHint_biochemistry: '若上传了生化结果图片，需要启用以识别图片内容',
     visionHint_painter: '启用后 Painter 修订模式图时可看到当前图片并进行针对性修改',
     visionHint_supervisor: '启用后 Supervisor 可实时检查生成图片的质量',
+    visionHint_technique: '技术 Agent 通常不需要视觉能力',
     reset: '重置',
     save: '保存',
     promptTips: '提示词编写建议',
@@ -502,6 +505,8 @@ Please provide a detailed literature review report with specific citation inform
     painterAgentDesc: 'Graphic abstract generation',
     supervisorAgent: 'Supervisor Agent',
     supervisorAgentDesc: 'Real-time analysis monitoring and quality control',
+    techniqueAgent: 'Technique Agent',
+    techniqueAgentDesc: 'API documentation lookup & error summarization',
 
     // Publication figures and reports
     figureGallery: 'Figure Gallery',
@@ -608,6 +613,7 @@ Please provide a detailed literature review report with specific citation inform
     visionHint_biochemistry: 'Enable if biochemistry result images are uploaded for recognition',
     visionHint_painter: 'When enabled, Painter can see the current graphic abstract during revision for targeted improvements',
     visionHint_supervisor: 'When enabled, Supervisor can visually inspect generated figures in real-time',
+    visionHint_technique: 'Technique Agent typically does not require vision capabilities',
     reset: 'Reset',
     save: 'Save',
     promptTips: 'Prompt Writing Tips',
@@ -968,5 +974,23 @@ Style guidelines:
 
 Note: This agent uses Google Gemini's image generation API.`,
 
-  supervisor: `You are a bioinformatics analysis supervisor. Your role is to monitor analysis steps for technical correctness and identify important biological decision points. You use a cheap vision-capable LLM to evaluate every step in real-time.`
+  supervisor: `You are a bioinformatics analysis supervisor. Your role is to monitor analysis steps for technical correctness and identify important biological decision points. You use a cheap vision-capable LLM to evaluate every step in real-time.`,
+
+  technique: `You are a technical documentation assistant. Given raw Python docstring output, produce a concise API reference.
+
+FORMAT (strict, no extra text):
+**Signature:** \`function_path(param1, param2, ...)\`
+**Key Parameters:**
+- \`param1\` (type): description
+- \`param2\` (type): description
+(only list the 5-8 most important parameters)
+**Returns:** description
+**Example:**
+\`\`\`python
+one short usage example
+\`\`\`
+
+If the input includes a list of available attributes (from dir()), highlight the 3-5 most relevant ones to the user's error.
+
+Keep total output under 25 lines.`
 }

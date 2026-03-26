@@ -440,7 +440,7 @@ export function ReportPanel() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <FileText className="w-6 h-6 text-indigo-600" />
-            <h2 className="text-xl font-semibold text-slate-900">
+            <h2 className="font-display text-xl font-semibold text-slate-900">
               {language === 'zh' ? '详细研究报告' : 'Detailed Research Report'}
             </h2>
           </div>
@@ -477,7 +477,7 @@ export function ReportPanel() {
                 {preview?.has_html && (
                   <button
                     onClick={openHtmlInNewTab}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-violet-50 text-violet-700 rounded-lg hover:bg-violet-100"
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-accent-50 text-accent-700 rounded-lg hover:bg-accent-100"
                   >
                     <ExternalLink className="w-4 h-4" />
                     {language === 'zh' ? '新窗口打开' : 'Open in Tab'}
@@ -619,7 +619,7 @@ export function ReportPanel() {
           <div className="flex-1 overflow-auto min-h-0 p-4">
             <div className="max-w-4xl mx-auto space-y-6">
               {/* Title */}
-              <div className="bg-gradient-to-r from-indigo-50 to-violet-50 rounded-2xl p-6 border border-indigo-100">
+              <div className="bg-gradient-to-r from-accent-500 to-accent-600 rounded-2xl p-6 border border-accent-100">
                 <h1 className="text-2xl font-bold text-slate-900 mb-2">{report.title}</h1>
                 <p className="text-sm text-slate-500">
                   {language === 'zh' ? '生成时间：' : 'Generated: '}
@@ -630,7 +630,7 @@ export function ReportPanel() {
               {/* Graphic Abstract */}
               {report.graphic_abstract_path && (
                 <div className="bg-gradient-to-r from-pink-50 to-fuchsia-50 rounded-xl p-6 border border-pink-100 shadow-sm text-center">
-                  <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center justify-center gap-2">
+                  <h2 className="font-display text-lg font-semibold text-slate-900 mb-4 flex items-center justify-center gap-2">
                     <span className="w-1 h-6 bg-pink-500 rounded-full" />
                     {language === 'zh' ? '图形摘要' : 'Graphic Abstract'}
                   </h2>
@@ -645,7 +645,7 @@ export function ReportPanel() {
               {/* Abstract */}
               {report.abstract && (
                 <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm">
-                  <h2 className="text-lg font-semibold text-slate-900 mb-3 flex items-center gap-2">
+                  <h2 className="font-display text-lg font-semibold text-slate-900 mb-3 flex items-center gap-2">
                     <span className="w-1 h-6 bg-indigo-500 rounded-full" />
                     {language === 'zh' ? '摘要' : 'Abstract'}
                   </h2>
@@ -663,7 +663,7 @@ export function ReportPanel() {
                     onClick={() => toggleSection(section.id)}
                     className="w-full px-6 py-4 flex items-center justify-between hover:bg-slate-50 transition-colors"
                   >
-                    <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                    <h2 className="font-display text-lg font-semibold text-slate-900 flex items-center gap-2">
                       <span className={`w-1 h-6 rounded-full ${section.analysis_type === 'general' ? 'bg-blue-500' : 'bg-amber-500'}`} />
                       {section.title}
                       <span className={`text-xs px-2 py-0.5 rounded-full ${
@@ -789,8 +789,8 @@ export function ReportPanel() {
 
               {/* Conclusions */}
               {report.conclusions && (
-                <div className="bg-gradient-to-r from-violet-50 to-indigo-50 rounded-xl p-6 border border-violet-100">
-                  <h2 className="text-lg font-semibold text-slate-900 mb-3 flex items-center gap-2">
+                <div className="bg-gradient-to-r from-accent-500 to-accent-600 rounded-xl p-6 border border-accent-100">
+                  <h2 className="font-display text-lg font-semibold text-slate-900 mb-3 flex items-center gap-2">
                     <CheckCircle className="w-5 h-5 text-green-500" />
                     {language === 'zh' ? '结论' : 'Conclusions'}
                   </h2>
@@ -803,7 +803,7 @@ export function ReportPanel() {
               {/* Appendix: Analysis Settings & Records */}
               {report.appendix && (
                 <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm space-y-4">
-                  <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                  <h2 className="font-display text-lg font-semibold text-slate-900 flex items-center gap-2">
                     <Settings className="w-5 h-5 text-slate-500" />
                     {language === 'zh' ? '附录：分析设置与记录' : 'Appendix: Analysis Settings & Records'}
                   </h2>

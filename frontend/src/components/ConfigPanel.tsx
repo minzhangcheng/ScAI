@@ -43,17 +43,17 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden animate-slide-in">
+      <div className="bg-white rounded-2xl shadow-modal w-full max-w-lg mx-4 overflow-hidden animate-scale-in">
         {/* Header */}
-        <div className="bg-gradient-to-r from-violet-600 to-indigo-600 px-6 py-5 text-white">
+        <div className="bg-gradient-to-r from-accent-600 to-accent-700 px-6 py-5 text-white">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-white/20 rounded-lg">
                 <Key className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="font-semibold text-lg">{t('apiConfig')}</h2>
-                <p className="text-violet-200 text-sm">{t('apiConfigDesc')}</p>
+                <h2 className="font-display font-semibold text-lg">{t('apiConfig')}</h2>
+                <p className="text-accent-200 text-sm">{t('apiConfigDesc')}</p>
               </div>
             </div>
             <button
@@ -80,7 +80,7 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
               value={apiConfig.llmBaseUrl}
               onChange={(e) => handleConfigChange({ llmBaseUrl: e.target.value })}
               placeholder="https://openrouter.ai/api/v1"
-              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all font-mono text-sm"
+              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all font-mono text-sm"
             />
             <p className="text-xs text-slate-500 mt-1.5">
               {language === 'zh'
@@ -105,7 +105,7 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
                 value={apiConfig.apiKey}
                 onChange={(e) => handleConfigChange({ apiKey: e.target.value })}
                 placeholder="sk-or-v1-..."
-                className="w-full px-4 py-3 pr-12 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
+                className="w-full px-4 py-3 pr-12 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all"
               />
               <button
                 type="button"
@@ -118,7 +118,7 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
             </div>
             <p className="text-xs text-slate-500 mt-1.5">
               {language === 'zh' ? '用于 LLM 服务的 API 密钥' : 'API key for LLM service'} ·
-              <a href="https://openrouter.ai/keys" target="_blank" className="text-violet-600 hover:underline">
+              <a href="https://openrouter.ai/keys" target="_blank" className="text-accent-600 hover:underline">
                 {t('getKey')}
               </a>
             </p>
@@ -134,7 +134,7 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
               value={pubmedEmail}
               onChange={(e) => setPubmedEmail(e.target.value)}
               placeholder="your@email.com"
-              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all text-sm"
+              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all text-sm"
             />
             <p className="text-xs text-slate-500 mt-1.5">
               {t('literaturePubmedEmailNote')}
@@ -156,7 +156,7 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
               value={apiConfig.proxyUrl || ''}
               onChange={(e) => handleConfigChange({ proxyUrl: e.target.value })}
               placeholder="http://proxy.example.com:8080"
-              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all"
+              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all"
             />
             <p className="text-xs text-slate-500 mt-1.5">
               {language === 'zh'
@@ -193,7 +193,7 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
             <button
               onClick={handleSave}
               disabled={loading}
-              className="px-5 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
+              className="px-5 py-2.5 bg-accent-600 hover:bg-accent-700 text-white rounded-xl font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
             >
               {loading ? (
                 <Loader2 className="w-4 h-4 animate-spin" />

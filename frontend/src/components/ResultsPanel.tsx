@@ -159,7 +159,7 @@ export function ResultsPanel() {
         <div className="p-6 bg-slate-100 rounded-full mb-6">
           <FileText className="w-12 h-12 text-slate-400" />
         </div>
-        <h2 className="text-xl font-semibold text-slate-900 mb-2">
+        <h2 className="font-display text-xl font-semibold text-slate-900 mb-2">
           {t('analysisResults')}
         </h2>
         <p className="text-slate-500 max-w-md">
@@ -175,7 +175,7 @@ export function ResultsPanel() {
         <div className="p-6 bg-slate-100 rounded-full mb-6">
           <FileText className="w-12 h-12 text-slate-400" />
         </div>
-        <h2 className="text-xl font-semibold text-slate-900 mb-2">
+        <h2 className="font-display text-xl font-semibold text-slate-900 mb-2">
           {t('waitingResults')}
         </h2>
         <p className="text-slate-500 max-w-md">
@@ -190,7 +190,7 @@ export function ResultsPanel() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-semibold text-slate-900">{t('analysisResults')}</h2>
+          <h2 className="font-display text-xl font-semibold text-slate-900">{t('analysisResults')}</h2>
           <p className="text-sm text-slate-500 mt-1">
             {t('completedRounds', { n: currentSession.roundResults?.length || 0 })}
           </p>
@@ -212,7 +212,7 @@ export function ResultsPanel() {
           {currentSession.finalSummary && (
             <button
               onClick={downloadReport}
-              className="flex items-center gap-2 px-4 py-2 bg-violet-600 text-white rounded-xl font-medium hover:bg-violet-700 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-accent-600 text-white rounded-xl font-medium hover:bg-accent-700 transition-colors"
             >
               <Download className="w-4 h-4" />
               {t('downloadReport')}

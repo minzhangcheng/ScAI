@@ -8,10 +8,10 @@ as a fallback.
 import asyncio
 import re
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, AsyncGenerator
 
 from .base import BaseAgent, AgentConfig
-from ..models.schemas import AgentType
+from ..models.schemas import AgentType, AnalysisState
 from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type
 from ..utils.llm_client import OpenAICompatibleClient
 
@@ -58,6 +58,24 @@ class TechniqueAgent(BaseAgent):
             system_prompt=system_prompt or _SUMMARIZE_PROMPT,
             config=AgentConfig(temperature=temperature),
         )
+
+    async def process(
+        self,
+        state: AnalysisState,
+        instruction: str,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Abstract method implementation. TechniqueAgent is not called via process() —
+        it uses lookup_docs() and lookup_from_error() directly.
+        This stub satisfies the BaseAgent ABC contract.
+        """
+        return {
+            "agent": self.agent_type.value,
+            "status": "skipped",
+            "message": "TechniqueAgent does not use the standard process() workflow. "
+                       "Use lookup_docs() or lookup_from_error() instead.",
+        }
 
     @staticmethod
     def _build_inspect_code(function_path: str) -> str:

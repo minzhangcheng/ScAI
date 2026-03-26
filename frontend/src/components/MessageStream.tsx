@@ -88,6 +88,7 @@ const agentIcons: Record<AgentType, typeof Users> = {
   literature: BookOpen,
   painter: Palette,
   supervisor: Eye,
+  technique: Wrench,
 }
 
 const agentBgColors: Record<AgentType, string> = {
@@ -98,6 +99,18 @@ const agentBgColors: Record<AgentType, string> = {
   literature: 'bg-blue-50 border-blue-200',
   painter: 'bg-pink-50 border-pink-200',
   supervisor: 'bg-cyan-50 border-cyan-200',
+  technique: 'bg-teal-50 border-teal-200',
+}
+
+const agentGradients: Record<AgentType, string> = {
+  pi: 'from-violet-500 to-violet-600',
+  pathology: 'from-rose-500 to-rose-600',
+  bioinformatics: 'from-emerald-500 to-emerald-600',
+  biochemistry: 'from-amber-500 to-amber-600',
+  literature: 'from-blue-500 to-blue-600',
+  painter: 'from-pink-500 to-pink-600',
+  supervisor: 'from-cyan-500 to-cyan-600',
+  technique: 'from-teal-500 to-teal-600',
 }
 
 const MessageItem = memo(function MessageItem({ message, language }: { message: Message; language: 'zh' | 'en' }) {
@@ -111,6 +124,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
     literature: language === 'zh' ? '文献 Agent' : 'Literature Agent',
     painter: language === 'zh' ? 'Painter Agent' : 'Painter Agent',
     supervisor: language === 'zh' ? '监督 Agent' : 'Supervisor Agent',
+    technique: language === 'zh' ? '技术 Agent' : 'Technique Agent',
   }
 
   const agent = message.agent
@@ -701,45 +715,49 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
   // 根据消息类型决定边框颜色
   const getBorderClass = () => {
     if (message.type === 'error') return 'border-red-200'
-    if (message.type === 'prompt') return 'border-slate-300'
+    if (message.type === 'prompt') return 'border-surface-300'
     if (message.type === 'response') return 'border-green-200'
     if (message.type === 'tool_call') return 'border-orange-200'
     if (message.type === 'code') return 'border-emerald-200'
     if (message.type === 'completed') return 'border-green-300'
-    return 'border-slate-200'
+    return 'border-surface-200'
   }
 
   return (
-    <div className={`rounded-lg border bg-white shadow-sm overflow-hidden ${getBorderClass()}`}>
+    <div className={`rounded-lg border bg-white shadow-card overflow-hidden animate-fade-in-up ${getBorderClass()}`}>
       {/* Agent Header */}
       {showAgentHeader && (
         <div className={`px-3 py-2 border-b flex items-center justify-between ${
-          message.type === 'prompt' ? 'bg-slate-100 border-slate-200' :
+          message.type === 'prompt' ? 'bg-surface-50 border-surface-200' :
           message.type === 'response' ? 'bg-green-50 border-green-100' :
           message.type === 'tool_call' ? 'bg-orange-50 border-orange-100' :
           message.type === 'code' ? 'bg-emerald-50 border-emerald-100' :
           message.type === 'completed' ? 'bg-green-50 border-green-100' :
-          agent ? 'bg-slate-50 border-slate-100' : 'bg-slate-50 border-slate-100'
+          agent ? 'bg-surface-50 border-surface-100' : 'bg-surface-50 border-surface-100'
         }`}>
-          <div className="flex items-center gap-2">
-            {Icon && (
+          <div className="flex items-center gap-2.5">
+            {agent && agentGradients[agent] ? (
+              <div className={`p-1.5 rounded-lg bg-gradient-to-br ${agentGradients[agent]}`}>
+                <Icon className="w-3.5 h-3.5 text-white" />
+              </div>
+            ) : (
               <div className={`p-1 rounded ${
-                message.type === 'prompt' ? 'bg-slate-200' :
+                message.type === 'prompt' ? 'bg-surface-200' :
                 message.type === 'response' ? 'bg-green-100' :
                 message.type === 'tool_call' ? 'bg-orange-100' :
                 message.type === 'code' ? 'bg-emerald-100' :
-                'bg-slate-200'
+                'bg-surface-200'
               }`}>
                 <Icon className={`w-3.5 h-3.5 ${
-                  message.type === 'prompt' ? 'text-slate-600' :
+                  message.type === 'prompt' ? 'text-surface-600' :
                   message.type === 'response' ? 'text-green-600' :
                   message.type === 'tool_call' ? 'text-orange-600' :
                   message.type === 'code' ? 'text-emerald-600' :
-                  'text-slate-600'
+                  'text-surface-600'
                 }`} />
               </div>
             )}
-            <span className="text-sm font-medium text-slate-700">
+            <span className="text-xs font-semibold tracking-wide uppercase text-surface-500">
               {name}
             </span>
             {message.type === 'prompt' && (
@@ -758,7 +776,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               </span>
             )}
           </div>
-          <span className="text-xs text-slate-400">
+          <span className="text-[10px] text-surface-400">
             {new Date(message.timestamp).toLocaleTimeString()}
           </span>
         </div>
@@ -833,10 +851,10 @@ export function MessageStream() {
   if (messages.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center p-4 text-center">
-        <div className="text-slate-400">
+        <div className="text-surface-400">
           <MessageSquare className="w-10 h-10 mx-auto mb-3 opacity-30" />
           <p className="text-sm font-medium">{language === 'zh' ? '等待分析开始' : 'Waiting for Analysis'}</p>
-          <p className="text-xs mt-1 text-slate-400">
+          <p className="text-xs mt-1 text-surface-400">
             {language === 'zh' ? '消息将在这里实时显示' : 'Messages will appear here in real-time'}
           </p>
         </div>
@@ -852,18 +870,19 @@ export function MessageStream() {
     literature: language === 'zh' ? '文献 Agent' : 'Literature',
     painter: 'Painter',
     supervisor: language === 'zh' ? '监督 Agent' : 'Supervisor',
+    technique: language === 'zh' ? '技术 Agent' : 'Technique',
   }
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="px-4 py-2 border-b border-slate-200 bg-white flex items-center justify-between">
+      <div className="px-4 py-2.5 border-b border-surface-200/60 bg-white/90 backdrop-blur-sm flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <MessageSquare className="w-4 h-4 text-slate-500" />
-          <span className="text-sm font-medium text-slate-700">
+          <MessageSquare className="w-4 h-4 text-surface-400" />
+          <span className="text-sm font-medium text-surface-700">
             {language === 'zh' ? '实时消息' : 'Real-time Messages'}
           </span>
-          <span className="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">
+          <span className="text-xs bg-accent-50 text-accent-600 px-1.5 py-0.5 rounded-full font-medium">
             {filteredMessages.length}
           </span>
         </div>
@@ -872,7 +891,7 @@ export function MessageStream() {
           <select
             value={agentFilter}
             onChange={(e) => setAgentFilter(e.target.value as AgentType | 'all')}
-            className="text-xs border border-slate-200 rounded px-2 py-1 bg-white text-slate-600 focus:outline-none focus:ring-1 focus:ring-blue-400"
+            className="text-xs border border-surface-200 rounded-lg px-2 py-1 bg-white text-surface-600 focus:outline-none focus:ring-2 focus:ring-accent-500/20 focus:border-accent-400"
           >
             <option value="all">{language === 'zh' ? '全部 Agent' : 'All Agents'}</option>
             {availableAgents.map(agent => (
@@ -899,14 +918,14 @@ export function MessageStream() {
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-100"
+        className="flex-1 overflow-y-auto p-3 space-y-2 bg-surface-50"
       >
         {/* Collapsed older messages */}
         {collapsedMessages.length > 0 && (
           <div className="mb-2">
             <button
               onClick={() => setShowCollapsed(!showCollapsed)}
-              className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-slate-200 hover:bg-slate-300 rounded-lg text-sm text-slate-600 transition-colors"
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-surface-200 hover:bg-surface-300 rounded-lg text-sm text-surface-600 transition-colors"
             >
               {showCollapsed ? (
                 <>

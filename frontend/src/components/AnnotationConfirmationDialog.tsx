@@ -167,12 +167,12 @@ export function AnnotationConfirmationDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-xl max-w-[90vw] w-[1000px] mx-4 max-h-[85vh] flex flex-col">
+      <div className="bg-white rounded-2xl shadow-modal max-w-[90vw] w-[1000px] mx-4 max-h-[85vh] flex flex-col animate-scale-in">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
           <div className="flex items-center gap-4">
             <div>
-              <h2 className="text-lg font-semibold text-slate-800">
+              <h2 className="text-lg font-display font-semibold text-slate-800">
                 {language === 'zh' ? '细胞注释确认' : 'Cell Annotation Confirmation'}
               </h2>
               <p className="text-sm text-slate-500 mt-1">
@@ -185,7 +185,7 @@ export function AnnotationConfirmationDialog({
                 href={reportHtmlUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-2 px-4 py-2 bg-violet-50 text-violet-700 hover:bg-violet-100 rounded-lg text-sm font-medium transition-colors border border-violet-200"
+                className="flex items-center gap-2 px-4 py-2 bg-accent-50 text-accent-700 hover:bg-accent-100 rounded-lg text-sm font-medium transition-colors border border-accent-200"
               >
                 <FileDown className="w-4 h-4" />
                 {language === 'zh' ? '查看分析报告' : 'View Analysis Report'}
@@ -282,7 +282,7 @@ export function AnnotationConfirmationDialog({
                     ) : (
                       <div>
                         <div className="flex items-center gap-2">
-                          <span className={ann.user_override ? 'font-medium text-violet-700' : 'text-slate-800'}>
+                          <span className={ann.user_override ? 'font-medium text-accent-700' : 'text-slate-800'}>
                             {ann.user_override || ann.cell_type}
                           </span>
                           {ann.user_override && (
@@ -368,7 +368,7 @@ export function AnnotationConfirmationDialog({
                 className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all ${
                   submitting || (hasLowConfidence && !allLowConfidenceConfirmed)
                     ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                    : 'bg-violet-600 text-white hover:bg-violet-700 shadow-md'
+                    : 'bg-accent-600 text-white hover:bg-accent-700 shadow-md'
                 }`}
               >
                 {submitting

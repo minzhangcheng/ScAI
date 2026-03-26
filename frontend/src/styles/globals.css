@@ -4,14 +4,19 @@
 
 :root {
   --color-pi: #7c3aed;
+  --color-pi-light: #a78bfa;
   --color-pathology: #dc2626;
+  --color-pathology-light: #f87171;
   --color-bioinformatics: #059669;
+  --color-bioinformatics-light: #34d399;
   --color-biochemistry: #d97706;
+  --color-biochemistry-light: #fbbf24;
   --color-literature: #2563eb;
+  --color-literature-light: #60a5fa;
 }
 
 body {
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -22,22 +27,29 @@ html, body {
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f5f9;
-  border-radius: 4px;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 4px;
+  background: rgba(100, 116, 139, 0.25);
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: rgba(100, 116, 139, 0.45);
+}
+
+/* Dark sidebar scrollbar */
+.dark-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+}
+.dark-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
 }
 
 /* Code blocks */
@@ -46,29 +58,60 @@ pre {
 }
 
 /* Agent colors */
-.agent-pi { 
+.agent-pi {
   --agent-color: var(--color-pi);
   border-left-color: var(--color-pi);
 }
 
-.agent-pathology { 
+.agent-pathology {
   --agent-color: var(--color-pathology);
   border-left-color: var(--color-pathology);
 }
 
-.agent-bioinformatics { 
+.agent-bioinformatics {
   --agent-color: var(--color-bioinformatics);
   border-left-color: var(--color-bioinformatics);
 }
 
-.agent-biochemistry { 
+.agent-biochemistry {
   --agent-color: var(--color-biochemistry);
   border-left-color: var(--color-biochemistry);
 }
 
-.agent-literature { 
+.agent-literature {
   --agent-color: var(--color-literature);
   border-left-color: var(--color-literature);
+}
+
+/* Agent gradient left borders */
+.agent-pi::before,
+.agent-pathology::before,
+.agent-bioinformatics::before,
+.agent-biochemistry::before,
+.agent-literature::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 3px;
+}
+
+.agent-pi::before {
+  background: linear-gradient(to bottom, var(--color-pi), var(--color-pi-light));
+}
+.agent-pathology::before {
+  background: linear-gradient(to bottom, var(--color-pathology), var(--color-pathology-light));
+}
+.agent-bioinformatics::before {
+  background: linear-gradient(to bottom, var(--color-bioinformatics), var(--color-bioinformatics-light));
+}
+.agent-biochemistry::before {
+  background: linear-gradient(to bottom, var(--color-biochemistry), var(--color-biochemistry-light));
+}
+.agent-literature::before {
+  background: linear-gradient(to bottom, var(--color-literature), var(--color-literature-light));
 }
 
 /* Animations */
@@ -96,16 +139,66 @@ pre {
   animation: slide-in 0.3s ease-out;
 }
 
+/* Tab underline indicator */
+@keyframes tab-indicator {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+.animate-tab-indicator {
+  animation: tab-indicator 0.2s ease-out;
+}
+
+/* Stagger utilities */
+.stagger-1 { animation-delay: 50ms; animation-fill-mode: both; }
+.stagger-2 { animation-delay: 100ms; animation-fill-mode: both; }
+.stagger-3 { animation-delay: 150ms; animation-fill-mode: both; }
+.stagger-4 { animation-delay: 200ms; animation-fill-mode: both; }
+.stagger-5 { animation-delay: 250ms; animation-fill-mode: both; }
+
+/* Scientific grid background */
+.bg-science-grid {
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(99, 102, 241, 0.05) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
 /* Glass effect */
 .glass {
-  background: rgba(255, 255, 255, 0.8);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(16px) saturate(1.5);
+  -webkit-backdrop-filter: blur(16px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.glass-dark {
+  background: rgba(15, 23, 42, 0.8);
+  backdrop-filter: blur(16px) saturate(1.5);
+  -webkit-backdrop-filter: blur(16px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 /* Status badges */
-.status-pending { @apply bg-gray-100 text-gray-700; }
-.status-running { @apply bg-blue-100 text-blue-700; }
-.status-completed { @apply bg-green-100 text-green-700; }
-.status-failed { @apply bg-red-100 text-red-700; }
-.status-paused { @apply bg-yellow-100 text-yellow-700; }
+.status-pending { @apply bg-gray-100 text-gray-600 border border-gray-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-running { @apply bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-completed { @apply bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-failed { @apply bg-red-50 text-red-700 border border-red-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-paused { @apply bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+
+/* Input science style */
+@layer components {
+  .input-science {
+    @apply w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg
+           transition-all duration-200
+           focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400
+           placeholder:text-slate-400;
+  }
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

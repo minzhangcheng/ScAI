@@ -20,6 +20,7 @@ import {
   ChevronUp,
   Palette,
   Eye,
+  Wrench,
   Pause,
   Square
 } from 'lucide-react'
@@ -90,6 +91,7 @@ export function AnalysisPanel() {
     { id: 'literature', name: t('literatureAgent'), icon: BookOpen, color: 'blue' },
     { id: 'painter', name: t('painterAgent'), icon: Palette, color: 'pink' },
     { id: 'supervisor', name: t('supervisorAgent'), icon: Eye, color: 'cyan' },
+    { id: 'technique', name: t('techniqueAgent'), icon: Wrench, color: 'teal' },
   ]
 
   // Memoize unresolved errors to avoid recalculation
@@ -537,7 +539,7 @@ export function AnalysisPanel() {
         <div className="p-6 bg-slate-100 rounded-full mb-6">
           <Users className="w-12 h-12 text-slate-400" />
         </div>
-        <h2 className="text-xl font-semibold text-slate-900 mb-2">
+        <h2 className="font-display text-xl font-semibold text-slate-900 mb-2">
           {t('startNewAnalysis')}
         </h2>
         <p className="text-slate-500 max-w-md">
@@ -557,7 +559,7 @@ export function AnalysisPanel() {
       {validating && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
           <div className="bg-white rounded-xl shadow-lg p-6 flex items-center gap-3">
-            <Loader2 className="w-5 h-5 animate-spin text-violet-600" />
+            <Loader2 className="w-5 h-5 animate-spin text-accent-600" />
             <span className="text-slate-700 font-medium">
               {t('validatingApiKey')}
             </span>
@@ -596,7 +598,7 @@ export function AnalysisPanel() {
               </button>
               <button
                 onClick={handleReconfigureFromValidation}
-                className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg font-medium transition-colors text-sm"
+                className="px-4 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-lg font-medium transition-colors text-sm"
               >
                 {t('reconfigureApiKey')}
               </button>
@@ -608,7 +610,7 @@ export function AnalysisPanel() {
       {/* Header - Compact */}
       <div className="flex items-center justify-between pb-4 border-b border-slate-200">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900">{t('analysisControl')}</h2>
+          <h2 className="font-display text-lg font-semibold text-slate-900">{t('analysisControl')}</h2>
           <p className="text-sm text-slate-500 truncate max-w-md">
             {currentSession.instruction}
           </p>
@@ -658,7 +660,7 @@ export function AnalysisPanel() {
             <div className="flex items-center gap-2">
               <div className={`flex items-center gap-2 px-4 py-2 rounded-xl ${
                 currentSession.status === 'waiting_annotation'
-                  ? 'bg-violet-100 text-violet-700'
+                  ? 'bg-accent-100 text-accent-700'
                   : 'bg-amber-100 text-amber-700'
               }`}>
                 <AlertCircle className="w-4 h-4" />
@@ -937,12 +939,12 @@ export function AnalysisPanel() {
 
         {/* Brief Analysis Result */}
         {currentSession.finalSummary && (
-          <div className="bg-gradient-to-br from-violet-50 to-indigo-50 border border-violet-200 rounded-2xl p-6">
+          <div className="bg-gradient-to-br from-accent-500 to-accent-600 border border-accent-200 rounded-2xl p-6">
             <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-violet-100 rounded-lg">
-                <CheckCircle2 className="w-5 h-5 text-violet-600" />
+              <div className="p-2 bg-accent-100 rounded-lg">
+                <CheckCircle2 className="w-5 h-5 text-accent-600" />
               </div>
-              <h3 className="font-semibold text-violet-900">{t('finalReport')}</h3>
+              <h3 className="font-display font-semibold text-accent-900">{t('finalReport')}</h3>
             </div>
             <div className="prose prose-slate prose-sm max-w-none">
               <ReactMarkdown>{currentSession.finalSummary}</ReactMarkdown>

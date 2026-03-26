@@ -24,10 +24,10 @@ export function AboutDialog() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
           onClick={(e) => { if (e.target === e.currentTarget) setOpen(false) }}
         >
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-modal w-full max-w-md mx-4 max-h-[85vh] flex flex-col overflow-hidden animate-scale-in">
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-gradient-to-r from-violet-50 to-indigo-50">
-              <h2 className="text-lg font-semibold text-slate-900">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-gradient-to-r from-accent-50 to-accent-100">
+              <h2 className="text-lg font-display font-semibold text-slate-900">
                 {zh ? '关于' : 'About'}
               </h2>
               <button
@@ -42,14 +42,14 @@ export function AboutDialog() {
             <div className="px-6 py-4 space-y-4 overflow-y-auto">
               {/* Title */}
               <div className="text-center">
-                <h3 className="text-2xl font-bold text-violet-700">ScAI</h3>
+                <h3 className="text-2xl font-display font-bold text-accent-700">ScAI</h3>
                 <p className="text-sm text-slate-500 mt-1">
                   {zh
                     ? '单细胞测序AI分析'
                     : 'Single Cell Sequencing Analysis Driven by AI'}
                 </p>
-                <div className="mt-2 inline-block px-3 py-1 bg-violet-100 text-violet-700 text-xs font-medium rounded-full">
-                  v0.17.3
+                <div className="mt-2 inline-block px-3 py-1 bg-accent-100 text-accent-700 text-xs font-medium rounded-full">
+                  v0.17.4
                 </div>
               </div>
 
@@ -64,7 +64,7 @@ export function AboutDialog() {
                     : 'For questions or suggestions, please contact Minzhang Cheng (MOE Organoid Resource Center, The First Affiliated Hospital, Nanchang University). Email: '}
                   <a
                     href="mailto:mzcheng@ncu.edu.cn"
-                    className="text-violet-600 hover:text-violet-700 hover:underline"
+                    className="text-accent-600 hover:text-accent-700 hover:underline"
                   >
                     mzcheng@ncu.edu.cn
                   </a>
@@ -82,7 +82,7 @@ export function AboutDialog() {
                     href="https://github.com/minzhangcheng/scai"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-sm text-violet-600 hover:text-violet-700 hover:underline"
+                    className="text-sm text-accent-600 hover:text-accent-700 hover:underline"
                   >
                     github.com/minzhangcheng/scai
                   </a>

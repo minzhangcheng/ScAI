@@ -26,7 +26,8 @@ import {
   X,
   Wifi,
   WifiOff,
-  GripVertical
+  GripVertical,
+  Dna
 } from 'lucide-react'
 
 function App() {
@@ -142,8 +143,11 @@ function App() {
 
   if (configured === null) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-4 border-violet-500 border-t-transparent" />
+      <div className="min-h-screen bg-surface-900 flex flex-col items-center justify-center gap-4">
+        <div className="p-4 bg-gradient-to-br from-accent-500 to-accent-700 rounded-2xl shadow-glow-accent">
+          <Dna className="w-8 h-8 text-white animate-spin" />
+        </div>
+        <p className="text-surface-400 text-sm font-medium tracking-wide">Loading ScAI...</p>
       </div>
     )
   }
@@ -158,7 +162,7 @@ function App() {
   ] as const
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-50">
+    <div className="min-h-screen bg-surface-50">
       {/* Config Modal */}
       {showConfig && (
         <ConfigPanel
@@ -192,28 +196,28 @@ function App() {
         {/* Main Content */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Header */}
-          <header className="h-16 border-b border-slate-200 bg-white/80 backdrop-blur-sm flex items-center justify-between px-4 shrink-0">
+          <header className="h-14 border-b border-surface-200/60 bg-white/90 backdrop-blur-md flex items-center justify-between px-4 shrink-0" style={{ boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.04)' }}>
             <div className="flex items-center gap-4">
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="p-2 hover:bg-slate-100 rounded-lg transition-colors lg:hidden"
+                className="p-2 hover:bg-surface-100 rounded-lg transition-colors lg:hidden"
               >
                 {sidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
               </button>
-              
+
               <div>
-                <h1 className="font-semibold text-slate-900">
+                <h1 className="font-display font-semibold text-surface-800 tracking-tight">
                   {currentSession?.name || t('appFullName')}
                 </h1>
                 {currentSession && (
-                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <div className="flex items-center gap-2 text-xs text-surface-500">
                     <span>Round {currentSession.currentRound}</span>
-                    <span>·</span>
+                    <span className="text-surface-300">·</span>
                     <span className={`status-${currentSession.status}`}>
                       {currentSession.status}
                     </span>
                     {wsConnected ? (
-                      <span className="flex items-center gap-1 text-green-600">
+                      <span className="flex items-center gap-1 text-emerald-600">
                         <Wifi className="w-3 h-3" />
                         <span>{language === 'zh' ? '已连接' : 'Connected'}</span>
                       </span>
@@ -229,24 +233,27 @@ function App() {
             </div>
 
             <div className="flex items-center gap-2">
-              {/* Tabs */}
-              <nav className="hidden md:flex items-center gap-1 bg-slate-100 rounded-lg p-1">
+              {/* Tabs - underline style */}
+              <nav className="hidden md:flex items-center gap-0.5">
                 {tabs.map((tab) => (
                   <button
                     key={tab.id}
                     onClick={() => setActiveTab(tab.id)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                    className={`relative flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-all duration-200 ${
                       activeTab === tab.id
-                        ? 'bg-white text-violet-700 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
+                        ? 'text-accent-600'
+                        : 'text-surface-500 hover:text-surface-700'
                     }`}
                   >
                     <tab.icon className="w-4 h-4" />
                     {tab.label}
+                    {activeTab === tab.id && (
+                      <span className="absolute bottom-0 left-2 right-2 h-0.5 bg-accent-500 rounded-full animate-tab-indicator" />
+                    )}
                   </button>
                 ))}
               </nav>
-              
+
               {/* Language Selector */}
               <LanguageSelector />
 
@@ -256,7 +263,7 @@ function App() {
           </header>
 
           {/* Content Area */}
-          <div ref={containerRef} className="flex-1 flex overflow-hidden">
+          <div ref={containerRef} className="flex-1 flex overflow-hidden bg-science-grid">
             {/* Left Panel - Tab Content */}
             <div
               className="flex flex-col"
@@ -285,10 +292,10 @@ function App() {
             {/* Resizable Divider */}
             {currentSession && (
               <div
-                className="hidden lg:flex items-center justify-center w-1 bg-slate-200 hover:bg-violet-400 cursor-col-resize transition-colors group"
+                className="hidden lg:flex items-center justify-center w-[3px] bg-surface-200 hover:bg-accent-400 cursor-col-resize transition-colors duration-200 group"
                 onMouseDown={() => setIsResizing(true)}
               >
-                <div className="absolute p-1 bg-slate-300 group-hover:bg-violet-500 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="absolute p-1 bg-surface-300 group-hover:bg-accent-500 rounded opacity-0 group-hover:opacity-100 transition-opacity">
                   <GripVertical className="w-3 h-3 text-white" />
                 </div>
               </div>
@@ -297,7 +304,7 @@ function App() {
             {/* Right Panel - Message Stream */}
             {currentSession && (
               <div
-                className="hidden lg:flex border-l border-slate-200 bg-white overflow-hidden flex-col"
+                className="hidden lg:flex border-l border-surface-200/60 bg-white overflow-hidden flex-col"
                 style={{ width: `${messagePanelWidth}%` }}
               >
                 <MessageStream />
@@ -306,15 +313,15 @@ function App() {
           </div>
 
           {/* Mobile Tabs */}
-          <nav className="md:hidden border-t border-slate-200 bg-white flex">
+          <nav className="md:hidden border-t border-surface-200 bg-white flex">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex-1 flex flex-col items-center gap-1 py-3 text-xs font-medium transition-all ${
                   activeTab === tab.id
-                    ? 'text-violet-700'
-                    : 'text-slate-500'
+                    ? 'text-accent-600'
+                    : 'text-surface-500'
                 }`}
               >
                 <tab.icon className="w-5 h-5" />
@@ -324,8 +331,8 @@ function App() {
           </nav>
 
           {/* Footer */}
-          <footer className="shrink-0 border-t border-slate-100 bg-white/80 px-4 py-1.5 text-center">
-            <p className="text-[11px] text-slate-400 select-none">
+          <footer className="shrink-0 border-t border-surface-100 bg-white/60 backdrop-blur-sm px-4 py-1.5 text-center">
+            <p className="text-[10px] text-surface-400 select-none tracking-wider uppercase">
               {language === 'zh'
                 ? 'ScAI · 单细胞测序AI分析 · © 2025–2026 程敏章 版权所有'
                 : 'ScAI · Single Cell Sequencing Analysis Driven by AI · © 2025–2026 Minzhang Cheng. All rights reserved.'}

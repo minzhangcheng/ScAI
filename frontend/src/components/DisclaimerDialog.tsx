@@ -23,14 +23,14 @@ export function DisclaimerDialog({ onAccept }: DisclaimerDialogProps) {
 
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-modal w-full max-w-lg mx-4 overflow-hidden animate-scale-in">
         {/* Header */}
-        <div className="bg-gradient-to-r from-violet-600 to-indigo-600 px-6 py-5">
+        <div className="bg-gradient-to-r from-accent-600 to-accent-700 px-6 py-5">
           <div className="flex items-center gap-3">
             <FlaskConical className="w-7 h-7 text-white shrink-0" />
             <div>
-              <h1 className="text-lg font-bold text-white">ScAI</h1>
-              <p className="text-sm text-violet-200">
+              <h1 className="text-lg font-display font-bold text-white">ScAI</h1>
+              <p className="text-sm text-accent-200">
                 {zh
                   ? '单细胞测序AI分析'
                   : 'Single Cell Sequencing Analysis Driven by AI'}
@@ -66,7 +66,7 @@ export function DisclaimerDialog({ onAccept }: DisclaimerDialogProps) {
         <div className="px-6 pb-6">
           <button
             onClick={handleAccept}
-            className="w-full py-3 bg-violet-600 hover:bg-violet-700 text-white font-semibold rounded-xl transition-colors"
+            className="w-full py-3 bg-accent-600 hover:bg-accent-700 text-white font-semibold rounded-xl transition-colors"
           >
             {zh ? '我已了解，进入系统' : 'I Understand, Enter System'}
           </button>

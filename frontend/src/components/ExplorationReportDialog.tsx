@@ -207,11 +207,11 @@ export function ExplorationReportDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col">
+      <div className="bg-white rounded-2xl shadow-modal max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col animate-scale-in">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b bg-gradient-to-r from-violet-50 to-blue-50 rounded-t-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b bg-gradient-to-r from-accent-50 to-accent-100 rounded-t-2xl">
           <div className="flex-1">
-            <h2 className="text-lg font-semibold text-slate-800">
+            <h2 className="text-lg font-display font-semibold text-slate-800">
               {isZh ? '探索期分析完成 — 选择研究方向' : 'Exploration Complete — Choose Research Directions'}
             </h2>
             <p className="text-sm text-slate-500 mt-1">
@@ -226,7 +226,7 @@ export function ExplorationReportDialog({
                 href={explorationReportUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-violet-700 bg-violet-100 hover:bg-violet-200 rounded-lg transition-colors"
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-accent-700 bg-accent-100 hover:bg-accent-200 rounded-lg transition-colors"
               >
                 <ExternalLink className="w-3.5 h-3.5" />
                 {isZh ? '查看详细报告' : 'View Detailed Report'}
@@ -243,7 +243,7 @@ export function ExplorationReportDialog({
           {report.cluster_overview && (
             <div className="p-4 bg-slate-50 rounded-xl">
               <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2 mb-2">
-                <Dna className="w-4 h-4 text-violet-500" />
+                <Dna className="w-4 h-4 text-accent-500" />
                 {isZh ? '亚群概况' : 'Cluster Overview'}
               </h3>
               <p className="text-sm text-slate-600 whitespace-pre-wrap">{report.cluster_overview}</p>
@@ -318,12 +318,12 @@ export function ExplorationReportDialog({
 
           {/* PI Direction Assessment */}
           {report.pi_direction_assessment && (
-            <div className="p-4 bg-violet-50 border border-violet-200 rounded-xl">
-              <h3 className="text-sm font-semibold text-violet-800 flex items-center gap-2 mb-2">
+            <div className="p-4 bg-accent-50 border border-accent-200 rounded-xl">
+              <h3 className="text-sm font-semibold text-accent-800 flex items-center gap-2 mb-2">
                 <Brain className="w-4 h-4" />
                 {isZh ? 'PI 研究方向评估' : 'PI Direction Assessment'}
               </h3>
-              <p className="text-sm text-violet-700 whitespace-pre-wrap">{report.pi_direction_assessment}</p>
+              <p className="text-sm text-accent-700 whitespace-pre-wrap">{report.pi_direction_assessment}</p>
             </div>
           )}
 
@@ -331,7 +331,7 @@ export function ExplorationReportDialog({
           {(report.research_direction_candidates || []).length > 0 && (
             <div>
               <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2 mb-3">
-                <TrendingUp className="w-4 h-4 text-violet-500" />
+                <TrendingUp className="w-4 h-4 text-accent-500" />
                 {isZh ? '推荐研究方向（可多选）' : 'Recommended Directions (multi-select)'}
               </h3>
               <div className="space-y-2">
@@ -340,8 +340,8 @@ export function ExplorationReportDialog({
                   return (
                     <div key={i} className={`rounded-xl border-2 transition-all ${
                       isSelected
-                        ? 'border-violet-400 bg-violet-50/50'
-                        : 'border-slate-200 hover:border-violet-200'
+                        ? 'border-accent-400 bg-accent-50/50'
+                        : 'border-slate-200 hover:border-accent-200'
                     }`}>
                       {/* Checkbox + direction header */}
                       <button
@@ -350,7 +350,7 @@ export function ExplorationReportDialog({
                       >
                         <div className="mt-0.5 flex-shrink-0">
                           {isSelected
-                            ? <CheckSquare className="w-5 h-5 text-violet-600" />
+                            ? <CheckSquare className="w-5 h-5 text-accent-600" />
                             : <Square className="w-5 h-5 text-slate-300" />
                           }
                         </div>
@@ -378,7 +378,7 @@ export function ExplorationReportDialog({
                             value={candidateNotes[i] || ''}
                             onChange={e => updateCandidateNote(i, e.target.value)}
                             placeholder={isZh ? '备注（可选）：提示 PI 需注意或调整的地方...' : 'Notes (optional): Tips for PI to focus on or adjust...'}
-                            className="w-full border border-violet-200 rounded-lg px-3 py-2 text-xs resize-none focus:outline-none focus:ring-2 focus:ring-violet-300 bg-white"
+                            className="w-full border border-accent-200 rounded-lg px-3 py-2 text-xs resize-none focus:outline-none focus:ring-2 focus:ring-accent-300 bg-white"
                             rows={2}
                             onClick={e => e.stopPropagation()}
                           />
@@ -405,13 +405,13 @@ export function ExplorationReportDialog({
                       value={d.direction}
                       onChange={e => updateCustomDirection(i, 'direction', e.target.value)}
                       placeholder={isZh ? '研究方向...' : 'Research direction...'}
-                      className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-300"
+                      className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent-300"
                     />
                     <textarea
                       value={d.notes}
                       onChange={e => updateCustomDirection(i, 'notes', e.target.value)}
                       placeholder={isZh ? '备注（可选）...' : 'Notes (optional)...'}
-                      className="w-full border rounded-lg px-3 py-2 text-xs resize-none focus:outline-none focus:ring-2 focus:ring-violet-300"
+                      className="w-full border rounded-lg px-3 py-2 text-xs resize-none focus:outline-none focus:ring-2 focus:ring-accent-300"
                       rows={1}
                     />
                   </div>
@@ -425,7 +425,7 @@ export function ExplorationReportDialog({
               ))}
               <button
                 onClick={addCustomDirection}
-                className="flex items-center gap-2 px-3 py-2 text-sm text-violet-600 hover:bg-violet-50 rounded-lg transition-colors"
+                className="flex items-center gap-2 px-3 py-2 text-sm text-accent-600 hover:bg-accent-50 rounded-lg transition-colors"
               >
                 <Plus className="w-4 h-4" />
                 {isZh ? '添加研究方向' : 'Add Direction'}
@@ -449,7 +449,7 @@ export function ExplorationReportDialog({
             <button
               onClick={handlePiDecide}
               disabled={submitting}
-              className="px-5 py-2.5 rounded-xl text-sm font-medium border border-violet-300 text-violet-700 hover:bg-violet-50 transition-all disabled:opacity-50"
+              className="px-5 py-2.5 rounded-xl text-sm font-medium border border-accent-300 text-accent-700 hover:bg-accent-50 transition-all disabled:opacity-50"
             >
               <div className="flex items-center gap-2">
                 <Brain className="w-4 h-4" />
@@ -470,7 +470,7 @@ export function ExplorationReportDialog({
               className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
                 !canSubmit
                   ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                  : 'bg-violet-600 text-white hover:bg-violet-700 shadow-md'
+                  : 'bg-accent-600 text-white hover:bg-accent-700 shadow-md'
               }`}
             >
               <Send className="w-4 h-4" />

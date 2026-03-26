@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware'
 import { Language, getDefaultPrompts } from '../i18n/translations'
 
 // Types
-export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor'
+export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor' | 'technique'
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'waiting_annotation' | 'generating_report'
 export type FigureReviewStatus = 'pending' | 'approved' | 'accepted_with_reservations' | 'revision_requested'
 
@@ -131,6 +131,7 @@ export interface AgentPrompts {
   literature: string
   painter: string
   supervisor: string
+  technique: string
 }
 
 export interface AgentModels {
@@ -141,6 +142,7 @@ export interface AgentModels {
   literature: string
   painter: string
   supervisor: string
+  technique: string
 }
 
 export interface AgentTemperatures {
@@ -151,6 +153,7 @@ export interface AgentTemperatures {
   literature: number
   painter: number
   supervisor: number
+  technique: number
 }
 
 export interface AgentServerConfig {
@@ -166,6 +169,7 @@ export interface AgentVisionSettings {
   literature: boolean
   painter: boolean
   supervisor: boolean
+  technique: boolean
 }
 
 export const DEFAULT_VISION_SETTINGS: AgentVisionSettings = {
@@ -176,6 +180,7 @@ export const DEFAULT_VISION_SETTINGS: AgentVisionSettings = {
   literature: false,
   painter: true,
   supervisor: true,
+  technique: false,
 }
 
 // Default models
@@ -186,7 +191,8 @@ export const DEFAULT_MODELS: AgentModels = {
   biochemistry: 'google/gemini-3.1-pro-preview',
   literature: 'google/gemini-3.1-flash-lite-preview',
   painter: 'google/gemini-3.1-flash-image-preview',  // Image generation model via OpenRouter
-  supervisor: 'google/gemini-3.1-flash-lite-preview'
+  supervisor: 'google/gemini-3.1-flash-lite-preview',
+  technique: 'google/gemini-3.1-flash-lite-preview'
 }
 
 // Default temperatures
@@ -199,7 +205,8 @@ export const DEFAULT_TEMPERATURES: AgentTemperatures = {
   biochemistry: 0.2,  // Biochemistry needs objective interpretation
   literature: 0.6,   // Literature search can explore more broadly
   painter: 0.7,       // Painter benefits from creative variation in image generation
-  supervisor: 0.1    // Supervisor needs high-certainty evaluation
+  supervisor: 0.1,   // Supervisor needs high-certainty evaluation
+  technique: 0.1     // Technique needs precise documentation lookup
 }
 
 interface AppState {

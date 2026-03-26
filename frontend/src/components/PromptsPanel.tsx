@@ -22,6 +22,7 @@ import {
   Key,
   ChevronDown,
   ChevronRight,
+  Wrench,
 } from 'lucide-react'
 
 // Color styles mapping for Tailwind - use complete class names to prevent purging
@@ -88,6 +89,14 @@ const colorStyles: Record<string, {
     bgIconSelected: 'bg-cyan-100',
     textIcon: 'text-slate-500',
     textIconSelected: 'text-cyan-600'
+  },
+  teal: {
+    bgSelected: 'bg-teal-50',
+    borderSelected: 'border-teal-200',
+    bgIcon: 'bg-slate-100',
+    bgIconSelected: 'bg-teal-100',
+    textIcon: 'text-slate-500',
+    textIconSelected: 'text-teal-600'
   }
 }
 
@@ -198,6 +207,13 @@ export function PromptsPanel() {
       description: t('supervisorAgentDesc'),
       icon: Eye,
       color: 'cyan'
+    },
+    {
+      id: 'technique',
+      name: t('techniqueAgent'),
+      description: t('techniqueAgentDesc'),
+      icon: Wrench,
+      color: 'teal'
     },
   ]
 
@@ -387,7 +403,7 @@ export function PromptsPanel() {
               <Icon className={`w-5 h-5 ${selectedStyles.textIconSelected}`} />
             </div>
             <div>
-              <h3 className="font-semibold text-slate-900">{selectedConfig.name}</h3>
+              <h3 className="font-display font-semibold text-slate-900">{selectedConfig.name}</h3>
               <p className="text-sm text-slate-500">{selectedConfig.description}</p>
             </div>
           </div>
@@ -406,7 +422,7 @@ export function PromptsPanel() {
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                 saved
                   ? 'bg-green-100 text-green-700'
-                  : 'bg-violet-600 text-white hover:bg-violet-700'
+                  : 'bg-accent-600 text-white hover:bg-accent-700'
               }`}
             >
               <Save className="w-4 h-4" />
@@ -751,7 +767,7 @@ export function PromptsPanel() {
                 setEditedModel(e.target.value)
                 setSaved(false)
               }}
-              className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+              className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
               placeholder="e.g., google/gemini-3.1-pro-preview"
             />
           </div>
@@ -770,7 +786,7 @@ export function PromptsPanel() {
                   setSaved(false)
                 }}
                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                  editedVisionEnabled ? 'bg-violet-600' : 'bg-slate-300'
+                  editedVisionEnabled ? 'bg-accent-600' : 'bg-slate-300'
                 }`}
               >
                 <span
@@ -839,7 +855,7 @@ export function PromptsPanel() {
                     setEditedLlmBaseUrl(e.target.value)
                     setSaved(false)
                   }}
-                  className="flex-1 px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+                  className="flex-1 px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
                   placeholder="https://openrouter.ai/api/v1"
                 />
               </div>
@@ -853,7 +869,7 @@ export function PromptsPanel() {
                       setEditedApiKey(e.target.value)
                       setSaved(false)
                     }}
-                    className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+                    className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
                     placeholder="sk-..."
                   />
                   <button
@@ -890,7 +906,7 @@ export function PromptsPanel() {
                 setEditedTemperature(parseFloat(e.target.value))
                 setSaved(false)
               }}
-              className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-violet-600"
+              className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-accent-600"
             />
             <span className="w-12 text-center text-sm font-mono text-slate-600 bg-white px-2 py-1 rounded border border-slate-200">
               {editedTemperature.toFixed(1)}
@@ -923,7 +939,7 @@ export function PromptsPanel() {
                 setEditedPrompt(e.target.value)
                 setSaved(false)
               }}
-              className="w-full h-full p-4 border border-slate-300 rounded-xl font-mono text-sm resize-none focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+              className="w-full h-full p-4 border border-slate-300 rounded-xl font-mono text-sm resize-none focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
               placeholder={language === 'zh' ? '输入 Agent 的系统提示词...' : 'Enter the agent system prompt...'}
             />
           )}

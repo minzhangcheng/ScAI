@@ -285,11 +285,11 @@ export function RoundFeedbackDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl mx-4 max-h-[85vh] flex flex-col overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-modal w-full max-w-4xl mx-4 max-h-[85vh] flex flex-col overflow-hidden animate-scale-in">
 
         {/* Header with timer */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-gradient-to-r from-blue-50 to-indigo-50">
-          <h2 className="text-lg font-semibold text-slate-800">
+          <h2 className="text-lg font-display font-semibold text-slate-800">
             {t('roundComplete').replace('{round}', String(roundNumber))}
           </h2>
           <div className="flex items-center gap-3">

@@ -95,7 +95,7 @@ function GroupManager({
         <div className="flex items-center gap-2">
           <Users className="w-5 h-5 text-indigo-500" />
           <div>
-            <h3 className="text-lg font-semibold text-slate-900">{t('treatmentGroups')}</h3>
+            <h3 className="font-display text-lg font-semibold text-slate-900">{t('treatmentGroups')}</h3>
             <p className="text-sm text-slate-500">{t('treatmentGroupsDesc')}</p>
           </div>
         </div>
@@ -454,7 +454,7 @@ function DataSection({
         <div className="flex items-center gap-2">
           <Icon className={`w-5 h-5 ${iconColor}`} />
           <div>
-            <h3 className="text-base font-semibold text-slate-900">{title}</h3>
+            <h3 className="font-display text-base font-semibold text-slate-900">{title}</h3>
             <p className="text-xs text-slate-500">{description}</p>
           </div>
           {sectionFiles.length > 0 && (
@@ -892,7 +892,7 @@ function DataOverviewMatrix({
       <div className="flex items-center gap-2 mb-3">
         <Grid3X3 className="w-5 h-5 text-slate-500" />
         <div>
-          <h3 className="text-lg font-semibold text-slate-900">{t('dataOverview')}</h3>
+          <h3 className="font-display text-lg font-semibold text-slate-900">{t('dataOverview')}</h3>
           <p className="text-sm text-slate-500">{t('dataOverviewDesc')}</p>
         </div>
       </div>
@@ -999,7 +999,7 @@ export function DataPanel() {
         <div className="p-6 bg-slate-100 rounded-full mb-6">
           <Upload className="w-12 h-12 text-slate-400" />
         </div>
-        <h2 className="text-xl font-semibold text-slate-900 mb-2">
+        <h2 className="font-display text-xl font-semibold text-slate-900 mb-2">
           {t('uploadData')}
         </h2>
         <p className="text-slate-500 max-w-md">
