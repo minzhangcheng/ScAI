@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.17.5
-**Last Updated**: 2026-03-26
+**Version**: 0.18.1
+**Last Updated**: 2026-03-27
 
 ## Project Overview
 
@@ -1447,6 +1447,22 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
+#### v0.18.1 (2026-03-27)
+
+- Version bump and documentation sync.
+
+#### v0.18.0 (2026-03-27)
+
+- **Snapshot tree view** (`SnapshotPanel.tsx`, `schemas.py`): Snapshots now display as a tree with parent-child relationships using `parent_id` field. DFS traversal builds depth-based indentation and detects branch points (multiple children of the same parent). `GitBranch` icon marks divergence points. Snapshot count shown in panel header. Manual snapshot creation UI (input + create button) and backend endpoint (`POST /snapshots`) removed — snapshots are now auto-created at key analysis points only. Empty state message updated to explain auto-creation.
+- **Snapshot restore reliability** (`main.py`, `workflow.py`, `snapshot.py`): Restoring a snapshot now (1) closes the workflow DB connection before cleanup to avoid SQLite lock, (2) calls new `SnapshotManager.delete_checkpoint()` to remove LangGraph checkpoint files (`checkpoints.sqlite*`), and (3) sets phase-aware status: `pre_direction` → `WAITING_INPUT` (re-opens direction selection), `pre_annotation` → `WAITING_ANNOTATION` (re-opens annotation dialog), others → `PAUSED`. New `last_restored_snapshot_id` field tracks restore provenance for parent chain. `workflow.resume()` now handles missing checkpoint gracefully by starting a fresh graph invocation via `_make_initial_workflow_state()`. WebSocket resume condition extended to include `WAITING_ANNOTATION`.
+- **Snapshot parent chain tracking** (`workflow.py`): `_create_auto_snapshot()` sets `parent_id` from `last_restored_snapshot_id` (if just restored) or from the last snapshot in the list. Restore marker cleared after first snapshot to avoid polluting subsequent snapshots. Removed `post_annotation` auto-snapshot (only `pre_annotation` and `pre_direction` remain).
+- **Annotation context report figure scanning** (`report_generator.py`): `generate_annotation_context_report_html()` now scans workspace and `figures/` subdirectory for `.jpg`/`.png` files directly, with `seen_stems` deduplication. Fixed `publication_figures` attribute access (`png_base64`/`name` instead of `base64_data`/`title`). This fixes empty figure sections when the report is generated mid-execution before bioinformatics agent returns.
+- **Analysis log passthrough for annotation** (`workflow.py`, `bioinformatics_agent.py`): `annotate_clusters_callback` now accepts `analysis_log` parameter. During annotation, the in-progress bioinformatics log is temporarily populated into `state.analysis_log` so the context report can access figures from the current round, then restored after report generation.
+- **ANSI escape code stripping** (`bioinformatics_agent.py`): Imported `strip_ansi` from `utils/error_parsing`. Applied to `result.error` in code execution, figure generation, and figure revision paths — producing clean error messages without terminal color codes.
+- **Explicitly saved figure tracking** (`bioinformatics_agent.py`): Auto-save code now emits `[Auto-saved] JPG/PNG` lines for user-saved images (previously only emitted for auto-converted images), ensuring they appear in `analysis_log.saved_figure_filenames`. Regex updated to match `.jpeg` extension (`jpe?g`).
+- **Status badge styles** (`globals.css`): Added `.status-waiting_annotation`, `.status-waiting_input` (amber), and `.status-generating_report` (indigo) CSS classes matching existing badge pattern.
+- **Workflow refactor** (`workflow.py`): Extracted `_make_initial_workflow_state()` static method to eliminate duplicated `WorkflowState` dict construction between `run()` and `resume()`.
+
 #### v0.17.5 (2026-03-26)
 
 - **Fix: Loading spinner not animating** (`globals.css`, `AnalysisPanel.tsx`): Loader2 spinner icons were rendered as static icons because the `@media (prefers-reduced-motion: reduce)` rule in `globals.css` applied `animation-duration: 0.01ms !important` to all elements, overriding both inline styles and Tailwind classes. Fixed by excluding `.animate-spin` elements from the reduced-motion selector. Additionally, standardized 3 inline `style={{ animation: 'spin 1s linear infinite' }}` usages in `AnalysisPanel.tsx` to Tailwind's `animate-spin` class for consistency.
@@ -1980,5 +1996,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-26*
-*Version: 0.17.5*
+*Document updated: 2026-03-27*
+*Version: 0.18.1*

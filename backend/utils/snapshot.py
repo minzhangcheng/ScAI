@@ -4,7 +4,7 @@ import json
 import os
 import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from ..models.schemas import AnalysisState, Snapshot
 from ..config import get_session_dir
@@ -28,6 +28,7 @@ class SnapshotManager:
         name: str,
         phase: str,
         description: str = "",
+        parent_id: Optional[str] = None,
     ) -> Snapshot:
         """Create a lightweight snapshot (AnalysisState JSON only)."""
         self._ensure_dir()
@@ -37,6 +38,7 @@ class SnapshotManager:
             description=description,
             phase=phase,
             round_number=state.current_round,
+            parent_id=parent_id,
         )
         snapshot.state_file = f"{snapshot.id}.json"
 
@@ -101,3 +103,16 @@ class SnapshotManager:
             old.unlink()
             removed.append(old.name)
         return removed
+
+    async def delete_checkpoint(self):
+        """Delete LangGraph checkpoint files so resume() starts fresh after restore."""
+        from ..config import get_session_states
+        states_dir = get_session_states(self.session_id)
+        deleted = []
+        for suffix in ("checkpoints.sqlite", "checkpoints.sqlite-wal", "checkpoints.sqlite-shm"):
+            p = states_dir / suffix
+            if p.exists():
+                deleted.append(p.name)
+            p.unlink(missing_ok=True)
+        if deleted:
+            logger.info(f"[{self.session_id}] Deleted checkpoint files: {', '.join(deleted)}")

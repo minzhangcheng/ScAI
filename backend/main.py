@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.17.5"
+    version="0.18.1"
 )
 
 # CORS
@@ -2117,33 +2117,6 @@ async def list_snapshots(session_id: str):
     )
 
 
-class CreateSnapshotRequest(BaseModel):
-    name: str = "Manual snapshot"
-    description: str = ""
-
-
-@app.post("/api/session/{session_id}/snapshots")
-async def create_snapshot(session_id: str, request: CreateSnapshotRequest):
-    """Manually create a snapshot of the current analysis state."""
-    validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    from .utils.snapshot import SnapshotManager
-    mgr = SnapshotManager(session_id)
-    snapshot = await mgr.create_snapshot(state, request.name, "manual", request.description)
-    state.snapshots.append(snapshot)
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
-
-    return APIResponse(
-        success=True,
-        data=snapshot.model_dump(mode="json"),
-        message=f"Snapshot created: {snapshot.name}"
-    )
-
-
 @app.post("/api/session/{session_id}/snapshots/{snapshot_id}/restore")
 async def restore_snapshot(session_id: str, snapshot_id: str):
     """Restore analysis state from a snapshot.
@@ -2162,19 +2135,38 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
     # Stop running workflow if any
     async with _state_lock:
         workflow = workflows.get(session_id)
-    if workflow and state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_ANNOTATION, TaskStatus.WAITING_INPUT):
-        state.status = TaskStatus.PAUSED
-        workflow.signal_continue()
-        workflow.signal_annotation_confirmed()
+    if workflow:
+        if state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_ANNOTATION, TaskStatus.WAITING_INPUT):
+            state.status = TaskStatus.PAUSED
+            workflow.signal_continue()
+            workflow.signal_annotation_confirmed()
+        # Close DB connection before deleting checkpoint file (avoid SQLite lock)
+        await workflow.close()
 
     # Restore state
     from .utils.snapshot import SnapshotManager
     mgr = SnapshotManager(session_id)
     restored_state = await mgr.restore_snapshot(snapshot)
 
-    # Preserve the snapshots list from current state
+    # Delete stale LangGraph checkpoint so resume() won't continue at
+    # the old graph node position after restoring a different state
+    await mgr.delete_checkpoint()
+
+    # Preserve snapshots list + set parent tracking
     restored_state.snapshots = state.snapshots
-    restored_state.status = TaskStatus.PAUSED
+    restored_state.last_restored_snapshot_id = snapshot.id
+
+    # Phase-aware status setting
+    phase = snapshot.phase
+    if phase == "pre_direction":
+        # User wants to re-choose direction — frontend shows exploration report
+        restored_state.status = TaskStatus.WAITING_INPUT
+    elif phase == "pre_annotation":
+        # User wants to re-annotate — frontend shows annotation dialog
+        restored_state.status = TaskStatus.WAITING_ANNOTATION
+    else:
+        # Other phases: set to PAUSED, WebSocket reconnect will start fresh run
+        restored_state.status = TaskStatus.PAUSED
 
     # Replace in-memory and on-disk state
     await _update_session_cache(session_id, restored_state)
@@ -2184,7 +2176,11 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
     async with _state_lock:
         workflows.pop(session_id, None)
 
-    logger.info(f"[{session_id}] Snapshot restored: {snapshot.name} (Round {snapshot.round_number})")
+    logger.info(
+        f"[{session_id}] Snapshot restored: {snapshot.name} (Round {snapshot.round_number}), "
+        f"phase={phase}, status={restored_state.status.value}, "
+        f"current_round={restored_state.current_round}"
+    )
 
     return APIResponse(
         success=True,
@@ -3139,7 +3135,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             run_coro = workflow.generate_report(state, session_id)
         else:
             # Check if we should resume or start fresh
-            if state.current_round > 0 or state.status in (TaskStatus.PAUSED, TaskStatus.WAITING_INPUT):
+            if state.current_round > 0 or state.status in (
+                TaskStatus.PAUSED, TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION
+            ):
                 logger.info(f"Resuming workflow for session {session_id}")
                 run_coro = workflow.resume(session_id, state)
             else:

@@ -263,11 +263,12 @@ class Snapshot(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     description: str = ""
-    phase: str  # "pre_annotation" | "post_annotation" | "pre_direction" | "post_direction" | "manual"
+    phase: str  # "pre_annotation" | "pre_direction" (auto-created at key analysis points)
     round_number: int = 0
     timestamp: datetime = Field(default_factory=datetime.now)
     state_file: str = ""  # Filename within snapshots/ directory
     size_bytes: int = 0
+    parent_id: Optional[str] = None  # Parent snapshot ID for tree view
 
 class ExplorationReport(BaseModel):
     """Structured exploration report (Report A) generated after Phase 1"""
@@ -382,6 +383,7 @@ class AnalysisState(BaseModel):
 
     # Snapshots for debugging rollback
     snapshots: List[Snapshot] = Field(default_factory=list)
+    last_restored_snapshot_id: Optional[str] = None  # Tracks which snapshot was last restored (for parent chain)
 
     # Initial inputs
     initial_instruction: str = ""

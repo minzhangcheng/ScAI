@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.17.5
+**Version**: 0.18.1
 
 ## Installation
 
@@ -340,6 +340,18 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.1 (2026-03-27)
+
+- Version bump and documentation sync.
+
+### v0.18.0 (2026-03-27)
+
+- **Improvement: Snapshot tree view** — Snapshots now display as a tree with parent-child relationships and branch indicators, making it easy to visualize analysis history and restore points. Manual snapshot creation removed; snapshots are now auto-created at key analysis points only.
+- **Improvement: Snapshot restore reliability** — Restoring a snapshot now properly deletes the LangGraph checkpoint and closes the DB connection first, enabling a clean fresh run from the restored state. Phase-aware status setting: restoring a pre-direction snapshot re-opens the direction selection dialog; restoring a pre-annotation snapshot re-opens the annotation dialog.
+- **Fix: Annotation context report missing figures** — The annotation context report now scans the workspace directory for images directly, fixing empty figure sections when the report is generated mid-execution before the bioinformatics agent returns its analysis log.
+- **Fix: ANSI escape codes in error output** — Jupyter traceback errors are now stripped of ANSI escape codes before display, producing clean readable error messages.
+- **Improvement: Status badge styles** — Added missing CSS styles for `waiting_annotation`, `waiting_input`, and `generating_report` status badges.
 
 ### v0.17.5 (2026-03-26)
 

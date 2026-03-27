@@ -711,14 +711,38 @@ IMPORTANT: Respond in English only. Do not use any other language."""
 
         return segment
 
+    @staticmethod
+    def _make_initial_workflow_state(analysis_state: AnalysisState, current_round: int = 0) -> "WorkflowState":
+        """Build a clean WorkflowState for a fresh graph invocation."""
+        return {
+            "analysis_state": analysis_state,
+            "current_round": current_round,
+            "pi_instructions": {},
+            "pathology_result": None,
+            "bioinformatics_result": None,
+            "biochemistry_result": None,
+            "literature_result": None,
+            "round_result": None,
+            "should_continue": True,
+            "error": None,
+            "messages": [],
+        }
+
     async def _create_auto_snapshot(self, state: AnalysisState, phase: str):
         """Create an automatic snapshot at a key analysis point."""
         from .utils.snapshot import SnapshotManager
         try:
             mgr = SnapshotManager(self.session_id)
             name = f"Auto: {phase} (Round {state.current_round})"
-            snapshot = await mgr.create_snapshot(state, name, phase)
+            # Determine parent: if just restored, parent is the restored snapshot; otherwise the last snapshot
+            parent_id = state.last_restored_snapshot_id
+            if parent_id is None and state.snapshots:
+                parent_id = state.snapshots[-1].id
+            snapshot = await mgr.create_snapshot(state, name, phase, parent_id=parent_id)
             state.snapshots.append(snapshot)
+            # Clear restore marker: only the first snapshot after restore is a "branch point"
+            if state.last_restored_snapshot_id:
+                state.last_restored_snapshot_id = None
             removed = await mgr.cleanup_old_snapshots(keep_count=20)
             if removed:
                 removed_set = set(removed)
@@ -831,7 +855,8 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         self,
         cluster_markers: Dict,
         tissue: str,
-        organism: str
+        organism: str,
+        analysis_log: Optional[List] = None,
     ) -> Dict[str, Any]:
         """Callback for bioinformatics agent to annotate all clusters via literature.
 
@@ -954,6 +979,13 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                     )
                     return result
 
+                # Temporarily populate state.analysis_log with the in-progress log
+                # from the bioinformatics agent (it hasn't returned yet, so the log
+                # hasn't been synced to state via _after_bioinformatics)
+                original_log = state.analysis_log
+                if analysis_log:
+                    state.analysis_log = analysis_log
+
                 # Generate the context summary report
                 analysis_summary = self._build_annotation_context_report(state, self._current_graph_state)
 
@@ -966,6 +998,9 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 except Exception as e:
                     logger.warning(f"[{self.session_id}] Annotation context report generation failed: {e}")
                     report_html_url = None
+
+                # Restore original log — proper sync happens in _after_bioinformatics
+                state.analysis_log = original_log
 
                 # Generate detailed report segment for annotation checkpoint
                 await self._build_and_save_detailed_segment(
@@ -1076,9 +1111,6 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                                 f"→ {ca.user_override}"
                             )
                     result["annotations"] = annotations
-
-                # Auto-snapshot after annotation confirmed
-                await self._create_auto_snapshot(state, "post_annotation")
 
                 await self._send_message(
                     "status",
@@ -3300,19 +3332,7 @@ Return ONLY the JSON array, nothing else."""
             return initial_state
 
         # Create initial workflow state
-        workflow_state: WorkflowState = {
-            "analysis_state": initial_state,
-            "current_round": 0,
-            "pi_instructions": {},
-            "pathology_result": None,
-            "bioinformatics_result": None,
-            "biochemistry_result": None,
-            "literature_result": None,
-            "round_result": None,
-            "should_continue": True,
-            "error": None,
-            "messages": []
-        }
+        workflow_state = self._make_initial_workflow_state(initial_state)
         
         # Run workflow
         config = {"configurable": {"thread_id": thread_id}}
@@ -3481,9 +3501,31 @@ Return ONLY the JSON array, nothing else."""
             logger.info(f"[{self.session_id}] Workflow resumed and completed")
             return final_state["analysis_state"]
 
-        logger.error(f"[{self.session_id}] No saved state found for thread {thread_id}")
-        raise ValueError(f"No saved state found for thread {thread_id}")
-    
+        # No checkpoint found — start a fresh run from initialize_round.
+        # This is the expected path after snapshot restore (checkpoint was deleted).
+        if analysis_state is None:
+            logger.error(f"[{self.session_id}] No checkpoint and no analysis_state for {thread_id}")
+            raise ValueError(f"No saved state found for thread {thread_id}")
+
+        logger.info(
+            f"[{self.session_id}] No checkpoint found, starting fresh run "
+            f"(current_round={analysis_state.current_round})"
+        )
+        await self._send_message(
+            "status",
+            f"Resuming from snapshot (Round {analysis_state.current_round})..."
+        )
+
+        analysis_state.status = TaskStatus.RUNNING
+        self._current_analysis_state = analysis_state
+
+        workflow_state = self._make_initial_workflow_state(
+            analysis_state, current_round=analysis_state.current_round
+        )
+        final_state = await self.compiled_graph.ainvoke(workflow_state, config)
+        logger.info(f"[{self.session_id}] Fresh run after restore completed")
+        return final_state["analysis_state"]
+
     async def pause(self, thread_id: str):
         """Pause the workflow and save sandbox state including Python session"""
         logger.info(f"[{self.session_id}] Pausing workflow for thread {thread_id}")

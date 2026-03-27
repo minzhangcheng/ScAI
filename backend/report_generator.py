@@ -5440,32 +5440,43 @@ def generate_annotation_context_report_html(
     # --- Figures ---
     figures_html = ""
     figure_blocks = []
+    seen_stems: set = set()
 
-    # From publication_figures
+    # Scan workspace directory for figures (works even when analysis_log is empty,
+    # e.g. when report is generated mid-execution before bioinformatics agent returns)
+    workspace_dir = get_session_workspace(state.id) if state.id else None
+    if workspace_dir and workspace_dir.exists():
+        scan_dirs = [workspace_dir]
+        figures_subdir = workspace_dir / "figures"
+        if figures_subdir.exists():
+            scan_dirs.append(figures_subdir)
+
+        for scan_dir in scan_dirs:
+            image_files = sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png"))
+            for img_file in image_files:
+                if img_file.stem in seen_stems:
+                    continue
+                seen_stems.add(img_file.stem)
+                try:
+                    b64 = compress_image_to_base64(str(img_file), max_width=700, quality=80)
+                    caption = html_module.escape(img_file.stem.replace("_", " ").title())
+                    figure_blocks.append(
+                        f'<div class="figure-item"><img src="{b64}" alt="{caption}"/>'
+                        f'<div class="figure-caption">{caption}</div></div>'
+                    )
+                except Exception:
+                    logger.warning("Failed to embed figure in HTML: %s", img_file, exc_info=True)
+
+    # From publication_figures (correct attribute names: png_base64, name)
     for pf in (state.publication_figures or []):
-        title = html_module.escape(getattr(pf, 'title', '') or 'Figure')
-        if hasattr(pf, 'base64_data') and pf.base64_data:
+        pf_name = getattr(pf, 'name', '') or 'Figure'
+        b64_data = getattr(pf, 'png_base64', None)
+        if b64_data and pf_name not in seen_stems:
+            title = html_module.escape(pf_name)
             figure_blocks.append(
-                f'<div class="figure-item"><img src="data:image/{"png" if pf.base64_data[:5] == "iVBOR" else "jpeg"};base64,{pf.base64_data}" alt="{title}"/>'
+                f'<div class="figure-item"><img src="data:image/{"png" if b64_data[:5] == "iVBOR" else "jpeg"};base64,{b64_data}" alt="{title}"/>'
                 f'<div class="figure-caption">{title}</div></div>'
             )
-
-    # From analysis_log saved_figure_filenames
-    workspace_dir = get_session_workspace(state.id) if state.id else None
-    for s in state.analysis_log:
-        for fname in (s.saved_figure_filenames or []):
-            if workspace_dir:
-                fpath = workspace_dir / fname
-                if fpath.exists():
-                    try:
-                        b64 = compress_image_to_base64(str(fpath), max_width=700, quality=80)
-                        caption = html_module.escape(s.code_description or fname)
-                        figure_blocks.append(
-                            f'<div class="figure-item"><img src="{b64}" alt="{caption}"/>'
-                            f'<div class="figure-caption">{caption}</div></div>'
-                        )
-                    except Exception:
-                        logger.warning("Failed to embed figure in HTML: %s", fpath, exc_info=True)
 
     if figure_blocks:
         figures_html = f"""

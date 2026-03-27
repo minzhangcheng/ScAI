@@ -31,6 +31,7 @@ from ..models.schemas import (
     PublicationFigure, FigureReviewStatus, AnalysisStep
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall
+from ..utils.error_parsing import strip_ansi
 
 
 # Define the tools for bioinformatics agent
@@ -1075,6 +1076,13 @@ for _fig_num in _fig_nums:
         # For figures already saved by user code, skip JPG but supplement PDF if missing
         if _fig_num in _explicitly_saved_figs:
             _saved_paths = _explicitly_saved_figs[_fig_num]
+            # Emit [Auto-saved] for explicitly saved images so they get tracked
+            for _sp in _saved_paths:
+                _sp_lower = _sp.lower()
+                if _sp_lower.endswith(('.jpg', '.jpeg')):
+                    print(f"[Auto-saved] JPG: {{_sp}}")
+                elif _sp_lower.endswith('.png'):
+                    print(f"[Auto-saved] PNG: {{_sp}}")
             _has_pdf = any(_p.lower().endswith('.pdf') for _p in _saved_paths)
             if not _has_pdf and _saved_paths:
                 # Derive PDF path from the first saved image path
@@ -1125,6 +1133,10 @@ plt.close('all')
                         save_to_history=False, skip_safety_check=True
                     )
 
+                    # Strip ANSI escape codes from Jupyter traceback
+                    if result.error:
+                        result.error = strip_ansi(result.error)
+
                     code_exec = CodeExecution(
                         code=code,
                         output=result.output,
@@ -1138,7 +1150,7 @@ plt.close('all')
                     # Record execute_code step in analysis log
                     _saved_figs = []
                     if result.output:
-                        _saved_figs = [Path(p).name for p in re.findall(r'\[Auto-saved\] (?:JPG|PNG): (.+\.(?:jpg|png))', result.output)]
+                        _saved_figs = [Path(p).name for p in re.findall(r'\[Auto-saved\] (?:JPG|PNG): (.+\.(?:jpe?g|png))', result.output)]
                     analysis_log.append(AnalysisStep(
                         step_number=step_count, step_type="execute_code",
                         agent_reasoning=agent_reasoning,
@@ -1352,7 +1364,8 @@ plt.close('all')
                     annotation_result: Dict[str, Any] = {}
                     if self.annotate_clusters_callback:
                         annotation_result = await self.annotate_clusters_callback(
-                            cluster_markers, tissue, organism
+                            cluster_markers, tissue, organism,
+                            analysis_log=analysis_log,
                         )
                     else:
                         annotation_result = {
@@ -1895,6 +1908,7 @@ plt.close('all')
         result = await self.sandbox.execute(wrapped_code)
 
         if result.error:
+            result.error = strip_ansi(result.error)
             error_msg = f"Figure generation failed: {result.error}"
             logger.error(f"[Bioinformatics] {error_msg}")
             await self._notify("error", error_msg)
@@ -2082,6 +2096,7 @@ plt.close('all')
                     await self._notify("figure", figure.png_base64)
                     current_code = revised_code
                 else:
+                    result.error = strip_ansi(result.error) if result.error else result.error
                     logger.warning(f"[Bioinformatics] Revision failed: {result.error}")
                     # Auto-retry: feed error back to LLM for a single fix attempt
                     error_msg = str(result.error)[:1000]
