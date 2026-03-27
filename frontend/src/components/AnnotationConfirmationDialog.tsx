@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { SupplementaryAnalysisModal } from './SupplementaryAnalysisModal'
 import {
   X,
   CheckCircle2,
@@ -31,10 +32,13 @@ interface AnnotationConfirmationDialogProps {
   organism: string
   tissueSummary: string
   reportHtmlUrl?: string
+  detailedReportUrl?: string
   language: Language
   countdownSeconds: number  // countdown for high-confidence auto-confirm
   onConfirm: (annotations: Array<{ cluster_id: string; user_override?: string; user_confirmed: boolean }>) => Promise<void>
+  onRequestSupplementary: (requestText: string) => Promise<void>
   onClose: () => void
+  isSupplementaryRunning?: boolean
 }
 
 export function AnnotationConfirmationDialog({
@@ -43,18 +47,29 @@ export function AnnotationConfirmationDialog({
   organism,
   tissueSummary,
   reportHtmlUrl,
+  detailedReportUrl,
   language,
   countdownSeconds,
   onConfirm,
-  onClose
+  onRequestSupplementary,
+  onClose,
+  isSupplementaryRunning = false,
 }: AnnotationConfirmationDialogProps) {
   const [annotations, setAnnotations] = useState(initialAnnotations)
+  const [showSupplementaryInput, setShowSupplementaryInput] = useState(false)
   const [editingCluster, setEditingCluster] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [countdown, setCountdown] = useState(countdownSeconds > 0 ? countdownSeconds : 0)
   const [submitting, setSubmitting] = useState(false)
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set())
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Update annotations only when genuinely new data arrives (e.g. after supplementary analysis),
+  // not on every parent re-render which would discard user edits
+  const annotationKey = `${initialAnnotations.length}:${initialAnnotations.map(a => a.cluster_id + a.confidence).join(',')}`
+  useEffect(() => {
+    setAnnotations(initialAnnotations)
+  }, [annotationKey])
 
   const lowConfidenceClusters = annotations.filter(a => a.confidence === 'low')
   const allLowConfidenceConfirmed = lowConfidenceClusters.every(a => a.user_confirmed)
@@ -358,29 +373,64 @@ export function AnnotationConfirmationDialog({
             </div>
             {/* Footer */}
             <div className="flex items-center justify-between px-6 py-4 border-t bg-slate-50">
-              <div className="text-sm text-slate-500">
-                {annotations.filter(a => a.user_confirmed).length} / {annotations.length}{' '}
-                {language === 'zh' ? '已确认' : 'confirmed'}
+              <div className="flex items-center gap-3">
+                <div className="text-sm text-slate-500">
+                  {annotations.filter(a => a.user_confirmed).length} / {annotations.length}{' '}
+                  {language === 'zh' ? '已确认' : 'confirmed'}
+                </div>
+                {detailedReportUrl && (
+                  <a
+                    href={detailedReportUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    {language === 'zh' ? '查看详细报告' : 'View Detailed Report'}
+                  </a>
+                )}
               </div>
-              <button
-                onClick={handleConfirmAll}
-                disabled={submitting || (hasLowConfidence && !allLowConfidenceConfirmed)}
-                className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all ${
-                  submitting || (hasLowConfidence && !allLowConfidenceConfirmed)
-                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                    : 'bg-accent-600 text-white hover:bg-accent-700 shadow-md'
-                }`}
-              >
-                {submitting
-                  ? (language === 'zh' ? '提交中...' : 'Submitting...')
-                  : hasLowConfidence && !allLowConfidenceConfirmed
-                  ? (language === 'zh' ? '请先确认低置信度亚群' : 'Confirm low-confidence clusters first')
-                  : (language === 'zh' ? '确认全部注释' : 'Confirm All Annotations')}
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setShowSupplementaryInput(true)}
+                  disabled={submitting || isSupplementaryRunning}
+                  className="px-4 py-2.5 rounded-xl text-sm font-medium border border-amber-300 text-amber-700 hover:bg-amber-50 transition-all disabled:opacity-50"
+                >
+                  {isSupplementaryRunning
+                    ? (language === 'zh' ? '补充分析中...' : 'Analyzing...')
+                    : (language === 'zh' ? '请求补充分析' : 'Request More Analysis')}
+                </button>
+                <button
+                  onClick={handleConfirmAll}
+                  disabled={submitting || isSupplementaryRunning || (hasLowConfidence && !allLowConfidenceConfirmed)}
+                  className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                    submitting || isSupplementaryRunning || (hasLowConfidence && !allLowConfidenceConfirmed)
+                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                      : 'bg-accent-600 text-white hover:bg-accent-700 shadow-md'
+                  }`}
+                >
+                  {submitting
+                    ? (language === 'zh' ? '提交中...' : 'Submitting...')
+                    : hasLowConfidence && !allLowConfidenceConfirmed
+                    ? (language === 'zh' ? '请先确认低置信度亚群' : 'Confirm low-confidence clusters first')
+                    : (language === 'zh' ? '确认全部注释' : 'Confirm All Annotations')}
+                </button>
+              </div>
             </div>
           </div>
         </div>
       </div>
+
+      {showSupplementaryInput && (
+        <SupplementaryAnalysisModal
+          language={language}
+          placeholder={language === 'zh'
+            ? '例如：请进一步分析cluster 3和cluster 5的差异基因，并搜索相关文献'
+            : 'e.g., Please analyze DEGs between cluster 3 and 5, and search relevant literature'}
+          onSubmit={onRequestSupplementary}
+          onClose={() => setShowSupplementaryInput(false)}
+        />
+      )}
     </div>
   )
 }

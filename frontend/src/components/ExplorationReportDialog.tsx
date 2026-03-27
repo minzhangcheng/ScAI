@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { SupplementaryAnalysisModal } from './SupplementaryAnalysisModal'
 import {
   X,
   Send,
@@ -44,11 +45,14 @@ interface ExplorationReportDialogProps {
   report: ExplorationReport
   roundSummary: string
   explorationReportUrl?: string
+  detailedReportUrl?: string
   language: Language
   countdownSeconds: number  // -1=manual, 0=no wait, >0=countdown
   onChooseDirections: (directions: SelectedDirection[]) => Promise<void>
   onLetPiDecide: () => Promise<void>
+  onRequestSupplementary: (requestText: string) => Promise<void>
   onClose: () => void
+  isSupplementaryRunning?: boolean
 }
 
 function ScoreBadge({ text }: { text?: string }) {
@@ -80,11 +84,14 @@ export function ExplorationReportDialog({
   report,
   roundSummary,
   explorationReportUrl,
+  detailedReportUrl,
   language,
   countdownSeconds,
   onChooseDirections,
   onLetPiDecide,
-  onClose
+  onRequestSupplementary,
+  onClose,
+  isSupplementaryRunning = false,
 }: ExplorationReportDialogProps) {
   const isZh = language === 'zh'
 
@@ -97,6 +104,7 @@ export function ExplorationReportDialog({
 
   const [submitting, setSubmitting] = useState(false)
   const [showFullReport, setShowFullReport] = useState(false)
+  const [showSupplementaryInput, setShowSupplementaryInput] = useState(false)
 
   // Timer state — wall-clock based (same pattern as RoundFeedbackDialog)
   const hasCountdown = countdownSeconds > 0
@@ -448,7 +456,7 @@ export function ExplorationReportDialog({
             )}
             <button
               onClick={handlePiDecide}
-              disabled={submitting}
+              disabled={submitting || isSupplementaryRunning}
               className="px-5 py-2.5 rounded-xl text-sm font-medium border border-accent-300 text-accent-700 hover:bg-accent-50 transition-all disabled:opacity-50"
             >
               <div className="flex items-center gap-2">
@@ -456,9 +464,29 @@ export function ExplorationReportDialog({
                 {isZh ? '让 PI 决定' : 'Let PI Decide'}
               </div>
             </button>
+            {detailedReportUrl && (
+              <a
+                href={detailedReportUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                {isZh ? '查看详细报告' : 'View Detailed Report'}
+              </a>
+            )}
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowSupplementaryInput(true)}
+              disabled={submitting || isSupplementaryRunning}
+              className="px-4 py-2.5 rounded-xl text-sm font-medium border border-amber-300 text-amber-700 hover:bg-amber-50 transition-all disabled:opacity-50"
+            >
+              {isSupplementaryRunning
+                ? (isZh ? '补充分析中...' : 'Analyzing...')
+                : (isZh ? '请求补充分析' : 'Request More Analysis')}
+            </button>
             {totalSelected > 0 && (
               <span className="text-xs text-slate-500">
                 {isZh ? `已选 ${totalSelected} 个研究方向` : `${totalSelected} direction(s) selected`}
@@ -466,9 +494,9 @@ export function ExplorationReportDialog({
             )}
             <button
               onClick={handleSubmit}
-              disabled={!canSubmit}
+              disabled={!canSubmit || isSupplementaryRunning}
               className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
-                !canSubmit
+                !canSubmit || isSupplementaryRunning
                   ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
                   : 'bg-accent-600 text-white hover:bg-accent-700 shadow-md'
               }`}
@@ -481,6 +509,17 @@ export function ExplorationReportDialog({
           </div>
         </div>
       </div>
+
+      {showSupplementaryInput && (
+        <SupplementaryAnalysisModal
+          language={language}
+          placeholder={isZh
+            ? '例如：请进一步搜索关于XXX通路在这个组织中的文献，以帮助判断研究方向'
+            : 'e.g., Please search for more literature about XXX pathway to help determine research direction'}
+          onSubmit={onRequestSupplementary}
+          onClose={() => setShowSupplementaryInput(false)}
+        />
+      )}
     </div>
   )
 }

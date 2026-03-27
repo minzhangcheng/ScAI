@@ -643,6 +643,60 @@ Return JSON:
         logger.info(f"[PI] Selected {len(selected)} directions: {[d['direction'][:50] for d in selected]}")
         return selected
 
+    async def plan_supplementary_analysis(
+        self, state: AnalysisState, user_request: str, context: str
+    ) -> Dict[str, Any]:
+        """Plan supplementary analysis tasks based on user's request at a HITL point.
+
+        Args:
+            state: Current analysis state
+            user_request: User's free-text description of what additional analysis they want
+            context: "annotation" or "direction" - which HITL checkpoint
+
+        Returns:
+            Dict with keys: bioinformatics_tasks, literature_topics, summary
+        """
+        context_desc = (
+            "cell type annotation confirmation (the user wants more information before confirming cluster annotations)"
+            if context == "annotation"
+            else "research direction selection (the user wants more information before choosing innovation directions)"
+        )
+
+        prompt = f"""You are the PI Agent coordinating a supplementary analysis requested by the user.
+
+Current analysis checkpoint: {context_desc}
+
+User's request for additional analysis:
+"{user_request}"
+
+Current analysis state:
+- Round: {state.current_round}
+- Phase: {state.analysis_phase}
+- Clusters annotated: {len(state.annotation_state.cluster_annotations) if state.annotation_state else 0}
+
+Based on the user's request, plan specific supplementary analysis tasks.
+Return a JSON object with these keys (empty lists for agents that don't need to run):
+{{
+    "bioinformatics_tasks": ["task1", "task2"],
+    "literature_topics": ["topic1"],
+    "summary": "Brief explanation of what will be analyzed"
+}}
+
+Keep tasks focused and actionable. The user is waiting for results to make a decision,
+so prioritize speed - plan only the minimum necessary analysis."""
+
+        response = await self.chat(prompt)
+        plan = self._safe_parse_json(response, default={})
+        if not plan or not isinstance(plan, dict):
+            plan = {
+                "bioinformatics_tasks": [user_request],
+                "literature_topics": [],
+                "summary": user_request,
+            }
+
+        logger.info(f"[PI] Supplementary analysis plan: {plan.get('summary', '')[:100]}")
+        return plan
+
     async def analyze_direction_correlations(
         self,
         state: AnalysisState,

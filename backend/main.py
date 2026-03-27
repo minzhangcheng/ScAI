@@ -1948,6 +1948,40 @@ async def confirm_annotations(session_id: str, request: AnnotationConfirmation):
     )
 
 
+class SupplementaryAnalysisRequest(BaseModel):
+    """Request body for supplementary analysis at HITL points"""
+    request_text: str = Field(..., min_length=1, max_length=2000)
+    target: str = Field(..., pattern=r"^(annotation|direction)$")
+
+
+@app.post("/api/session/{session_id}/supplementary-analysis")
+async def request_supplementary_analysis(
+    session_id: str, request: SupplementaryAnalysisRequest
+):
+    """User requests additional analysis at a HITL point before finalizing their decision."""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if request.target == "annotation" and state.status != TaskStatus.WAITING_ANNOTATION:
+        raise HTTPException(status_code=400, detail="Session is not at annotation confirmation point")
+    if request.target == "direction" and state.status != TaskStatus.WAITING_INPUT:
+        raise HTTPException(status_code=400, detail="Session is not at direction selection point")
+
+    async with _state_lock:
+        workflow = workflows.get(session_id)
+    if not workflow:
+        raise HTTPException(status_code=400, detail="No active workflow for this session")
+
+    workflow.signal_supplementary_analysis(request.request_text, request.target)
+
+    return APIResponse(
+        success=True,
+        message="Supplementary analysis started"
+    )
+
+
 class DirectionChoice(BaseModel):
     """Request body for choosing innovation phase direction"""
     direction: str = ""  # backward compat: single direction
@@ -2044,6 +2078,140 @@ async def get_annotation_report_html(session_id: str):
     validate_path_within(Path(html_path), session_dir)
 
     return FileResponse(html_path, media_type="text/html", filename="annotation_context_report.html")
+
+
+@app.get("/api/session/{session_id}/detailed-report/html")
+async def get_detailed_report_html(session_id: str):
+    """Serve the combined incremental detailed report HTML."""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not state.detailed_report_html_path:
+        raise HTTPException(status_code=404, detail="Detailed report not yet generated")
+
+    html_path = Path(state.detailed_report_html_path)
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="Detailed report file not found")
+
+    session_dir = get_session_dir(session_id)
+    validate_path_within(html_path, session_dir)
+
+    return FileResponse(str(html_path), media_type="text/html", filename="detailed_report.html")
+
+
+# ========== Snapshot Management ==========
+
+@app.get("/api/session/{session_id}/snapshots")
+async def list_snapshots(session_id: str):
+    """List all snapshots for a session."""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return APIResponse(
+        success=True,
+        data={"snapshots": [s.model_dump(mode="json") for s in state.snapshots]},
+        message="ok"
+    )
+
+
+class CreateSnapshotRequest(BaseModel):
+    name: str = "Manual snapshot"
+    description: str = ""
+
+
+@app.post("/api/session/{session_id}/snapshots")
+async def create_snapshot(session_id: str, request: CreateSnapshotRequest):
+    """Manually create a snapshot of the current analysis state."""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from .utils.snapshot import SnapshotManager
+    mgr = SnapshotManager(session_id)
+    snapshot = await mgr.create_snapshot(state, request.name, "manual", request.description)
+    state.snapshots.append(snapshot)
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state)
+
+    return APIResponse(
+        success=True,
+        data=snapshot.model_dump(mode="json"),
+        message=f"Snapshot created: {snapshot.name}"
+    )
+
+
+@app.post("/api/session/{session_id}/snapshots/{snapshot_id}/restore")
+async def restore_snapshot(session_id: str, snapshot_id: str):
+    """Restore analysis state from a snapshot.
+
+    WARNING: This stops any running workflow and replaces the session state.
+    """
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    # Stop running workflow if any
+    async with _state_lock:
+        workflow = workflows.get(session_id)
+    if workflow and state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_ANNOTATION, TaskStatus.WAITING_INPUT):
+        state.status = TaskStatus.PAUSED
+        workflow.signal_continue()
+        workflow.signal_annotation_confirmed()
+
+    # Restore state
+    from .utils.snapshot import SnapshotManager
+    mgr = SnapshotManager(session_id)
+    restored_state = await mgr.restore_snapshot(snapshot)
+
+    # Preserve the snapshots list from current state
+    restored_state.snapshots = state.snapshots
+    restored_state.status = TaskStatus.PAUSED
+
+    # Replace in-memory and on-disk state
+    await _update_session_cache(session_id, restored_state)
+    await async_save_session(session_id, restored_state)
+
+    # Remove workflow reference (needs fresh start)
+    async with _state_lock:
+        workflows.pop(session_id, None)
+
+    logger.info(f"[{session_id}] Snapshot restored: {snapshot.name} (Round {snapshot.round_number})")
+
+    return APIResponse(
+        success=True,
+        message=f"State restored to snapshot: {snapshot.name} (Round {snapshot.round_number})"
+    )
+
+
+@app.delete("/api/session/{session_id}/snapshots/{snapshot_id}")
+async def delete_snapshot(session_id: str, snapshot_id: str):
+    """Delete a snapshot."""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    from .utils.snapshot import SnapshotManager
+    mgr = SnapshotManager(session_id)
+    await mgr.delete_snapshot(snapshot)
+    state.snapshots = [s for s in state.snapshots if s.id != snapshot_id]
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state)
+
+    return APIResponse(success=True, message="Snapshot deleted")
 
 
 @app.post("/api/session/{session_id}/request-input")

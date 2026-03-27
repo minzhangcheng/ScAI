@@ -92,7 +92,7 @@ echo "Data directory: $DATA_DIR"
 # Create virtual environment if it doesn't exist
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating Python virtual environment..."
-    python3 -m venv "$VENV_DIR"
+    python3.12 -m venv "$VENV_DIR"
 fi
 
 # Activate virtual environment

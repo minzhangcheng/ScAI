@@ -249,6 +249,26 @@ class AnnotationConfirmationState(BaseModel):
     pending: bool = False
     confirmed: bool = False
 
+class DetailedReportSegment(BaseModel):
+    """One segment of the incrementally-built detailed report at each HITL checkpoint"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    phase: str  # "pre_annotation" | "exploration_complete" | "supplementary_annotation_N" | "supplementary_direction_N"
+    title: str  # Human-readable, e.g. "Pre-Annotation Analysis Summary"
+    content_html: str = ""  # Pre-rendered HTML
+    timestamp: datetime = Field(default_factory=datetime.now)
+    round_number: int = 0
+
+class Snapshot(BaseModel):
+    """A saved snapshot of analysis state for debugging rollback"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    description: str = ""
+    phase: str  # "pre_annotation" | "post_annotation" | "pre_direction" | "post_direction" | "manual"
+    round_number: int = 0
+    timestamp: datetime = Field(default_factory=datetime.now)
+    state_file: str = ""  # Filename within snapshots/ directory
+    size_bytes: int = 0
+
 class ExplorationReport(BaseModel):
     """Structured exploration report (Report A) generated after Phase 1"""
     cluster_overview: str = ""
@@ -355,6 +375,13 @@ class AnalysisState(BaseModel):
     # Path to exploration report HTML file
     annotation_report_html_path: Optional[str] = None
     # Path to annotation context report HTML file
+
+    # Incremental detailed report segments (built at each HITL point)
+    detailed_report_segments: List[DetailedReportSegment] = Field(default_factory=list)
+    detailed_report_html_path: Optional[str] = None
+
+    # Snapshots for debugging rollback
+    snapshots: List[Snapshot] = Field(default_factory=list)
 
     # Initial inputs
     initial_instruction: str = ""

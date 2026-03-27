@@ -386,6 +386,38 @@ Please provide a detailed literature review report with specific citation inform
     chatTargetPathology: '病理',
     chatTargetBioinformatics: '生信',
     chatTargetBiochemistry: '生化',
+
+    // Supplementary Analysis
+    requestMoreAnalysis: '请求补充分析',
+    supplementaryAnalysisPrompt: '请描述您希望进行的补充分析',
+    supplementaryAnalysisRunning: '正在执行补充分析...',
+    supplementaryAnalysisComplete: '补充分析完成',
+    supplementarySubmit: '提交',
+    supplementaryPlaceholderAnnotation: '例如：请进一步分析cluster 3和cluster 5的差异基因，并搜索相关文献',
+    supplementaryPlaceholderDirection: '例如：请进一步搜索关于XXX通路在这个组织中的文献，以帮助判断研究方向',
+    supplementaryDesc: '请描述您希望进行的补充分析，PI Agent将组织各Agent执行分析后更新报告。',
+
+    // Detailed Report
+    viewDetailedReport: '查看详细报告',
+
+    // Snapshots
+    snapshots: '快照',
+    createSnapshot: '创建快照',
+    restoreSnapshot: '恢复快照',
+    deleteSnapshot: '删除快照',
+    snapshotCreated: '快照已创建',
+    snapshotRestored: '已恢复到快照',
+    confirmRestore: '确认恢复到此快照？当前分析进度将被替换。',
+    manualSnapshot: '手动快照',
+    noSnapshots: '暂无快照',
+    snapshotName: '快照名称（可选）',
+    phasePreAnnotation: '注释前',
+    phasePostAnnotation: '注释后',
+    phasePreDirection: '选方向前',
+    phasePostDirection: '选方向后',
+    phaseManual: '手动',
+    analysisSnapshots: '分析快照',
+    creating: '创建中...',
   },
 
   en: {
@@ -771,6 +803,38 @@ Please provide a detailed literature review report with specific citations.`,
     chatTargetPathology: 'Pathology',
     chatTargetBioinformatics: 'Bioinformatics',
     chatTargetBiochemistry: 'Biochemistry',
+
+    // Supplementary Analysis
+    requestMoreAnalysis: 'Request More Analysis',
+    supplementaryAnalysisPrompt: 'Describe the additional analysis you need',
+    supplementaryAnalysisRunning: 'Running supplementary analysis...',
+    supplementaryAnalysisComplete: 'Supplementary analysis complete',
+    supplementarySubmit: 'Submit',
+    supplementaryPlaceholderAnnotation: 'e.g., Please analyze DEGs between cluster 3 and 5, and search relevant literature',
+    supplementaryPlaceholderDirection: 'e.g., Please search for more literature about XXX pathway to help determine research direction',
+    supplementaryDesc: 'Describe the additional analysis you need. The PI Agent will coordinate agents to run the analysis and update the report.',
+
+    // Detailed Report
+    viewDetailedReport: 'View Detailed Report',
+
+    // Snapshots
+    snapshots: 'Snapshots',
+    createSnapshot: 'Create Snapshot',
+    restoreSnapshot: 'Restore',
+    deleteSnapshot: 'Delete',
+    snapshotCreated: 'Snapshot created',
+    snapshotRestored: 'Restored to snapshot',
+    confirmRestore: 'Restore to this snapshot? Current analysis progress will be replaced.',
+    manualSnapshot: 'Manual snapshot',
+    noSnapshots: 'No snapshots',
+    snapshotName: 'Snapshot name (optional)',
+    phasePreAnnotation: 'Pre-Annotation',
+    phasePostAnnotation: 'Post-Annotation',
+    phasePreDirection: 'Pre-Direction',
+    phasePostDirection: 'Post-Direction',
+    phaseManual: 'Manual',
+    analysisSnapshots: 'Analysis Snapshots',
+    creating: 'Creating...',
   }
 } as const
 

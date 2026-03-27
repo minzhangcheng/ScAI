@@ -28,7 +28,7 @@ from .models.schemas import (
     AnalysisState, AnalysisStep, AgentType, TaskStatus, RoundResult,
     WebSocketMessage, AgentMessage, MessageRole, BiochemistryIndicator,
     PublicationFigure, FigureReviewStatus,
-    ClusterAnnotation, AnnotationConfirmationState,
+    ClusterAnnotation, AnnotationConfirmationState, DetailedReportSegment,
 )
 from .agents.pi_agent import PIAgent
 from .agents.pathology_agent import PathologyAgent
@@ -234,6 +234,10 @@ class SingleCellAnalysisWorkflow:
         # Event for blocking during annotation confirmation (exploration phase)
         self._annotation_event = asyncio.Event()
 
+        # Supplementary analysis request (set by API, consumed by HITL loop)
+        self._supplementary_request: Optional[str] = None
+        self._supplementary_target: Optional[str] = None  # "annotation" or "direction"
+
     def signal_continue(self):
         """Signal the workflow to continue from wait_for_user_input"""
         self._continue_event.set()
@@ -241,6 +245,15 @@ class SingleCellAnalysisWorkflow:
     def signal_annotation_confirmed(self):
         """Signal that user has confirmed cell type annotations"""
         self._annotation_event.set()
+
+    def signal_supplementary_analysis(self, request_text: str, target: str):
+        """Signal that user wants supplementary analysis at current HITL point."""
+        self._supplementary_request = request_text
+        self._supplementary_target = target
+        if target == "annotation":
+            self._annotation_event.set()
+        elif target == "direction":
+            self._continue_event.set()
 
     def _get_agent_llm_client(self, agent_name: str) -> OpenAICompatibleClient:
         """Get LLM client for an agent, using per-agent override if different from global."""
@@ -280,7 +293,7 @@ class SingleCellAnalysisWorkflow:
             states_dir.mkdir(parents=True, exist_ok=True)
             db_path = str(states_dir / "checkpoints.sqlite")
             self._db_conn = await aiosqlite.connect(db_path)
-            serde = JsonPlusSerializer(allowed_msgpack_modules=[
+            serde = JsonPlusSerializer(allowed_json_modules=[
                 ("backend.models.schemas", "AgentType"),
                 ("backend.models.schemas", "AnalysisState"),
                 ("backend.models.schemas", "AnalysisPhase"),
@@ -667,6 +680,153 @@ IMPORTANT: Respond in English only. Do not use any other language."""
 
         return "\n".join(parts)
 
+    async def _build_and_save_detailed_segment(
+        self, state: AnalysisState, phase: str, title: str,
+        graph_state=None,
+        round_result=None,
+    ) -> DetailedReportSegment:
+        """Build a detailed report segment and save the combined HTML."""
+        from .report_generator import (
+            generate_detailed_report_segment_html,
+            generate_combined_detailed_report_html,
+        )
+
+        content_html = generate_detailed_report_segment_html(
+            state, phase, title,
+            graph_state=dict(graph_state) if graph_state else None,
+            round_result=round_result,
+        )
+        segment = DetailedReportSegment(
+            phase=phase,
+            title=title,
+            content_html=content_html,
+            round_number=state.current_round,
+        )
+        state.detailed_report_segments.append(segment)
+
+        try:
+            generate_combined_detailed_report_html(state)
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] Combined detailed report generation failed: {e}")
+
+        return segment
+
+    async def _create_auto_snapshot(self, state: AnalysisState, phase: str):
+        """Create an automatic snapshot at a key analysis point."""
+        from .utils.snapshot import SnapshotManager
+        try:
+            mgr = SnapshotManager(self.session_id)
+            name = f"Auto: {phase} (Round {state.current_round})"
+            snapshot = await mgr.create_snapshot(state, name, phase)
+            state.snapshots.append(snapshot)
+            removed = await mgr.cleanup_old_snapshots(keep_count=20)
+            if removed:
+                removed_set = set(removed)
+                state.snapshots = [s for s in state.snapshots if s.state_file not in removed_set]
+            logger.info(f"[{self.session_id}] Auto-snapshot: {name}")
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] Auto-snapshot failed: {e}")
+
+    def _merge_supplementary_findings(self, agent_key: str, new_findings: List[str]):
+        """Merge supplementary findings into the current graph state for an agent."""
+        if not self._current_graph_state or not new_findings:
+            return
+        existing = self._current_graph_state.get(agent_key, {})
+        existing_findings = existing.get("findings", []) if isinstance(existing, dict) else []
+        existing["findings"] = existing_findings + [f"[Supplementary] {f}" for f in new_findings]
+        self._current_graph_state[agent_key] = existing
+
+    async def _run_supplementary_analysis(
+        self, state: AnalysisState, request_text: str, context: str
+    ):
+        """Execute user-requested supplementary analysis at a HITL point."""
+        await self._send_message(
+            "status",
+            f"PI is planning supplementary analysis: {request_text[:200]}...",
+            AgentType.PI,
+        )
+
+        # PI agent plans supplementary tasks
+        supp_plan = await self.pi_agent.plan_supplementary_analysis(
+            state, request_text, context
+        )
+
+        # Execute bioinformatics tasks if planned
+        bio_tasks = supp_plan.get("bioinformatics_tasks", [])
+        if bio_tasks and self.bioinformatics_agent:
+            await self._send_message("status", "Running supplementary bioinformatics analysis...", AgentType.BIOINFORMATICS)
+            try:
+                combined_instruction = "Supplementary analysis tasks:\n" + "\n".join(f"- {t}" for t in bio_tasks)
+                supp_result = await self.bioinformatics_agent.run_autonomous_analysis(
+                    state, combined_instruction, max_steps=30
+                )
+                if supp_result:
+                    self._merge_supplementary_findings(
+                        "bioinformatics_result", supp_result.get("findings", [])
+                    )
+            except Exception as e:
+                logger.error(f"[{self.session_id}] Supplementary bioinformatics failed: {e}")
+                await self._send_message("error", f"Supplementary bioinformatics analysis failed: {e}", AgentType.BIOINFORMATICS)
+
+        # Execute literature tasks if planned
+        lit_tasks = supp_plan.get("literature_topics", [])
+        if lit_tasks and self.literature_agent:
+            await self._send_message("status", "Running supplementary literature research...", AgentType.LITERATURE)
+            try:
+                for topic in lit_tasks[:3]:
+                    lit_result = await self.literature_agent.process(
+                        state, topic, topic=topic, use_deep_research=False
+                    )
+                    if lit_result:
+                        report_text = lit_result.get("report", "") or lit_result.get("synthesis", "")
+                        if report_text:
+                            self._merge_supplementary_findings(
+                                "literature_result", [report_text[:500]]
+                            )
+            except Exception as e:
+                logger.error(f"[{self.session_id}] Supplementary literature failed: {e}")
+                await self._send_message("error", f"Supplementary literature research failed: {e}", AgentType.LITERATURE)
+
+        # Generate new detailed report segment
+        seg_index = sum(1 for s in state.detailed_report_segments if "supplementary" in s.phase)
+        await self._build_and_save_detailed_segment(
+            state,
+            f"supplementary_{context}_{seg_index}",
+            f"Supplementary Analysis: {request_text[:60]}",
+            graph_state=self._current_graph_state,
+        )
+
+        await self._send_message(
+            "status",
+            "Supplementary analysis complete. Updating reports...",
+            AgentType.PI,
+        )
+
+        # Save state
+        if self.state_callback:
+            try:
+                await self.state_callback(state)
+            except Exception as e:
+                logger.exception(f"[{self.session_id}] Failed to save state after supplementary analysis")
+
+    @staticmethod
+    def _build_cluster_annotations(annotations: Dict) -> List[ClusterAnnotation]:
+        """Build ClusterAnnotation list from annotation dict."""
+        return [
+            ClusterAnnotation(
+                cluster_id=cid,
+                cell_type=info.get("cell_type", "Unknown"),
+                subtypes=info.get("subtypes", []),
+                key_markers=info.get("key_markers", []),
+                confidence=info.get("confidence", "low"),
+                evidence=info.get("evidence", ""),
+                alternative_cell_types=info.get("alternative_cell_types", []),
+                low_confidence_reason=info.get("low_confidence_reason", ""),
+            )
+            for cid, info in annotations.items()
+            if isinstance(info, dict)
+        ]
+
     async def _annotate_clusters_callback(
         self,
         cluster_markers: Dict,
@@ -773,19 +933,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                     # Continue with original annotations if PI review fails
 
                 # Step 2: Build AnnotationConfirmationState
-                cluster_anns = []
-                for cid, info in annotations.items():
-                    if isinstance(info, dict):
-                        cluster_anns.append(ClusterAnnotation(
-                            cluster_id=cid,
-                            cell_type=info.get("cell_type", "Unknown"),
-                            subtypes=info.get("subtypes", []),
-                            key_markers=info.get("key_markers", []),
-                            confidence=info.get("confidence", "low"),
-                            evidence=info.get("evidence", ""),
-                            alternative_cell_types=info.get("alternative_cell_types", []),
-                            low_confidence_reason=info.get("low_confidence_reason", ""),
-                        ))
+                cluster_anns = self._build_cluster_annotations(annotations)
 
                 # Guard: if annotations were already confirmed (e.g. backend restart),
                 # apply overrides directly without re-blocking for user confirmation
@@ -819,6 +967,17 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                     logger.warning(f"[{self.session_id}] Annotation context report generation failed: {e}")
                     report_html_url = None
 
+                # Generate detailed report segment for annotation checkpoint
+                await self._build_and_save_detailed_segment(
+                    state, "pre_annotation",
+                    "Analysis Summary Before Cell Annotation",
+                    graph_state=self._current_graph_state,
+                )
+                detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if state.detailed_report_html_path else None
+
+                # Auto-snapshot before annotation HITL
+                await self._create_auto_snapshot(state, "pre_annotation")
+
                 ann_state = AnnotationConfirmationState(
                     cluster_annotations=cluster_anns,
                     tissue=tissue,
@@ -829,34 +988,82 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 )
                 state.annotation_state = ann_state
 
-                # Step 3: Send annotation confirmation request to frontend and block
-                # Clear event BEFORE sending message to prevent race condition:
-                # if frontend confirms between send and clear, the set() would be lost.
-                self._annotation_event.clear()
-
-                await self._send_message("annotation_confirmation", {
-                    "annotations": [a.model_dump() for a in cluster_anns],
-                    "tissue": tissue,
-                    "organism": organism,
-                    "tissue_summary": result.get("tissue_summary", ""),
-                    "analysis_summary": analysis_summary,
-                    "report_html_url": report_html_url,
-                }, AgentType.LITERATURE)
-
+                # Step 3: Annotation confirmation loop (supports supplementary analysis)
                 original_status = state.status
-                state.status = TaskStatus.WAITING_ANNOTATION
-                await self._send_state_sync(state, "annotation_confirmation")
+                while True:
+                    self._annotation_event.clear()
 
-                logger.info(f"[{self.session_id}] Waiting for user annotation confirmation...")
-                await self._annotation_event.wait()
-                logger.info(f"[{self.session_id}] Annotation confirmation received")
+                    await self._send_message("annotation_confirmation", {
+                        "annotations": [a.model_dump() for a in cluster_anns],
+                        "tissue": tissue,
+                        "organism": organism,
+                        "tissue_summary": result.get("tissue_summary", ""),
+                        "analysis_summary": analysis_summary,
+                        "report_html_url": report_html_url,
+                        "detailed_report_url": detailed_report_url,
+                    }, AgentType.LITERATURE)
 
-                # Restore status, but respect pause if user paused during annotation wait
-                if state.status == TaskStatus.PAUSED:
-                    logger.info(f"[{self.session_id}] User paused during annotation wait, returning early")
-                    return result
-                state.status = original_status
-                await self._send_state_sync(state, "annotation_resumed")
+                    state.status = TaskStatus.WAITING_ANNOTATION
+                    await self._send_state_sync(state, "annotation_confirmation")
+
+                    logger.info(f"[{self.session_id}] Waiting for user annotation confirmation...")
+                    await self._annotation_event.wait()
+
+                    # Check: supplementary analysis requested?
+                    if self._supplementary_request and self._supplementary_target == "annotation":
+                        req = self._supplementary_request
+                        self._supplementary_request = None
+                        self._supplementary_target = None
+                        state.status = TaskStatus.RUNNING
+                        await self._send_state_sync(state, "supplementary_running")
+
+                        await self._run_supplementary_analysis(state, req, "annotation")
+
+                        # Regenerate context report with new data
+                        analysis_summary = self._build_annotation_context_report(state, self._current_graph_state)
+
+                        # Re-run PI review of annotations with supplementary context
+                        try:
+                            pi_review = await self.pi_agent.review_cluster_annotations(
+                                state, annotations, tissue, organism
+                            )
+                            for cid, review in pi_review.items():
+                                if cid in annotations and isinstance(review, dict):
+                                    annotations[cid].update(review)
+                            result["annotations"] = annotations
+                            cluster_anns = self._build_cluster_annotations(annotations)
+                        except Exception as e:
+                            logger.warning(f"[{self.session_id}] PI re-review after supplementary failed: {e}")
+
+                        # Regenerate HTML report
+                        try:
+                            html_path = generate_annotation_context_report_html(state, self._current_graph_state, cluster_anns)
+                            state.annotation_report_html_path = html_path
+                            report_html_url = f"/api/session/{self.session_id}/annotation-report/html"
+                        except Exception as e:
+                            logger.warning(f"[{self.session_id}] Report re-generation failed: {e}")
+
+                        detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if state.detailed_report_html_path else None
+
+                        ann_state = AnnotationConfirmationState(
+                            cluster_annotations=cluster_anns,
+                            tissue=tissue,
+                            organism=organism,
+                            tissue_summary=result.get("tissue_summary", ""),
+                            analysis_summary=analysis_summary,
+                            pending=True,
+                        )
+                        state.annotation_state = ann_state
+                        continue  # Loop back to re-show dialog
+                    else:
+                        # Normal confirmation
+                        logger.info(f"[{self.session_id}] Annotation confirmation received")
+                        if state.status == TaskStatus.PAUSED:
+                            logger.info(f"[{self.session_id}] User paused during annotation wait, returning early")
+                            return result
+                        state.status = original_status
+                        await self._send_state_sync(state, "annotation_resumed")
+                        break
 
                 # Step 4: Apply user overrides
                 confirmed = state.annotation_state
@@ -869,6 +1076,9 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                                 f"→ {ca.user_override}"
                             )
                     result["annotations"] = annotations
+
+                # Auto-snapshot after annotation confirmed
+                await self._create_auto_snapshot(state, "post_annotation")
 
                 await self._send_message(
                     "status",
@@ -2292,11 +2502,26 @@ Return ONLY the JSON array, nothing else."""
                     logger.error(f"[{self.session_id}] Exploration report HTML generation failed: {html_err}")
 
                 html_url = f"/api/session/{self.session_id}/exploration-report/html" if analysis_state.exploration_report_html_path else None
+
+                # Generate detailed report segment for exploration completion
+                await self._build_and_save_detailed_segment(
+                    state=analysis_state,
+                    phase="exploration_complete",
+                    title="Exploration Phase Complete - Analysis Summary",
+                    graph_state=state,
+                    round_result=round_result,
+                )
+                detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if analysis_state.detailed_report_html_path else None
+
+                # Auto-snapshot before direction selection HITL
+                await self._create_auto_snapshot(analysis_state, "pre_direction")
+
                 await self._send_message("exploration_report", {
                     "report_a": exploration_report.model_dump(),
                     "round": round_result.round_number,
                     "summary": round_result.pi_summary,
                     "html_url": html_url,
+                    "detailed_report_url": detailed_report_url,
                 }, AgentType.PI)
             except Exception as e:
                 logger.exception(f"[{self.session_id}] Exploration report generation failed")
@@ -2469,15 +2694,60 @@ Return ONLY the JSON array, nothing else."""
             # No-wait mode: proceed immediately
             logger.info(f"[{self.session_id}] No-wait mode, proceeding immediately (round {analysis_state.current_round})")
         elif wait_seconds == -1:
-            # Manual mode: wait indefinitely for user signal
-            # Guard: ensure WAITING_INPUT status is synced before blocking
-            # (prevents deadlock when Resume restores status to RUNNING)
+            # Manual mode: wait for user signal (with supplementary analysis support)
             if analysis_state.status != TaskStatus.WAITING_INPUT:
                 analysis_state.status = TaskStatus.WAITING_INPUT
                 await self._send_state_sync(analysis_state, "waiting_input")
-            logger.info(f"[{self.session_id}] Manual mode, waiting indefinitely for user input (round {analysis_state.current_round})")
-            await self._continue_event.wait()
-            logger.info(f"[{self.session_id}] Continue signal received")
+
+            while True:
+                self._continue_event.clear()
+                logger.info(f"[{self.session_id}] Manual mode, waiting for user input (round {analysis_state.current_round})")
+                await self._continue_event.wait()
+
+                # Check: supplementary analysis requested?
+                if self._supplementary_request and self._supplementary_target == "direction":
+                    req = self._supplementary_request
+                    self._supplementary_request = None
+                    self._supplementary_target = None
+                    analysis_state.status = TaskStatus.RUNNING
+                    await self._send_state_sync(analysis_state, "supplementary_running")
+
+                    await self._run_supplementary_analysis(analysis_state, req, "direction")
+
+                    # Regenerate exploration report with supplementary data
+                    try:
+                        last_round = analysis_state.round_results[-1] if analysis_state.round_results else None
+                        if last_round and analysis_state.exploration_report:
+                            exploration_report = await self.pi_agent.generate_exploration_report(
+                                analysis_state, last_round
+                            )
+                            analysis_state.exploration_report = exploration_report
+
+                            from .report_generator import generate_exploration_report_html
+                            html_path = generate_exploration_report_html(
+                                analysis_state, exploration_report, last_round
+                            )
+                            analysis_state.exploration_report_html_path = html_path
+                            html_url = f"/api/session/{self.session_id}/exploration-report/html"
+                            detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if analysis_state.detailed_report_html_path else None
+
+                            await self._send_message("exploration_report", {
+                                "report_a": exploration_report.model_dump(),
+                                "round": last_round.round_number,
+                                "summary": last_round.pi_summary,
+                                "html_url": html_url,
+                                "detailed_report_url": detailed_report_url,
+                            }, AgentType.PI)
+                    except Exception as e:
+                        logger.error(f"[{self.session_id}] Exploration report regeneration failed: {e}")
+                        await self._send_message("error", f"Report regeneration failed: {e}", AgentType.PI)
+
+                    analysis_state.status = TaskStatus.WAITING_INPUT
+                    await self._send_state_sync(analysis_state, "waiting_input")
+                    continue
+                else:
+                    logger.info(f"[{self.session_id}] Continue signal received")
+                    break
         else:
             # Countdown mode: backend safety timeout = frontend countdown + 60s buffer
             # Guard: ensure WAITING_INPUT status is synced before blocking

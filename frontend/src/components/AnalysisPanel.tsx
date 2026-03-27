@@ -6,6 +6,7 @@ import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
 import { AnnotationConfirmationDialog } from './AnnotationConfirmationDialog'
 import { ExplorationReportDialog } from './ExplorationReportDialog'
+import { SnapshotPanel } from './SnapshotPanel'
 import {
   Play,
   AlertCircle,
@@ -22,7 +23,8 @@ import {
   Eye,
   Wrench,
   Pause,
-  Square
+  Square,
+  Camera
 } from 'lucide-react'
 
 const API_BASE = '/api'
@@ -66,6 +68,12 @@ export function AnalysisPanel() {
   const [showExplorationDialog, setShowExplorationDialog] = useState(false)
   const [explorationReportData, setExplorationReportData] = useState<any>(null)
   const lastExplorationMsgRef = useRef<string>('')
+
+  // Supplementary analysis state
+  const [isSupplementaryRunning, setIsSupplementaryRunning] = useState(false)
+
+  // Snapshot panel state
+  const [showSnapshotPanel, setShowSnapshotPanel] = useState(false)
 
   // Reset message refs when session changes so dialogs can re-trigger after page reload
   useEffect(() => {
@@ -274,6 +282,26 @@ export function AnalysisPanel() {
       console.error('Failed to let PI decide:', e)
     }
   }, [currentSession, wsConnected, wsConnect])
+
+  const handleSupplementaryAnalysis = useCallback(async (requestText: string, target: 'annotation' | 'direction') => {
+    if (!currentSession) return
+    setIsSupplementaryRunning(true)
+    try {
+      const response = await fetch(`${API_BASE}/session/${currentSession.id}/supplementary-analysis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_text: requestText, target }),
+      })
+      if (!response.ok) {
+        const err = await response.json()
+        console.error('Supplementary analysis error:', err.detail || err)
+      }
+      // isSupplementaryRunning will be reset when new annotation_confirmation or exploration_report message arrives
+    } catch (error) {
+      console.error('Supplementary analysis error:', error)
+      setIsSupplementaryRunning(false)
+    }
+  }, [currentSession])
 
   const handleStart = async () => {
     // Block in read mode
@@ -494,36 +522,42 @@ export function AnalysisPanel() {
     }
   }, [currentSession?.status, showFeedbackDialog])
 
-  // Detect annotation_confirmation messages and show dialog
+  // Detect annotation_confirmation messages and show dialog (supports data refresh for supplementary analysis)
   useEffect(() => {
-    if (currentSession?.status !== 'waiting_annotation') return
-    const annMsg = [...messages].reverse().find(m => m.type === 'annotation_confirmation')
+    if (currentSession?.status !== 'waiting_annotation') {
+      if (isSupplementaryRunning) setIsSupplementaryRunning(false)
+      return
+    }
+    let annMsg: typeof messages[number] | undefined
+    for (let i = messages.length - 1; i >= 0; i--) { if (messages[i].type === 'annotation_confirmation') { annMsg = messages[i]; break } }
     if (annMsg && annMsg.id !== lastAnnotationMsgRef.current) {
       lastAnnotationMsgRef.current = annMsg.id
       setAnnotationData(annMsg.content)
-      setShowAnnotationDialog(true)
+      setIsSupplementaryRunning(false)
+      if (!showAnnotationDialog) {
+        setShowAnnotationDialog(true)
+      }
     }
   }, [messages, currentSession?.status])
 
-  // Detect exploration_report messages and show dialog
+  // Detect exploration_report messages and show dialog (supports data refresh for supplementary analysis)
   useEffect(() => {
-    const expMsg = [...messages].reverse().find(m => m.type === 'exploration_report')
+    let expMsg: typeof messages[number] | undefined
+    for (let i = messages.length - 1; i >= 0; i--) { if (messages[i].type === 'exploration_report') { expMsg = messages[i]; break } }
     if (expMsg && expMsg.id !== lastExplorationMsgRef.current && currentSession?.status === 'waiting_input') {
-      // Suppress the dialog only if round 2+ has already started (meaning the user already
-      // saw and handled it). Do NOT check analysisPhase === 'innovation' here — the backend
-      // sets that phase immediately after generating the exploration report, before the user
-      // selects research directions, so that check would incorrectly block the dialog.
       if ((currentSession.currentRound ?? 0) > 1) {
-        lastExplorationMsgRef.current = expMsg.id  // Mark as seen so it doesn't re-trigger
+        lastExplorationMsgRef.current = expMsg.id
         return
       }
       lastExplorationMsgRef.current = expMsg.id
       setExplorationReportData(expMsg.content)
-      setShowExplorationDialog(true)
-      // Hide the normal feedback dialog if it's showing
-      setShowFeedbackDialog(false)
+      setIsSupplementaryRunning(false)
+      if (!showExplorationDialog) {
+        setShowExplorationDialog(true)
+        setShowFeedbackDialog(false)
+      }
     }
-  }, [messages, currentSession?.status, currentSession?.currentRound, currentSession?.analysisPhase])
+  }, [messages, currentSession?.status, currentSession?.currentRound])
 
   // Auto-dismiss annotation/exploration dialogs when analysis resumes
   useEffect(() => {
@@ -649,6 +683,13 @@ export function AnalysisPanel() {
               >
                 <Square className="w-3.5 h-3.5" />
                 {language === 'zh' ? '停止' : 'Stop'}
+              </button>
+              <button
+                onClick={() => setShowSnapshotPanel(true)}
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                title={language === 'zh' ? '快照管理' : 'Snapshots'}
+              >
+                <Camera className="w-3.5 h-3.5" />
               </button>
             </div>
           )}
@@ -958,9 +999,12 @@ export function AnalysisPanel() {
           organism={annotationData.organism || ''}
           tissueSummary={annotationData.tissue_summary || ''}
           reportHtmlUrl={annotationData.report_html_url || undefined}
+          detailedReportUrl={annotationData.detailed_report_url || undefined}
           language={language}
           countdownSeconds={useAppStore.getState().roundWaitSeconds}
           onConfirm={handleConfirmAnnotations}
+          onRequestSupplementary={(text) => handleSupplementaryAnalysis(text, 'annotation')}
+          isSupplementaryRunning={isSupplementaryRunning}
           onClose={() => setShowAnnotationDialog(false)}
         />
       )}
@@ -971,10 +1015,13 @@ export function AnalysisPanel() {
           report={explorationReportData.report_a || explorationReportData}
           roundSummary={explorationReportData.round_summary?.summary || ''}
           explorationReportUrl={explorationReportData.html_url || undefined}
+          detailedReportUrl={explorationReportData.detailed_report_url || undefined}
           language={language}
           countdownSeconds={useAppStore.getState().roundWaitSeconds}
           onChooseDirections={handleChooseDirections}
           onLetPiDecide={handleLetPiDecide}
+          onRequestSupplementary={(text) => handleSupplementaryAnalysis(text, 'direction')}
+          isSupplementaryRunning={isSupplementaryRunning}
           onClose={() => setShowExplorationDialog(false)}
         />
       )}
@@ -1063,6 +1110,21 @@ export function AnalysisPanel() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Snapshot Panel */}
+      {showSnapshotPanel && currentSession && (
+        <SnapshotPanel
+          sessionId={currentSession.id}
+          apiBase={API_BASE}
+          language={language}
+          onClose={() => setShowSnapshotPanel(false)}
+          onRestore={() => {
+            setShowSnapshotPanel(false)
+            // Reload page to get restored state
+            window.location.reload()
+          }}
+        />
       )}
     </div>
   )

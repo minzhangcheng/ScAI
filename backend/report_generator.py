@@ -27,7 +27,7 @@ from PIL import Image
 from .models.schemas import AnalysisState, AgentType, CodeExecution
 from .utils.llm_client import OpenAICompatibleClient
 from .utils.checkpoint import CheckpointManager
-from .config import STATE_DIR, WORKSPACE_DIR, get_session_states
+from .config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir
 
 logger = logging.getLogger(__name__)
 
@@ -5150,6 +5150,229 @@ def generate_exploration_report_html(
 
     logger.info(f"Exploration report HTML saved to: {html_path}")
     return str(html_path)
+
+
+def generate_detailed_report_segment_html(
+    state: "AnalysisState",
+    phase: str,
+    title: str,
+    graph_state: Optional[Dict[str, Any]] = None,
+    round_result=None,
+) -> str:
+    """Generate one segment of the incremental detailed report as HTML.
+
+    Args:
+        state: Current AnalysisState
+        phase: "pre_annotation" or "exploration_complete" or "supplementary_*"
+        title: Human-readable segment title
+        graph_state: Current LangGraph WorkflowState (for in-progress results)
+        round_result: Completed RoundResult (for post-round segments)
+
+    Returns:
+        HTML string for this segment
+    """
+    parts = []
+    parts.append(f'<div class="report-segment" id="{phase}">')
+    parts.append(f'<h2 class="segment-title">{html_module.escape(title)}</h2>')
+    parts.append(f'<p class="segment-timestamp">{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>')
+
+    try:
+        exp_summary = state.build_experimental_design_summary()
+        if exp_summary:
+            parts.append('<div class="segment-section">')
+            parts.append('<h3>Experimental Design</h3>')
+            parts.append(f'<div class="content">{markdown_to_html(exp_summary)}</div>')
+            parts.append('</div>')
+    except Exception as e:
+        logger.debug(f"Experimental design section failed: {e}")
+        pass
+
+    # --- Section: Agent Findings (from graph_state if available) ---
+    if graph_state:
+        for agent_key, agent_label in [
+            ("biochemistry_result", "Biochemistry Findings"),
+            ("pathology_result", "Pathology Findings"),
+            ("bioinformatics_result", "Bioinformatics Findings"),
+            ("literature_result", "Literature Research"),
+        ]:
+            result = graph_state.get(agent_key)
+            if result and isinstance(result, dict):
+                findings = result.get("findings", [])
+                detail = result.get("analysis_detail") or result.get("summary", "")
+                if findings or detail:
+                    parts.append(f'<div class="segment-section"><h3>{agent_label}</h3>')
+                    if findings:
+                        parts.append('<ul>')
+                        for f in findings:
+                            parts.append(f'<li>{html_module.escape(str(f))}</li>')
+                        parts.append('</ul>')
+                    if detail:
+                        parts.append(f'<div class="detail">{markdown_to_html(str(detail)[:3000])}</div>')
+                    parts.append('</div>')
+
+    # --- Section: Analysis Log Summary ---
+    if state.analysis_log:
+        recent_steps = state.analysis_log[-50:]
+        parts.append('<div class="segment-section"><h3>Analysis Steps Executed</h3>')
+        parts.append('<table class="steps-table"><thead><tr><th>#</th><th>Step</th><th>Status</th><th>Details</th></tr></thead><tbody>')
+        for i, step in enumerate(recent_steps, 1):
+            # Derive status from code_error field (AnalysisStep has no status field)
+            has_error = bool(step.code_error)
+            status_label = "error" if has_error else "completed"
+            status_class = "error" if has_error else "success"
+            detail_text = ""
+            if step.step_type == "search_literature" and step.literature_topic:
+                detail_text = html_module.escape(step.literature_topic[:120])
+            elif step.code:
+                detail_text = html_module.escape(step.code[:100])
+            parts.append(f'<tr><td>{i}</td><td>{html_module.escape(step.step_type)}</td>'
+                         f'<td class="{status_class}">{html_module.escape(status_label)}</td>'
+                         f'<td>{detail_text}</td></tr>')
+        parts.append('</tbody></table></div>')
+
+    try:
+        from .config import get_session_workspace
+        workspace_dir = get_session_workspace(state.id)
+        if workspace_dir and workspace_dir.exists():
+            categories = categorize_figures(workspace_dir)
+            has_figures = any(figs for figs in categories.values())
+            if has_figures:
+                parts.append('<div class="segment-section"><h3>Generated Figures</h3>')
+                parts.append('<div class="figure-gallery">')
+                count = 0
+                for cat, figs in categories.items():
+                    for fig_info in figs[:5]:
+                        if count >= 20:
+                            break
+                        try:
+                            fig_path = fig_info.get("png_path") or fig_info.get("path", "")
+                            if not fig_path:
+                                continue
+                            b64 = compress_image_to_base64(fig_path, max_width=400, quality=60)
+                            caption = fig_info.get("caption", fig_info.get("name", ""))
+                            parts.append(f'<div class="figure-item"><img src="{b64}" />'
+                                         f'<p class="caption">{html_module.escape(str(caption))}</p></div>')
+                            count += 1
+                        except Exception as e:
+                            logger.debug(f"Figure embedding failed for {fig_info.get('name', '?')}: {e}")
+                parts.append('</div></div>')
+    except Exception as e:
+        logger.warning(f"Figure section generation failed: {e}")
+
+    # --- Section: Round Result (if provided) ---
+    if round_result:
+        parts.append('<div class="segment-section"><h3>PI Synthesis</h3>')
+        if hasattr(round_result, 'pi_summary') and round_result.pi_summary:
+            parts.append(f'<div class="content">{markdown_to_html(round_result.pi_summary)}</div>')
+        if hasattr(round_result, 'conflicts') and round_result.conflicts:
+            parts.append('<h4>Identified Conflicts</h4><ul>')
+            for c in round_result.conflicts:
+                parts.append(f'<li>{html_module.escape(c.get("description", str(c)))}</li>')
+            parts.append('</ul>')
+        if hasattr(round_result, 'next_steps') and round_result.next_steps:
+            parts.append('<h4>Recommended Next Steps</h4><ul>')
+            for s in round_result.next_steps:
+                parts.append(f'<li>{html_module.escape(str(s))}</li>')
+            parts.append('</ul>')
+        parts.append('</div>')
+
+    # --- Section: Exploration Report (if available) ---
+    if phase == "exploration_complete" and state.exploration_report:
+        er = state.exploration_report
+        parts.append('<div class="segment-section"><h3>Exploration Report Summary</h3>')
+        if er.cluster_overview:
+            parts.append(f'<p><strong>Cluster Overview:</strong> {html_module.escape(er.cluster_overview)}</p>')
+        if er.data_quality_warnings:
+            parts.append('<h4>Data Quality Warnings</h4><ul>')
+            for w in er.data_quality_warnings:
+                parts.append(f'<li class="warning">{html_module.escape(w)}</li>')
+            parts.append('</ul>')
+        if er.pi_direction_assessment:
+            parts.append(f'<h4>PI Direction Assessment</h4>'
+                         f'<div class="content">{markdown_to_html(er.pi_direction_assessment)}</div>')
+        parts.append('</div>')
+
+    parts.append('</div>')  # Close report-segment
+    return "\n".join(parts)
+
+
+def generate_combined_detailed_report_html(state: "AnalysisState") -> str:
+    """Generate combined HTML from all detailed report segments.
+
+    Returns:
+        Path to the saved HTML file
+    """
+    from .config import get_session_reports
+    reports_dir = Path(get_session_reports(state.id))
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    segments_html = "\n<hr class='segment-divider'>\n".join(
+        seg.content_html for seg in state.detailed_report_segments if seg.content_html
+    )
+
+    toc_items = "".join(
+        f'<li><a href="#{seg.phase}">{html_module.escape(seg.title)}'
+        f' (Round {seg.round_number})</a></li>'
+        for seg in state.detailed_report_segments
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Detailed Analysis Report - {html_module.escape(state.name)}</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 2rem; background: #f8fafc; color: #1e293b; }}
+.report-header {{ background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 2rem; border-radius: 1rem; margin-bottom: 2rem; }}
+.report-header h1 {{ margin: 0 0 0.5rem; font-size: 1.5rem; }}
+.toc {{ background: white; padding: 1.5rem; border-radius: 0.75rem; margin-bottom: 2rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+.toc h2 {{ margin-top: 0; font-size: 1.1rem; }}
+.toc ul {{ padding-left: 1.5rem; }}
+.toc li {{ margin: 0.3rem 0; }}
+.toc a {{ color: #6366f1; text-decoration: none; }}
+.report-segment {{ background: white; padding: 2rem; border-radius: 0.75rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+.segment-title {{ color: #6366f1; margin-top: 0; }}
+.segment-timestamp {{ color: #94a3b8; font-size: 0.85rem; }}
+.segment-section {{ margin: 1.5rem 0; padding: 1rem; background: #f1f5f9; border-radius: 0.5rem; }}
+.segment-section h3 {{ color: #334155; margin-top: 0; font-size: 1rem; }}
+.segment-section h4 {{ color: #475569; font-size: 0.9rem; }}
+.steps-table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
+.steps-table th, .steps-table td {{ padding: 0.4rem 0.6rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
+.steps-table th {{ background: #e2e8f0; }}
+.success {{ color: #16a34a; }}
+.error {{ color: #dc2626; }}
+.warning {{ color: #d97706; }}
+.figure-gallery {{ display: flex; flex-wrap: wrap; gap: 1rem; }}
+.figure-item {{ max-width: 300px; }}
+.figure-item img {{ max-width: 100%; border-radius: 0.5rem; }}
+.caption {{ font-size: 0.8rem; color: #64748b; margin-top: 0.3rem; }}
+.segment-divider {{ border: none; border-top: 2px dashed #cbd5e1; margin: 2rem 0; }}
+.detail {{ font-size: 0.9rem; color: #475569; }}
+.content {{ line-height: 1.6; }}
+</style>
+</head>
+<body>
+<div class="report-header">
+  <h1>Detailed Analysis Report</h1>
+  <p>{html_module.escape(state.name)} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+</div>
+<div class="toc">
+  <h2>Table of Contents</h2>
+  <ul>{toc_items}</ul>
+</div>
+{segments_html}
+</body>
+</html>"""
+
+    output_path = reports_dir / "detailed_report.html"
+    tmp_path = output_path.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    os.replace(str(tmp_path), str(output_path))
+
+    state.detailed_report_html_path = str(output_path)
+    logger.info(f"Combined detailed report saved to: {output_path}")
+    return str(output_path)
 
 
 def generate_annotation_context_report_html(
