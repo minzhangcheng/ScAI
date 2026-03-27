@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+trap 'echo "Error on line $LINENO"; exit 1' ERR
 
 APP_DIR="/app"
 DEP_DIR="/dep"
@@ -41,8 +42,8 @@ if [ ! -L "$APP_DIR/frontend/node_modules" ]; then
 fi
 
 # Install if node_modules is empty or package.json is newer
-if [ ! -f "$NODE_MODULES_DIR/.package-lock.json" ] || \
-   [ "$APP_DIR/frontend/package.json" -nt "$NODE_MODULES_DIR/.package-lock.json" ]; then
+if [ ! -f "$NODE_MODULES_DIR/package-lock.json" ] || \
+   [ "$APP_DIR/frontend/package.json" -nt "$NODE_MODULES_DIR/package-lock.json" ]; then
     echo "Installing/updating Node.js dependencies..."
     cd "$APP_DIR/frontend"
     npm install
@@ -54,7 +55,7 @@ fi
 # ── Start backend ─────────────────────────────────────────────────
 echo "Starting backend..."
 cd "$APP_DIR"
-"$VENV_DIR/bin/uvicorn" backend.main:app --host 127.0.0.1 --port 8000 &
+"$VENV_DIR/bin/uvicorn" backend.main:app --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 
 # Wait for backend to be ready

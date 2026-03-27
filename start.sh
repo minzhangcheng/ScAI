@@ -191,11 +191,11 @@ echo ""
 cleanup() {
     echo ""
     echo "Stopping services..."
-    kill $BACKEND_PID 2>/dev/null
-    kill $FRONTEND_PID 2>/dev/null
+    kill "$BACKEND_PID" 2>/dev/null
+    kill "$FRONTEND_PID" 2>/dev/null
     # Also kill any child processes
-    pkill -P $BACKEND_PID 2>/dev/null
-    pkill -P $FRONTEND_PID 2>/dev/null
+    pkill -P "$BACKEND_PID" 2>/dev/null
+    pkill -P "$FRONTEND_PID" 2>/dev/null
     rm -f "$PID_FILE"
     deactivate 2>/dev/null
     echo "Stopped"

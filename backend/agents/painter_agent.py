@@ -11,6 +11,7 @@ import logging
 import base64
 import json
 import asyncio
+import re
 
 import httpx
 
@@ -346,6 +347,8 @@ The graphic abstract should tell the story of the research at a glance, highligh
         """
         if response and response.choices and len(response.choices) > 0:
             message = response.choices[0].message
+            if message is None:
+                raise ValueError("API response contained no message")
 
             # Method 1: Check for images field directly (OpenRouter format)
             if hasattr(message, 'images') and message.images:
@@ -407,6 +410,18 @@ The graphic abstract should tell the story of the research at a glance, highligh
                                         return url.split(",", 1)[1] if "," in url else url
                     except json.JSONDecodeError:
                         pass
+
+                    # Method 3b: Extract from markdown image syntax
+                    # Some models (e.g. Gemini) return: ![image](data:image/...;base64,XXXXX)
+                    md_match = re.search(
+                        r'!\[.*?\]\(data:image/[^;]+;base64,([A-Za-z0-9+/=\s]+)\)',
+                        content,
+                    )
+                    if md_match:
+                        logger.info(
+                            f"[{self.session_id}][Painter] Extracted image from markdown syntax"
+                        )
+                        return md_match.group(1).strip()
 
                     if content.startswith("data:image"):
                         if "," in content:

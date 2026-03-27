@@ -8,8 +8,8 @@ from enum import Enum
 import uuid
 import asyncio
 
-# Module-level lock for async-safe state version increments (lazy-init for Python 3.10 compat)
-_version_lock: asyncio.Lock | None = None
+# Module-level lock for async-safe state version increments
+_version_lock = asyncio.Lock()
 
 class AgentType(str, Enum):
     PI = "pi"
@@ -509,11 +509,7 @@ class AnalysisState(BaseModel):
         """Atomically increment state version for synchronization
 
         Uses a module-level async lock to ensure safe increment in concurrent async environments.
-        Lock is lazily created on first use for Python 3.10/3.11 compatibility.
         """
-        global _version_lock
-        if _version_lock is None:
-            _version_lock = asyncio.Lock()
         async with _version_lock:
             self.state_version += 1
             self.last_sync_timestamp = datetime.now()

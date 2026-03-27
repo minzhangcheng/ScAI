@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, AsyncGenerator
 
 from .base import BaseAgent, AgentConfig
 from ..models.schemas import AgentType, AnalysisState
-from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type
+from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type, strip_ansi
 from ..utils.llm_client import OpenAICompatibleClient
 
 logger = logging.getLogger(__name__)
@@ -85,9 +85,9 @@ class TechniqueAgent(BaseAgent):
             module_path, attr_name = parts
             return f"""
 import inspect
+import importlib
 try:
-    import {module_path.split('.')[0]}
-    mod = __import__("{module_path}", fromlist=["{attr_name}"])
+    mod = importlib.import_module("{module_path}")
     obj = getattr(mod, "{attr_name}", None)
     if obj is None:
         print(f"'{attr_name}' not found in {module_path}.")
@@ -110,12 +110,13 @@ except Exception as e:
             # Top-level module
             return f"""
 import inspect
+import importlib
 try:
-    import {function_path}
-    doc = inspect.getdoc({function_path}) or "No docstring available."
+    mod = importlib.import_module("{function_path}")
+    doc = inspect.getdoc(mod) or "No docstring available."
     print(f"Module: {function_path}")
     print(f"\\nDocstring:\\n{{doc[:2000]}}")
-    print(f"\\nPublic API: {{[a for a in dir({function_path}) if not a.startswith('_')][:50]}}")
+    print(f"\\nPublic API: {{[a for a in dir(mod) if not a.startswith('_')][:50]}}")
 except ImportError as e:
     print(f"Cannot import: {{e}}")
 """
@@ -124,9 +125,9 @@ except ImportError as e:
     def _build_dir_code(module_path: str) -> str:
         """Build code to list available attributes of a module."""
         return f"""
+import importlib
 try:
-    import {module_path.split('.')[0]}
-    mod = __import__("{module_path}", fromlist=["__name__"])
+    mod = importlib.import_module("{module_path}")
     attrs = [a for a in dir(mod) if not a.startswith('_')]
     print(f"Available in {module_path}: {{attrs}}")
 except ImportError as e:
@@ -147,6 +148,9 @@ except ImportError as e:
         error_type = extract_error_type(error_text)
         if error_type not in API_ERROR_TYPES:
             return None
+
+        # Strip ANSI escape codes so regex patterns can match cleanly
+        error_text = strip_ansi(error_text)
 
         result = {"error_type": error_type}
 
@@ -215,7 +219,7 @@ except ImportError as e:
         if result.error:
             raw_doc += f"\nError during lookup: {result.error}"
 
-        if not raw_doc.strip() or "Cannot import" in raw_doc:
+        if not result.success or not raw_doc.strip() or "Cannot import" in raw_doc:
             return f"Could not find documentation for `{function_path}`. Package may not be installed."
 
         # Step 2: Summarize with cheap LLM

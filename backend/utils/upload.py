@@ -154,6 +154,9 @@ class ChunkedUploadManager:
             async with aiofiles.open(meta_path, 'r') as f:
                 meta = json.loads(await f.read())
 
+            if not isinstance(meta.get("received_chunks"), list):
+                return {"success": False, "error": "Corrupted upload metadata: received_chunks is not a list"}
+
             if chunk_index not in meta["received_chunks"]:
                 meta["received_chunks"].append(chunk_index)
                 meta["received_chunks"].sort()

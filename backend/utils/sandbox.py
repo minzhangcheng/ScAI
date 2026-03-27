@@ -95,6 +95,53 @@ DANGEROUS_PATTERNS = [
 ]
 
 
+def _is_safe_os_system(code: str) -> bool:
+    """Check if all os.system calls are pip install commands."""
+    lines = [l.strip() for l in code.splitlines() if re.search(r'\bos\.system\b', l)]
+    pip_pattern = r'os\.system\s*\(\s*["\'](?:pip|pip3)\s+install'
+    return bool(lines) and all(re.search(pip_pattern, l) for l in lines)
+
+
+def _is_safe_subprocess(code: str) -> bool:
+    """Check if all subprocess calls are pip install commands."""
+    lines = [l.strip() for l in code.splitlines() if re.search(r'\bsubprocess\b', l)]
+    pip_pattern = r'subprocess\.\w+\(\s*\[?\s*["\'](?:pip|pip3)["\'].*install'
+    import_pattern = r'^(?:import|from)\s+subprocess'
+    non_import = [l for l in lines if not re.match(import_pattern, l)]
+    return not non_import or all(re.search(pip_pattern, l) for l in non_import)
+
+
+def _is_safe_importlib(code: str) -> bool:
+    """Check if importlib usage is limited to safe patterns (import_module, find_spec, reload)."""
+    lines = [l.strip() for l in code.splitlines() if re.search(r'\bimportlib\b', l)]
+    safe_import = r'^import\s+importlib\s*$'
+    safe_from = r'^from\s+importlib(?:\.util)?\s+import\s+'
+    safe_use = r'importlib\.(?:import_module|util\.find_spec|reload)\s*\('
+    return all(
+        re.match(safe_import, l) or re.match(safe_from, l) or re.search(safe_use, l)
+        for l in lines
+    )
+
+
+def _is_safe_file_write(code: str) -> bool:
+    """Check if file write calls reference known safe path variables."""
+    lines = [
+        l.strip() for l in code.splitlines()
+        if re.search(r'\bopen\s*\(', l) and re.search(r',\s*["\'][wa]', l)
+    ]
+    safe_ref = re.compile(r'_?WORKSPACE_DIR|working_dir|figures|tables|/tmp', re.IGNORECASE)
+    return all(safe_ref.search(l) for l in lines)
+
+
+# Maps pattern description keywords to their safety check functions
+_EXCEPTION_CHECKS = {
+    'os.system':   _is_safe_os_system,
+    'subprocess':  _is_safe_subprocess,
+    'importlib':   _is_safe_importlib,
+    'file write':  _is_safe_file_write,
+}
+
+
 def validate_code_safety(code: str) -> Tuple[bool, str]:
     """
     Validate code for security before execution.
@@ -108,61 +155,9 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
     """
     for pattern, description in DANGEROUS_PATTERNS:
         if re.search(pattern, code):
-            # Allow os.system when ALL usages are pip install commands
-            if 'os.system' in description:
-                os_system_lines = [
-                    line.strip() for line in code.splitlines()
-                    if re.search(r'\bos\.system\b', line)
-                ]
-                pip_pattern = r'os\.system\s*\(\s*["\'](?:pip|pip3)\s+install'
-                if os_system_lines and all(re.search(pip_pattern, line) for line in os_system_lines):
-                    continue
-            # Allow subprocess when ALL usages are pip install commands
-            if 'subprocess' in description:
-                subprocess_lines = [
-                    line.strip() for line in code.splitlines()
-                    if re.search(r'\bsubprocess\b', line)
-                ]
-                pip_pattern = r'subprocess\.\w+\(\s*\[?\s*["\'](?:pip|pip3)["\'].*install'
-                import_pattern = r'^(?:import|from)\s+subprocess'
-                non_import_lines = [
-                    line for line in subprocess_lines
-                    if not re.match(import_pattern, line)
-                ]
-                if not non_import_lines or all(re.search(pip_pattern, line) for line in non_import_lines):
-                    continue
-            # Allow importlib for safe usage patterns (import_module, util.find_spec)
-            if 'importlib' in description:
-                importlib_lines = [
-                    line.strip() for line in code.splitlines()
-                    if re.search(r'\bimportlib\b', line)
-                ]
-                # Only allow: `import importlib` (bare) or `from importlib import ...`
-                # Block dangerous submodules: importlib.machinery, importlib.abc, etc.
-                safe_import_pattern = r'^import\s+importlib\s*$'
-                safe_from_pattern = r'^from\s+importlib(?:\.util)?\s+import\s+'
-                safe_use_pattern = r'importlib\.(?:import_module|util\.find_spec|reload)\s*\('
-                if all(
-                    re.match(safe_import_pattern, line)
-                    or re.match(safe_from_pattern, line)
-                    or re.search(safe_use_pattern, line)
-                    for line in importlib_lines
-                ):
-                    continue
-            # Allow open() writes that reference known safe path variables / directories.
-            # The runtime I/O sandbox (_sandboxed_open) enforces actual path safety,
-            # so the static check only needs to catch writes with no safe-path indication.
-            if 'file write' in description:
-                open_write_lines = [
-                    line.strip() for line in code.splitlines()
-                    if re.search(r'\bopen\s*\(', line) and re.search(r',\s*["\'][wa]', line)
-                ]
-                safe_ref = re.compile(
-                    r'_?WORKSPACE_DIR|working_dir|figures|tables|/tmp',
-                    re.IGNORECASE,
-                )
-                if all(safe_ref.search(line) for line in open_write_lines):
-                    continue
+            # Check if the matched pattern has a known safe-usage exception
+            if any(key in description and check(code) for key, check in _EXCEPTION_CHECKS.items()):
+                continue
             logger.warning(
                 "Security: blocked dangerous code pattern [%s] — snippet: %.200s",
                 description, code.replace('\n', ' '),
@@ -988,7 +983,7 @@ _session_data = {{}}
 for _var_name in _vars_to_save:
     if _var_name in dir():
         try:
-            _obj = eval(_var_name)
+            _obj = globals()[_var_name]
             # Test if it can be pickled
             dill.dumps(_obj)
             _session_data[_var_name] = _obj

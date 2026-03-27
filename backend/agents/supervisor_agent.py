@@ -8,6 +8,7 @@ the detailed report from its accumulated supervision log.
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Callable, Awaitable
+import asyncio
 import json
 import logging
 import os
@@ -21,6 +22,8 @@ from pathlib import Path
 from urllib.parse import quote as url_quote
 
 logger = logging.getLogger(__name__)
+
+from openai import APIConnectionError
 
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep
 from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type
@@ -1035,20 +1038,38 @@ class SupervisorAgent:
         try:
             # Set LLM context for correct logging label (shared client)
             self.llm_client.set_context(self.session_id, "report_generator")
-            response = await self.llm_client.chat(
-                model=report_model,
-                messages=[
-                    {"role": "system", "content": self._get_report_system_prompt(language)},
-                    {"role": "user", "content": report_prompt},
-                ],
-                temperature=0.3,
-                max_tokens=32768,
-                timeout=900.0,  # 15 min — large narratives need long generation time
-            )
-            report_content = response.content or ""
-        except Exception as e:
-            logger.exception(f"[{self.session_id}] Report generation LLM call failed")
-            report_content = self._fallback_report(narrative, stats, language)
+            for attempt in range(2):  # Single retry on connection error
+                try:
+                    response = await self.llm_client.chat(
+                        model=report_model,
+                        messages=[
+                            {"role": "system", "content": self._get_report_system_prompt(language)},
+                            {"role": "user", "content": report_prompt},
+                        ],
+                        temperature=0.3,
+                        max_tokens=32768,
+                        timeout=900.0,  # 15 min — large narratives need long generation time
+                    )
+                    report_content = response.content or ""
+                    break
+                except APIConnectionError:
+                    if attempt == 0:
+                        logger.warning(
+                            f"[{self.session_id}] Report generation connection error, "
+                            f"retrying in 5s"
+                        )
+                        await asyncio.sleep(5)
+                        continue
+                    logger.exception(
+                        f"[{self.session_id}] Report generation failed after retry"
+                    )
+                    report_content = self._fallback_report(narrative, stats, language)
+                except Exception:
+                    logger.exception(
+                        f"[{self.session_id}] Report generation LLM call failed"
+                    )
+                    report_content = self._fallback_report(narrative, stats, language)
+                    break
         finally:
             # Restore supervisor context in case of subsequent LLM calls
             self._set_llm_context()
@@ -1146,20 +1167,8 @@ class SupervisorAgent:
         """Return True if the error is a pure Python/technical exception (no PI help needed)."""
         if not code_error:
             return False
-        for line in reversed(code_error.strip().split('\n')):
-            line = line.strip()
-            if not line or line.startswith('File ') or line.startswith('Traceback'):
-                continue
-            err_type = line.split(':')[0].strip()
-            if '.' in err_type:
-                err_type = err_type.rsplit('.', 1)[-1]
-            # Skip lines that don't look like exception class names
-            if ' ' in err_type or not err_type or not err_type[0].isupper():
-                continue
-            if err_type.endswith(('Error', 'Exception')) or err_type in _TECHNICAL_ERROR_TYPES:
-                return err_type in _TECHNICAL_ERROR_TYPES
-            continue
-        return False
+        err_type = extract_error_type(code_error)
+        return err_type in _TECHNICAL_ERROR_TYPES
 
     # ------------------------------------------------------------------
     # Internal: Rule-based checks
@@ -1869,17 +1878,44 @@ IMPORTANT:
         return sections
 
     def _fallback_report(self, narrative: str, stats: Dict, language: str) -> str:
-        """Generate a minimal fallback report when LLM call fails."""
+        """Generate a minimal fallback report when LLM call fails.
+
+        Extracts only step headers and reasoning from the raw narrative,
+        stripping code blocks and outputs to keep the fallback readable.
+
+        Note: Currently generates English text only. The language parameter is
+        accepted for interface consistency but not used in this fallback path.
+        """
+        # Extract step summaries (reasoning only, no code/output)
+        summary_lines = []
+        for line in narrative.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('--- Step') or stripped.startswith('Reasoning:'):
+                summary_lines.append(stripped)
+            elif stripped.startswith('========== ROUND'):
+                summary_lines.append('')
+                summary_lines.append(stripped)
+            if len(summary_lines) >= 60:
+                break
+
+        if summary_lines:
+            overview = '\n'.join(summary_lines)
+        else:
+            overview = (
+                "Report content generation failed due to API connection error. "
+                "Please refer to the analysis log in the appendix for detailed records."
+            )
+
         return f"""## [abstract] Abstract
-This report was generated by the automated monitoring system. Analysis monitored {stats['total_steps_monitored']} steps,
-found {stats['steps_with_technical_issues']} technical issues,
-with {stats['pi_escalations']} PI escalations.
+This report was generated by the automated monitoring system. Analysis monitored {stats['total_steps_monitored']} steps, found {stats['steps_with_technical_issues']} technical issues, with {stats['pi_escalations']} PI escalations.
+
+Note: The detailed narrative report could not be generated due to an API connection error. Below is a summary of the analysis steps performed. For full details including code and outputs, please refer to the appendix.
 
 ## [analysis_overview] Analysis Overview
-{narrative[:3000]}
+{overview}
 
 ## [conclusions] Conclusions
-Report generation model call failed. Above is the raw analysis record. Refer to the analysis log for complete information.
+Report generation model call failed due to API connection error. Please refer to the analysis log in the appendix for complete information, including all figures and tables generated during the analysis.
 """
 
     @staticmethod
@@ -1986,6 +2022,16 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
         """Generate a standalone HTML report with embedded images and download links."""
         import html as html_module
 
+        def _maybe_escape_html(text: str) -> str:
+            """Return *text* as-is if it already contains HTML tags, otherwise escape it.
+
+            Caption text from [FIGURE_CAPTION:]/[TABLE_CAPTION:] markers has been
+            through _markdown_to_html() and may contain safe HTML.  Captions from
+            pub_fig_descriptions are plain text and need escaping.
+            """
+            if '<' in text and '>' in text:
+                return text
+            return html_module.escape(text)
 
         # Build figure base64 cache for embedding
         figure_b64_cache: Dict[str, str] = {}
@@ -2059,10 +2105,11 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
             # Interpretation block
             interp_html = ""
             if interpretation:
+                interp_content = _maybe_escape_html(interpretation)
                 interp_html = (
                     f'<div class="figure-interpretation">'
                     f'<strong>Interpretation</strong>'
-                    f'<p>{html_module.escape(interpretation)}</p>'
+                    f'<p>{interp_content}</p>'
                     f'</div>'
                 )
 
@@ -2157,7 +2204,7 @@ Report generation model call failed. Above is the raw analysis record. Refer to 
                 caption_html = (
                     f'<div class="table-interpretation">'
                     f'<strong>Interpretation</strong>'
-                    f'<p>{html_module.escape(caption)}</p>'
+                    f'<p>{_maybe_escape_html(caption)}</p>'
                     f'</div>'
                 )
 

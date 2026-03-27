@@ -67,7 +67,6 @@ def _detect_image_mime_type(img_b64: str) -> str:
 # Retry configuration
 MAX_RETRIES = 3
 RETRY_DELAY_BASE = 2.0  # Base delay in seconds, will be multiplied by attempt number
-# Include JSONDecodeError for when API returns invalid JSON (truncated response, etc.)
 # Note: Only retry transient errors. Non-transient errors like AuthenticationError,
 # BadRequestError, NotFoundError etc. should NOT be retried.
 RETRYABLE_EXCEPTIONS = (
@@ -77,8 +76,10 @@ RETRYABLE_EXCEPTIONS = (
     httpx.ConnectTimeout,
     httpx.ReadTimeout,
     asyncio.TimeoutError,
-    json.JSONDecodeError  # Invalid JSON response from API
 )
+# JSONDecodeError gets fewer retries (max 2) since repeated bad JSON likely indicates
+# a persistent issue rather than a transient network problem.
+MAX_JSON_RETRIES = 2
 
 # Models that do not support the temperature parameter (reasoning models)
 # Match by model name segments after provider prefix (e.g., "openai/o4-mini" -> "o4-mini")
@@ -126,9 +127,27 @@ async def retry_with_backoff(
     """
     last_exception = None
 
+    json_error_count = 0
+
     for attempt in range(max_retries + 1):
         try:
             return await asyncio.wait_for(func(), timeout=request_timeout)
+        except json.JSONDecodeError as e:
+            # JSON errors get fewer retries — repeated bad JSON is likely persistent
+            json_error_count += 1
+            last_exception = e
+            if json_error_count < MAX_JSON_RETRIES:
+                delay = retry_delay_base * json_error_count
+                logger.warning(
+                    f"[{agent_name}] Invalid JSON response (attempt {json_error_count}/{MAX_JSON_RETRIES}): {str(e)[:100]}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(
+                    f"[{agent_name}] Invalid JSON after {MAX_JSON_RETRIES} attempts: {str(e)}"
+                )
+                raise
         except RateLimitError as e:
             # RateLimitError needs special handling with longer backoff delays.
             last_exception = e

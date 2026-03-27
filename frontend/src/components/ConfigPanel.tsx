@@ -76,7 +76,7 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
               {language === 'zh' ? '默认 LLM 服务器' : 'Default LLM Server'} <span className="text-red-500">*</span>
             </label>
             <input
-              type="text"
+              type="url"
               value={apiConfig.llmBaseUrl}
               onChange={(e) => handleConfigChange({ llmBaseUrl: e.target.value })}
               placeholder="https://openrouter.ai/api/v1"

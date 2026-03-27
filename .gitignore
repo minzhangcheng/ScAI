@@ -10,6 +10,18 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+*.egg-info/
+*.dist-info/
 
 # Build output
 dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*~

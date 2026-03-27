@@ -158,6 +158,11 @@ class BaseAgent(ABC):
         _MAX_HISTORY_PAIRS = 20
         history = self.message_history
         if len(history) > _MAX_HISTORY_PAIRS * 2:
+            dropped = len(history) - _MAX_HISTORY_PAIRS * 2
+            logger.warning(
+                f"[{self.agent_type}] Message history truncated: dropped {dropped} oldest messages "
+                f"(keeping last {_MAX_HISTORY_PAIRS} pairs)"
+            )
             history = history[-(_MAX_HISTORY_PAIRS * 2):]
         messages.extend(history)
         messages.append({"role": "user", "content": user_message})

@@ -59,6 +59,7 @@ class CheckpointManager:
             logger.exception(f"[{self.session_id}] Failed to save checkpoint")
             if tmp_path.exists():
                 tmp_path.unlink()
+            raise
 
     async def load(self) -> Optional[Dict[str, Any]]:
         """

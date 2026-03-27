@@ -22,9 +22,8 @@ import {
 } from 'lucide-react'
 
 // --- Data type options ---
-const PATHOLOGY_TYPES = ['H&E', 'Other']
-const SEQUENCING_TYPES = ['scRNA-seq', 'Loom', 'Other']
-const BIOCHEMISTRY_TYPES = ['image', 'file']
+import { PATHOLOGY_TYPES, BIOCHEMISTRY_TYPES } from '../utils/dataTypes'
+const SEQUENCING_TYPES = ['scRNA-seq', 'Loom', 'Other'] as const  // DataPanel adds 'Other' for upload flexibility
 
 // Allowed extensions per section + data type (used for manual validation instead of
 // react-dropzone accept filter, which silently rejects files with unrecognized MIME types

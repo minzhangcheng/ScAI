@@ -14,23 +14,9 @@ const AGENT_OPTIONS = [
 ]
 
 // Section-specific data type options
-const PATHOLOGY_TYPES = ['H&E', 'Other']
-const SEQUENCING_TYPES = ['scRNA-seq', 'Loom']
-const BIOCHEMISTRY_TYPES = ['image', 'file']
+import { getSection, getTypeOptions } from '../utils/dataTypes'
 
-function getSection(agent: string): string | null {
-  if (agent === 'pathology') return 'pathology'
-  if (agent === 'bioinformatics') return 'sequencing'
-  if (agent === 'biochemistry') return 'biochemistry'
-  return null
-}
-
-function getTypeOptions(agent: string): string[] {
-  if (agent === 'pathology') return PATHOLOGY_TYPES
-  if (agent === 'bioinformatics') return SEQUENCING_TYPES
-  if (agent === 'biochemistry') return BIOCHEMISTRY_TYPES
-  return []
-}
+const MIN_TEXTAREA_HEIGHT = 72
 
 interface SelectedFileWithAgent {
   file: File
@@ -66,7 +52,7 @@ export function ChatPanel() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const loadedSessionRef = useRef<string | null>(null)
-  const [textareaHeight, setTextareaHeight] = useState(72)
+  const [textareaHeight, setTextareaHeight] = useState(MIN_TEXTAREA_HEIGHT)
   const resizingRef = useRef(false)
   const resizeStartRef = useRef({ y: 0, height: 0 })
 
@@ -153,7 +139,7 @@ export function ChatPanel() {
     const onMouseMove = (e: MouseEvent) => {
       if (!resizingRef.current) return
       const delta = resizeStartRef.current.y - e.clientY // upward = positive
-      setTextareaHeight(Math.max(72, resizeStartRef.current.height + delta))
+      setTextareaHeight(Math.max(MIN_TEXTAREA_HEIGHT, resizeStartRef.current.height + delta))
     }
     const onMouseUp = () => {
       if (resizingRef.current) {
@@ -221,7 +207,7 @@ export function ChatPanel() {
     const message = input.trim() || (selectedFiles.length > 0 ? `[${selectedFiles.map(sf => sf.file.name).join(', ')}]` : '')
     setInput('')
     setError(null)
-    setTextareaHeight(72)
+    setTextareaHeight(MIN_TEXTAREA_HEIGHT)
 
     const filesToSend = [...selectedFiles]
     setSelectedFiles([])

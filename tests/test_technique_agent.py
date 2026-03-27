@@ -156,6 +156,56 @@ async def test_lookup_from_error_non_api_error_returns_empty(agent):
     mock_sandbox.execute.assert_not_called()
 
 
+def test_parse_error_for_lookup_empty_string():
+    """Empty string should return None."""
+    assert TechniqueAgent._parse_error_for_lookup("") is None
+
+
+def test_parse_error_for_lookup_module_not_found():
+    """ModuleNotFoundError should be detected."""
+    error = "ModuleNotFoundError: No module named 'nonexistent_module'"
+    result = TechniqueAgent._parse_error_for_lookup(error)
+    assert result is not None
+    assert result["error_type"] == "ModuleNotFoundError"
+    assert result["module"] == "nonexistent_module"
+
+
+def test_build_inspect_code_empty_string():
+    """Empty function path should still produce valid code."""
+    code = TechniqueAgent._build_inspect_code("")
+    assert isinstance(code, str)
+
+
+def test_guess_function_path_no_match():
+    """When function name is not found in code, return empty string."""
+    result = TechniqueAgent._guess_function_path("nonexistent_func", "import os\nos.path.exists('foo')")
+    assert result == ""
+
+
+def test_guess_function_path_dotted_call():
+    """Dotted call like sc.pp.normalize should be resolved."""
+    code = "import scanpy as sc\nsc.pp.normalize_total(adata)"
+    result = TechniqueAgent._guess_function_path("normalize_total", code)
+    assert result == "scanpy.pp.normalize_total"
+
+
+@pytest.mark.asyncio
+async def test_lookup_docs_sandbox_error(agent, mock_llm):
+    """When sandbox execution returns an error, should still produce a result."""
+    mock_llm.chat = AsyncMock(return_value=MagicMock(
+        content="No documentation available for this function."
+    ))
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.execute = AsyncMock(return_value=MagicMock(
+        output="",
+        error="NameError: name 'scanpy' is not defined",
+    ))
+
+    result = await agent.lookup_docs(mock_sandbox, "scanpy.tl.umap")
+    assert isinstance(result, str)
+
+
 @pytest.mark.asyncio
 async def test_lookup_docs_fallback_on_llm_failure(agent, mock_llm):
     """When LLM fails, should fallback to truncated raw docstring."""

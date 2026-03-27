@@ -1430,6 +1430,9 @@ Be specific and actionable. Include:
                 'cluster_annotations': self.cluster_annotations,
             })
 
+        # Free figure image cache — no longer needed after section writing
+        self.figure_images_cache.clear()
+
         # Step 6: PI writes abstract and conclusions (expensive LLM calls)
         if last_step >= 7 and checkpoint:
             abstract = checkpoint.get('abstract', '')

@@ -28,6 +28,7 @@ export function generateId(): string {
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
     crypto.getRandomValues(bytes)
   } else {
+    console.warn('crypto.getRandomValues unavailable — falling back to Math.random() for ID generation')
     for (let i = 0; i < 16; i++) bytes[i] = Math.random() * 256 | 0
   }
   bytes[6] = (bytes[6] & 0x0f) | 0x40

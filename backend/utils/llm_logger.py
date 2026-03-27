@@ -151,11 +151,11 @@ class LLMLogger:
         duration_str = f"{interaction.duration_ms:.0f}ms" if interaction.duration_ms is not None else "N/A"
         logger.info(
             f"\n{'='*60}\n"
-            f"🤖 LLM INTERACTION [{interaction.agent}] - {interaction.model}\n"
+            f"[LLM] [{interaction.agent}] - {interaction.model}\n"
             f"{'='*60}\n"
-            f"📤 PROMPT: {last_user_msg}{'...' if len(last_user_msg) >= 200 else ''}\n"
-            f"📥 RESPONSE: {response_summary}{'...' if len(response_summary) >= 200 else ''}\n"
-            f"⏱️ Duration: {duration_str} | Tokens: {interaction.usage}\n"
+            f"> PROMPT: {last_user_msg}{'...' if len(last_user_msg) >= 200 else ''}\n"
+            f"< RESPONSE: {response_summary}{'...' if len(response_summary) >= 200 else ''}\n"
+            f"  Duration: {duration_str} | Tokens: {interaction.usage}\n"
             f"{'='*60}"
         )
     

@@ -9,6 +9,9 @@ RUN apt-get update \
 WORKDIR /app
 COPY . .
 
+# Build frontend for production
+RUN cd frontend && npm install && npm run build && cd ..
+
 RUN chmod +x docker-entrypoint.sh
 
 EXPOSE 3000

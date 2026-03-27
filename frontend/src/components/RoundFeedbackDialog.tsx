@@ -21,23 +21,7 @@ import { useTranslation, Language } from '../i18n/translations'
 import { TreatmentGroup } from '../stores/appStore'
 
 // Section-specific data type options (shared with DataPanel)
-const PATHOLOGY_TYPES = ['H&E', 'Other']
-const SEQUENCING_TYPES = ['scRNA-seq', 'Loom']
-const BIOCHEMISTRY_TYPES = ['image', 'file']
-
-function getSection(agent: string): string | null {
-  if (agent === 'pathology') return 'pathology'
-  if (agent === 'bioinformatics') return 'sequencing'
-  if (agent === 'biochemistry') return 'biochemistry'
-  return null
-}
-
-function getTypeOptions(agent: string): string[] {
-  if (agent === 'pathology') return PATHOLOGY_TYPES
-  if (agent === 'bioinformatics') return SEQUENCING_TYPES
-  if (agent === 'biochemistry') return BIOCHEMISTRY_TYPES
-  return []
-}
+import { getSection, getTypeOptions } from '../utils/dataTypes'
 
 interface RoundSummary {
   round: number

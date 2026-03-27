@@ -122,41 +122,18 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     console_handler.setFormatter(simple_formatter)
     root_logger.addHandler(console_handler)
 
-    # Main app log - INFO level, rotating
-    app_log_path = LOG_DIR / "app.log"
-    app_handler = logging.handlers.RotatingFileHandler(
-        app_log_path,
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5,
-        encoding='utf-8'
-    )
-    app_handler.setLevel(logging.INFO)
-    app_handler.setFormatter(detailed_formatter)
-    root_logger.addHandler(app_handler)
+    def _add_file_handler(name, level, max_bytes, backup_count):
+        path = LOG_DIR / f"{name}.log"
+        handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8'
+        )
+        handler.setLevel(level)
+        handler.setFormatter(detailed_formatter)
+        root_logger.addHandler(handler)
 
-    # Error log - ERROR level only, rotating
-    error_log_path = LOG_DIR / "error.log"
-    error_handler = logging.handlers.RotatingFileHandler(
-        error_log_path,
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5,
-        encoding='utf-8'
-    )
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(detailed_formatter)
-    root_logger.addHandler(error_handler)
-
-    # Debug log - DEBUG level, larger rotation
-    debug_log_path = LOG_DIR / "debug.log"
-    debug_handler = logging.handlers.RotatingFileHandler(
-        debug_log_path,
-        maxBytes=50*1024*1024,  # 50MB
-        backupCount=3,
-        encoding='utf-8'
-    )
-    debug_handler.setLevel(logging.DEBUG)
-    debug_handler.setFormatter(detailed_formatter)
-    root_logger.addHandler(debug_handler)
+    _add_file_handler("app",   logging.INFO,   10*1024*1024, 5)
+    _add_file_handler("error", logging.ERROR,  10*1024*1024, 5)
+    _add_file_handler("debug", logging.DEBUG,  50*1024*1024, 3)
 
     # Log startup message
     logging.info(f"Logging initialized. Log directory: {LOG_DIR}")
