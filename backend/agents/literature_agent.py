@@ -11,7 +11,7 @@ Fallback chain: Gemini DR → PubMed + LLM → quick search (LLM knowledge only)
 When in DR mode, gap coverage is handled at the workflow level by falling back
 to PubMed+LLM for insufficiently covered topics.
 """
-from typing import Dict, Any, List, Optional, Set, Tuple
+from typing import Callable, Dict, Any, List, Optional, Set, Tuple
 import json
 import re
 import asyncio
@@ -422,19 +422,32 @@ Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. ht
         topic: str,
         state: Optional[AnalysisState] = None,
         pubmed_max_results: Optional[int] = None,
-        current_round_findings: Optional[List[str]] = None
+        current_round_findings: Optional[List[str]] = None,
+        initial_query: Optional[str] = None,
+        evaluate_fn: Optional[Callable] = None,
     ) -> Dict[str, Any]:
-        """Multi-round PubMed search with LLM-guided query refinement."""
+        """Multi-round PubMed search with LLM-guided query refinement.
+
+        When ``initial_query`` and ``evaluate_fn`` are provided, the search
+        uses PI Agent-guided query generation and evaluation instead of
+        Literature Agent's own LLM-based methods.
+        """
+        pi_guided = initial_query is not None and evaluate_fn is not None
+        label = "PI-guided PubMed" if pi_guided else "PubMed"
+
         all_articles: List[Dict[str, str]] = []
         seen_pmids: Set[str] = set()
         search_history: List[Dict[str, Any]] = []
 
-        # Generate initial PubMed query from the topic
-        query = await self._generate_pubmed_query(topic, state, current_round_findings)
+        # Generate initial PubMed query from the topic (or use provided one)
+        if pi_guided:
+            query = initial_query
+        else:
+            query = await self._generate_pubmed_query(topic, state, current_round_findings)
 
         for round_num in range(1, self.max_search_rounds + 1):
             logger.info(
-                f"[Literature] PubMed round {round_num}/{self.max_search_rounds}: "
+                f"[Literature] {label} round {round_num}/{self.max_search_rounds}: "
                 f"{query[:100]}"
             )
 
@@ -469,17 +482,24 @@ Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. ht
             })
 
             logger.info(
-                f"[Literature] PubMed round {round_num}: "
+                f"[Literature] {label} round {round_num}: "
                 f"{len(new_articles)} new articles, {len(all_articles)} total"
             )
 
             # Evaluate if more searching needed
             if round_num < self.max_search_rounds and all_articles:
-                evaluation = await self._evaluate_pubmed_results(
-                    topic, all_articles, search_history
-                )
+                if pi_guided:
+                    try:
+                        evaluation = await evaluate_fn(all_articles, search_history)
+                    except Exception as e:
+                        logger.warning(f"[Literature] PI evaluation failed in round {round_num}: {e}, stopping search")
+                        evaluation = {"sufficient": True}
+                else:
+                    evaluation = await self._evaluate_pubmed_results(
+                        topic, all_articles, search_history
+                    )
                 if evaluation.get("sufficient", True):
-                    logger.info(f"[Literature] PubMed sufficient after {round_num} rounds")
+                    logger.info(f"[Literature] {label} sufficient after {round_num} rounds")
                     break
                 query = evaluation.get("refined_query", query)
 
@@ -487,7 +507,7 @@ Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. ht
             await asyncio.sleep(0.4)
 
         if not all_articles:
-            logger.warning("[Literature] No PubMed articles found, falling back to quick search")
+            logger.warning(f"[Literature] No PubMed articles found ({label}), falling back to quick search")
             return await self._quick_search(topic, state)
 
         # Synthesize all collected articles
@@ -1043,7 +1063,10 @@ Please return in JSON format:
         cluster_markers: Dict[str, List[str]],
         organism: str = "mouse",
         tissue: str = "",
-        state: Optional[AnalysisState] = None
+        state: Optional[AnalysisState] = None,
+        pi_initial_query: Optional[str] = None,
+        pi_evaluate_fn: Optional[Callable] = None,
+        skip_matching: bool = False,
     ) -> Dict[str, Any]:
         """
         Two-phase cluster annotation: one literature search + LLM matching.
@@ -1051,12 +1074,19 @@ Please return in JSON format:
         Phase 1: Single _do_research() call with tissue/organism-focused query
         Phase 2: LLM matches each cluster's markers against retrieved literature
 
+        When PI-guided parameters are provided, Phase 1 uses PI Agent's query and
+        evaluation logic instead of Literature Agent's own LLM. When skip_matching
+        is True, Phase 2 is skipped (PI Agent handles matching externally).
+
         Args:
             cluster_markers: Dict mapping cluster_id (str) to list of top marker genes
                             e.g. {"0": ["Cd79a", "Cd79b", "Ms4a1"], "1": ["Cd3d", "Cd3e"]}
             organism: Organism name (e.g., "mouse", "human")
             tissue: Tissue/organ context (e.g., "kidney", "liver")
             state: Optional analysis state for context
+            pi_initial_query: Pre-generated PubMed query from PI Agent (strong model)
+            pi_evaluate_fn: Async callable for PI Agent to evaluate search sufficiency
+            skip_matching: If True, skip Phase 2 (LLM matching) — PI handles it externally
 
         Returns:
             Dict with annotations per cluster, literature_report, references, status
@@ -1107,18 +1137,43 @@ Please return in JSON format:
 
         logger.info(
             f"[Literature] annotate_clusters Phase 1: {n_clusters} clusters, "
-            f"organism={organism}, tissue={tissue}"
+            f"organism={organism}, tissue={tissue}, pi_guided={pi_initial_query is not None}"
         )
 
-        # Use higher pubmed_max_results (50) for broader tissue coverage
-        research_result = await self._do_research(
-            topic, state, pubmed_max_results=50
-        )
+        # Use PI-guided PubMed search if PI query and evaluator are provided
+        if pi_initial_query and pi_evaluate_fn and self.literature_mode == "pubmed_llm":
+            # PI Agent provides the search strategy; Literature Agent executes
+            research_result = await self._multi_round_pubmed(
+                topic, state, pubmed_max_results=50,
+                initial_query=pi_initial_query, evaluate_fn=pi_evaluate_fn,
+            )
+        else:
+            # Default: Literature Agent handles everything (original behavior)
+            # Also used for deep_research/gemini modes where PI query guidance doesn't apply
+            research_result = await self._do_research(
+                topic, state, pubmed_max_results=50
+            )
 
         literature_report = research_result.get("report", "")
         references = research_result.get("references", [])
 
         # ---- Phase 2: LLM matching ----
+        # When skip_matching is True, PI Agent handles matching externally
+        if skip_matching:
+            logger.info(f"[Literature] annotate_clusters Phase 2 skipped (PI Agent will handle matching)")
+            result = {
+                "status": "literature_only",
+                "annotations": {},
+                "tissue_summary": "",
+                "literature_report": literature_report,
+                "references": references,
+                "n_clusters": n_clusters,
+                "organism": organism,
+                "tissue": tissue
+            }
+            # Do NOT cache partial results — cache will be populated after PI matching
+            return result
+
         markers_text = "\n".join(
             f"Cluster {cid}: {', '.join(genes[:15])}"
             for cid, genes in cluster_markers.items()

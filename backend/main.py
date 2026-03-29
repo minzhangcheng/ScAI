@@ -30,7 +30,7 @@ from .config import (
     DATA_BASE_DIR, UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR,
     UPLOAD_CHUNK_SIZE, MAX_UPLOAD_SIZE, UPLOAD_TEMP_DIR,
     MAX_CACHED_SESSIONS, MAX_REALTIME_MESSAGES, SESSION_CACHE_TTL,
-    MAX_MESSAGE_BUFFER_SIZE, IMPORT_JOB_TTL, CLEANUP_INTERVAL,
+    IMPORT_JOB_TTL, CLEANUP_INTERVAL,
     WS_RECEIVE_TIMEOUT, CHAT_DELEGATION_TIMEOUT,
     setup_logging,
     get_session_dir, get_session_metadata_path, get_session_workspace,
@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.18.2"
+    version="0.18.3"
 )
 
 # CORS
@@ -171,10 +171,6 @@ _chat_sandboxes: Dict[str, Any] = {}  # session_id → sandbox for active chat (
 
 # Session access tracking for cache eviction
 _session_access_times: Dict[str, float] = {}  # Track last access time for each session
-
-# Message buffer for WebSocket reconnection recovery
-_message_buffers: Dict[str, List[Dict[str, Any]]] = {}  # session_id -> list of messages
-_message_buffer_lock = asyncio.Lock()
 
 # WebSocket monitor tasks (for cancellation on reconnect)
 _monitor_tasks: Dict[str, asyncio.Task] = {}  # session_id -> monitor task
@@ -270,11 +266,6 @@ async def cleanup_stale_sessions():
                         logger.info(f"Stopped chat sandbox for evicted session {session_id}")
                     except Exception as sb_error:
                         logger.exception(f"Failed to stop chat sandbox for session {session_id}")
-
-                # Also clean up message buffer for evicted session
-                async with _message_buffer_lock:
-                    if session_id in _message_buffers:
-                        del _message_buffers[session_id]
 
                 # Clean up report websockets and cached detailed reports
                 report_websockets.pop(session_id, None)
@@ -727,6 +718,20 @@ async def list_sessions():
     return {"sessions": disk_sessions}
 
 
+def _serialize_realtime_messages(messages: list, limit: int = 500) -> list:
+    """Serialize WebSocketMessage list for WebSocket transmission."""
+    return [
+        {
+            "id": msg.id,
+            "type": msg.type,
+            "agent": msg.agent.value if hasattr(msg.agent, 'value') else (str(msg.agent) if msg.agent else None),
+            "content": msg.content,
+            "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
+        }
+        for msg in messages[-limit:]
+    ]
+
+
 def _strip_message_base64(msg_type: str, content) -> Any:
     """Strip large base64 image data from message content to reduce response size."""
     # figure type: content is raw base64 string
@@ -774,10 +779,6 @@ async def delete_session(session_id: str):
         sessions.pop(session_id, None)
         _session_access_times.pop(session_id, None)
         _last_save_times.pop(session_id, None)
-
-    # Remove message buffer
-    async with _message_buffer_lock:
-        _message_buffers.pop(session_id, None)
 
     # Remove from disk (use thread pool for blocking I/O)
     def _delete_from_disk():
@@ -2097,10 +2098,6 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
     if monitor and not monitor.done():
         monitor.cancel()
 
-    # Clear stale message buffers (prevent old messages from being sent to new connections)
-    async with _message_buffer_lock:
-        _message_buffers.pop(session_id, None)
-
     # Clean up initializing flag and workflow reference
     async with _state_lock:
         _initializing_sessions.discard(session_id)
@@ -2850,18 +2847,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         except Exception as e:
             logger.exception("Failed to send status to observer")
 
-        # Send buffered messages to allow observer to catch up (outside lock to avoid I/O under lock)
-        async with _message_buffer_lock:
-            buffered_messages = list(_message_buffers.get(session_id, []))
-
-        if buffered_messages:
-            logger.info(f"Sending {len(buffered_messages)} buffered messages to observer")
+        # Send message history from state (same approach as completed/HITL restore)
+        if state.realtime_messages:
+            msg_data_list = _serialize_realtime_messages(state.realtime_messages)
+            logger.info(f"Sending {len(msg_data_list)} messages from history to observer")
             try:
                 await websocket.send_json({
                     "type": "message_history",
                     "content": {
-                        "messages": buffered_messages,
-                        "count": len(buffered_messages)
+                        "messages": msg_data_list,
+                        "count": len(msg_data_list)
                     },
                     "timestamp": datetime.now().isoformat()
                 })
@@ -2929,16 +2924,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
             # Send message_history for UI message stream restoration
             if state.realtime_messages:
-                msg_data_list = [
-                    {
-                        "id": msg.id,
-                        "type": msg.type,
-                        "agent": msg.agent.value if hasattr(msg.agent, 'value') else (str(msg.agent) if msg.agent else None),
-                        "content": msg.content,
-                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
-                    }
-                    for msg in state.realtime_messages[-500:]  # Limit to prevent oversized payload
-                ]
+                msg_data_list = _serialize_realtime_messages(state.realtime_messages)
                 await websocket.send_json({
                     "type": "message_history",
                     "content": {
@@ -2973,16 +2959,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         try:
             # Send message history (includes synthesized HITL messages from restore)
             if state.realtime_messages:
-                msg_data_list = [
-                    {
-                        "id": msg.id,
-                        "type": msg.type,
-                        "agent": msg.agent.value if hasattr(msg.agent, 'value') else (str(msg.agent) if msg.agent else None),
-                        "content": msg.content,
-                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
-                    }
-                    for msg in state.realtime_messages[-500:]
-                ]
+                msg_data_list = _serialize_realtime_messages(state.realtime_messages)
                 await websocket.send_json({
                     "type": "message_history",
                     "content": {
@@ -3042,21 +3019,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
             "id": msg.id  # Include message ID for deduplication on client
         }
-
-        # Add to message buffer for reconnection recovery
-        # Strip base64 to keep buffer lightweight
-        buf_data = {
-            **msg_data,
-            "content": _strip_message_base64(msg_data["type"], msg_data["content"])
-        }
-
-        async with _message_buffer_lock:
-            if session_id not in _message_buffers:
-                _message_buffers[session_id] = []
-            _message_buffers[session_id].append(buf_data)
-            # Trim buffer to max size
-            if len(_message_buffers[session_id]) > MAX_MESSAGE_BUFFER_SIZE:
-                _message_buffers[session_id] = _message_buffers[session_id][-MAX_MESSAGE_BUFFER_SIZE:]
 
         # Hold ws_lock for the entire check-and-send sequence to prevent concurrent
         # coroutines from all reading ws_closed=False and then all trying to send

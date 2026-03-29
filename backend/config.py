@@ -49,7 +49,6 @@ _ensure_directories()
 MAX_CACHED_SESSIONS = 50  # Maximum sessions to keep in memory
 MAX_REALTIME_MESSAGES = 1000  # Maximum realtime messages per session
 SESSION_CACHE_TTL = 3600  # Seconds before inactive session eviction (1 hour)
-MAX_MESSAGE_BUFFER_SIZE = 100  # WebSocket reconnection message buffer size
 IMPORT_JOB_TTL = 3600  # Cleanup completed/failed import jobs after (seconds)
 CLEANUP_INTERVAL = 300  # Background cleanup task interval (seconds)
 WS_RECEIVE_TIMEOUT = 30.0  # WebSocket receive timeout (seconds)
@@ -269,6 +268,11 @@ Standard analysis workflow (adjust based on data type):
    f. Save the annotated data as 'adata_annotated.h5ad' in the working directory
 5. Differential expression analysis
 6. Pathway enrichment analysis
+   - When using gseapy/Enrichr, try gene set libraries in this order of preference:
+     GO_Biological_Process_2023, GO_Biological_Process_2021, GO_Biological_Process_2018
+   - If GO libraries are unavailable, fall back to: Reactome_2022, WikiPathways_2024_Human, BioPlanet_2019
+   - Always include KEGG_2021_Human as a complementary pathway source
+   - If a library call fails, log the error and try the next library in the list automatically
 7. Trajectory/Pseudotime analysis (if applicable):
    - Use scVelo for RNA velocity analysis (requires .loom files with spliced/unspliced counts)
    - Use PAGA for trajectory inference and partition-based graph abstraction

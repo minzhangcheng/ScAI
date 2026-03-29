@@ -8,7 +8,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import List, Dict, Any, Optional, AsyncGenerator, Union
+from typing import List, Dict, Any, Optional, AsyncGenerator, Union, Callable, Awaitable
 from dataclasses import dataclass, field
 from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError
 
@@ -121,6 +121,7 @@ async def retry_with_backoff(
     retry_delay_base: float = RETRY_DELAY_BASE,
     agent_name: str = "unknown",
     request_timeout: float = 300.0,
+    on_retry: Optional[Callable[[int, int, float, str], Awaitable[None]]] = None,
 ):
     """
     Execute an async function with exponential backoff retry on timeout/connection errors
@@ -132,6 +133,10 @@ async def retry_with_backoff(
         agent_name: Agent name for logging
         request_timeout: Hard per-attempt timeout in seconds (asyncio-level deadline).
             Fires even if the HTTP client hangs during response body reading.
+        on_retry: Optional async callback invoked before each retry sleep.
+            Signature: (attempt, max_retries, delay, error_type) -> None.
+            Useful for sending progress updates to WebSocket clients during
+            long retry waits.
 
     Returns:
         Result from the function
@@ -142,6 +147,14 @@ async def retry_with_backoff(
     last_exception = None
 
     json_error_count = 0
+
+    async def _notify_retry(attempt: int, delay: float, error_type: str):
+        """Fire the on_retry callback if provided, swallowing errors."""
+        if on_retry is not None:
+            try:
+                await on_retry(attempt, max_retries, delay, error_type)
+            except Exception:
+                pass  # Never let notification failure break retry logic
 
     for attempt in range(max_retries + 1):
         try:
@@ -156,6 +169,7 @@ async def retry_with_backoff(
                     f"[{agent_name}] Invalid JSON response (attempt {json_error_count}/{MAX_JSON_RETRIES}): {str(e)[:100]}. "
                     f"Retrying in {delay:.1f}s..."
                 )
+                await _notify_retry(attempt, delay, "JSONDecodeError")
                 await asyncio.sleep(delay)
             else:
                 logger.error(
@@ -172,6 +186,7 @@ async def retry_with_backoff(
                     f"[{agent_name}] Rate limited (attempt {attempt + 1}/{rate_limit_max + 1}). "
                     f"Retrying in {delay}s..."
                 )
+                await _notify_retry(attempt, delay, "RateLimitError")
                 await asyncio.sleep(delay)
             else:
                 logger.error(f"[{agent_name}] Rate limit exceeded after {rate_limit_max + 1} attempts")
@@ -183,12 +198,13 @@ async def retry_with_backoff(
                     f"[{agent_name}] Request failed (attempt {attempt + 1}/{max_retries + 1}): {type(e).__name__}: {str(e)[:100]}. "
                     f"Retrying in {delay:.1f}s..."
                 )
+                await _notify_retry(attempt, delay, type(e).__name__)
                 await asyncio.sleep(delay)
             else:
                 logger.error(
                     f"[{agent_name}] Request failed after {max_retries + 1} attempts: {type(e).__name__}: {str(e)}"
                 )
-    
+
     raise last_exception
 
 
@@ -242,6 +258,10 @@ class OpenAICompatibleClient:
         self.session_id = session_id
         self.agent_name = agent_name
         self.llm_logger = get_llm_logger()
+        # Optional callback fired before each retry sleep, used to push
+        # status updates to WebSocket so the frontend knows we're still alive.
+        # Signature: async (attempt, max_retries, delay, error_type) -> None
+        self.on_retry: Optional[Callable[[int, int, float, str], Awaitable[None]]] = None
         
         # Always create an explicit HTTP client with tuned timeouts and pool settings,
         # so both proxy and non-proxy scenarios get the same configuration.
@@ -482,6 +502,8 @@ class OpenAICompatibleClient:
                 retry_kwargs["request_timeout"] = timeout
                 if timeout > 300:
                     retry_kwargs["max_retries"] = 0  # Don't retry expensive long-running requests
+            if self.on_retry is not None:
+                retry_kwargs["on_retry"] = self.on_retry
             response = await retry_with_backoff(_make_request, **retry_kwargs)
             
             # Extract content — handles reasoning models, list content, etc.
@@ -574,9 +596,12 @@ class OpenAICompatibleClient:
             logger.info(f"[{self.agent_name}] Sending chat_with_tools request to {model}")
             
             # Use retry mechanism for the API call
+            retry_kwargs_tools: Dict[str, Any] = {"agent_name": self.agent_name}
+            if self.on_retry is not None:
+                retry_kwargs_tools["on_retry"] = self.on_retry
             response = await retry_with_backoff(
                 _make_request,
-                agent_name=self.agent_name
+                **retry_kwargs_tools
             )
             
             # Safely extract message from response
@@ -683,11 +708,16 @@ class OpenAICompatibleClient:
         self._apply_model_params(params, model, temperature, max_tokens)
 
         # Retry connection establishment (most common failure point)
+        stream_retry_kwargs: Dict[str, Any] = {
+            "max_retries": MAX_RETRIES,
+            "agent_name": self.agent_name,
+            "request_timeout": 120.0,
+        }
+        if self.on_retry is not None:
+            stream_retry_kwargs["on_retry"] = self.on_retry
         stream = await retry_with_backoff(
             lambda: self.client.chat.completions.create(**params),
-            max_retries=MAX_RETRIES,
-            agent_name=self.agent_name,
-            request_timeout=120.0,
+            **stream_retry_kwargs,
         )
 
         async for chunk in stream:
@@ -765,12 +795,14 @@ class OpenAICompatibleClient:
             logger.info(f"[{self.agent_name}] Sending vision request to {model} with {len(images)} images")
 
             # Use retry mechanism for the API call
-            retry_kwargs: Dict[str, Any] = {"agent_name": self.agent_name}
+            retry_kwargs_v: Dict[str, Any] = {"agent_name": self.agent_name}
             if request_timeout is not None:
-                retry_kwargs["request_timeout"] = request_timeout
+                retry_kwargs_v["request_timeout"] = request_timeout
+            if self.on_retry is not None:
+                retry_kwargs_v["on_retry"] = self.on_retry
             response = await retry_with_backoff(
                 _make_request,
-                **retry_kwargs
+                **retry_kwargs_v
             )
 
             # Extract content — uses shared helper for reasoning / multimodal formats

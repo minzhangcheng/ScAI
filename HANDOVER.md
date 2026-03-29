@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.2
+**Version**: 0.18.3
 **Last Updated**: 2026-03-29
 
 ## Project Overview
@@ -1447,6 +1447,20 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
+#### v0.18.3 (2026-03-29)
+
+- **PI-guided annotation** (`workflow.py`, `pi_agent.py`, `literature_agent.py`): Three new PI Agent methods — `generate_annotation_search_query()` builds an optimised PubMed query using MeSH terms and Boolean operators; `evaluate_annotation_search_results()` assesses coverage per cluster and proposes refined queries; `annotate_clusters_from_literature()` maps cluster markers to cell types using the strong PI model. `literature_agent.annotate_clusters()` gains `pi_initial_query`, `pi_evaluate_fn`, and `skip_matching` params. `workflow._annotate_clusters_step()` now runs a two-step flow: Literature executes the search, PI handles matching. Non-pubmed modes (deep_research/gemini) also skip Literature matching and delegate to PI. Fallback chain preserved: PI query failure → full Literature Agent; PI matching failure → Literature Agent fallback; both fail → `_build_fallback_annotations()` stub.
+- **Supervisor issue-type classification** (`supervisor_agent.py`): Evaluation prompt and default response dict gain `issue_type` field (`technical`/`biological`/`ambiguous`). `_evaluate_step()` adds a Layer 2 check: LLM-classified `technical` issues skip PI escalation even when no Python exception is present (e.g. blank plot from wrong column name).
+- **Supervisor-only reviewer degradation** (`workflow.py`): `_supervisor_figure_review()` detects when `pi_vision=False` and `bio_vision=False`. In that mode: score ≥ 5 auto-approves (relaxed from 7); consecutive rejections tracked in `_sup_rejections`; after 2 rejections sets `requires_reanalysis=True` to break revision loops.
+- **Supervisor feedback dedup** (`bioinformatics_agent.py`): `_recent_sup_feedback` set (reset per-round) skips re-injecting supervisor messages whose first 120 chars match a previously injected message, reducing token waste on repeated warnings.
+- **Figure revision stall detection** (`bioinformatics_agent.py`): After each PI revision, `revision_history` is checked; if `quality_score` did not improve across the last two rounds, the figure is accepted with reservations and the tool returns immediately.
+- **LLM retry WebSocket notifications** (`utils/llm_client.py`, `workflow.py`): `retry_with_backoff` gains optional `on_retry: Callable[[attempt, max_retries, delay, error_type], Awaitable[None]]` parameter, fired before each retry sleep. `OpenAICompatibleClient` exposes `self.on_retry` attribute. `workflow._install_retry_notifiers()` wires all agent LLM clients with a callback that pushes `status` messages to the WebSocket.
+- **Message buffer removal** (`main.py`, `config.py`): `_message_buffers`, `_message_buffer_lock`, and `MAX_MESSAGE_BUFFER_SIZE` removed. WebSocket observer path now calls `_serialize_realtime_messages(state.realtime_messages)` (new helper, limit=500) instead of the capped buffer. Three inline message-serialization loops replaced with the helper.
+- **Checkpoint write dedup** (`utils/checkpoint.py`): `_last_saved_step` attribute tracks the last successfully written `step_name`; `save()` returns early if the same step is re-submitted, eliminating redundant disk writes during figure-revision loops.
+- **Pathway enrichment library fallback** (`config.py`): Bioinformatics system prompt now documents preferred gseapy/Enrichr library order: `GO_Biological_Process_2023/2021/2018` → `Reactome_2022`, `WikiPathways_2024_Human`, `BioPlanet_2019` → `KEGG_2021_Human`, with instructions to catch errors and try the next library automatically.
+- **`_tracking_savefig` brace escape fix** (`bioinformatics_agent.py`): Format string `{_track_err}` changed to `{{_track_err}}` to prevent f-string interpolation inside injected code template.
+- **`_build_fallback_annotations` extracted** (`workflow.py`): Inline fallback dict construction (repeated in two except blocks) replaced with static helper `_build_fallback_annotations(cluster_markers, error)`.
+
 #### v0.18.2 (2026-03-29)
 
 - **Fine-grained session concurrency** (`main.py`): Per-session `asyncio.Lock` via `_get_session_lock()`; removed TOCTTOU window between `_active_sessions` check and modification. Session-level constants (`MAX_CACHED_SESSIONS`, `SESSION_CACHE_TTL`, etc.) extracted to `config.py`.
@@ -2016,4 +2030,4 @@ For issues, please contact the project maintainers.
 ---
 
 *Document updated: 2026-03-29*
-*Version: 0.18.2*
+*Version: 0.18.3*

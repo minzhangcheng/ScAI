@@ -276,6 +276,26 @@ class SingleCellAnalysisWorkflow:
         self._extra_llm_clients.append(client)
         return client
 
+    @staticmethod
+    def _build_fallback_annotations(
+        cluster_markers: Dict[str, Any], error: Exception
+    ) -> Dict[str, Any]:
+        """Build fallback annotations when annotation service fails."""
+        fallback_annotations = {}
+        for cid in cluster_markers:
+            fallback_annotations[str(cid)] = {
+                "cell_type": "Unknown",
+                "confidence": "low",
+                "key_markers": (
+                    list(cluster_markers[cid])[:10]
+                    if isinstance(cluster_markers[cid], list)
+                    else []
+                ),
+                "evidence": "",
+                "low_confidence_reason": f"Annotation service failed: {str(error)}",
+            }
+        return {"annotations": fallback_annotations, "tissue_summary": ""}
+
     async def initialize(self):
         """Initialize all components"""
         logger.info(f"[{self.session_id}] Initializing workflow components")
@@ -473,10 +493,46 @@ class SingleCellAnalysisWorkflow:
 
         logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model or 'DISABLED'}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model or 'DISABLED'}, Literature={literature_model}, Painter={painter_model or 'DISABLED'}, Supervisor={supervisor_model or 'DISABLED'}")
 
+        # Wire on_retry callback into every agent's LLM client so that
+        # WebSocket observers receive progress updates during retry waits
+        # instead of seeing dead silence.
+        self._install_retry_notifiers()
+
         # Build workflow graph
         self._build_graph()
         logger.info(f"[{self.session_id}] Workflow graph built")
         
+    def _install_retry_notifiers(self):
+        """Set on_retry callbacks on all agent LLM clients.
+
+        When an LLM request fails and enters retry-with-backoff, the callback
+        pushes a status message through the WebSocket so the frontend knows the
+        system is still alive (prevents disconnect due to apparent inactivity).
+        """
+        async def _on_retry(attempt: int, max_retries: int, delay: float, error_type: str):
+            try:
+                await self._send_message(
+                    "status",
+                    f"LLM request retry {attempt + 1}/{max_retries + 1} "
+                    f"({error_type}, waiting {delay:.0f}s)...",
+                    AgentType.BIOINFORMATICS,
+                )
+            except Exception:
+                pass  # Best-effort; never break retry logic
+
+        agents = [
+            self.pi_agent,
+            self.bioinformatics_agent,
+            getattr(self, 'pathology_agent', None),
+            getattr(self, 'biochemistry_agent', None),
+            getattr(self, 'literature_agent', None),
+            getattr(self, 'painter_agent', None),
+            getattr(self, 'supervisor_agent', None),
+        ]
+        for agent in agents:
+            if agent is not None and hasattr(agent, 'llm_client') and agent.llm_client is not None:
+                agent.llm_client.on_retry = _on_retry
+
     def _build_graph(self):
         """Build the LangGraph workflow with sequential execution for analysis nodes"""
 
@@ -896,38 +952,130 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 "already_confirmed": True,
             }
 
-        await self._send_message(
-            "status",
-            f"Literature-based cluster annotation: {n_clusters} clusters in {organism} {tissue}...",
-            AgentType.LITERATURE
-        )
+        # --- PI-guided annotation: PI decides search strategy, Literature executes ---
+        # PI guidance has two independent aspects:
+        # - Search guidance (query generation + evaluation): only for pubmed_llm mode
+        # - Matching guidance (cluster→cell_type): applies to ALL modes
+        lit_mode = getattr(self.literature_agent, 'literature_mode', 'pubmed_llm')
+        pi_search_guided = False
+        pi_query = None
+        pi_evaluate = None
 
-        try:
-            result = await self.literature_agent.annotate_clusters(
-                cluster_markers=cluster_markers,
-                organism=organism,
-                tissue=tissue,
-                state=state
+        # Step 0a: PI generates search query (only for pubmed_llm mode)
+        if lit_mode == "pubmed_llm":
+            try:
+                pi_query = await self.pi_agent.generate_annotation_search_query(
+                    cluster_markers=cluster_markers,
+                    organism=organism,
+                    tissue=tissue,
+                    state=state,
+                )
+                logger.info(f"[{self.session_id}] PI generated annotation query: {pi_query[:100]}")
+
+                # Build evaluation closure that captures cluster context for PI
+                async def pi_evaluate(articles, search_history):
+                    return await self.pi_agent.evaluate_annotation_search_results(
+                        cluster_markers=cluster_markers,
+                        organism=organism,
+                        tissue=tissue,
+                        articles=articles,
+                        search_history=search_history,
+                    )
+
+                pi_search_guided = True
+                await self._send_message(
+                    "status",
+                    f"PI-guided literature search for {n_clusters} clusters in {organism} {tissue}...",
+                    AgentType.PI
+                )
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] PI query generation failed, falling back to Literature Agent: {e}")
+        else:
+            logger.info(
+                f"[{self.session_id}] Literature mode is '{lit_mode}', "
+                f"PI will guide matching only (search handled by {lit_mode})"
             )
+
+        if not pi_search_guided:
+            await self._send_message(
+                "status",
+                f"Literature-based cluster annotation: {n_clusters} clusters in {organism} {tissue}...",
+                AgentType.LITERATURE
+            )
+
+        # Step 1: Literature Agent executes search
+        # - PI-guided search + skip matching (pubmed_llm with successful PI query)
+        # - Self-guided search + skip matching (non-pubmed modes, PI does matching only)
+        # - Full self-guided (fallback when PI query generation failed)
+        try:
+            if pi_search_guided:
+                result = await self.literature_agent.annotate_clusters(
+                    cluster_markers=cluster_markers,
+                    organism=organism,
+                    tissue=tissue,
+                    state=state,
+                    pi_initial_query=pi_query,
+                    pi_evaluate_fn=pi_evaluate,
+                    skip_matching=True,  # PI will handle matching in Step 2
+                )
+            elif lit_mode == "pubmed_llm":
+                # PI query generation failed — Literature Agent does everything
+                result = await self.literature_agent.annotate_clusters(
+                    cluster_markers=cluster_markers,
+                    organism=organism,
+                    tissue=tissue,
+                    state=state
+                )
+            else:
+                # Non-pubmed mode (deep_research/gemini): search self-guided, PI matches
+                result = await self.literature_agent.annotate_clusters(
+                    cluster_markers=cluster_markers,
+                    organism=organism,
+                    tissue=tissue,
+                    state=state,
+                    skip_matching=True,  # PI will handle matching in Step 2
+                )
         except Exception as e:
             error_msg = f"Cluster annotation failed: {str(e)}"
             logger.error(f"[{self.session_id}] {error_msg}")
             await self._send_message("error", error_msg, AgentType.LITERATURE)
             # Build fallback annotations so the confirmation flow still triggers
-            fallback_annotations = {}
-            for cid in cluster_markers:
-                fallback_annotations[str(cid)] = {
-                    "cell_type": "Unknown",
-                    "confidence": "low",
-                    "key_markers": (
-                        list(cluster_markers[cid])[:10]
-                        if isinstance(cluster_markers[cid], list)
-                        else []
-                    ),
-                    "evidence": "",
-                    "low_confidence_reason": f"Annotation service failed: {str(e)}",
-                }
-            result = {"annotations": fallback_annotations, "tissue_summary": ""}
+            result = self._build_fallback_annotations(cluster_markers, e)
+
+        # Step 2: PI Agent matches clusters to cell types
+        # Triggered when skip_matching was used (either PI-guided search or non-pubmed modes)
+        if result.get("status") == "literature_only":
+            literature_report = result.get("literature_report", "")
+            await self._send_message(
+                "status",
+                f"PI is matching {n_clusters} clusters to cell types using literature...",
+                AgentType.PI
+            )
+            try:
+                matching_result = await self.pi_agent.annotate_clusters_from_literature(
+                    cluster_markers=cluster_markers,
+                    organism=organism,
+                    tissue=tissue,
+                    literature_report=literature_report,
+                )
+                result["status"] = "completed"
+                result["annotations"] = matching_result.get("annotations", {})
+                result["tissue_summary"] = matching_result.get("tissue_summary", "")
+            except Exception as e:
+                logger.warning(
+                    f"[{self.session_id}] PI matching failed, falling back to Literature Agent: {e}"
+                )
+                # Fallback: re-run full annotation with Literature Agent
+                try:
+                    result = await self.literature_agent.annotate_clusters(
+                        cluster_markers=cluster_markers,
+                        organism=organism,
+                        tissue=tissue,
+                        state=state,
+                    )
+                except Exception as e2:
+                    logger.error(f"[{self.session_id}] Literature fallback also failed: {e2}")
+                    result = self._build_fallback_annotations(cluster_markers, e2)
 
         annotations = result.get("annotations", {})
         n_annotated = sum(
@@ -1369,8 +1517,24 @@ Be strict but fair. Approve if quality_score >= 7."""
         )
 
     async def _supervisor_figure_review(self, figure: PublicationFigure) -> Dict[str, Any]:
-        """Supervisor agent reviews figure using vision."""
+        """Supervisor agent reviews figure using vision.
+
+        When the supervisor is the *only* reviewer (PI and bio both lack vision),
+        it uses a relaxed approval threshold (score >= 5) instead of the normal 7,
+        since a small model shouldn't block the pipeline.  Suggestions are still
+        forwarded as non-blocking feedback.
+
+        A per-figure rejection counter (_sup_rejections) tracks consecutive
+        rejections.  After 2 consecutive rejections of the same figure, the
+        review auto-sets ``requires_reanalysis=True`` so the bioinformatics
+        agent breaks out of the revision loop instead of retrying endlessly.
+        """
         compressed = self.supervisor_agent._compress_base64_figure(figure.png_base64)
+
+        # Determine if supervisor is the sole reviewer (PI and bio both lack vision)
+        pi_vision = self._vision_settings.get('pi', True)
+        bio_vision = self._vision_settings.get('bioinformatics', True)
+        supervisor_is_sole_reviewer = not pi_vision and not bio_vision
 
         prompt = f"""## Figure Quality Review
 
@@ -1394,10 +1558,50 @@ Respond in JSON:
 ```
 Approve if quality_score >= 7."""
 
-        return await self._vision_figure_review(
+        review = await self._vision_figure_review(
             self.supervisor_agent, figure, prompt, compressed,
             temperature=0.2, label="Supervisor", max_tokens=1024,
         )
+
+        # --- Supervisor-as-sole-reviewer degradation logic ---
+        if supervisor_is_sole_reviewer and not review.get("approved", False):
+            score = review.get("quality_score", 0)
+
+            # Relaxed threshold: score >= 5 is acceptable when supervisor is the
+            # only reviewer, since the small model's judgment is less reliable.
+            if score >= 5:
+                logger.info(
+                    f"[{self.session_id}] Supervisor-only mode: accepting figure "
+                    f"{figure.name} at score={score} (relaxed threshold)"
+                )
+                review["approved"] = True
+                review["feedback"] = (
+                    f"[Accepted with relaxed threshold (supervisor-only mode, score={score}/10)] "
+                    + review.get("feedback", "")
+                )
+            else:
+                # Track consecutive rejections per figure
+                if not hasattr(self, "_sup_rejections"):
+                    self._sup_rejections: Dict[str, int] = {}
+                self._sup_rejections[figure.name] = self._sup_rejections.get(figure.name, 0) + 1
+                reject_count = self._sup_rejections[figure.name]
+
+                if reject_count >= 2:
+                    logger.warning(
+                        f"[{self.session_id}] Supervisor rejected figure {figure.name} "
+                        f"{reject_count} times consecutively, escalating to requires_reanalysis"
+                    )
+                    review["requires_reanalysis"] = True
+                    review["feedback"] = (
+                        f"[Escalated after {reject_count} consecutive rejections] "
+                        + review.get("feedback", "")
+                    )
+
+        # Reset rejection counter on approval
+        if review.get("approved", False) and hasattr(self, "_sup_rejections"):
+            self._sup_rejections.pop(figure.name, None)
+
+        return review
 
     # --- Round context helpers ---
 

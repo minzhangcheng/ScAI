@@ -119,6 +119,7 @@ Respond ONLY with a JSON object (no markdown, no explanation):
   "action": "none|warn|redirect",
   "message": "short feedback for the analyst (1-2 sentences), empty string if no issues",
   "redirect_instruction": "specific instruction if action=redirect, empty string otherwise",
+  "issue_type": "technical|biological|ambiguous",
   "is_biological_checkpoint": false,
   "pi_question": "question to ask PI if is_biological_checkpoint=true, empty string otherwise"
 }
@@ -145,6 +146,15 @@ IMPORTANT: Do NOT set is_biological_checkpoint=true for purely technical issues 
 - Missing package / ModuleNotFoundError
 - Memory errors or kernel crashes
 These are technical problems the analyst can fix on their own without PI guidance.
+
+Issue type guide (only relevant when severity is "warning" or "critical"):
+- technical: coding/programming problem that the analyst can fix alone. Examples: \
+wrong column name used for plotting (blank plot), incorrect API usage, data wrangling \
+logic error, missing data transformation step, wrong plot type parameters.
+- biological: data quality or biological interpretation issue needing PI expertise. \
+Examples: all cells filtered out (QC thresholds too strict), suspicious clustering \
+patterns, unexpected cell type proportions, batch effect concerns, annotation disagreement.
+- ambiguous: unclear whether technical or biological. Default to this when unsure.
 
 If images are provided, check for:
 - Blank or empty plots (no data visible)
@@ -318,10 +328,18 @@ class SupervisorAgent:
                     feedback_parts.append(f"Suggested action: {redirect}")
                 # Only escalate to PI for non-technical errors
                 # (PI gives biological guidance; can't help with KeyError/TypeError etc.)
+                # Layer 1: deterministic check on Python exception type
                 if self._is_technical_error(step.code_error):
                     logger.info(
                         f"[{self.session_id}] Skipping PI escalation for technical error "
-                        f"at step {step.step_number}"
+                        f"(exception type) at step {step.step_number}"
+                    )
+                # Layer 2: LLM classification catches logic errors with no exception
+                # (e.g. blank plot due to wrong column name, code ran without error)
+                elif llm_result.get("issue_type", "ambiguous") == "technical":
+                    logger.info(
+                        f"[{self.session_id}] Skipping PI escalation for technical issue "
+                        f"(LLM classified) at step {step.step_number}"
                     )
                 else:
                     pi_resp = await self._escalate_to_pi(
@@ -946,6 +964,7 @@ class SupervisorAgent:
         return {
             "severity": "none", "issues": [], "action": "none", "message": "",
             "is_biological_checkpoint": False, "pi_question": "",
+            "issue_type": "ambiguous",
         }
 
     async def _notify(self, msg_type: str, content: str):

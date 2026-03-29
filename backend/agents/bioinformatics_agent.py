@@ -320,6 +320,7 @@ class BioinformaticsAgent(BaseAgent):
         self.code_history: List[CodeExecution] = []
         self.last_result: Optional[CodeExecutionResult] = None
         self.analysis_context: Dict[str, Any] = {}
+        self._recent_sup_feedback: set = set()
 
     def _validate_code(self, code: str) -> Tuple[bool, str]:
         """
@@ -1085,7 +1086,7 @@ def _tracking_savefig(self, fname=None, *_a, **_kw):
         if fname is not None:
             _explicitly_saved_figs[self.number].append(str(fname))
     except Exception as _track_err:
-        print(f"[Auto-save] Debug: figure tracking failed: {_track_err}")
+        print(f"[Auto-save] Debug: figure tracking failed: {{_track_err}}")
     return _prev_fig_savefig(self, fname, *_a, **_kw)
 _mpl_figure.Figure.savefig = _tracking_savefig
 
@@ -1724,10 +1725,18 @@ except Exception as _autosave_block_err:
                         _step_figures       # Figures from this iteration (may be empty)
                     )
                     if supervisor_feedback:
-                        messages.append({
-                            "role": "user",
-                            "content": f"[Supervisor] {supervisor_feedback}"
-                        })
+                        # De-duplicate: skip if the same feedback (first 120 chars)
+                        # was already injected recently to avoid wasting tokens on
+                        # repeated identical warnings.
+                        sup_key = supervisor_feedback[:120]
+                        if sup_key not in self._recent_sup_feedback:
+                            messages.append({
+                                "role": "user",
+                                "content": f"[Supervisor] {supervisor_feedback}"
+                            })
+                            self._recent_sup_feedback.add(sup_key)
+                        else:
+                            logger.debug(f"[Bioinformatics] Skipping duplicate supervisor feedback: {sup_key[:60]}...")
                 except Exception as e:
                     logger.warning(f"[Bioinformatics] Supervisor callback error: {e}")
             # === END SUPERVISOR ===
@@ -1791,6 +1800,7 @@ except Exception as _autosave_block_err:
         # Reset per-run state to avoid pollution from previous rounds
         self.code_history = []
         self.analysis_context = {}
+        self._recent_sup_feedback: set = set()  # Reset supervisor dedup set per round
         self.last_result = None
 
         # For round 2+, inject previous round findings into instruction so the agent
@@ -2071,6 +2081,28 @@ except Exception as _save_err:
                 if revision_count >= 3:
                     # Out of revision budget
                     break
+
+                # Detect stalled revision loop: if the quality score hasn't
+                # improved across the last 2 rounds, further revisions are
+                # unlikely to help — accept the current version to avoid
+                # burning time and tokens.
+                if len(revision_history) >= 2:
+                    prev_score = revision_history[-2].get("quality_score")
+                    curr_score = revision_history[-1].get("quality_score")
+                    if prev_score is not None and curr_score is not None and curr_score <= prev_score:
+                        logger.warning(
+                            f"[Bioinformatics] Figure {figure_name}: quality score stalled "
+                            f"({prev_score} -> {curr_score}), accepting current version"
+                        )
+                        figure.review_status = FigureReviewStatus.ACCEPTED_WITH_RESERVATIONS
+                        self._upsert_publication_figure(state, figure)
+                        await self._notify("status", f"Figure {figure_name} accepted (revision stalled)")
+                        return (
+                            f"Figure {figure_name} accepted with reservations (quality score did not improve "
+                            f"after revision: {prev_score} -> {curr_score}).\n"
+                            f"Last feedback: {feedback}\n"
+                            f"Please move on to the next analysis step."
+                        )
 
                 # Try to revise the figure
                 await self._notify("status", f"Revising figure based on PI feedback...")

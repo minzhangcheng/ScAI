@@ -305,6 +305,214 @@ Reply in JSON format (include ALL clusters):
 
         return result
 
+    async def generate_annotation_search_query(
+        self,
+        cluster_markers: Dict[str, List[str]],
+        organism: str,
+        tissue: str,
+        state: Optional[AnalysisState] = None,
+    ) -> str:
+        """Generate an optimized PubMed search query for cell type annotation.
+
+        Uses PI's strong model to create high-quality queries with proper MeSH terms
+        and Boolean operators, instead of delegating to Literature Agent's weak model.
+        """
+        logger.info(f"[PI] Generating annotation search query for {organism} {tissue}")
+
+        # Sample top genes across clusters (same logic as literature_agent.annotate_clusters)
+        all_genes: set = set()
+        for genes in cluster_markers.values():
+            all_genes.update(genes[:5])
+        gene_sample = ", ".join(list(all_genes)[:20])
+
+        n_clusters = len(cluster_markers)
+
+        # Build cluster markers summary for context
+        markers_summary = "\n".join(
+            f"  Cluster {cid}: {', '.join(genes[:8])}"
+            for cid, genes in list(cluster_markers.items())[:15]
+        )
+
+        # Experimental background from state
+        background = ""
+        if state and state.initial_instruction:
+            background = f"\nExperimental background:\n{state.initial_instruction[:500]}"
+
+        prompt = f"""You are a principal investigator planning a PubMed literature search to identify cell types
+in a single-cell RNA sequencing dataset.
+
+Organism: {organism}
+Tissue: {tissue}
+Number of clusters: {n_clusters}
+Key marker genes across clusters: {gene_sample}
+{background}
+
+Cluster marker genes (top genes per cluster):
+{markers_summary}
+
+Generate an optimized PubMed search query to find literature about cell types in {organism} {tissue}
+that will help annotate these clusters. The query should retrieve articles about:
+- Known cell type markers and signatures in this tissue
+- Single-cell RNA sequencing studies of this tissue
+- Cell type classification and identification
+
+Rules for PubMed query:
+1. Use MeSH terms where appropriate (e.g., "Single-Cell Analysis"[MeSH], "Liver"[MeSH])
+2. Use Boolean operators (AND, OR, NOT)
+3. Keep the query focused but not overly restrictive — aim for 20-200 results
+4. Include species and tissue/organ as filters
+5. Pick 2-3 of the most informative marker genes (genes that are highly specific to known cell types)
+6. Use field tags like [Title/Abstract], [MeSH] when helpful
+7. Prefer broader terms over highly specific ones to avoid zero-result queries
+
+Return ONLY the PubMed query string, nothing else."""
+
+        response = await self.chat_without_history(prompt, temperature=0.2)
+        # Clean up response
+        query = response.strip().strip('"').strip("'").strip("`")
+        query = re.sub(r'^```\w*\n?', '', query)
+        query = re.sub(r'\n?```$', '', query)
+        return query.strip()
+
+    async def evaluate_annotation_search_results(
+        self,
+        cluster_markers: Dict[str, List[str]],
+        organism: str,
+        tissue: str,
+        articles: List[Dict[str, str]],
+        search_history: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Evaluate PubMed search results and suggest refined queries for annotation.
+
+        Uses PI's strong model to assess whether collected literature sufficiently covers
+        all cell types expected in the tissue, considering the actual cluster markers.
+        """
+        # Build cluster markers summary so PI can judge coverage per cluster
+        markers_summary = "\n".join(
+            f"  Cluster {cid}: {', '.join(genes[:8])}"
+            for cid, genes in list(cluster_markers.items())[:15]
+        )
+
+        articles_summary = "\n".join(
+            f"- [{a.get('year', 'N/A')}] {a['title']}\n  Abstract: {a.get('abstract', 'N/A')[:200]}"
+            for a in articles[:15]
+        )
+
+        previous_queries = "\n".join(
+            f"  Round {h['round']}: {h['query']}"
+            for h in search_history
+        )
+
+        prompt = f"""You are a principal investigator evaluating whether PubMed search results are sufficient
+to annotate cell clusters in a {organism} {tissue} single-cell RNA sequencing dataset.
+
+## Cluster Marker Genes (need to identify cell types for ALL clusters)
+{markers_summary}
+
+## Previous Queries (DO NOT repeat these)
+{previous_queries}
+
+## Articles Found ({len(articles)} total, showing first 15 with abstracts)
+{articles_summary}
+
+## Evaluation Criteria
+- Are there articles covering the major cell types expected in {tissue}?
+- For each cluster's marker genes, is there at least some literature support for cell type identification?
+- Are key aspects covered (cell type markers, tissue-specific signatures, scRNA-seq references)?
+- Are there at least 5 highly relevant articles?
+
+Respond in JSON format:
+{{
+    "sufficient": true or false,
+    "reasoning": "why sufficient or not — which cell types or clusters lack literature support",
+    "refined_query": "a NEW PubMed search query targeting missing cell types or markers (MUST differ from all previous queries)",
+    "missing_aspects": ["cell types or marker genes not yet covered by the literature"]
+}}
+
+IMPORTANT:
+- The refined_query MUST be a valid PubMed query using AND/OR operators
+- The refined_query MUST NOT duplicate any previous query listed above
+- Focus refined_query on the cell types or markers that are MISSING from current results
+- If the articles are mostly irrelevant, try a simpler, broader query"""
+
+        response = await self.chat_without_history(prompt, temperature=0.3)
+        result = self._safe_parse_json(response, default={})
+        if not result or "sufficient" not in result:
+            return {"sufficient": True}
+        return result
+
+    async def annotate_clusters_from_literature(
+        self,
+        cluster_markers: Dict[str, List[str]],
+        organism: str,
+        tissue: str,
+        literature_report: str,
+    ) -> Dict[str, Any]:
+        """Annotate cell clusters by matching marker genes to literature-derived signatures.
+
+        Uses PI's strong model for the critical cluster→cell_type matching step,
+        instead of delegating to Literature Agent's weak model.
+        """
+        logger.info(f"[PI] Annotating {len(cluster_markers)} clusters from literature for {organism} {tissue}")
+
+        tissue_part = f" {tissue}" if tissue else ""
+        markers_text = "\n".join(
+            f"Cluster {cid}: {', '.join(genes[:15])}"
+            for cid, genes in cluster_markers.items()
+        )
+
+        prompt = f"""Based on the following literature review about cell types in {organism}{tissue_part}, \
+annotate each cell cluster by matching its marker genes to known cell type signatures.
+
+=== LITERATURE REVIEW ===
+{literature_report[:12000]}
+
+=== CLUSTER MARKER GENES (from sc.tl.rank_genes_groups) ===
+{markers_text}
+
+For each cluster, provide:
+1. The most likely cell type identity
+2. Possible subtypes if applicable
+3. Key marker genes that support this annotation (from the cluster's markers)
+4. Confidence level (high/medium/low) based on how well markers match literature
+5. Brief evidence/reasoning citing the literature
+
+IMPORTANT:
+- Be specific about cell types (e.g., "CD8+ cytotoxic T cells" not just "T cells")
+- If a cluster has ambiguous markers, list the top 2 candidates
+- Consider the tissue context ({tissue}) when making assignments
+- Use "Unknown" only if markers truly don't match any known cell type
+
+Return a JSON object with this EXACT structure:
+{{
+    "annotations": {{
+        "<cluster_id>": {{
+            "cell_type": "Primary cell type name",
+            "subtypes": ["possible subtype 1", "possible subtype 2"],
+            "key_markers": ["gene1", "gene2", "gene3"],
+            "confidence": "high|medium|low",
+            "evidence": "Brief reasoning with literature support"
+        }}
+    }},
+    "tissue_summary": "Brief summary of expected cell types in this tissue"
+}}
+"""
+
+        response = await self.chat_without_history(prompt, temperature=0.2)
+        parsed = self._safe_parse_json(response, default={})
+
+        if parsed and "annotations" in parsed:
+            return parsed
+        else:
+            logger.warning("[PI] Failed to parse annotation matching JSON")
+            return {
+                "annotations": {
+                    "error": "Failed to parse structured annotations",
+                    "raw_response": response[:2000]
+                },
+                "tissue_summary": ""
+            }
+
     async def generate_exploration_report(
         self,
         state: AnalysisState,

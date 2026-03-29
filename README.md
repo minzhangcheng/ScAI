@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.2
+**Version**: 0.18.3
 
 ## Installation
 
@@ -340,6 +340,18 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.3 (2026-03-29)
+
+- **Improvement: PI-guided cluster annotation** — PI Agent now generates the PubMed search query and evaluates search results for cell-type annotation, leveraging the stronger PI model instead of the Literature Agent's weaker LLM. In the final matching step, PI also maps cluster markers to cell types directly, replacing the Literature Agent's LLM matching.
+- **Improvement: Supervisor LLM issue-type classification** — Supervisor prompt now returns an `issue_type` field (`technical`/`biological`/`ambiguous`). Technical issues (e.g. blank plot from wrong column name, logic errors with no exception) are skipped for PI escalation without relying solely on Python exception inspection.
+- **Improvement: Supervisor-as-sole-reviewer degradation** — When PI and bioinformatics agents both lack vision, the supervisor uses a relaxed approval threshold (score ≥ 5 instead of 7). After 2 consecutive rejections of the same figure, `requires_reanalysis` is set to break infinite revision loops.
+- **Improvement: Supervisor feedback deduplication** — Bioinformatics Agent skips re-injecting identical supervisor feedback (same first 120 chars) within a round, reducing wasted tokens on repeated warnings.
+- **Improvement: Figure revision stall detection** — If the PI quality score does not improve across two consecutive revisions, the figure is accepted with reservations and the agent moves on, preventing infinite revision loops.
+- **Improvement: LLM retry notifications via WebSocket** — `retry_with_backoff` now accepts an `on_retry` callback; all agent LLM clients are wired with a notifier that pushes status messages to the WebSocket during retry waits, preventing apparent dead silence.
+- **Improvement: Message buffer replaced with realtime_messages** — The in-memory `_message_buffers` dict (capped at 100 entries) is removed; WebSocket observers now receive the full `state.realtime_messages` history (up to 500 entries) via `_serialize_realtime_messages()`, eliminating the separate buffer and its lock.
+- **Improvement: Checkpoint write deduplication** — `CheckpointManager` tracks the last saved `step_name` and skips redundant writes, reducing I/O during figure-revision loops that revisit the same step.
+- **Improvement: Pathway enrichment library fallback order** — `config.py` now documents the preferred gene set library sequence for gseapy/Enrichr (GO_Biological_Process_2023 → Reactome_2022 → KEGG_2021_Human), with instructions to try each in order on failure.
 
 ### v0.18.2 (2026-03-29)
 
