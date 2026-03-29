@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAppStore, Message, Session, AgentType, RoundResult, FigureReviewStatus } from '../stores/appStore'
 import { devLog } from '../utils/logger'
+import { downloadBlob } from '../utils/download'
 import type {
   SessionLoadResponse,
   SessionInfoUpdateResponse,
@@ -17,6 +18,7 @@ import type {
 } from '../types'
 
 const API_BASE = '/api'
+export const WS_CONNECT_TIMEOUT_MS = 10_000
 
 // Generate UUID using crypto API with fallback for non-HTTPS contexts
 export function generateId(): string {
@@ -641,8 +643,7 @@ export function useSession() {
 
   const exportState = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
-    
-    // Download as tar.gz file (backend GET endpoint returns .tar.gz)
+
     const response = await fetch(`${API_BASE}/session/${currentSession.id}/export`, {
       method: 'GET'
     })
@@ -651,16 +652,8 @@ export function useSession() {
       throw new Error('Failed to export state')
     }
 
-    // Create blob and download
     const blob = await response.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${currentSession.id}_export.tar.gz`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+    downloadBlob(blob, `${currentSession.id}_export.tar.gz`)
   }, [currentSession])
   
   const getReport = useCallback(async () => {
@@ -740,7 +733,17 @@ export function useWebSocket() {
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 
+    // Connection timeout: close and retry if onopen doesn't fire within 10 seconds
+    const connectTimeout = setTimeout(() => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        devLog('WebSocket: Connection timeout (10s), closing')
+        connectingRef.current = false
+        ws.close()
+      }
+    }, WS_CONNECT_TIMEOUT_MS)
+
     ws.onopen = async () => {
+      clearTimeout(connectTimeout)
       connectingRef.current = false
       setConnected(true)
       setWsConnected(true)
@@ -781,31 +784,22 @@ export function useWebSocket() {
                 timestamp: msg.timestamp || new Date().toISOString(),
               }))
 
-              // Create composite key for robust deduplication (handles ID regeneration on server restart)
-              // Include content fingerprint to avoid collision when same agent/type/timestamp
-              const createMsgKey = (m: Message) => {
-                const contentStr = typeof m.content === 'string'
-                  ? m.content.slice(0, 200)
-                  : JSON.stringify(m.content ?? null).slice(0, 200)
-                return `${m.agent || 'system'}-${m.type}-${m.timestamp}-${contentStr}`
-              }
-              const serverMsgKeySet = new Set(serverMessages.map(createMsgKey))
+              // Deduplicate using server-assigned unique IDs
               const serverMsgIdSet = new Set(serverMessages.map(m => m.id))
 
-              // Filter local messages that don't exist on server (by composite key OR id)
+              // Filter local messages that don't exist on server (by id)
               const localOnlyMessages = localMessages.filter(m =>
-                !serverMsgIdSet.has(m.id) && !serverMsgKeySet.has(createMsgKey(m))
+                !serverMsgIdSet.has(m.id)
               )
 
               // Read latest messages from store to avoid overwriting messages
               // that arrived via WebSocket during the async fetch.
               const latestMessages = useAppStore.getState().messages
-              const latestMsgKeySet = new Set(latestMessages.map(createMsgKey))
               const latestMsgIdSet = new Set(latestMessages.map((m: Message) => m.id))
 
               // Find server messages not already present locally
               const newFromServer = serverMessages.filter((m: Message) =>
-                !latestMsgIdSet.has(m.id) && !latestMsgKeySet.has(createMsgKey(m))
+                !latestMsgIdSet.has(m.id)
               )
 
               if (newFromServer.length > 0) {
@@ -969,7 +963,7 @@ export function useWebSocket() {
               .then((res) => {
                 useAppStore.getState().setChatMessages(res.messages || [])
               })
-              .catch(() => {})
+              .catch((e) => { devLog('Chat refresh after delegation failed:', e) })
           }
           useAppStore.getState().setChatLoading(false)
           useAppStore.getState().setChatDelegationActive(false)
@@ -1101,11 +1095,13 @@ export function useWebSocket() {
     }
     
     ws.onerror = (error) => {
+      clearTimeout(connectTimeout)
       connectingRef.current = false
       console.error('WebSocket: Error:', error)
     }
-    
+
     ws.onclose = (event) => {
+      clearTimeout(connectTimeout)
       connectingRef.current = false
       setConnected(false)
       setWsConnected(false)

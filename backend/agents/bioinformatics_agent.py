@@ -33,6 +33,15 @@ from ..models.schemas import (
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall
 from ..utils.error_parsing import strip_ansi
 
+# Pre-compiled pattern for detecting manual cell_type assignment in code
+_CELL_TYPE_ASSIGN_RE = re.compile(r"""\.obs\[['"]cell_type['"]\]\s*=""")
+
+# Reusable sandbox template snippet: safely close all matplotlib figures
+_TPL_SAFE_CLOSE_ALL = """\
+try:
+    plt.close('all')
+except Exception:
+    pass"""
 
 # Define the tools for bioinformatics agent
 TOOLS = [
@@ -681,6 +690,9 @@ WORKFLOW GUIDELINES:
   * Call annotate_clusters ONCE with all cluster markers, tissue type, and organism
   * Apply the returned mapping to adata.obs['cell_type']
   * This is far more efficient than asking about each cluster separately
+  * NEVER manually assign cell types via execute_code (e.g., adata.obs['cell_type'] = ...).
+    Cell type assignment MUST go through annotate_clusters, which triggers user review.
+    If annotate_clusters fails, retry it or consult_pi — do NOT work around it with code.
 - For OTHER BIOLOGICAL DECISIONS, use consult_pi:
   * Whether batch correction is needed and which method to use
   * Which clusters show interesting changes?
@@ -1010,6 +1022,32 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         ))
                         continue
 
+                    # Guard: block manual cell_type assignment when annotation
+                    # has not been completed through the annotate_clusters workflow
+                    if (
+                        state.analysis_phase == "exploration"
+                        and not annotation_completed
+                        and _CELL_TYPE_ASSIGN_RE.search(code)
+                    ):
+                        guard_msg = (
+                            "Manual assignment to adata.obs['cell_type'] is not allowed "
+                            "before cell type annotations have been confirmed through "
+                            "the annotate_clusters workflow. Please call annotate_clusters first."
+                        )
+                        logger.warning(f"[Bioinformatics] Blocked manual cell_type assignment: annotation not confirmed")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": f"Execution blocked: {guard_msg}"
+                        })
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="execute_code",
+                            agent_reasoning=agent_reasoning,
+                            code=code, code_error=guard_msg,
+                            code_description=description, code_step_type=step_type,
+                        ))
+                        continue
+
                     await self._notify("status", f"[{step_type.upper()}] {description}")
                     await self._notify("code", code)
 
@@ -1026,7 +1064,7 @@ from pathlib import Path
 from IPython.display import display
 
 # Close any stale figures from previous executions to prevent poisoning
-plt.close('all')
+{_TPL_SAFE_CLOSE_ALL}
 
 # Set PDF vectorized fonts
 plt.rcParams.update({{
@@ -1042,9 +1080,12 @@ _figures_dir.mkdir(exist_ok=True)
 _explicitly_saved_figs = {{}}
 _prev_fig_savefig = _mpl_figure.Figure.savefig
 def _tracking_savefig(self, fname=None, *_a, **_kw):
-    _explicitly_saved_figs.setdefault(self.number, [])
-    if fname is not None:
-        _explicitly_saved_figs[self.number].append(str(fname))
+    try:
+        _explicitly_saved_figs.setdefault(self.number, [])
+        if fname is not None:
+            _explicitly_saved_figs[self.number].append(str(fname))
+    except Exception as _track_err:
+        print(f"[Auto-save] Debug: figure tracking failed: {_track_err}")
     return _prev_fig_savefig(self, fname, *_a, **_kw)
 _mpl_figure.Figure.savefig = _tracking_savefig
 
@@ -1063,61 +1104,64 @@ finally:
     _mpl_figure.Figure.savefig = _prev_fig_savefig
 
 # Detect and save all active figures
-_fig_nums = plt.get_fignums()
-for _fig_num in _fig_nums:
-    try:
-        _fig = plt.figure(_fig_num)
-
-        # Display figure to trigger capture via display_data message (always)
-        display(_fig)
-
-        _fig_id = f"fig_{timestamp}_{{_fig_num}}"
-
-        # For figures already saved by user code, skip JPG but supplement PDF if missing
-        if _fig_num in _explicitly_saved_figs:
-            _saved_paths = _explicitly_saved_figs[_fig_num]
-            # Emit [Auto-saved] for explicitly saved images so they get tracked
-            for _sp in _saved_paths:
-                _sp_lower = _sp.lower()
-                if _sp_lower.endswith(('.jpg', '.jpeg')):
-                    print(f"[Auto-saved] JPG: {{_sp}}")
-                elif _sp_lower.endswith('.png'):
-                    print(f"[Auto-saved] PNG: {{_sp}}")
-            _has_pdf = any(_p.lower().endswith('.pdf') for _p in _saved_paths)
-            if not _has_pdf and _saved_paths:
-                # Derive PDF path from the first saved image path
-                _src_path = Path(_saved_paths[0])
-                _pdf_supplement = _src_path.with_suffix('.pdf')
-                try:
-                    _fig.savefig(str(_pdf_supplement), dpi=300, bbox_inches='tight', format='pdf')
-                    print(f"[Auto-save] Supplemented PDF: {{_pdf_supplement}}")
-                except Exception as _pdf_err:
-                    print(f"[Auto-save] Warning: could not supplement PDF: {{_pdf_err}}")
-            else:
-                print(f"[Auto-save] Skipped figure {{_fig_num}} (already saved by code with PDF)")
-            continue
-
-        _jpg_path = _figures_dir / f"{{_fig_id}}.jpg"
-        _pdf_path = _figures_dir / f"{{_fig_id}}.pdf"
-
-        # Save JPG (for web display — smaller file size than PNG)
-        _fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-                     format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-
-        # Save PDF (vector format for publication quality download)
-        _fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-
-        print(f"[Auto-saved] JPG: {{_jpg_path}}")
-        print(f"[Auto-saved] PDF: {{_pdf_path}}")
-    except Exception as _save_err:
-        print(f"[Auto-save] Warning: could not save figure {{_fig_num}}: {{_save_err}}")
+try:
+    _fig_nums = plt.get_fignums()
+    for _fig_num in _fig_nums:
         try:
-            plt.close(_fig_num)
-        except Exception:
-            pass
+            _fig = plt.figure(_fig_num)
+
+            # Display figure to trigger capture via display_data message (always)
+            display(_fig)
+
+            _fig_id = f"fig_{timestamp}_{{_fig_num}}"
+
+            # For figures already saved by user code, skip JPG but supplement PDF if missing
+            if _fig_num in _explicitly_saved_figs:
+                _saved_paths = _explicitly_saved_figs[_fig_num]
+                # Emit [Auto-saved] for explicitly saved images so they get tracked
+                for _sp in _saved_paths:
+                    _sp_lower = _sp.lower()
+                    if _sp_lower.endswith(('.jpg', '.jpeg')):
+                        print(f"[Auto-saved] JPG: {{_sp}}")
+                    elif _sp_lower.endswith('.png'):
+                        print(f"[Auto-saved] PNG: {{_sp}}")
+                _has_pdf = any(_p.lower().endswith('.pdf') for _p in _saved_paths)
+                if not _has_pdf and _saved_paths:
+                    # Derive PDF path from the first saved image path
+                    _src_path = Path(_saved_paths[0])
+                    _pdf_supplement = _src_path.with_suffix('.pdf')
+                    try:
+                        _fig.savefig(str(_pdf_supplement), dpi=300, bbox_inches='tight', format='pdf')
+                        print(f"[Auto-save] Supplemented PDF: {{_pdf_supplement}}")
+                    except Exception as _pdf_err:
+                        print(f"[Auto-save] Warning: could not supplement PDF: {{_pdf_err}}")
+                else:
+                    print(f"[Auto-save] Skipped figure {{_fig_num}} (already saved by code with PDF)")
+                continue
+
+            _jpg_path = _figures_dir / f"{{_fig_id}}.jpg"
+            _pdf_path = _figures_dir / f"{{_fig_id}}.pdf"
+
+            # Save JPG (for web display — smaller file size than PNG)
+            _fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                         format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+
+            # Save PDF (vector format for publication quality download)
+            _fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+
+            print(f"[Auto-saved] JPG: {{_jpg_path}}")
+            print(f"[Auto-saved] PDF: {{_pdf_path}}")
+        except Exception as _save_err:
+            print(f"[Auto-save] Warning: could not save figure {{_fig_num}}: {{_save_err}}")
+            try:
+                plt.close(_fig_num)
+            except Exception as _close_err:
+                print(f"[Auto-save] Debug: plt.close({{_fig_num}}) failed: {{_close_err}}")
+except Exception as _autosave_block_err:
+    print(f"[Auto-save] Warning: figure auto-save failed: {{_autosave_block_err}}")
 
 # Close all figures to free memory
-plt.close('all')
+{_TPL_SAFE_CLOSE_ALL}
 '''
 
                     result = await self.sandbox.execute(wrapped_code)
@@ -1373,6 +1417,28 @@ plt.close('all')
                             "annotations": {},
                             "error": "Cluster annotation service not available. Use consult_pi instead."
                         }
+
+                    # If annotation service returned an error, inform the agent
+                    # and do NOT set annotation_completed (so report_findings gate blocks)
+                    if annotation_result.get("status") == "error":
+                        error_detail = annotation_result.get("error", "Unknown annotation error")
+                        tool_result = (
+                            f"[ANNOTATION FAILED] {error_detail}\n"
+                            "Do NOT manually assign cell types via execute_code. "
+                            "Cell type annotation MUST go through annotate_clusters for user review. "
+                            "You may retry annotate_clusters or consult_pi for guidance."
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_result
+                        })
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="annotate_clusters",
+                            agent_reasoning=agent_reasoning,
+                            annotation_result_summary=tool_result,
+                        ))
+                        continue
 
                     # Format result for the agent to use in code
                     annotations = annotation_result.get("annotations", {})
@@ -1852,7 +1918,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Close any stale figures from previous executions to prevent poisoning
-plt.close('all')
+{_TPL_SAFE_CLOSE_ALL}
 
 # Set publication-quality parameters
 plt.rcParams.update({{
@@ -1888,11 +1954,11 @@ finally:
     plt.show = _orig_show
 
 # Get current figure and save
-fig = plt.gcf()
-_jpg_path = {png_path_repr}
-_pdf_path = {pdf_path_repr}
-
 try:
+    fig = plt.gcf()
+    _jpg_path = {png_path_repr}
+    _pdf_path = {pdf_path_repr}
+
     fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
                 format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
     print(f"Saved JPG: {{_jpg_path}}")
@@ -1901,7 +1967,7 @@ try:
 except Exception as _save_err:
     print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
 
-plt.close('all')
+{_TPL_SAFE_CLOSE_ALL}
 '''
 
         # Execute the code
@@ -2038,7 +2104,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Close any stale figures from previous executions to prevent poisoning
-plt.close('all')
+{_TPL_SAFE_CLOSE_ALL}
 
 plt.rcParams.update({{
     'figure.dpi': 300,
@@ -2071,18 +2137,18 @@ finally:
     plt.close = _orig_close
     plt.show = _orig_show
 
-fig = plt.gcf()
-_jpg_path = {png_path_repr}
-_pdf_path = {pdf_path_repr}
-
 try:
+    fig = plt.gcf()
+    _jpg_path = {png_path_repr}
+    _pdf_path = {pdf_path_repr}
+
     fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
                 format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
     fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
 except Exception as _save_err:
     print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
 
-plt.close('all')
+{_TPL_SAFE_CLOSE_ALL}
 '''
                 result = await self.sandbox.execute(revised_wrapped)
 
@@ -2118,7 +2184,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Close any stale figures from previous executions to prevent poisoning
-plt.close('all')
+{_TPL_SAFE_CLOSE_ALL}
 
 plt.rcParams.update({{
     'figure.dpi': 300,
@@ -2149,19 +2215,19 @@ finally:
     plt.close = _orig_close
     plt.show = _orig_show
 
-fig = plt.gcf()
-
-_jpg_path = {png_path_repr}
-_pdf_path = {pdf_path_repr}
-
 try:
+    fig = plt.gcf()
+
+    _jpg_path = {png_path_repr}
+    _pdf_path = {pdf_path_repr}
+
     fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
                 format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
     fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
 except Exception as _save_err:
     print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
 
-plt.close('all')
+{_TPL_SAFE_CLOSE_ALL}
 '''
                             retry_result = await self.sandbox.execute(retry_wrapped)
                             if not retry_result.error and jpg_path.exists() and jpg_path.stat().st_size >= 2000:

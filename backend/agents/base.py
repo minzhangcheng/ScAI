@@ -287,7 +287,7 @@ class BaseAgent(ABC):
         Returns:
             Dict with results
         """
-        pass
+        raise NotImplementedError("Subclasses must implement process()")
     
     def create_message(
         self,

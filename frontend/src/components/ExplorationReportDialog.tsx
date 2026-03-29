@@ -469,7 +469,7 @@ export function ExplorationReportDialog({
                 href={detailedReportUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-sm text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                className="text-sm text-accent-600 hover:text-accent-800 flex items-center gap-1"
               >
                 <ExternalLink className="w-3.5 h-3.5" />
                 {isZh ? '查看详细报告' : 'View Detailed Report'}

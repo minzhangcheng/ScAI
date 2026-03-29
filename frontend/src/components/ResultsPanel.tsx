@@ -3,6 +3,7 @@ import { useAppStore, PublicationFigure, PublicationTable, GraphicAbstract as Gr
 import { useSession } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import { FigureGallery, IntegratedReport, GraphicAbstract, DownloadButtons } from './analysis'
+import { downloadBlob } from '../utils/download'
 import {
   FileText,
   Download,
@@ -14,13 +15,33 @@ import {
   BookOpen
 } from 'lucide-react'
 
+// Typed content interfaces for message payloads (avoid `as any`)
+interface FigureReviewContent {
+  figure?: Record<string, unknown>
+}
+
+interface IntegratedReportContent {
+  report?: string
+  figures?: Record<string, unknown>[]
+  tables?: PublicationTable[]
+}
+
+interface GraphicAbstractContent {
+  id?: string
+  prompt?: string
+  image_base64?: string
+  imageBase64?: string
+  created_at?: string
+  createdAt?: string
+}
+
 export function ResultsPanel() {
   const { currentSession, messages, language } = useAppStore()
   const { getReport } = useSession()
   const { t } = useTranslation(language)
   const [report, setReport] = useState<any>(null)
   const [expandedRounds, setExpandedRounds] = useState<Set<number>>(new Set())
-  const [_loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(false)
 
   // Publication outputs state
   const [publicationFigures, setPublicationFigures] = useState<PublicationFigure[]>([])
@@ -79,7 +100,7 @@ export function ResultsPanel() {
     // Process messages for real-time updates
     for (const msg of messages) {
       if (msg.type === 'figure_review' || msg.type === 'figure_approved') {
-        const content = msg.content as any
+        const content = msg.content as FigureReviewContent
         if (content?.figure) {
           const fig = transformFigure(content.figure)
           setPublicationFigures(prev => {
@@ -92,13 +113,14 @@ export function ResultsPanel() {
         }
       }
       if (msg.type === 'integrated_report') {
-        const content = msg.content as any
+        const content = msg.content as IntegratedReportContent
         if (content?.report) {
           setIntegratedReport(content.report)
         }
         if (content?.figures) {
+          const figures = content.figures
           setPublicationFigures(prev => {
-            const newFigs = content.figures.map(transformFigure)
+            const newFigs = figures.map(transformFigure)
             // Preserve pngBase64 from existing figures (integrated_report message may have
             // been stripped of base64 by localStorage persistence)
             return newFigs.map((fig: PublicationFigure) => {
@@ -115,12 +137,12 @@ export function ResultsPanel() {
         }
       }
       if (msg.type === 'graphic_abstract') {
-        const content = msg.content as any
+        const content = msg.content as GraphicAbstractContent
         if (content?.image_base64 || content?.imageBase64) {
           setGraphicAbstract({
             id: content.id || 'ga-1',
             prompt: content.prompt || '',
-            imageBase64: content.image_base64 || content.imageBase64,
+            imageBase64: content.image_base64 || content.imageBase64 || '',
             createdAt: content.created_at || content.createdAt || new Date().toISOString()
           })
         }
@@ -140,17 +162,10 @@ export function ResultsPanel() {
 
   const downloadReport = () => {
     if (!report?.final_summary) return
-    
+
     const content = `# ${currentSession?.name}\n\n${report.final_summary}`
     const blob = new Blob([content], { type: 'text/markdown' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${currentSession?.name || 'report'}.md`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+    downloadBlob(blob, `${currentSession?.name || 'report'}.md`)
   }
 
   if (!currentSession) {
@@ -202,7 +217,7 @@ export function ResultsPanel() {
               href={currentSession.explorationReportUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-700 rounded-xl font-medium hover:bg-indigo-100 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-accent-50 text-accent-700 rounded-xl font-medium hover:bg-accent-100 transition-colors"
             >
               <FileText className="w-4 h-4" />
               {language === 'zh' ? '查看探索报告' : 'View Exploration Report'}
@@ -220,6 +235,14 @@ export function ResultsPanel() {
           )}
         </div>
       </div>
+      {/* Loading indicator */}
+      {loading && (
+        <div className="flex items-center justify-center py-4">
+          <div className="w-5 h-5 border-2 border-accent-600 border-t-transparent rounded-full animate-spin" />
+          <span className="ml-2 text-sm text-slate-500">{language === 'zh' ? '加载报告中...' : 'Loading report...'}</span>
+        </div>
+      )}
+
       {/* Publication Outputs */}
       {(currentSession.status === 'completed' || publicationFigures.length > 0) && (
         <div className="space-y-4">

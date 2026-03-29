@@ -65,8 +65,10 @@ def _detect_image_mime_type(img_b64: str) -> str:
 
 
 # Retry configuration
-MAX_RETRIES = 3
+MAX_RETRIES = 4
 RETRY_DELAY_BASE = 2.0  # Base delay in seconds, will be multiplied by attempt number
+# Rate limit (429) uses fixed escalating delays to handle TPM limits
+RATE_LIMIT_DELAYS = [5, 10, 20, 40]  # seconds between retries
 # Note: Only retry transient errors. Non-transient errors like AuthenticationError,
 # BadRequestError, NotFoundError etc. should NOT be retried.
 RETRYABLE_EXCEPTIONS = (
@@ -81,24 +83,36 @@ RETRYABLE_EXCEPTIONS = (
 # a persistent issue rather than a transient network problem.
 MAX_JSON_RETRIES = 2
 
-# Models that do not support the temperature parameter (reasoning models)
-# Match by model name segments after provider prefix (e.g., "openai/o4-mini" -> "o4-mini")
-_NO_TEMPERATURE_PATTERNS = ("o1", "o3", "o4")
+# OpenAI reasoning models that do NOT support the temperature parameter at all.
+# Matched by exact model name segment (e.g., "openai/o4-mini" -> "o4-mini").
+_OPENAI_REASONING_PREFIXES = ("o1", "o3", "o4")
+
+# Gemini 3.x thinking models: temperature is accepted but Google strongly recommends
+# keeping it at 1.0. Lower values cause looping or degraded output quality.
+_GEMINI3_PREFIX = "gemini-3"
 
 
-def _model_supports_temperature(model: str) -> bool:
-    """Check if a model supports the temperature parameter.
+def _extract_model_name(model: str) -> str:
+    """Extract model name after provider prefix (e.g. 'google/gemini-3.1-pro' -> 'gemini-3.1-pro')."""
+    return model.split("/")[-1] if "/" in model else model
 
-    Reasoning models (o1, o3, o4 series) do not support temperature.
-    Model string may have provider prefix like 'openai/o4-mini-deep-research'.
+
+def _get_effective_temperature(model: str, temperature: float) -> Optional[float]:
+    """Determine the effective temperature for a model.
+
+    - OpenAI o-series reasoning models: returns None (parameter not supported)
+    - Gemini 3.x thinking models: returns 1.0 (Google recommends default for thinking)
+    - All other models: returns the requested temperature as-is
     """
-    # Extract model name after provider prefix
-    model_name = model.split("/")[-1] if "/" in model else model
-    # Check if model name starts with any no-temperature pattern
-    for pattern in _NO_TEMPERATURE_PATTERNS:
-        if model_name.startswith(pattern):
-            return False
-    return True
+    model_name = _extract_model_name(model)
+    # OpenAI reasoning models: temperature not supported at all
+    for prefix in _OPENAI_REASONING_PREFIXES:
+        if model_name == prefix or model_name.startswith(prefix + "-"):
+            return None
+    # Gemini 3.x thinking models: force temperature=1.0
+    if model_name.startswith(_GEMINI3_PREFIX):
+        return 1.0
+    return temperature
 
 
 async def retry_with_backoff(
@@ -151,15 +165,16 @@ async def retry_with_backoff(
         except RateLimitError as e:
             # RateLimitError needs special handling with longer backoff delays.
             last_exception = e
-            if attempt < max_retries:
-                delay = retry_delay_base * (attempt + 1) * 2  # Double the delay for rate limits
+            rate_limit_max = min(max_retries, len(RATE_LIMIT_DELAYS))
+            if attempt < rate_limit_max:
+                delay = RATE_LIMIT_DELAYS[attempt]
                 logger.warning(
-                    f"[{agent_name}] Rate limited (attempt {attempt + 1}/{max_retries + 1}). "
-                    f"Retrying in {delay:.1f}s..."
+                    f"[{agent_name}] Rate limited (attempt {attempt + 1}/{rate_limit_max + 1}). "
+                    f"Retrying in {delay}s..."
                 )
                 await asyncio.sleep(delay)
             else:
-                logger.error(f"[{agent_name}] Rate limit exceeded after {max_retries + 1} attempts")
+                logger.error(f"[{agent_name}] Rate limit exceeded after {rate_limit_max + 1} attempts")
         except RETRYABLE_EXCEPTIONS as e:
             last_exception = e
             if attempt < max_retries:
@@ -256,9 +271,36 @@ class OpenAICompatibleClient:
         self.agent_name = agent_name
         
     async def close(self):
-        await self.client.close()
-        await self.http_client.aclose()
-        
+        try:
+            await self.client.close()
+        finally:
+            await self.http_client.aclose()
+
+    @staticmethod
+    def _extract_usage(response) -> Dict[str, int]:
+        """Extract usage dict from an LLM response."""
+        if response and response.usage:
+            return {
+                "prompt_tokens": response.usage.prompt_tokens or 0,
+                "completion_tokens": response.usage.completion_tokens or 0,
+                "total_tokens": response.usage.total_tokens or 0,
+            }
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def _apply_model_params(self, params: Dict[str, Any], model: str, temperature: float, max_tokens: Optional[int]) -> None:
+        """Apply temperature and max_tokens to request params based on model type."""
+        effective_temp = _get_effective_temperature(model, temperature)
+        if effective_temp is not None:
+            params["temperature"] = effective_temp
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
+        else:
+            # OpenAI o-series: no temperature, use max_completion_tokens
+            if max_tokens is not None:
+                params["max_completion_tokens"] = max_tokens
+        if effective_temp != temperature and effective_temp is not None:
+            logger.info(f"[{self.agent_name}] Temperature overridden: {temperature} -> {effective_temp} for {model}")
+
     def _extract_content_from_message(self, message, response=None) -> str:
         """Extract text content from a chat completion message, handling multiple formats.
 
@@ -426,14 +468,7 @@ class OpenAICompatibleClient:
                 messages=messages,
                 stream=stream,
             )
-            # o-series reasoning models use max_completion_tokens, not max_tokens
-            if _model_supports_temperature(model):
-                params["temperature"] = temperature
-                if max_tokens is not None:
-                    params["max_tokens"] = max_tokens
-            else:
-                if max_tokens is not None:
-                    params["max_completion_tokens"] = max_tokens
+            self._apply_model_params(params, model, temperature, max_tokens)
             if timeout is not None:
                 params["timeout"] = timeout
             return await self.client.chat.completions.create(**params)
@@ -454,15 +489,11 @@ class OpenAICompatibleClient:
             if response and response.choices and len(response.choices) > 0:
                 message = response.choices[0].message
                 content = self._extract_content_from_message(message, response)
-            
+
             result = LLMResponse(
                 content=content,
                 model=response.model if response else model,
-                usage={
-                    "prompt_tokens": response.usage.prompt_tokens if response and response.usage else 0,
-                    "completion_tokens": response.usage.completion_tokens if response and response.usage else 0,
-                    "total_tokens": response.usage.total_tokens if response and response.usage else 0
-                },
+                usage=self._extract_usage(response),
                 raw_response=response
             )
             
@@ -536,12 +567,7 @@ class OpenAICompatibleClient:
                 tools=tools,
                 tool_choice=tool_choice,
             )
-            # o-series reasoning models use max_completion_tokens, not max_tokens
-            if _model_supports_temperature(model):
-                params["temperature"] = temperature
-                params["max_tokens"] = max_tokens
-            else:
-                params["max_completion_tokens"] = max_tokens
+            self._apply_model_params(params, model, temperature, max_tokens)
             return await self.client.chat.completions.create(**params)
 
         try:
@@ -601,11 +627,7 @@ class OpenAICompatibleClient:
                 content=content,
                 tool_calls=tool_calls,
                 model=response.model if response else model,
-                usage={
-                    "prompt_tokens": response.usage.prompt_tokens if response and response.usage else 0,
-                    "completion_tokens": response.usage.completion_tokens if response and response.usage else 0,
-                    "total_tokens": response.usage.total_tokens if response and response.usage else 0
-                },
+                usage=self._extract_usage(response),
                 raw_response=response,
                 raw_assistant_message=raw_assistant_message
             )
@@ -658,12 +680,7 @@ class OpenAICompatibleClient:
             messages=messages,
             stream=True,
         )
-        # o-series reasoning models use max_completion_tokens, not max_tokens
-        if _model_supports_temperature(model):
-            params["temperature"] = temperature
-            params["max_tokens"] = max_tokens
-        else:
-            params["max_completion_tokens"] = max_tokens
+        self._apply_model_params(params, model, temperature, max_tokens)
 
         # Retry connection establishment (most common failure point)
         stream = await retry_with_backoff(
@@ -741,12 +758,7 @@ class OpenAICompatibleClient:
                 model=model,
                 messages=messages,
             )
-            # o-series reasoning models use max_completion_tokens, not max_tokens
-            if _model_supports_temperature(model):
-                params["temperature"] = temperature
-                params["max_tokens"] = max_tokens
-            else:
-                params["max_completion_tokens"] = max_tokens
+            self._apply_model_params(params, model, temperature, max_tokens)
             return await self.client.chat.completions.create(**params)
 
         try:
@@ -772,11 +784,7 @@ class OpenAICompatibleClient:
             result = LLMResponse(
                 content=content,
                 model=response.model if response else model,
-                usage={
-                    "prompt_tokens": response.usage.prompt_tokens if response and response.usage else 0,
-                    "completion_tokens": response.usage.completion_tokens if response and response.usage else 0,
-                    "total_tokens": response.usage.total_tokens if response and response.usage else 0
-                },
+                usage=self._extract_usage(response),
                 raw_response=response
             )
             

@@ -45,7 +45,7 @@ export function SupplementaryAnalysisModal({
             value={text}
             onChange={e => setText(e.target.value)}
             placeholder={placeholder}
-            className="w-full h-32 px-4 py-3 border border-slate-300 rounded-xl text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="w-full h-32 px-4 py-3 border border-slate-300 rounded-xl text-sm resize-none focus:outline-none focus:ring-2 focus:ring-accent-500"
             autoFocus
           />
           <div className="flex justify-end gap-3 mt-4">
@@ -58,7 +58,7 @@ export function SupplementaryAnalysisModal({
             <button
               onClick={handleSubmit}
               disabled={!text.trim() || submitting}
-              className="px-5 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl disabled:opacity-50"
+              className="px-5 py-2 text-sm font-medium text-white bg-accent-600 hover:bg-accent-700 rounded-xl disabled:opacity-50"
             >
               {submitting
                 ? (isZh ? '提交中...' : 'Submitting...')

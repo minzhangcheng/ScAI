@@ -245,7 +245,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
           xhr.onload = () => {
             uploadFinished = true
             if (xhr.status >= 200 && xhr.status < 300) {
-              try { resolve(JSON.parse(xhr.responseText)) } catch { resolve({}) }
+              try { resolve(JSON.parse(xhr.responseText)) } catch { console.debug('Import response parse failed'); resolve({}) }
             } else {
               try {
                 const err = JSON.parse(xhr.responseText)
@@ -353,7 +353,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   if (!isOpen) return null
 
   return (
-    <div className="w-72 border-r border-surface-800 bg-surface-900 flex flex-col h-full shrink-0 dark-scrollbar">
+    <div className="w-72 border-r border-surface-200 bg-accent-50 flex flex-col h-full shrink-0">
       {/* Export/Import Progress Modal */}
       {progressInfo && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
@@ -409,14 +409,14 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       )}
 
       {/* Logo */}
-      <div className="p-4 border-b border-surface-800">
+      <div className="p-4 border-b border-surface-200">
         <div className="flex items-center gap-3">
           <div className="p-2 bg-gradient-to-br from-accent-500 to-accent-600 rounded-xl text-white shadow-glow-accent">
             <Dna className="w-6 h-6" />
           </div>
           <div>
-            <h1 className="font-display font-bold text-white">{t('appName')}</h1>
-            <p className="text-xs text-surface-400">{t('appSubtitle')}</p>
+            <h1 className="font-display font-bold text-surface-800">{t('appName')}</h1>
+            <p className="text-xs text-surface-500">{t('appSubtitle')}</p>
           </div>
         </div>
       </div>
@@ -433,7 +433,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
         
         <button
           onClick={() => setShowSessionBrowser(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-800 text-surface-300 rounded-xl font-medium hover:bg-surface-700 transition-all"
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-100 text-surface-800 rounded-xl font-medium hover:bg-surface-200 transition-all"
         >
           <FolderOpen className="w-4 h-4" />
           {language === 'zh' ? '打开已有会话' : 'Open Saved Session'}
@@ -545,7 +545,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
             <div className="p-4 border-t border-surface-200 flex justify-between">
               <button
                 onClick={fetchSessions}
-                className="px-3 py-2 text-sm text-surface-600 hover:bg-surface-100 rounded-lg flex items-center gap-1"
+                className="px-3 py-2 text-sm text-surface-800 hover:bg-surface-100 rounded-lg flex items-center gap-1"
               >
                 <RefreshCw className="w-4 h-4" />
                 {language === 'zh' ? '刷新' : 'Refresh'}
@@ -564,34 +564,34 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       {/* New Session Form */}
       {showNewSession && (
         <div className="px-3 pb-3">
-          <div className="p-4 bg-surface-800 rounded-xl space-y-3">
+          <div className="p-4 bg-surface-50 rounded-xl space-y-3 border border-surface-200">
             <input
               type="text"
               value={sessionName}
               onChange={(e) => setSessionName(e.target.value)}
               placeholder={t('sessionNamePlaceholder')}
-              className="w-full px-3 py-2 text-sm border border-surface-700 rounded-lg bg-surface-900 text-white placeholder:text-surface-500 focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
             />
             <textarea
               value={instruction}
               onChange={(e) => setInstruction(e.target.value)}
               placeholder={t('researchGoalPlaceholder')}
               rows={12}
-              className="w-full px-3 py-2 text-sm border border-surface-700 rounded-lg bg-surface-900 text-white placeholder:text-surface-500 focus:ring-2 focus:ring-accent-500 focus:border-accent-500 resize-y min-h-[200px]"
+              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500 resize-y min-h-[200px]"
             />
             
             {/* Round Wait Time Setting */}
-            <div className="p-3 bg-accent-900/30 rounded-lg border border-accent-700/40">
+            <div className="p-3 bg-surface-50 rounded-lg border border-surface-200">
               <div className="flex items-center gap-2 mb-2">
-                <Clock className="w-4 h-4 text-accent-400" />
-                <label className="text-sm font-medium text-accent-300">
+                <Clock className="w-4 h-4 text-accent-600" />
+                <label className="text-sm font-medium text-surface-700">
                   {language === 'zh' ? '轮次等待时间' : 'Round Wait Time'}
                 </label>
               </div>
               <select
                 value={roundWaitSeconds}
                 onChange={(e) => setRoundWaitSeconds(parseInt(e.target.value))}
-                className="w-full text-sm font-mono text-accent-300 bg-surface-900 px-3 py-1.5 rounded border border-accent-700/40 focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+                className="w-full text-sm font-mono text-surface-700 bg-white px-3 py-1.5 rounded border border-surface-200 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
               >
                 <option value={0}>{language === 'zh' ? '不等待' : 'No wait'}</option>
                 <option value={300}>{language === 'zh' ? '5 分钟' : '5 minutes'}</option>
@@ -599,7 +599,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                 <option value={3600}>{language === 'zh' ? '60 分钟' : '60 minutes'}</option>
                 <option value={-1}>{language === 'zh' ? '手动跳过' : 'Manual skip'}</option>
               </select>
-              <p className="text-xs text-accent-400/70 mt-2 leading-relaxed">
+              <p className="text-xs text-surface-500 mt-2 leading-relaxed">
                 {language === 'zh'
                   ? '💡 每轮分析后等待用户输入的时间，超时后自动继续'
                   : '💡 Wait time for user input between rounds, auto-continues on timeout'}
@@ -609,14 +609,14 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
             <div className="flex gap-2">
               <button
                 onClick={() => setShowNewSession(false)}
-                className="flex-1 px-3 py-2 text-sm text-surface-400 hover:bg-surface-700 rounded-lg"
+                className="flex-1 px-3 py-2 text-sm text-surface-500 hover:bg-surface-100 rounded-lg"
               >
                 {t('cancel')}
               </button>
               <button
                 onClick={handleCreateSession}
                 disabled={!instruction.trim()}
-                className="flex-1 px-3 py-2 text-sm bg-accent-600 text-white rounded-lg hover:bg-accent-700 disabled:opacity-50"
+                className="flex-1 px-3 py-2 text-sm bg-accent-600 text-white rounded-lg hover:bg-accent-700 disabled:opacity-50 font-medium"
               >
                 {t('create')}
               </button>
@@ -629,7 +629,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       <div className="flex-1 min-h-0 flex flex-col">
         {currentSession && (
           <div className="px-3 pb-3 min-h-0 flex flex-col">
-            <div className="p-3 bg-accent-900/30 border border-accent-700/40 rounded-xl min-h-0 flex flex-col">
+            <div className="p-3 bg-surface-50 border border-surface-200 rounded-xl min-h-0 flex flex-col">
               {editingSession ? (
                 <div className="space-y-2">
                   <input
@@ -639,7 +639,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                       const val = e.target.value.trim()
                       if (val && val !== currentSession.name) updateSessionInfo({ name: val })
                     }}
-                    className="w-full px-2 py-1 border border-accent-700/40 rounded text-sm font-medium bg-surface-900 text-white"
+                    className="w-full px-2 py-1 border border-surface-200 rounded text-sm font-medium bg-white text-surface-800"
                     autoFocus
                   />
                   <textarea
@@ -648,12 +648,12 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                       const val = e.target.value.trim()
                       if (val !== currentSession.instruction) updateSessionInfo({ instruction: val })
                     }}
-                    className="w-full px-2 py-1 border border-accent-700/40 rounded text-xs bg-surface-900 text-white resize-y"
+                    className="w-full px-2 py-1 border border-surface-200 rounded text-xs bg-white text-surface-800 resize-y"
                     rows={8}
                   />
                   <button
                     onClick={() => setEditingSession(false)}
-                    className="text-xs text-accent-400 hover:underline"
+                    className="text-xs text-accent-600 hover:underline"
                   >
                     {language === 'zh' ? '完成' : 'Done'}
                   </button>
@@ -661,23 +661,23 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
               ) : (
                 <>
                   <div className="flex items-center justify-between shrink-0">
-                    <span className="text-sm font-medium text-white">
+                    <span className="text-sm font-medium text-surface-800">
                       {currentSession.name}
                     </span>
                     <div className="flex items-center gap-1">
                       <button
                         onClick={() => setEditingSession(true)}
-                        className="p-1 hover:bg-accent-800/40 rounded"
+                        className="p-1 hover:bg-surface-100 rounded"
                         title={language === 'zh' ? '编辑' : 'Edit'}
                       >
-                        <Pencil className="w-3.5 h-3.5 text-accent-400" />
+                        <Pencil className="w-3.5 h-3.5 text-surface-500" />
                       </button>
                       <button
                         onClick={handleRefreshSession}
-                        className="p-1 hover:bg-accent-800/40 rounded"
+                        className="p-1 hover:bg-surface-100 rounded"
                         title={language === 'zh' ? '刷新状态' : 'Refresh status'}
                       >
-                        <RefreshCw className="w-3.5 h-3.5 text-accent-400" />
+                        <RefreshCw className="w-3.5 h-3.5 text-surface-500" />
                       </button>
                       <button
                         onClick={handleClearSession}
@@ -688,7 +688,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                       </button>
                     </div>
                   </div>
-                  <p className="text-sm text-surface-300 mt-1 overflow-y-auto min-h-0">
+                  <p className="text-sm text-surface-700 mt-1 overflow-y-auto min-h-0">
                     {currentSession.instruction}
                   </p>
                 </>
@@ -705,7 +705,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                         : (language === 'zh' ? '分析完成' : 'analysis done'))
                     : currentSession.status}
                 </span>
-                <span className="text-xs text-accent-400">
+                <span className="text-xs text-accent-600">
                   Round {currentSession.currentRound}
                 </span>
               </div>
@@ -715,13 +715,13 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       </div>
 
       {/* Bottom Actions */}
-      <div className="p-3 border-t border-surface-800 space-y-1">
+      <div className="p-3 border-t border-surface-200 space-y-1">
         {/* Export - only when a session is open */}
         {currentSession && (
           <button
             onClick={handleExport}
             disabled={exporting}
-            className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-400 hover:bg-surface-800 rounded-lg disabled:opacity-50"
+            className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 hover:bg-surface-100 rounded-lg disabled:opacity-50"
           >
             {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
             {exporting ? t('exporting') : t('exportSession')}
@@ -739,7 +739,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={importing}
-          className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-400 hover:bg-surface-800 rounded-lg disabled:opacity-50"
+          className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 hover:bg-surface-100 rounded-lg disabled:opacity-50"
         >
           {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
           {importing ? t('importing') : t('importSession')}
@@ -747,9 +747,10 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
         <button
           onClick={onOpenConfig}
-          className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-400 hover:bg-surface-800 rounded-lg"
+          aria-label={t('apiSettings')}
+          className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 hover:bg-surface-100 rounded-lg"
         >
-          <Settings className="w-4 h-4" />
+          <Settings className="w-4 h-4" aria-hidden="true" />
           {t('apiSettings')}
         </button>
       </div>

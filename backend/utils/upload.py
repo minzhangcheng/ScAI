@@ -27,6 +27,9 @@ class ChunkedUploadManager:
     - Automatic cleanup of temporary files
     """
 
+    # Maximum concurrent uploads per session
+    MAX_CONCURRENT_UPLOADS_PER_SESSION = 5
+
     def __init__(self, temp_dir: Path, chunk_size: int = 10 * 1024 * 1024):
         """
         Initialize the upload manager.
@@ -41,6 +44,9 @@ class ChunkedUploadManager:
         # Per-upload locks to prevent concurrent metadata read/write race conditions
         self._upload_locks: Dict[str, asyncio.Lock] = {}
         self._upload_locks_guard = asyncio.Lock()
+        # Track active uploads per session for rate limiting
+        self._active_uploads: Dict[str, int] = {}  # session_id -> count
+        self._active_uploads_lock = asyncio.Lock()
 
     async def _get_upload_lock(self, upload_id: str) -> asyncio.Lock:
         """Get or create a lock for a specific upload (thread-safe)"""
@@ -56,6 +62,15 @@ class ChunkedUploadManager:
     def _get_chunk_path(self, upload_id: str, chunk_index: int) -> Path:
         """Get path to a specific chunk file"""
         return self.temp_dir / f"{upload_id}.chunk.{chunk_index}"
+
+    async def _decrement_active_uploads(self, session_id: str, default: int = 0) -> None:
+        """Decrement active upload counter for a session, removing entry when it reaches zero."""
+        async with self._active_uploads_lock:
+            count = self._active_uploads.get(session_id, default)
+            if count <= 1:
+                self._active_uploads.pop(session_id, None)
+            else:
+                self._active_uploads[session_id] = count - 1
 
     async def init_upload(
         self,
@@ -80,27 +95,42 @@ class ChunkedUploadManager:
         Returns:
             upload_id: Unique identifier for this upload
         """
+        # Enforce per-session concurrent upload limit and atomically increment counter
+        async with self._active_uploads_lock:
+            active = self._active_uploads.get(session_id, 0)
+            if active >= self.MAX_CONCURRENT_UPLOADS_PER_SESSION:
+                raise ValueError(
+                    f"Too many concurrent uploads for session {session_id} "
+                    f"(limit: {self.MAX_CONCURRENT_UPLOADS_PER_SESSION})"
+                )
+            self._active_uploads[session_id] = active + 1
+
         # Generate unique upload ID
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
         file_hash = hashlib.md5(filename.encode()).hexdigest()[:8]
         upload_id = f"{session_id}_{timestamp}_{file_hash}"
 
-        meta = {
-            "upload_id": upload_id,
-            "session_id": session_id,
-            "filename": filename,
-            "total_size": total_size,
-            "total_chunks": total_chunks,
-            "file_type": file_type,
-            "group": group,
-            "received_chunks": [],
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "completed": False
-        }
+        try:
+            meta = {
+                "upload_id": upload_id,
+                "session_id": session_id,
+                "filename": filename,
+                "total_size": total_size,
+                "total_chunks": total_chunks,
+                "file_type": file_type,
+                "group": group,
+                "received_chunks": [],
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+                "completed": False
+            }
 
-        async with aiofiles.open(self._get_upload_meta_path(upload_id), 'w') as f:
-            await f.write(json.dumps(meta, indent=2))
+            async with aiofiles.open(self._get_upload_meta_path(upload_id), 'w') as f:
+                await f.write(json.dumps(meta, indent=2))
+        except Exception:
+            # Roll back counter on failure
+            await self._decrement_active_uploads(session_id, default=1)
+            raise
 
         logger.info(
             f"Initialized chunked upload: {upload_id} for {filename} "
@@ -203,6 +233,7 @@ class ChunkedUploadManager:
 
         if expected_chunks != received_chunks:
             missing = sorted(expected_chunks - received_chunks)
+            await self.cleanup_upload(upload_id)
             return {
                 "success": False,
                 "error": f"Missing chunks: {missing}",
@@ -231,6 +262,7 @@ class ChunkedUploadManager:
             logger.exception("Failed to assemble file")
             if final_path.exists():
                 final_path.unlink()
+            await self.cleanup_upload(upload_id)
             return {"success": False, "error": f"Assembly failed: {str(e)}"}
 
         # Verify final file size
@@ -240,6 +272,7 @@ class ChunkedUploadManager:
                 f"Size mismatch: expected {meta['total_size']}, got {actual_size}"
             )
             final_path.unlink()
+            await self.cleanup_upload(upload_id)
             return {
                 "success": False,
                 "error": f"Size mismatch: expected {meta['total_size']}, got {actual_size}"
@@ -283,6 +316,10 @@ class ChunkedUploadManager:
                 meta_path.unlink()
                 # Clean up per-upload lock
                 self._upload_locks.pop(upload_id, None)
+                # Decrement active upload counter
+                session_id = meta.get("session_id")
+                if session_id:
+                    await self._decrement_active_uploads(session_id, default=0)
                 logger.info(f"Cleaned up upload {upload_id}")
             except Exception as e:
                 logger.warning(f"Error cleaning up upload {upload_id}: {e}")
@@ -358,7 +395,7 @@ class ChunkedUploadManager:
 
         return pending
 
-    async def cancel_upload(self, upload_id: str) -> bool:
+    async def cancel_upload(self, upload_id: str) -> Dict[str, Any]:
         """
         Cancel and cleanup an upload.
 
@@ -366,15 +403,15 @@ class ChunkedUploadManager:
             upload_id: Upload identifier
 
         Returns:
-            True if cancelled successfully
+            Dict with success status and optional error
         """
         meta_path = self._get_upload_meta_path(upload_id)
 
         if not meta_path.exists():
-            return False
+            return {"success": False, "error": "Upload not found"}
 
         await self.cleanup_upload(upload_id)
-        return True
+        return {"success": True}
 
 
 async def stream_save_file(file, dest_path: Path, chunk_size: int = 1024 * 1024) -> Path:

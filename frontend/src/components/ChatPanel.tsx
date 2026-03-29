@@ -29,7 +29,8 @@ interface SelectedFileWithAgent {
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg'])
 
 function isImageFile(filename: string): boolean {
-  const ext = filename.toLowerCase().slice(filename.lastIndexOf('.'))
+  const dotIdx = filename.lastIndexOf('.')
+  const ext = dotIdx >= 0 ? filename.toLowerCase().slice(dotIdx) : ''
   return IMAGE_EXTS.has(ext)
 }
 
@@ -101,7 +102,7 @@ export function ChatPanel() {
             setChatDelegationPlan(null)
           }
         }
-      } catch {}
+      } catch (e) { console.debug('Chat poll failed:', e) }
     }, 5000)
     return () => clearInterval(interval)
   }, [chatLoading, currentSession?.id, setChatMessages, setChatLoading, setChatDelegationActive, setChatDelegationPlan])

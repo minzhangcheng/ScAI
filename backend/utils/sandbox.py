@@ -53,6 +53,18 @@ DANGEROUS_PATTERNS = [
     (r'\bdelattr\s*\([^,]+,\s*["\']__', 'delattr with dunder'),
     (r'\bvars\s*\(\s*\)', 'vars() function'),
 
+    # Reflection-based sandbox bypasses
+    # getattr on dangerous modules (os, sys, subprocess, etc.) can retrieve dangerous funcs dynamically
+    (r'\bgetattr\s*\(\s*(?:os|sys|subprocess|shutil|builtins|__builtins__)\b', 'getattr on dangerous module'),
+    # __dict__ subscript access can bypass attribute-level checks
+    (r'\b__dict__\s*\[', '__dict__ subscript access'),
+    # __globals__ gives access to the global namespace of any function
+    (r'\b__globals__\b', '__globals__ access'),
+    # __class__.__init__ chain is used to reach __globals__ via method objects
+    (r'\b__class__\s*\.\s*__init__\b', '__class__.__init__ chain'),
+    # type.__subclasses__() enumerates all subclasses to find exploitable ones
+    (r'\btype\s*\.\s*__subclasses__', 'type.__subclasses__ access'),
+
     # File system operations (destructive)
     # Note: open() writes are checked contextually in validate_code_safety()
     # rather than blanket-blocked, because the runtime I/O sandbox (_sandboxed_open)
@@ -142,9 +154,72 @@ _EXCEPTION_CHECKS = {
 }
 
 
+_DANGEROUS_AST_FUNCS = frozenset({
+    'system', 'popen', 'exec', 'eval', 'execfile', 'spawn', 'fork',
+    'remove', 'unlink', 'rmdir', 'rmtree', 'rename', 'replace',
+})
+
+_DANGEROUS_AST_ATTRS = frozenset({
+    '__globals__', '__init__', '__subclasses__', '__bases__', '__mro__',
+    '__builtins__',
+})
+
+_DANGEROUS_AST_MODULES = frozenset({
+    'os', 'sys', 'subprocess', 'shutil', 'builtins',
+})
+
+
+def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
+    """AST-based validation layer that catches reflection-based bypasses
+    which regex patterns may miss (e.g. string concatenation, variable indirection).
+
+    Returns (True, "") if safe, (False, reason) if dangerous pattern detected.
+    Falls back to (True, "") on parse errors so this is purely additive.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return True, ""  # Cannot parse — let regex-only check decide
+
+    for node in ast.walk(tree):
+        # Detect getattr(os, 'system') / getattr(os, dangerous_string)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'getattr':
+            if len(node.args) >= 2:
+                target = node.args[0]
+                attr_arg = node.args[1]
+                # Check if target is a dangerous module
+                if isinstance(target, ast.Name) and target.id in _DANGEROUS_AST_MODULES:
+                    return False, f"getattr() on dangerous module '{target.id}'"
+                # Check if attr argument is a dangerous function name
+                if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
+                    if attr_arg.value in _DANGEROUS_AST_FUNCS:
+                        return False, f"getattr() retrieving dangerous function '{attr_arg.value}'"
+
+        # Detect attribute chains containing __globals__, __init__.__globals__, etc.
+        if isinstance(node, ast.Attribute):
+            if node.attr in ('__globals__', '__builtins__'):
+                return False, f"Access to '{node.attr}' attribute"
+            # Detect __class__.__init__ chain (used to reach __globals__)
+            if node.attr == '__init__' and isinstance(node.value, ast.Attribute) and node.value.attr == '__class__':
+                return False, "Access to __class__.__init__ chain"
+
+        # Detect __dict__[...] subscript access
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
+            if node.value.attr == '__dict__':
+                return False, "__dict__ subscript access"
+
+    return True, ""
+
+
 def validate_code_safety(code: str) -> Tuple[bool, str]:
     """
     Validate code for security before execution.
+
+    Uses a two-layer approach:
+    1. Regex pattern matching against DANGEROUS_PATTERNS (fast, broad)
+    2. AST-based analysis to catch reflection/indirection bypasses
 
     Args:
         code: The Python code to validate
@@ -163,6 +238,16 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
                 description, code.replace('\n', ' '),
             )
             return False, f"Dangerous pattern detected: {description}"
+
+    # Second layer: AST-based validation for reflection/indirection bypasses
+    ast_safe, ast_reason = _validate_code_safety_ast(code)
+    if not ast_safe:
+        logger.warning(
+            "Security: AST analysis blocked code [%s] — snippet: %.200s",
+            ast_reason, code.replace('\n', ' '),
+        )
+        return False, f"Dangerous pattern detected (AST): {ast_reason}"
+
     return True, ""
 
 
@@ -1216,10 +1301,8 @@ print(f"Session saved: {{len(_session_data)}} variables")
             loop = asyncio.get_running_loop()
             # We're in an async context - cannot safely run async code
             # Log warning and skip session save (notebook is already saved)
-            logger.warning(
-                "save_state() called from async context - session variables may not be saved. "
-                "Use save_state_async() for guaranteed persistence."
-            )
+            # 在已有事件循环中调度异步保存
+            loop.create_task(self.save_session())
         except RuntimeError:
             # No running loop - safe to create a new one
             try:

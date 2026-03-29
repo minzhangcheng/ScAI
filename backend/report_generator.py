@@ -27,120 +27,29 @@ from PIL import Image
 from .models.schemas import AnalysisState, AgentType, CodeExecution
 from .utils.llm_client import OpenAICompatibleClient
 from .utils.checkpoint import CheckpointManager
+from .utils.image_utils import compress_image_to_base64, categorize_figures
 from .config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir
 
 logger = logging.getLogger(__name__)
 
 
-def compress_image_to_base64(image_path: str, max_width: int = 800, quality: int = 85) -> str:
+
+# categorize_figures is imported from utils.image_utils
+
+
+def _build_figure_description_map(analysis_log) -> Dict[str, str]:
+    """Build a mapping from figure filename stem to code_description from analysis_log.
+
+    Provides rich, contextual captions for figures instead of just prettified filenames.
     """
-    Compress an image and convert to base64 for HTML embedding.
-
-    Args:
-        image_path: Path to the image file
-        max_width: Maximum width for resizing (preserves aspect ratio)
-        quality: JPEG quality (1-100)
-
-    Returns:
-        Base64 encoded string with data URI prefix
-    """
-    try:
-        with Image.open(image_path) as img:
-            # Convert to RGB if necessary (for PNG with transparency)
-            if img.mode in ('RGBA', 'P'):
-                # Create white background
-                background = Image.new('RGB', img.size, (255, 255, 255))
-                if img.mode == 'P':
-                    img = img.convert('RGBA')
-                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-                img = background
-            elif img.mode != 'RGB':
-                img = img.convert('RGB')
-
-            # Resize if too large
-            width, height = img.size
-            if width > max_width:
-                ratio = max_width / width
-                new_size = (max_width, int(height * ratio))
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
-
-            # Save to buffer as JPEG
-            buffer = io.BytesIO()
-            img.save(buffer, format='JPEG', quality=quality, optimize=True)
-            buffer.seek(0)
-
-            # Encode to base64
-            b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            return f"data:image/jpeg;base64,{b64_data}"
-    except Exception as e:
-        logger.exception(f"Error compressing image {image_path}")
-        return ""
-
-
-def categorize_figures(figures_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
-    """
-    Scan figures directory and categorize images by their content type.
-
-    Returns a dictionary mapping category names to lists of figure info.
-    """
-    categories = {
-        "qc": [],           # Quality control figures
-        "umap": [],         # UMAP visualizations
-        "clustering": [],   # Clustering related
-        "markers": [],      # Marker gene analysis
-        "de": [],           # Differential expression
-        "heatmap": [],      # Heatmaps
-        "violin": [],       # Violin plots
-        "other": []         # Other figures
-    }
-
-    if not figures_dir.exists():
-        return categories
-
-    # Scan for both JPG and PNG (JPG preferred for new sessions, PNG for backward compatibility)
-    seen_stems = set()
-    image_files = sorted(figures_dir.glob("*.jpg")) + sorted(figures_dir.glob("*.png"))
-    for img_file in image_files:
-        if img_file.stem in seen_stems:
-            continue  # Skip PNG if JPG already found for same stem
-        seen_stems.add(img_file.stem)
-        filename = img_file.stem.lower()
-        pdf_file = img_file.with_suffix('.pdf')
-
-        fig_info = {
-            "name": img_file.stem,
-            "png_path": str(img_file),  # Field name kept for compatibility; may be JPG
-            "pdf_path": str(pdf_file) if pdf_file.exists() else None,
-            "filename": img_file.name
-        }
-
-        # Categorize based on filename
-        if "qc" in filename or "quality" in filename:
-            categories["qc"].append(fig_info)
-        elif "celltype" in filename or "cell_type" in filename or "annotation" in filename:
-            categories["umap"].append(fig_info)  # Cell type annotation UMAPs grouped with UMAP
-        elif "umap" in filename:
-            categories["umap"].append(fig_info)
-        elif "cluster" in filename or "leiden" in filename:
-            categories["clustering"].append(fig_info)
-        elif "marker" in filename:
-            categories["markers"].append(fig_info)
-        elif "volcano" in filename or "_de_" in filename or "differential" in filename:
-            categories["de"].append(fig_info)
-        elif "heatmap" in filename:
-            categories["heatmap"].append(fig_info)
-        elif "violin" in filename:
-            categories["violin"].append(fig_info)
-        elif "dotplot" in filename:
-            categories["markers"].append(fig_info)
-        elif "stacked_bar" in filename or "composition" in filename or "fold_change" in filename:
-            categories["clustering"].append(fig_info)
-        elif "feature" in filename or "expression" in filename:
-            categories["de"].append(fig_info)
-        else:
-            categories["other"].append(fig_info)
-
-    return categories
+    desc_map: Dict[str, str] = {}
+    for step in analysis_log:
+        if step.saved_figure_filenames and step.code_description:
+            for fname in step.saved_figure_filenames:
+                stem = Path(fname).stem
+                if stem not in desc_map:
+                    desc_map[stem] = step.code_description
+    return desc_map
 
 
 def _safe_parse_json(response: str) -> Optional[dict]:
@@ -177,7 +86,7 @@ def _safe_parse_json(response: str) -> Optional[dict]:
         try:
             return json.loads(response[start:end])
         except json.JSONDecodeError:
-            pass
+            logger.debug("JSON extraction from LLM response failed at position %d-%d", start, end)
     return None
 
 
@@ -1030,7 +939,9 @@ class DetailedReportGenerator:
         output_dir: str,
         workspace_dir: str = None,
         progress_callback: Optional[Callable] = None,
-        session_id: str = "report"
+        session_id: str = "report",
+        vision_settings: Optional[Dict[str, bool]] = None,
+        supervisor_model: Optional[str] = None,
     ):
         self._session_id = session_id
         self.llm_client = llm_client
@@ -1040,6 +951,8 @@ class DetailedReportGenerator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_dir = Path(workspace_dir) if workspace_dir else None
         self.progress_callback = progress_callback
+        self.vision_settings = vision_settings or {}
+        self.supervisor_model = supervisor_model or ""
 
         # Create subdirectories
         self.figures_dir = self.output_dir / "figures"
@@ -1085,6 +998,49 @@ class DetailedReportGenerator:
             max_tokens=max_tokens
         )
         return response.content if response else ""
+
+    async def _chat_with_vision_fallback(
+        self,
+        text_prompt: str,
+        images: List[str],
+        temperature: float = 0.3,
+        max_tokens: int = 32768,
+        request_timeout: float = 120.0,
+    ) -> str:
+        """Vision call with agent fallback chain: PI -> bio -> supervisor -> text-only."""
+        candidates = []
+        if self.vision_settings.get("pi", True) and self.pi_model:
+            candidates.append(("pi", self.pi_model))
+        if self.vision_settings.get("bioinformatics", True) and self.bio_model:
+            candidates.append(("bioinformatics", self.bio_model))
+        if self.vision_settings.get("supervisor", True) and self.supervisor_model:
+            candidates.append(("supervisor", self.supervisor_model))
+
+        if not candidates:
+            logger.info(f"[{self._session_id}] No vision-capable model for report, using text-only")
+            return await self._pi_chat(text_prompt, temperature, max_tokens)
+
+        for agent_name, model in candidates:
+            try:
+                self._set_llm_context(f"report_{agent_name}")
+                response = await self.llm_client.chat_with_vision(
+                    model=model,
+                    text_prompt=text_prompt,
+                    images=images,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    request_timeout=request_timeout,
+                )
+                return response.content if response and response.content else ""
+            except Exception as e:
+                logger.warning(
+                    f"[{self._session_id}] Vision failed with {agent_name} model ({model}): {e}"
+                )
+                continue
+
+        logger.warning(f"[{self._session_id}] All vision models failed, falling back to text-only")
+        self._set_llm_context("report_pi")
+        return await self._pi_chat(text_prompt, temperature, max_tokens)
 
     async def _bio_chat_with_tools(
         self,
@@ -2328,28 +2284,14 @@ Provide a detailed technical summary of this analysis phase covering:
 {lang_instruction}
 """
 
-        # Use vision API if we have images, otherwise text-only
-        self._set_llm_context("report_pi")
-        try:
-            if phase_images:
-                response = await self.llm_client.chat_with_vision(
-                    model=self.pi_model,
-                    text_prompt=prompt,
-                    images=phase_images,
-                    temperature=0.3,
-                    max_tokens=32768,
-                    request_timeout=120.0
-                )
-                return response.content if response and response.content else ""
-            else:
-                return await self._pi_chat(prompt, temperature=0.3)
-        except Exception as e:
-            logger.warning(f"PI review failed for phase '{phase_name}': {e}, falling back to text-only")
-            try:
-                return await self._pi_chat(prompt, temperature=0.3)
-            except Exception as e2:
-                logger.error(f"PI text-only review also failed for phase '{phase_name}': {e2}")
-                return ""
+        # Use vision API if we have images (fallback chain handled internally), otherwise text-only
+        if phase_images:
+            return await self._chat_with_vision_fallback(
+                text_prompt=prompt, images=phase_images,
+                temperature=0.3, max_tokens=32768, request_timeout=120.0,
+            )
+        else:
+            return await self._pi_chat(prompt, temperature=0.3)
 
     async def _pi_synthesize_review(
         self,
@@ -2541,28 +2483,17 @@ IMPORTANT:
 - For score_definitions, identify ALL scoring/enrichment computations in the code and document what each score measures and how it was computed
 """
 
-        self._set_llm_context("report_pi")
         try:
             if all_images:
-                response_obj = await self.llm_client.chat_with_vision(
-                    model=self.pi_model,
-                    text_prompt=prompt,
-                    images=all_images[:20],
-                    temperature=0.3,
-                    max_tokens=8192,
-                    request_timeout=180.0
+                response = await self._chat_with_vision_fallback(
+                    text_prompt=prompt, images=all_images[:20],
+                    temperature=0.3, max_tokens=8192, request_timeout=180.0,
                 )
-                response = response_obj.content if response_obj and response_obj.content else ""
             else:
                 response = await self._pi_chat(prompt, temperature=0.3, max_tokens=8192)
         except Exception as e:
             logger.exception("PI comprehensive review failed")
-            # Fallback to text-only
-            try:
-                response = await self._pi_chat(prompt, temperature=0.3, max_tokens=8192)
-            except Exception as e2:
-                logger.error(f"PI text-only comprehensive review also failed: {e2}")
-                return self._empty_analysis_summary()
+            return self._empty_analysis_summary()
 
         # Parse JSON response
         try:
@@ -3512,28 +3443,18 @@ Generate a comprehensive scientific narrative for this section. Your response mu
 5. The narrative should flow logically and reference all figures in the section{tables_requirement}
 """
 
-        # Use vision API if we have figure images, otherwise text-only
-        self._set_llm_context("report_pi")
+        # Use vision API if we have figure images (fallback chain handled internally), otherwise text-only
         try:
             if section_images:
-                response_obj = await self.llm_client.chat_with_vision(
-                    model=self.pi_model,
-                    text_prompt=prompt,
-                    images=section_images[:6],
-                    temperature=0.3,
-                    max_tokens=32768,
-                    request_timeout=120.0
+                response = await self._chat_with_vision_fallback(
+                    text_prompt=prompt, images=section_images[:6],
+                    temperature=0.3, max_tokens=32768, request_timeout=120.0,
                 )
-                response = response_obj.content if response_obj and response_obj.content else ""
             else:
                 response = await self._pi_chat(prompt, temperature=0.3)
         except Exception as e:
-            logger.warning(f"Vision API failed for section '{section_title}', falling back to text-only: {e}")
-            try:
-                response = await self._pi_chat(prompt, temperature=0.3)
-            except Exception as e2:
-                logger.error(f"Text-only fallback also failed for section '{section_title}': {e2}")
-                response = ""
+            logger.warning(f"Report section '{section_title}' generation failed: {e}")
+            response = ""
 
         # Parse the response
         try:
@@ -5234,7 +5155,9 @@ def generate_detailed_report_segment_html(
         from .config import get_session_workspace
         workspace_dir = get_session_workspace(state.id)
         if workspace_dir and workspace_dir.exists():
-            categories = categorize_figures(workspace_dir)
+            figures_subdir = workspace_dir / "figures"
+            categories = categorize_figures(figures_subdir if figures_subdir.exists() else workspace_dir)
+            fig_desc_map = _build_figure_description_map(state.analysis_log)
             has_figures = any(figs for figs in categories.values())
             if has_figures:
                 parts.append('<div class="segment-section"><h3>Generated Figures</h3>')
@@ -5248,8 +5171,9 @@ def generate_detailed_report_segment_html(
                             fig_path = fig_info.get("png_path") or fig_info.get("path", "")
                             if not fig_path:
                                 continue
-                            b64 = compress_image_to_base64(fig_path, max_width=400, quality=60)
-                            caption = fig_info.get("caption", fig_info.get("name", ""))
+                            b64 = compress_image_to_base64(fig_path, max_width=600, quality=70)
+                            fig_name = fig_info.get("name", "")
+                            caption = fig_desc_map.get(fig_name, fig_name.replace("_", " ").title())
                             parts.append(f'<div class="figure-item"><img src="{b64}" />'
                                          f'<p class="caption">{html_module.escape(str(caption))}</p></div>')
                             count += 1
@@ -5342,10 +5266,10 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 .success {{ color: #16a34a; }}
 .error {{ color: #dc2626; }}
 .warning {{ color: #d97706; }}
-.figure-gallery {{ display: flex; flex-wrap: wrap; gap: 1rem; }}
-.figure-item {{ max-width: 300px; }}
-.figure-item img {{ max-width: 100%; border-radius: 0.5rem; }}
-.caption {{ font-size: 0.8rem; color: #64748b; margin-top: 0.3rem; }}
+.figure-gallery {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 28px; }}
+.figure-item {{ border: 1px solid #e2e8f0; border-radius: 0.5rem; overflow: hidden; }}
+.figure-item img {{ width: 100%; height: auto; display: block; }}
+.caption {{ padding: 0.75rem 1rem; font-size: 0.88rem; color: #334155; line-height: 1.5; background: #f8fafc; }}
 .segment-divider {{ border: none; border-top: 2px dashed #cbd5e1; margin: 2rem 0; }}
 .detail {{ font-size: 0.9rem; color: #475569; }}
 .content {{ line-height: 1.6; }}
@@ -5442,6 +5366,9 @@ def generate_annotation_context_report_html(
     figure_blocks = []
     seen_stems: set = set()
 
+    # Build filename → description mapping from analysis_log for rich captions
+    figure_desc_map = _build_figure_description_map(state.analysis_log)
+
     # Scan workspace directory for figures (works even when analysis_log is empty,
     # e.g. when report is generated mid-execution before bioinformatics agent returns)
     workspace_dir = get_session_workspace(state.id) if state.id else None
@@ -5459,13 +5386,36 @@ def generate_annotation_context_report_html(
                 seen_stems.add(img_file.stem)
                 try:
                     b64 = compress_image_to_base64(str(img_file), max_width=700, quality=80)
-                    caption = html_module.escape(img_file.stem.replace("_", " ").title())
+                    caption = html_module.escape(
+                        figure_desc_map.get(img_file.stem, img_file.stem.replace("_", " ").title())
+                    )
                     figure_blocks.append(
                         f'<div class="figure-item"><img src="{b64}" alt="{caption}"/>'
                         f'<div class="figure-caption">{caption}</div></div>'
                     )
                 except Exception:
                     logger.warning("Failed to embed figure in HTML: %s", img_file, exc_info=True)
+
+        # Collect any analysis_log figures not found by directory scan
+        for s in state.analysis_log:
+            for fname in (s.saved_figure_filenames or []):
+                stem = Path(fname).stem
+                if stem in seen_stems:
+                    continue
+                fpath = workspace_dir / fname
+                if not fpath.exists():
+                    fpath = workspace_dir / "figures" / fname
+                if fpath.exists():
+                    seen_stems.add(stem)
+                    try:
+                        b64 = compress_image_to_base64(str(fpath), max_width=700, quality=80)
+                        caption = html_module.escape(s.code_description or fname)
+                        figure_blocks.append(
+                            f'<div class="figure-item"><img src="{b64}" alt="{caption}"/>'
+                            f'<div class="figure-caption">{caption}</div></div>'
+                        )
+                    except Exception:
+                        logger.warning("Failed to embed figure: %s", fpath, exc_info=True)
 
     # From publication_figures (correct attribute names: png_base64, name)
     for pf in (state.publication_figures or []):
@@ -5605,13 +5555,17 @@ def generate_annotation_context_report_html(
         margin-top: 4px; white-space: pre-wrap; max-height: 120px; overflow-y: auto;
     }}
     .figures-grid {{
-        display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px;
+        display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 28px;
     }}
-    .figure-item {{ border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }}
+    .figure-item {{
+        border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }}
     .figure-item img {{ width: 100%; height: auto; display: block; }}
     .figure-caption {{
-        padding: 8px 12px; font-size: 0.85rem; color: var(--text-secondary);
-        background: #f8fafc; text-align: center;
+        padding: 12px 16px; font-size: 0.92rem; color: var(--text-color);
+        background: #f8fafc; text-align: left; line-height: 1.5;
+        border-top: 1px solid var(--border-color);
     }}
     .lit-result {{ font-size: 0.88rem; color: var(--text-secondary); }}
     .ann-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}

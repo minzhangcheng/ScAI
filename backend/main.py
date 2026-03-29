@@ -29,6 +29,9 @@ from .config import (
     SystemConfig, AgentTemperatures,
     DATA_BASE_DIR, UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR,
     UPLOAD_CHUNK_SIZE, MAX_UPLOAD_SIZE, UPLOAD_TEMP_DIR,
+    MAX_CACHED_SESSIONS, MAX_REALTIME_MESSAGES, SESSION_CACHE_TTL,
+    MAX_MESSAGE_BUFFER_SIZE, IMPORT_JOB_TTL, CLEANUP_INTERVAL,
+    WS_RECEIVE_TIMEOUT, CHAT_DELEGATION_TIMEOUT,
     setup_logging,
     get_session_dir, get_session_metadata_path, get_session_workspace,
     get_session_states, get_session_uploads, get_session_reports, ensure_session_dirs,
@@ -77,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.18.1"
+    version="0.18.2"
 )
 
 # CORS
@@ -97,8 +100,18 @@ config: Optional[SystemConfig] = None
 # Track sessions that are being initialized (prevents concurrent workflow creation)
 _initializing_sessions: set = set()
 
-# Lock for protecting concurrent access to global dicts
+# Lock for protecting concurrent access to global dicts (dict-level operations)
 _state_lock = asyncio.Lock()
+# Per-session locks for finer-grained concurrency control (save/evict operations)
+_session_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_session_lock(session_id: str) -> asyncio.Lock:
+    """Get or create a per-session lock. Must be called under _state_lock or
+    when the session_id is known to exist in the dict."""
+    if session_id not in _session_locks:
+        _session_locks[session_id] = asyncio.Lock()
+    return _session_locks[session_id]
 
 
 def _get_agent_llm_client(
@@ -131,6 +144,23 @@ async def _update_session_cache(session_id: str, state):
         _session_access_times[session_id] = time.time()
 
 
+async def _pause_and_restart_ws(session_id: str, state):
+    """Set status to PAUSED and close WebSocket to trigger auto-reconnect.
+
+    Used when a HITL confirmation arrives but no workflow is running
+    (e.g. after snapshot restore).
+    """
+    state.status = TaskStatus.PAUSED
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state)
+    ws = websockets.get(session_id)
+    if ws:
+        try:
+            await ws.close(4000, "workflow_restart")
+        except Exception:
+            logger.debug("WebSocket close failed during pause-and-restart", exc_info=True)
+
+
 # Workflow task tracking (for cancellation support)
 _run_tasks: Dict[str, asyncio.Task] = {}  # session_id -> asyncio.Task for workflow execution
 
@@ -139,14 +169,10 @@ _chat_tasks: Dict[str, asyncio.Task] = {}  # session_id → background delegatio
 _chat_task_lock = asyncio.Lock()
 _chat_sandboxes: Dict[str, Any] = {}  # session_id → sandbox for active chat (delegation/figure gen)
 
-# Memory management settings
-MAX_CACHED_SESSIONS = 50  # Maximum number of sessions to keep in memory
-MAX_REALTIME_MESSAGES = 1000  # Maximum realtime messages per session to prevent memory bloat
-SESSION_CACHE_TTL = 3600  # Seconds before an inactive session is evicted (1 hour)
+# Session access tracking for cache eviction
 _session_access_times: Dict[str, float] = {}  # Track last access time for each session
 
 # Message buffer for WebSocket reconnection recovery
-MAX_MESSAGE_BUFFER_SIZE = 100  # Keep last N messages per session
 _message_buffers: Dict[str, List[Dict[str, Any]]] = {}  # session_id -> list of messages
 _message_buffer_lock = asyncio.Lock()
 
@@ -156,7 +182,6 @@ _monitor_tasks: Dict[str, asyncio.Task] = {}  # session_id -> monitor task
 # Background import jobs: import_id -> {"status": "pending"|"completed"|"failed", "created_at": float, ...}
 _import_jobs: Dict[str, dict] = {}
 _import_jobs_lock = asyncio.Lock()
-_IMPORT_JOB_TTL = 3600  # Clean up completed/failed import jobs after 1 hour
 
 # Detailed report generation state
 detailed_reports: Dict[str, Any] = {}
@@ -170,7 +195,7 @@ async def cleanup_stale_sessions():
     """Background task to clean up stale sessions from memory"""
     while True:
         try:
-            await asyncio.sleep(300)  # Run every 5 minutes
+            await asyncio.sleep(CLEANUP_INTERVAL)
 
             current_time = time.time()
             sessions_to_evict = []
@@ -198,43 +223,43 @@ async def cleanup_stale_sessions():
                         if sid not in sessions_to_evict:
                             sessions_to_evict.append(sid)
 
-            # Evict sessions - release lock during I/O operations to prevent blocking
+            # Evict sessions using per-session locks to eliminate TOCTTOU window.
+            # The per-session lock ensures save + delete are atomic per session,
+            # while other sessions are not blocked during the I/O.
             for session_id in sessions_to_evict:
+                # Get per-session lock under global lock
                 async with _state_lock:
-                    # Re-check: session may have been re-activated (resumed/reconnected)
-                    # between building the eviction list and executing eviction
                     if session_id in _initializing_sessions or session_id in workflows:
                         logger.info(f"Skipping eviction of session {session_id}: re-activated since eviction list was built")
                         continue
-                    if session_id in sessions:
-                        state_to_save = sessions[session_id]
-                    else:
-                        state_to_save = None
-                    # Record access time at capture to detect concurrent modifications
-                    access_time_at_capture = _session_access_times.get(session_id, 0)
+                    session_lock = _get_session_lock(session_id)
 
-                # Save state outside lock
-                if state_to_save:
-                    try:
-                        await async_save_session(session_id, state_to_save)
-                        logger.info(f"Saved state for evicted session {session_id}")
-                    except Exception as save_error:
-                        logger.error(f"Failed to save state for evicted session {session_id}: {save_error}")
+                # Hold per-session lock across save + delete (no TOCTTOU window)
+                async with session_lock:
+                    # Re-check under session lock: may have been re-activated
+                    async with _state_lock:
+                        if session_id in _initializing_sessions or session_id in workflows:
+                            continue
+                        state_to_save = sessions.get(session_id)
 
-                # Re-acquire lock to safely delete from memory after save
-                async with _state_lock:
-                    if session_id in _initializing_sessions or session_id in workflows:
-                        # Re-activated while saving
-                        continue
-                    # Abort eviction if session was accessed during I/O (concurrent modification)
-                    current_access = _session_access_times.get(session_id, 0)
-                    if current_access != access_time_at_capture:
-                        logger.info(f"Session {session_id} was modified during eviction I/O, aborting eviction")
-                        continue
-                    if session_id in sessions:
-                        del sessions[session_id]
-                    if session_id in _session_access_times:
-                        del _session_access_times[session_id]
+                    # Save state (still under per-session lock, but global lock is released)
+                    if state_to_save:
+                        try:
+                            await async_save_session(session_id, state_to_save, force=True)
+                            logger.info(f"Saved state for evicted session {session_id}")
+                        except Exception as save_error:
+                            logger.exception(f"Failed to save state for evicted session {session_id}")
+
+                    # Delete from memory (under both locks for dict mutation)
+                    async with _state_lock:
+                        if session_id in _initializing_sessions or session_id in workflows:
+                            continue
+                        if session_id in sessions:
+                            del sessions[session_id]
+                        if session_id in _session_access_times:
+                            del _session_access_times[session_id]
+                        _last_save_times.pop(session_id, None)
+                        _session_locks.pop(session_id, None)
 
                 # Also stop any active chat sandbox for this session
                 async with _chat_task_lock:
@@ -244,7 +269,7 @@ async def cleanup_stale_sessions():
                         await chat_sandbox.stop()
                         logger.info(f"Stopped chat sandbox for evicted session {session_id}")
                     except Exception as sb_error:
-                        logger.error(f"Failed to stop chat sandbox for session {session_id}: {sb_error}")
+                        logger.exception(f"Failed to stop chat sandbox for session {session_id}")
 
                 # Also clean up message buffer for evicted session
                 async with _message_buffer_lock:
@@ -263,7 +288,7 @@ async def cleanup_stale_sessions():
                 stale_jobs = [
                     jid for jid, job in _import_jobs.items()
                     if job.get("status") in ("completed", "failed")
-                    and current_time - job.get("created_at", 0) > _IMPORT_JOB_TTL
+                    and current_time - job.get("created_at", 0) > IMPORT_JOB_TTL
                 ]
                 for jid in stale_jobs:
                     del _import_jobs[jid]
@@ -319,16 +344,44 @@ def save_session_to_disk(session_id: str, state: AnalysisState):
     to get a consistent snapshot), then writes atomically.
     When called via asyncio.to_thread, use save_session_snapshot instead.
     """
-    _write_session_json(session_id, state.model_dump_json(indent=2))
+    _write_session_json(session_id, state.model_dump_json())
 
 
-async def async_save_session(session_id: str, state: AnalysisState):
+# Throttle saves: track last save time per session to avoid excessive disk I/O
+_last_save_times: Dict[str, float] = {}
+_MIN_SAVE_INTERVAL = 5.0  # Minimum seconds between saves for the same session
+
+# Statuses that represent critical checkpoints — saves MUST persist immediately
+# to prevent data loss on crash during the throttle window.
+_FORCE_SAVE_STATUSES = frozenset({
+    TaskStatus.COMPLETED, TaskStatus.FAILED,
+    TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION,
+    TaskStatus.GENERATING_REPORT,
+})
+
+
+async def async_save_session(session_id: str, state: AnalysisState, force: bool = False):
     """Serialize state to JSON on the event-loop thread (consistent snapshot),
     then write to disk in a thread pool. This avoids the race where
     asyncio.to_thread would read mutable state attributes while the event loop
     mutates them concurrently.
+
+    Saves are throttled to at most once per _MIN_SAVE_INTERVAL seconds per session,
+    unless force=True (used for critical state transitions like session completion)
+    or the session is at a critical checkpoint status.
     """
-    json_str = state.model_dump_json(indent=2)
+    # Auto-force saves for critical checkpoint statuses
+    if not force and hasattr(state, 'status') and state.status in _FORCE_SAVE_STATUSES:
+        force = True
+    now = time.monotonic()
+    if not force:
+        last = _last_save_times.get(session_id, 0)
+        if now - last < _MIN_SAVE_INTERVAL:
+            logger.debug("Throttled save for session %s (%.1fs since last save)", session_id, now - last)
+            return  # Throttled - skip this save
+    _last_save_times[session_id] = now
+    # Use compact JSON (no indent) to reduce serialization overhead for large states
+    json_str = state.model_dump_json()
     await asyncio.to_thread(_write_session_json, session_id, json_str)
 
 
@@ -345,8 +398,8 @@ def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
             state = AnalysisState(**data)
             logger.info(f"Session {session_id} loaded from disk")
             return state
-    except Exception as e:
-        logger.exception(f"Failed to load session {session_id}: {e}")
+    except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
+        logger.exception(f"Failed to load session {session_id}")
     return None
 
 
@@ -410,7 +463,7 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
                 "has_sequencing": any(f.get("section") == "sequencing" for f in data_files),
                 "has_biochemistry": any(f.get("section") == "biochemistry" for f in data_files) or len(data.get("biochemistry_indicators", [])) > 0,
             })
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning(f"Failed to read session file {session_file}: {e}")
 
     try:
@@ -705,125 +758,7 @@ async def load_session(session_id: str):
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Return complete session data including analysis results
-    return {
-        "session_id": state.id,
-        "name": state.name,
-        "status": state.status.value if hasattr(state.status, 'value') else str(state.status),
-        "current_round": state.current_round,
-        "max_rounds": state.max_rounds,
-        "round_wait_seconds": state.round_wait_seconds,
-        "created_at": state.created_at.isoformat() if state.created_at else "",
-        "updated_at": state.updated_at.isoformat() if state.updated_at else "",
-        "initial_instruction": state.initial_instruction,
-        # Treatment groups and data uploads
-        "treatment_groups": [
-            {"id": g.id, "name": g.name, "description": g.description, "sampleCount": g.sample_count, "order": g.order}
-            for g in state.treatment_groups
-        ],
-        "data_files": [
-            {"id": f.id, "filename": f.filename, "filePath": f.file_path, "section": f.section, "dataType": f.data_type,
-             "groupId": f.group_id, "sampleNumber": f.sample_number, "description": f.description, "timestamp": f.timestamp.isoformat() if f.timestamp else ""}
-            for f in state.data_files
-        ],
-        "biochemistry_indicators": [
-            {"id": r.id, "indicator": r.indicator, "value": r.value, "unit": r.unit,
-             "referenceRange": r.reference_range, "interpretation": r.interpretation,
-             "groupId": r.group_id, "sampleNumber": r.sample_number}
-            for r in state.biochemistry_indicators
-        ],
-        # Analysis results - complete round results
-        "round_results": [
-            {
-                "round": r.round_number,
-                "pi_summary": r.pi_summary,
-                "pathology_findings": r.pathology_findings,
-                "bioinformatics_findings": r.bioinformatics_findings,
-                "biochemistry_findings": r.biochemistry_findings,
-                "literature_findings": r.literature_findings,
-                "next_steps": r.next_steps,
-                "conflicts": r.conflicts,
-                "timestamp": r.timestamp.isoformat() if r.timestamp else ""
-            } 
-            for r in state.round_results
-        ],
-        "final_summary": state.final_summary,
-        "exploration_report_url": f"/api/session/{session_id}/exploration-report/html" if getattr(state, 'exploration_report_html_path', None) else None,
-        "annotation_report_url": f"/api/session/{session_id}/annotation-report/html" if getattr(state, 'annotation_report_html_path', None) else None,
-        "analysis_phase": state.analysis_phase,
-        # Messages history (realtime WebSocket messages for UI restoration)
-        # Strip large base64 image data from messages to reduce response size
-        "messages": [
-            {
-                "id": msg.id,
-                "type": msg.type,
-                "agent": msg.agent.value if hasattr(msg.agent, 'value') else (str(msg.agent) if msg.agent else None),
-                "content": _strip_message_base64(msg.type, msg.content),
-                "timestamp": msg.timestamp.isoformat() if msg.timestamp else "",
-            }
-            for msg in state.realtime_messages
-        ],
-        # Custom settings
-        "custom_prompts": state.custom_prompts,
-        "custom_models": state.custom_models,
-        "custom_temperatures": state.custom_temperatures,
-        # State version control
-        "state_version": state.state_version,
-        "last_sync_timestamp": state.last_sync_timestamp.isoformat() if state.last_sync_timestamp else "",
-        # Agent errors tracking
-        "agent_errors": [
-            {
-                "id": err.id,
-                "agent": err.agent.value if hasattr(err.agent, 'value') else str(err.agent),
-                "error_type": err.error_type,
-                "message": err.message,
-                "details": err.details,
-                "round_number": err.round_number,
-                "timestamp": err.timestamp.isoformat() if err.timestamp else "",
-                "resolved": err.resolved,
-                "resolution": err.resolution
-            }
-            for err in state.agent_errors
-        ],
-        # Publication outputs
-        "publication_figures": [
-            {
-                "id": fig.id,
-                "name": fig.name,
-                "description": fig.description,
-                "figure_type": fig.figure_type,
-                "png_path": fig.png_path,
-                "pdf_path": fig.pdf_path,
-                "png_base64": fig.png_base64,
-                "review_status": fig.review_status.value if hasattr(fig.review_status, 'value') else str(fig.review_status),
-                "pi_feedback": fig.pi_feedback,
-                "revision_count": fig.revision_count,
-                "created_at": fig.created_at.isoformat() if fig.created_at else ""
-            }
-            for fig in state.publication_figures
-        ],
-        "publication_tables": [
-            {
-                "id": tbl.id,
-                "name": tbl.name,
-                "description": tbl.description,
-                "csv_path": tbl.csv_path,
-                "columns": tbl.columns,
-                "preview_data": tbl.preview_data,
-                "review_status": tbl.review_status.value if hasattr(tbl.review_status, 'value') else str(tbl.review_status),
-                "pi_feedback": tbl.pi_feedback,
-                "created_at": tbl.created_at.isoformat() if tbl.created_at else ""
-            }
-            for tbl in state.publication_tables
-        ],
-        "graphic_abstract": {
-            "id": state.graphic_abstract.id,
-            "prompt": state.graphic_abstract.prompt,
-            "image_base64": state.graphic_abstract.image_base64,
-            "created_at": state.graphic_abstract.created_at.isoformat() if state.graphic_abstract.created_at else ""
-        } if state.graphic_abstract else None,
-        "integrated_report": state.integrated_report,
-    }
+    return state.to_api_dict(strip_message_base64=_strip_message_base64)
 
 
 @app.delete("/api/session/{session_id}")
@@ -838,6 +773,7 @@ async def delete_session(session_id: str):
         # Remove from memory while holding lock
         sessions.pop(session_id, None)
         _session_access_times.pop(session_id, None)
+        _last_save_times.pop(session_id, None)
 
     # Remove message buffer
     async with _message_buffer_lock:
@@ -1044,7 +980,7 @@ async def delete_group(session_id: str, group_id: str):
         try:
             if os.path.exists(df.file_path):
                 os.remove(df.file_path)
-        except Exception as e:
+        except OSError as e:
             logger.warning(f"Failed to delete file {df.file_path}: {e}")
 
     # Remove files and indicators from state
@@ -1118,7 +1054,7 @@ async def upload_data(
             content = await file.read()
             with open(file_path, "wb") as f:
                 f.write(content)
-    except Exception as e:
+    except OSError as e:
         logger.warning(f"Failed to save uploaded file {file_path}: {e}")
         # Clean up partial file on failure
         try:
@@ -1296,7 +1232,7 @@ async def delete_data_file(session_id: str, file_id: str):
             try:
                 if os.path.exists(df.file_path):
                     os.remove(df.file_path)
-            except Exception as e:
+            except OSError as e:
                 logger.warning(f"Failed to delete file {df.file_path}: {e}")
 
             state.data_files.pop(i)
@@ -1941,6 +1877,8 @@ async def confirm_annotations(session_id: str, request: AnnotationConfirmation):
         workflow = workflows.get(session_id)
     if workflow:
         workflow.signal_annotation_confirmed()
+    else:
+        await _pause_and_restart_ws(session_id, state)
 
     return APIResponse(
         success=True,
@@ -2034,6 +1972,8 @@ async def choose_direction(session_id: str, request: DirectionChoice):
         workflow = workflows.get(session_id)
     if workflow:
         workflow.signal_continue()
+    else:
+        await _pause_and_restart_ws(session_id, state)
 
     direction_count = len(request.directions) if request.directions else (1 if request.direction else 0)
     return APIResponse(
@@ -2143,6 +2083,29 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
         # Close DB connection before deleting checkpoint file (avoid SQLite lock)
         await workflow.close()
 
+    # Cancel running workflow asyncio task (same pattern as stop endpoint)
+    task = _run_tasks.get(session_id)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            pass
+
+    # Cancel monitor task
+    monitor = _monitor_tasks.pop(session_id, None)
+    if monitor and not monitor.done():
+        monitor.cancel()
+
+    # Clear stale message buffers (prevent old messages from being sent to new connections)
+    async with _message_buffer_lock:
+        _message_buffers.pop(session_id, None)
+
+    # Clean up initializing flag and workflow reference
+    async with _state_lock:
+        _initializing_sessions.discard(session_id)
+        workflows.pop(session_id, None)
+
     # Restore state
     from .utils.snapshot import SnapshotManager
     mgr = SnapshotManager(session_id)
@@ -2168,13 +2131,62 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
         # Other phases: set to PAUSED, WebSocket reconnect will start fresh run
         restored_state.status = TaskStatus.PAUSED
 
+    # Synthesize HITL messages into realtime_messages so frontend can show dialogs
+    # (snapshots exclude realtime_messages to save space, but frontend needs them)
+    if phase == "pre_annotation" and restored_state.annotation_state:
+        ann = restored_state.annotation_state
+        report_html_url = (
+            f"/api/session/{session_id}/annotation-report/html"
+            if getattr(restored_state, 'annotation_report_html_path', None) else None
+        )
+        detailed_report_url = (
+            f"/api/session/{session_id}/detailed-report/html"
+            if getattr(restored_state, 'detailed_report_html_path', None) else None
+        )
+        restored_state.realtime_messages.append(WebSocketMessage(
+            type="annotation_confirmation",
+            agent=AgentType.LITERATURE,
+            content={
+                "annotations": [a.model_dump() for a in ann.cluster_annotations],
+                "tissue": ann.tissue,
+                "organism": ann.organism,
+                "tissue_summary": ann.tissue_summary,
+                "analysis_summary": ann.analysis_summary,
+                "report_html_url": report_html_url,
+                "detailed_report_url": detailed_report_url,
+            }
+        ))
+    elif phase == "pre_direction" and restored_state.exploration_report:
+        exp = restored_state.exploration_report
+        html_url = (
+            f"/api/session/{session_id}/exploration-report/html"
+            if getattr(restored_state, 'exploration_report_html_path', None) else None
+        )
+        detailed_report_url = (
+            f"/api/session/{session_id}/detailed-report/html"
+            if getattr(restored_state, 'detailed_report_html_path', None) else None
+        )
+        last_round = restored_state.round_results[-1] if restored_state.round_results else None
+        restored_state.realtime_messages.append(WebSocketMessage(
+            type="exploration_report",
+            agent=AgentType.PI,
+            content={
+                "report_a": exp.model_dump(),
+                "round": last_round.round_number if last_round else 1,
+                "summary": last_round.pi_summary if last_round else "",
+                "html_url": html_url,
+                "detailed_report_url": detailed_report_url,
+            }
+        ))
+
+    # Reset annotation confirmed flag so the restored HITL checkpoint works correctly
+    if phase == "pre_annotation" and restored_state.annotation_state:
+        restored_state.annotation_state.confirmed = False
+        restored_state.annotation_state.pending = True
+
     # Replace in-memory and on-disk state
     await _update_session_cache(session_id, restored_state)
-    await async_save_session(session_id, restored_state)
-
-    # Remove workflow reference (needs fresh start)
-    async with _state_lock:
-        workflows.pop(session_id, None)
+    await async_save_session(session_id, restored_state, force=True)
 
     logger.info(
         f"[{session_id}] Snapshot restored: {snapshot.name} (Round {snapshot.round_number}), "
@@ -2862,7 +2874,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             while session_id in workflows:
                 # Keep connection alive by waiting for messages
                 try:
-                    await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                    await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT)
                 except asyncio.TimeoutError:
                     # Send heartbeat to keep connection alive through proxies
                     try:
@@ -2943,13 +2955,63 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         try:
             while True:
                 try:
-                    await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                    await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT)
                 except asyncio.TimeoutError:
                     pass
         except WebSocketDisconnect:
             logger.info(f"WebSocket disconnected for completed session {session_id}")
         return
-    
+
+    # HITL-hold: after snapshot restore, hold connection without starting workflow.
+    # The frontend will show the HITL dialog from data loaded via the /load endpoint.
+    # When user confirms/chooses, the confirm/choose endpoint closes this WebSocket
+    # with code 4000, triggering auto-reconnect which creates a new workflow.
+    if state.status in (TaskStatus.WAITING_ANNOTATION, TaskStatus.WAITING_INPUT):
+        logger.info(f"[{session_id}] HITL-hold: status={state.status.value}, waiting for user action")
+        async with _state_lock:
+            _initializing_sessions.discard(session_id)
+        try:
+            # Send message history (includes synthesized HITL messages from restore)
+            if state.realtime_messages:
+                msg_data_list = [
+                    {
+                        "id": msg.id,
+                        "type": msg.type,
+                        "agent": msg.agent.value if hasattr(msg.agent, 'value') else (str(msg.agent) if msg.agent else None),
+                        "content": msg.content,
+                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
+                    }
+                    for msg in state.realtime_messages[-500:]
+                ]
+                await websocket.send_json({
+                    "type": "message_history",
+                    "content": {
+                        "messages": msg_data_list,
+                        "count": len(msg_data_list)
+                    },
+                    "timestamp": datetime.now().isoformat()
+                })
+            # Hold connection until user action triggers close
+            while True:
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    try:
+                        await websocket.send_json({
+                            "type": "ping",
+                            "timestamp": datetime.now().isoformat()
+                        })
+                    except Exception:
+                        break
+        except Exception:
+            logger.debug("WebSocket receive loop ended unexpectedly", exc_info=True)
+        finally:
+            async with _state_lock:
+                # Only clean up if we're still the active websocket
+                if websockets.get(session_id) is websocket:
+                    del websockets[session_id]
+        return
+
     # Create message callback that uses the global websockets dict
     # This way, if the websocket reconnects, messages go to the new connection
     # Track WebSocket closed state with lock for thread-safe access
@@ -3085,7 +3147,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         try:
             while True:
                 try:
-                    await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                    await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT)
                 except asyncio.TimeoutError:
                     # Send heartbeat ping to keep connection alive through proxies
                     async with ws_lock:
@@ -3170,7 +3232,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     final_state = report_state
                 except Exception as e:
                     logger.exception(f"[{session_id}] Report generation after stop failed")
-                    logger.error(traceback.format_exc())
                     current_state.status = TaskStatus.FAILED
                     await _update_session_cache(session_id, current_state)
                     await async_save_session(session_id, current_state)
@@ -3205,7 +3266,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     except Exception as e:
         # Log the full error traceback
         logger.exception(f"Workflow error for session {session_id}")
-        logger.error(traceback.format_exc())
 
         # Try to send error, but don't fail if WebSocket is closed
         await safe_send({
@@ -3427,7 +3487,6 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
 
     except Exception as e:
         logger.exception("Report generation failed")
-        logger.error(traceback.format_exc())
 
         if session_id in report_websockets:
             try:
@@ -4155,9 +4214,9 @@ async def get_chunked_upload_status(session_id: str, upload_id: str):
 @app.delete("/api/session/{session_id}/upload/cancel/{upload_id}")
 async def cancel_chunked_upload(session_id: str, upload_id: str):
     """Cancel and cleanup a chunked upload"""
-    success = await upload_manager.cancel_upload(upload_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Upload not found")
+    result = await upload_manager.cancel_upload(upload_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Upload not found"))
     return {"success": True, "message": "Upload cancelled"}
 
 
@@ -4476,7 +4535,6 @@ async def _generate_figures_in_chat(
 
     except Exception as e:
         logger.exception("Chat figure generation error")
-        logger.error(traceback.format_exc())
     finally:
         _chat_sandboxes.pop(session_id, None)
         try:
@@ -4904,7 +4962,6 @@ async def _run_chat_delegation(
                         a_client, chat_msg_callback, saved_files
                     ))
                 # Global timeout to prevent indefinite hang if an agent's LLM call stalls
-                CHAT_DELEGATION_TIMEOUT = 600  # 10 minutes
                 try:
                     results = await asyncio.wait_for(
                         asyncio.gather(*tasks, return_exceptions=True),
@@ -5067,7 +5124,7 @@ async def _run_chat_delegation(
             try:
                 await extra_client.close()
             except Exception:
-                pass
+                logger.debug("Failed to close extra LLM client", exc_info=True)
 
 
 @app.post("/api/session/{session_id}/chat")
@@ -5297,7 +5354,6 @@ async def chat_with_pi(
 
     except Exception as e:
         logger.exception("Chat LLM error")
-        logger.error(traceback.format_exc())
         assistant_content = f"Error communicating with LLM: {str(e)}"
 
     # --- Check for delegation ---
@@ -5384,7 +5440,6 @@ async def chat_with_pi(
                 await async_save_session(session_id, state)
         except Exception as e:
             logger.exception("Chat figure generation failed")
-            logger.error(traceback.format_exc())
 
     result: Dict[str, Any] = {"role": "assistant", "content": cleaned_content}
     if assistant_msg.get("figures"):

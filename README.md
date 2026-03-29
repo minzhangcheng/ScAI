@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.1
+**Version**: 0.18.2
 
 ## Installation
 
@@ -340,6 +340,20 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.2 (2026-03-29)
+
+- **Improvement: Fine-grained session concurrency** — Per-session mutex locks replace the single global lock, eliminating TOCTTOU race windows and enabling truly parallel operations across sessions.
+- **Improvement: LLM client rate-limit handling** — Retry count raised to 4 with fixed escalating delays (5/10/20/40 s) for 429 errors; reasoning models (OpenAI o-series, Gemini 3.x) now receive correct temperature parameters automatically.
+- **Improvement: Sandbox AST security layer** — A second AST-based inspection pass detects reflection-based sandbox escapes (`getattr`, `__globals__`, `__subclasses__`, etc.) that regex patterns miss.
+- **Improvement: Centralised download utilities** — A new `frontend/src/utils/download.ts` module de-duplicates blob-download logic across ReportPanel, ResultsPanel, and DownloadButtons; parallel `Promise.all` download added to DownloadButtons.
+- **Improvement: Report CSS and image utils extraction** — Report stylesheet moved to `backend/utils/report_css.py` and image helpers to `backend/utils/image_utils.py`, enabling reuse between report generators.
+- **Improvement: Annotation workflow guard** — The bioinformatics agent now blocks direct `adata.obs['cell_type']` assignment, enforcing the `annotate_clusters` workflow and preventing silent annotation overwrites.
+- **Fix: Annotation recovery after restart** — Restoring a snapshot with a previously confirmed annotation no longer re-blocks on confirmation; overrides are applied directly.
+- **Improvement: Upload concurrency limit** — Per-session upload slots capped at 5; excess requests are rejected early with a clear error before any file I/O begins.
+- **Improvement: Centralised AnalysisState serialisation** — `AnalysisState.to_api_dict()` replaces scattered camelCase conversion logic across endpoints.
+- **Improvement: Frontend colour system** — Tailwind palette updated to Material Design red (primary) and modern blue (accent); Sidebar migrated to light theme for improved contrast.
+- **Improvement: Upload file extension blocklist** — DataPanel now rejects executable and script file types (.exe, .sh, .dll, etc.) client-side before upload begins.
 
 ### v0.18.1 (2026-03-27)
 

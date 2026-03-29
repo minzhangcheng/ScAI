@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useAppStore, PublicationFigure, PublicationTable } from '../../stores/appStore'
 import { useTranslation } from '../../i18n/translations'
+import { fetchAndDownload } from '../../utils/download'
 import {
   Download,
   Package,
@@ -34,26 +35,14 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
 
   const downloadAllFigures = async () => {
     if (!currentSession) return
-
     setDownloading('figures')
     try {
-      const response = await fetch(
+      const ok = await fetchAndDownload(
         `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
+        `figures_${currentSession.id}.zip`,
         { method: 'POST' }
       )
-
-      if (response.ok) {
-        const blob = await response.blob()
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `figures_${currentSession.id}.zip`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-        showSuccess('figures')
-      }
+      if (ok) showSuccess('figures')
     } catch (e) {
       console.error('Failed to download figures:', e)
     } finally {
@@ -63,26 +52,14 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
 
   const downloadAllTables = async () => {
     if (!currentSession) return
-
     setDownloading('tables')
     try {
-      const response = await fetch(
+      const ok = await fetchAndDownload(
         `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
+        `tables_${currentSession.id}.zip`,
         { method: 'POST' }
       )
-
-      if (response.ok) {
-        const blob = await response.blob()
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `tables_${currentSession.id}.zip`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-        showSuccess('tables')
-      }
+      if (ok) showSuccess('tables')
     } catch (e) {
       console.error('Failed to download tables:', e)
     } finally {
@@ -92,47 +69,25 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
 
   const downloadAll = async () => {
     if (!currentSession) return
-
     setDownloading('all')
     try {
-      // Download figures
-      const figuresResponse = await fetch(
-        `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
-        { method: 'POST' }
-      )
-
-      if (figuresResponse.ok) {
-        const blob = await figuresResponse.blob()
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `figures_${currentSession.id}.zip`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-      }
-
-      // Download tables if available
-      if (tables.length > 0) {
-        const tablesResponse = await fetch(
-          `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
+      const downloads = [
+        fetchAndDownload(
+          `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
+          `figures_${currentSession.id}.zip`,
           { method: 'POST' }
         )
-
-        if (tablesResponse.ok) {
-          const blob = await tablesResponse.blob()
-          const url = URL.createObjectURL(blob)
-          const a = document.createElement('a')
-          a.href = url
-          a.download = `tables_${currentSession.id}.zip`
-          document.body.appendChild(a)
-          a.click()
-          document.body.removeChild(a)
-          URL.revokeObjectURL(url)
-        }
+      ]
+      if (tables.length > 0) {
+        downloads.push(
+          fetchAndDownload(
+            `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
+            `tables_${currentSession.id}.zip`,
+            { method: 'POST' }
+          )
+        )
       }
-
+      await Promise.all(downloads)
       showSuccess('all')
     } catch (e) {
       console.error('Failed to download all:', e)

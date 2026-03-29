@@ -274,6 +274,7 @@ export function PromptsPanel() {
           console.error('Failed to save vision setting:', e)
           throw e
         }
+        setAgentVisionSetting(selectedAgent, editedVisionEnabled)
 
         // Also save literature config if on literature agent
         if (selectedAgent === 'literature') {

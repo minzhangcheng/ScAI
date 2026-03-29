@@ -8,6 +8,7 @@ import {
   Sparkles
 } from 'lucide-react'
 import { base64ToDataUri, detectBase64MimeType } from '../../utils/image'
+import { downloadBlob } from '../../utils/download'
 
 interface GraphicAbstractProps {
   graphicAbstract: GraphicAbstractType
@@ -23,14 +24,12 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
   }
 
   const downloadImage = () => {
-    const link = document.createElement('a')
     const mimeType = detectBase64MimeType(graphicAbstract.imageBase64)
-    const ext = mimeType === 'image/jpeg' ? 'jpg' : mimeType.split('/')[1]
-    link.href = base64ToDataUri(graphicAbstract.imageBase64)
-    link.download = `graphic_abstract.${ext}`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    const ext = mimeType === 'image/jpeg' ? 'jpg' : (mimeType.split('/')[1] ?? 'png')
+    const byteString = atob(graphicAbstract.imageBase64)
+    const bytes = new Uint8Array(byteString.length)
+    for (let i = 0; i < byteString.length; i++) bytes[i] = byteString.charCodeAt(i)
+    downloadBlob(new Blob([bytes], { type: mimeType }), `graphic_abstract.${ext}`)
   }
 
   return (

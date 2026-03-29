@@ -19,9 +19,6 @@ DATA_BASE_DIR = Path(os.environ.get(
     str((_BACKEND_DIR.parent.parent / "data").resolve())
 ))
 
-# Create data directory structure
-DATA_BASE_DIR.mkdir(exist_ok=True)
-
 # Legacy top-level directories (kept for backward compatibility / migration fallback)
 UPLOAD_DIR = DATA_BASE_DIR / "uploads"
 STATE_DIR = DATA_BASE_DIR / "states"
@@ -32,14 +29,31 @@ LOG_DIR = DATA_BASE_DIR / "logs"
 # Session-centric directory: all per-session data lives under sessions/{session_id}/
 SESSION_DIR = DATA_BASE_DIR / "sessions"
 
-for d in [UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR]:
-    d.mkdir(exist_ok=True)
-
 # Upload settings for large files
 UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024 * 1024  # 10GB maximum file size
 UPLOAD_TEMP_DIR = DATA_BASE_DIR / "upload_temp"
-UPLOAD_TEMP_DIR.mkdir(exist_ok=True)
+
+
+def _ensure_directories() -> None:
+    """Create data directory structure (idempotent, called once at import time)."""
+    DATA_BASE_DIR.mkdir(exist_ok=True)
+    for d in [UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR]:
+        d.mkdir(exist_ok=True)
+    UPLOAD_TEMP_DIR.mkdir(exist_ok=True)
+
+
+_ensure_directories()
+
+# Session cache management
+MAX_CACHED_SESSIONS = 50  # Maximum sessions to keep in memory
+MAX_REALTIME_MESSAGES = 1000  # Maximum realtime messages per session
+SESSION_CACHE_TTL = 3600  # Seconds before inactive session eviction (1 hour)
+MAX_MESSAGE_BUFFER_SIZE = 100  # WebSocket reconnection message buffer size
+IMPORT_JOB_TTL = 3600  # Cleanup completed/failed import jobs after (seconds)
+CLEANUP_INTERVAL = 300  # Background cleanup task interval (seconds)
+WS_RECEIVE_TIMEOUT = 30.0  # WebSocket receive timeout (seconds)
+CHAT_DELEGATION_TIMEOUT = 600  # Chat delegation global timeout (seconds)
 
 
 # ---------------------------------------------------------------------------

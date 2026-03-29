@@ -3,14 +3,61 @@ Image processing utilities for pathology images
 """
 import base64
 import io
+import logging
 import math
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Any, Optional
+from pathlib import Path
 from PIL import Image
 import numpy as np
+
+_logger = logging.getLogger(__name__)
 
 
 # Set PIL decompression bomb limit at module level to protect all Image.open() calls
 Image.MAX_IMAGE_PIXELS = 200_000_000  # ~200 megapixels
+
+
+def compress_image_to_base64(image_path: str, max_width: int = 800, quality: int = 85) -> str:
+    """
+    Compress an image and convert to base64 for HTML embedding.
+
+    Args:
+        image_path: Path to the image file
+        max_width: Maximum width for resizing (preserves aspect ratio)
+        quality: JPEG quality (1-100)
+
+    Returns:
+        Base64 encoded string with data URI prefix, or empty string on failure
+    """
+    try:
+        with Image.open(image_path) as img:
+            # Convert to RGB if necessary (for PNG with transparency)
+            if img.mode in ('RGBA', 'P'):
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            # Resize if too large
+            width, height = img.size
+            if width > max_width:
+                ratio = max_width / width
+                new_size = (max_width, int(height * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+            # Save to buffer as JPEG
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=quality, optimize=True)
+            buffer.seek(0)
+
+            b64_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            return f"data:image/jpeg;base64,{b64_data}"
+    except Exception as e:
+        _logger.exception(f"Error compressing image {image_path}")
+        return ""
 
 
 def load_image(image_path: str) -> Image.Image:
@@ -212,3 +259,69 @@ def annotate_tile_positions(
         descriptions.append(f"Tile {i+1}: {position} (position: {x1},{y1} to {x2},{y2})")
     
     return "\n".join(descriptions)
+
+
+def categorize_figures(figures_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Scan figures directory and categorize images by their content type.
+
+    Returns a dictionary mapping category names to lists of figure info.
+    """
+    categories = {
+        "qc": [],           # Quality control figures
+        "umap": [],         # UMAP visualizations
+        "clustering": [],   # Clustering related
+        "markers": [],      # Marker gene analysis
+        "de": [],           # Differential expression
+        "heatmap": [],      # Heatmaps
+        "violin": [],       # Violin plots
+        "other": []         # Other figures
+    }
+
+    if not figures_dir.exists():
+        return categories
+
+    # Scan for both JPG and PNG (JPG preferred for new sessions, PNG for backward compatibility)
+    seen_stems = set()
+    image_files = sorted(figures_dir.glob("*.jpg")) + sorted(figures_dir.glob("*.png"))
+    for img_file in image_files:
+        if img_file.stem in seen_stems:
+            continue  # Skip PNG if JPG already found for same stem
+        seen_stems.add(img_file.stem)
+        filename = img_file.stem.lower()
+        pdf_file = img_file.with_suffix('.pdf')
+
+        fig_info = {
+            "name": img_file.stem,
+            "png_path": str(img_file),  # Field name kept for compatibility; may be JPG
+            "pdf_path": str(pdf_file) if pdf_file.exists() else None,
+            "filename": img_file.name
+        }
+
+        # Categorize based on filename
+        if "qc" in filename or "quality" in filename:
+            categories["qc"].append(fig_info)
+        elif "celltype" in filename or "cell_type" in filename or "annotation" in filename:
+            categories["umap"].append(fig_info)  # Cell type annotation UMAPs grouped with UMAP
+        elif "umap" in filename:
+            categories["umap"].append(fig_info)
+        elif "cluster" in filename or "leiden" in filename:
+            categories["clustering"].append(fig_info)
+        elif "marker" in filename:
+            categories["markers"].append(fig_info)
+        elif "volcano" in filename or "_de_" in filename or "differential" in filename:
+            categories["de"].append(fig_info)
+        elif "heatmap" in filename:
+            categories["heatmap"].append(fig_info)
+        elif "violin" in filename:
+            categories["violin"].append(fig_info)
+        elif "dotplot" in filename:
+            categories["markers"].append(fig_info)
+        elif "stacked_bar" in filename or "composition" in filename or "fold_change" in filename:
+            categories["clustering"].append(fig_info)
+        elif "feature" in filename or "expression" in filename:
+            categories["de"].append(fig_info)
+        else:
+            categories["other"].append(fig_info)
+
+    return categories

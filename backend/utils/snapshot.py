@@ -48,7 +48,8 @@ class SnapshotManager:
         state_dict.pop("realtime_messages", None)
         # Strip content_html from report segments (can be regenerated, contains base64 images)
         for seg in state_dict.get("detailed_report_segments", []):
-            seg.pop("content_html", None)
+            if isinstance(seg, dict):
+                seg.pop("content_html", None)
 
         state_path = self.snapshots_dir / snapshot.state_file
         state_json = json.dumps(state_dict, ensure_ascii=False, default=str)
@@ -70,7 +71,7 @@ class SnapshotManager:
         """Load AnalysisState from a snapshot."""
         state_path = (self.snapshots_dir / snapshot.state_file).resolve()
         # Guard against path traversal
-        if not str(state_path).startswith(str(self.snapshots_dir.resolve())):
+        if not state_path.is_relative_to(self.snapshots_dir.resolve()):
             raise ValueError(f"Invalid snapshot path: {snapshot.state_file}")
         if not state_path.exists():
             raise FileNotFoundError(f"Snapshot file not found: {state_path}")
@@ -84,7 +85,9 @@ class SnapshotManager:
 
     async def delete_snapshot(self, snapshot: Snapshot):
         """Delete a snapshot file."""
-        state_path = self.snapshots_dir / snapshot.state_file
+        state_path = (self.snapshots_dir / snapshot.state_file).resolve()
+        if not state_path.is_relative_to(self.snapshots_dir.resolve()):
+            raise ValueError(f"Invalid snapshot path: {snapshot.state_file}")
         if state_path.exists():
             state_path.unlink()
             logger.info(f"[{self.session_id}] Snapshot deleted: {snapshot.name}")

@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.1
-**Last Updated**: 2026-03-27
+**Version**: 0.18.2
+**Last Updated**: 2026-03-29
 
 ## Project Overview
 
@@ -1447,6 +1447,25 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
+#### v0.18.2 (2026-03-29)
+
+- **Fine-grained session concurrency** (`main.py`): Per-session `asyncio.Lock` via `_get_session_lock()`; removed TOCTTOU window between `_active_sessions` check and modification. Session-level constants (`MAX_CACHED_SESSIONS`, `SESSION_CACHE_TTL`, etc.) extracted to `config.py`.
+- **WebSocket reconnect after snapshot restore** (`main.py`): `_pause_and_restart_ws()` closes WS on confirmed HITL with no running workflow, triggering client reconnect.
+- **LLM temperature & retry** (`utils/llm_client.py`): `_get_effective_temperature()` returns `None` for o1/o3/o4, `1.0` for Gemini 3.x thinking models, requested value otherwise. Retry count 3→4; delays `[5, 10, 20, 40]` s.
+- **AST sandbox layer** (`utils/sandbox.py`): Second-pass AST visitor catches reflection escapes (`getattr`, `__globals__`, `__builtins__`, `__dict__[...]`, `__subclasses__`) that regex alone misses.
+- **Annotation guard** (`agents/bioinformatics_agent.py`): `_CELL_TYPE_ASSIGN_RE` regex blocks direct `adata.obs['cell_type'] =` assignment; matplotlib figures closed safely with `try/except plt.close('all')`.
+- **Annotation recovery** (`workflow.py`): Already-confirmed annotations skip re-confirmation on restart; PI review failures fall back to original annotation rather than aborting.
+- **Upload concurrency** (`utils/upload.py`): `MAX_CONCURRENT_UPLOADS_PER_SESSION = 5`; counter rolled back on metadata init failure via `try/finally`.
+- **Report CSS extraction** (`utils/report_css.py`): 538-line report stylesheet extracted from `supervisor_agent.py` into shared module.
+- **Image utils extraction** (`utils/image_utils.py`): `compress_image_to_base64()` and `categorize_figures()` moved from `report_generator.py`.
+- **AnalysisState serialisation** (`models/schemas.py`): `to_api_dict()` centralises snake→camelCase, Enum/datetime conversion, and URL generation.
+- **Download utilities** (`frontend/src/utils/download.ts`): `downloadBlob()` and `fetchAndDownload()` replace inline blob-download code in ReportPanel, ResultsPanel, DownloadButtons.
+- **Parallel figure download** (`analysis/DownloadButtons.tsx`): `Promise.all()` parallelises figure and table downloads.
+- **Upload blocklist** (`DataPanel.tsx`): `BLOCKED_EXTENSIONS` set rejects executable/script files client-side.
+- **Tailwind colour system** (`tailwind.config.js`): primary → Material red, accent → modern blue; Sidebar migrated to light theme.
+- **Abstract method guard** (`agents/base.py`): `process()` raises `NotImplementedError` instead of silently passing.
+- **Config constants** (`config.py`): `_ensure_directories()` extracted; session/upload/WS constants centralised.
+
 #### v0.18.1 (2026-03-27)
 
 - Version bump and documentation sync.
@@ -1996,5 +2015,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-27*
-*Version: 0.18.1*
+*Document updated: 2026-03-29*
+*Version: 0.18.2*

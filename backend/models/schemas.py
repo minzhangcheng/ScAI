@@ -601,10 +601,123 @@ class AnalysisState(BaseModel):
         """Check if analysis should stop based on convergence"""
         if len(self.round_results) < convergence_rounds:
             return False
-        
+
         # Check if last N rounds had no new findings
         recent_rounds = self.round_results[-convergence_rounds:]
         return all(not r.new_findings for r in recent_rounds)
+
+    def to_api_dict(self, *, strip_message_base64=None) -> dict:
+        """Serialize state for the load_session API response.
+
+        Centralizes the snake_case → camelCase mapping and enum/datetime
+        conversions that the frontend expects, so the route handler is a
+        one-liner and field additions only need updating here.
+
+        Args:
+            strip_message_base64: Optional callable(msg_type, content) -> content
+                to strip large base64 data from messages before sending.
+        """
+        def _dt(v) -> str:
+            return v.isoformat() if v else ""
+
+        def _enum(v) -> str:
+            return v.value if hasattr(v, 'value') else str(v)
+
+        result = {
+            "session_id": self.id,
+            "name": self.name,
+            "status": _enum(self.status),
+            "current_round": self.current_round,
+            "max_rounds": self.max_rounds,
+            "round_wait_seconds": self.round_wait_seconds,
+            "created_at": _dt(self.created_at),
+            "updated_at": _dt(self.updated_at),
+            "initial_instruction": self.initial_instruction,
+            "treatment_groups": [
+                {"id": g.id, "name": g.name, "description": g.description,
+                 "sampleCount": g.sample_count, "order": g.order}
+                for g in self.treatment_groups
+            ],
+            "data_files": [
+                {"id": f.id, "filename": f.filename, "filePath": f.file_path,
+                 "section": f.section, "dataType": f.data_type,
+                 "groupId": f.group_id, "sampleNumber": f.sample_number,
+                 "description": f.description, "timestamp": _dt(f.timestamp)}
+                for f in self.data_files
+            ],
+            "biochemistry_indicators": [
+                {"id": r.id, "indicator": r.indicator, "value": r.value, "unit": r.unit,
+                 "referenceRange": r.reference_range, "interpretation": r.interpretation,
+                 "groupId": r.group_id, "sampleNumber": r.sample_number}
+                for r in self.biochemistry_indicators
+            ],
+            "round_results": [
+                {"round": r.round_number, "pi_summary": r.pi_summary,
+                 "pathology_findings": r.pathology_findings,
+                 "bioinformatics_findings": r.bioinformatics_findings,
+                 "biochemistry_findings": r.biochemistry_findings,
+                 "literature_findings": r.literature_findings,
+                 "next_steps": r.next_steps, "conflicts": r.conflicts,
+                 "timestamp": _dt(r.timestamp)}
+                for r in self.round_results
+            ],
+            "final_summary": self.final_summary,
+            "exploration_report_url": (
+                f"/api/session/{self.id}/exploration-report/html"
+                if getattr(self, 'exploration_report_html_path', None) else None
+            ),
+            "annotation_report_url": (
+                f"/api/session/{self.id}/annotation-report/html"
+                if getattr(self, 'annotation_report_html_path', None) else None
+            ),
+            "analysis_phase": self.analysis_phase,
+            "messages": [
+                {"id": msg.id, "type": msg.type,
+                 "agent": _enum(msg.agent) if msg.agent else None,
+                 "content": (strip_message_base64(msg.type, msg.content)
+                             if strip_message_base64 else msg.content),
+                 "timestamp": _dt(msg.timestamp)}
+                for msg in self.realtime_messages
+            ],
+            "custom_prompts": self.custom_prompts,
+            "custom_models": self.custom_models,
+            "custom_temperatures": self.custom_temperatures,
+            "state_version": self.state_version,
+            "last_sync_timestamp": _dt(self.last_sync_timestamp),
+            "agent_errors": [
+                {"id": err.id, "agent": _enum(err.agent),
+                 "error_type": err.error_type, "message": err.message,
+                 "details": err.details, "round_number": err.round_number,
+                 "timestamp": _dt(err.timestamp),
+                 "resolved": err.resolved, "resolution": err.resolution}
+                for err in self.agent_errors
+            ],
+            "publication_figures": [
+                {"id": fig.id, "name": fig.name, "description": fig.description,
+                 "figure_type": fig.figure_type, "png_path": fig.png_path,
+                 "pdf_path": fig.pdf_path, "png_base64": fig.png_base64,
+                 "review_status": _enum(fig.review_status),
+                 "pi_feedback": fig.pi_feedback, "revision_count": fig.revision_count,
+                 "created_at": _dt(fig.created_at)}
+                for fig in self.publication_figures
+            ],
+            "publication_tables": [
+                {"id": tbl.id, "name": tbl.name, "description": tbl.description,
+                 "csv_path": tbl.csv_path, "columns": tbl.columns,
+                 "preview_data": tbl.preview_data,
+                 "review_status": _enum(tbl.review_status),
+                 "pi_feedback": tbl.pi_feedback, "created_at": _dt(tbl.created_at)}
+                for tbl in self.publication_tables
+            ],
+            "graphic_abstract": (
+                {"id": self.graphic_abstract.id, "prompt": self.graphic_abstract.prompt,
+                 "image_base64": self.graphic_abstract.image_base64,
+                 "created_at": _dt(self.graphic_abstract.created_at)}
+                if self.graphic_abstract else None
+            ),
+            "integrated_report": self.integrated_report,
+        }
+        return result
 
 class APIRequest(BaseModel):
     """Request to start or resume analysis"""

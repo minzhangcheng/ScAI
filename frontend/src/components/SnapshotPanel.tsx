@@ -164,11 +164,11 @@ export function SnapshotPanel({ sessionId, apiBase, language, onClose, onRestore
         {/* Connector line for indented items */}
         {node.depth > 0 && (
           <div
-            className="absolute left-0 top-0 bottom-0 border-l-2 border-indigo-200"
+            className="absolute left-0 top-0 bottom-0 border-l-2 border-accent-200"
             style={{ left: -10 }}
           />
         )}
-        <div className="border border-slate-200 rounded-xl p-3 hover:border-indigo-300 transition-colors bg-white">
+        <div className="border border-slate-200 rounded-xl p-3 hover:border-accent-300 transition-colors bg-white">
           <div className="flex items-center justify-between">
             <div className="min-w-0 flex-1">
               <div className="font-medium text-sm text-slate-900 truncate">{snap.name}</div>
@@ -203,7 +203,7 @@ export function SnapshotPanel({ sessionId, apiBase, language, onClose, onRestore
                 <>
                   <button
                     onClick={() => setConfirmRestore(snap.id)}
-                    className="p-1.5 text-indigo-600 hover:bg-indigo-50 rounded-lg"
+                    className="p-1.5 text-accent-600 hover:bg-accent-50 rounded-lg"
                     title={isZh ? '恢复' : 'Restore'}
                   >
                     <RotateCcw className="w-4 h-4" />
@@ -230,7 +230,7 @@ export function SnapshotPanel({ sessionId, apiBase, language, onClose, onRestore
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
           <div className="flex items-center gap-2">
-            <Camera className="w-5 h-5 text-indigo-600" />
+            <Camera className="w-5 h-5 text-accent-600" />
             <h2 className="text-lg font-semibold text-slate-900">
               {isZh ? '分析快照' : 'Analysis Snapshots'}
             </h2>

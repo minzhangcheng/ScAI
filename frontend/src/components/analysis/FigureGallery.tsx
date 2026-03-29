@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useAppStore, PublicationFigure, FigureReviewStatus } from '../../stores/appStore'
 import { useTranslation } from '../../i18n/translations'
+import { fetchAndDownload } from '../../utils/download'
 import {
   CheckCircle2,
   Clock,
@@ -80,22 +81,11 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
 
   const downloadPDF = async (figure: PublicationFigure) => {
     if (!currentSession) return
-
     try {
-      const response = await fetch(
-        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/pdf`
+      await fetchAndDownload(
+        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/pdf`,
+        `${figure.name}.pdf`
       )
-      if (response.ok) {
-        const blob = await response.blob()
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `${figure.name}.pdf`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-      }
     } catch (e) {
       console.error('Failed to download PDF:', e)
     }
@@ -103,22 +93,11 @@ export function FigureGallery({ figures }: FigureGalleryProps) {
 
   const downloadJPG = async (figure: PublicationFigure) => {
     if (!currentSession) return
-
     try {
-      const response = await fetch(
-        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/png`
+      await fetchAndDownload(
+        `${API_BASE}/session/${currentSession.id}/figure/${figure.id}/png`,
+        `${figure.name}.jpg`
       )
-      if (response.ok) {
-        const blob = await response.blob()
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `${figure.name}.jpg`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-      }
     } catch (e) {
       console.error('Failed to download JPG:', e)
     }

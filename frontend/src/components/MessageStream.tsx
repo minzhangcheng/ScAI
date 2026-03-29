@@ -523,7 +523,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
             if (typeof message.content === 'string') {
               stats = JSON.parse(message.content)
             }
-          } catch { stats = {} }
+          } catch { console.debug('Failed to parse supervisor_summary'); stats = {} }
 
           return (
             <div className="space-y-2">

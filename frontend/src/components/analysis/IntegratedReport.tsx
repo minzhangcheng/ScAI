@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useAppStore } from '../../stores/appStore'
 import { useTranslation } from '../../i18n/translations'
+import { downloadBlob } from '../../utils/download'
 import ReactMarkdown from 'react-markdown'
 import {
   FileText,
@@ -39,34 +40,16 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
 
   const downloadAsMarkdown = () => {
     const blob = new Blob([report], { type: 'text/markdown' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `integrated_report_${currentSession?.id || 'report'}.md`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+    downloadBlob(blob, `integrated_report_${currentSession?.id || 'report'}.md`)
   }
 
   const downloadAsHTML = async () => {
     if (!currentSession) return
-
     try {
-      const response = await fetch(
-        `${API_BASE}/session/${currentSession.id}/report/html`
-      )
+      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/html`)
       if (response.ok) {
         const html = await response.text()
-        const blob = new Blob([html], { type: 'text/html' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `integrated_report_${currentSession.id}.html`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
+        downloadBlob(new Blob([html], { type: 'text/html' }), `integrated_report_${currentSession.id}.html`)
       }
     } catch (e) {
       console.error('Failed to download HTML:', e)

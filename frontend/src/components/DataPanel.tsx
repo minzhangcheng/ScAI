@@ -28,10 +28,16 @@ const SEQUENCING_TYPES = ['scRNA-seq', 'Loom', 'Other'] as const  // DataPanel a
 // Allowed extensions per section + data type (used for manual validation instead of
 // react-dropzone accept filter, which silently rejects files with unrecognized MIME types
 // like .h5, .h5ad, .loom)
+// Dangerous file extensions that should never be uploaded regardless of data type
+const BLOCKED_EXTENSIONS = new Set([
+  '.exe', '.bat', '.cmd', '.sh', '.ps1', '.vbs', '.js', '.msi',
+  '.dll', '.so', '.dylib', '.bin', '.com', '.scr', '.pif',
+])
+
 function getAllowedExtensions(section: string, dataType: string): string[] {
   if (section === 'pathology') return ['.png', '.jpg', '.jpeg', '.tiff', '.tif']
   if (section === 'sequencing') {
-    if (dataType === 'Other') return []
+    if (dataType === 'Other') return []  // allow-all mode, blocked extensions checked separately
     if (dataType === 'Loom') return ['.loom']
     return ['.h5ad', '.h5']
   }
@@ -40,6 +46,11 @@ function getAllowedExtensions(section: string, dataType: string): string[] {
     return ['.csv', '.txt', '.tsv', '.xls', '.xlsx']
   }
   return []
+}
+
+function isBlockedExtension(filename: string): boolean {
+  const ext = '.' + (filename.split('.').pop()?.toLowerCase() || '')
+  return BLOCKED_EXTENSIONS.has(ext)
 }
 
 // ============================================================
@@ -92,7 +103,7 @@ function GroupManager({
     <section className="mb-8">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <Users className="w-5 h-5 text-indigo-500" />
+          <Users className="w-5 h-5 text-accent-500" />
           <div>
             <h3 className="font-display text-lg font-semibold text-slate-900">{t('treatmentGroups')}</h3>
             <p className="text-sm text-slate-500">{t('treatmentGroupsDesc')}</p>
@@ -100,7 +111,7 @@ function GroupManager({
         </div>
         <button
           onClick={() => setAdding(true)}
-          className="flex items-center gap-1.5 px-3 py-2 bg-indigo-100 text-indigo-700 rounded-lg text-sm font-medium hover:bg-indigo-200 transition-colors"
+          className="flex items-center gap-1.5 px-3 py-2 bg-accent-100 text-accent-700 rounded-lg text-sm font-medium hover:bg-accent-200 transition-colors"
         >
           <Plus className="w-4 h-4" />
           {t('addGroup')}
@@ -112,7 +123,7 @@ function GroupManager({
         {groups.map((group) => (
           <div
             key={group.id}
-            className="border border-slate-200 rounded-xl p-4 bg-white hover:border-indigo-200 transition-colors"
+            className="border border-slate-200 rounded-xl p-4 bg-white hover:border-accent-200 transition-colors"
           >
             {editingId === group.id ? (
               <div className="space-y-2">
@@ -159,7 +170,7 @@ function GroupManager({
                 </div>
                 <button
                   onClick={() => setEditingId(null)}
-                  className="text-xs text-indigo-600 hover:underline"
+                  className="text-xs text-accent-600 hover:underline"
                 >
                   {language === 'zh' ? '完成' : 'Done'}
                 </button>
@@ -173,7 +184,7 @@ function GroupManager({
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => setEditingId(group.id)}
-                      className="p-1 text-slate-400 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors"
+                      className="p-1 text-slate-400 hover:text-accent-500 hover:bg-accent-50 rounded transition-colors"
                       title={language === 'zh' ? '编辑' : 'Edit'}
                     >
                       <Pencil className="w-3.5 h-3.5" />
@@ -190,7 +201,7 @@ function GroupManager({
                   <p className="text-xs text-slate-500 mb-2 line-clamp-2">{group.description}</p>
                 )}
                 <div className="flex items-center gap-1 text-xs text-slate-500">
-                  <span className="px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded font-medium">
+                  <span className="px-1.5 py-0.5 bg-accent-50 text-accent-600 rounded font-medium">
                     {group.sampleCount} {t('sample')}{group.sampleCount > 1 && language === 'en' ? 's' : ''}
                   </span>
                 </div>
@@ -201,7 +212,7 @@ function GroupManager({
 
         {/* Add New Group Card */}
         {adding && (
-          <div className="border-2 border-dashed border-indigo-300 rounded-xl p-4 bg-indigo-50/50">
+          <div className="border-2 border-dashed border-accent-300 rounded-xl p-4 bg-accent-50/50">
             <div className="space-y-2">
               <input
                 type="text"
@@ -240,7 +251,7 @@ function GroupManager({
                 <button
                   onClick={handleAdd}
                   disabled={!newName.trim()}
-                  className="px-3 py-1 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
+                  className="px-3 py-1 text-xs bg-accent-600 text-white rounded hover:bg-accent-700 disabled:opacity-50"
                 >
                   {t('add')}
                 </button>
@@ -391,14 +402,24 @@ function DataSection({
   const onDrop = useCallback((files: File[]) => {
     if (files.length === 0) return
 
+    // Reject dangerous file types regardless of data type
+    const blockedFiles = files.filter(f => isBlockedExtension(f.name))
+    if (blockedFiles.length > 0) {
+      const names = blockedFiles.map(f => f.name).join(', ')
+      alert(language === 'zh'
+        ? `不允许上传可执行文件: ${names}`
+        : `Executable files not allowed: ${names}`)
+    }
+    const safeFiles = files.filter(f => !isBlockedExtension(f.name))
+
     const allowedExts = getAllowedExtensions(section, selectedType)
     const validFiles = allowedExts.length === 0
-      ? files
-      : files.filter(f => {
+      ? safeFiles
+      : safeFiles.filter(f => {
           const ext = '.' + (f.name.split('.').pop()?.toLowerCase() || '')
           return allowedExts.includes(ext)
         })
-    const rejectedFiles = files.filter(f => !validFiles.includes(f))
+    const rejectedFiles = safeFiles.filter(f => !validFiles.includes(f))
 
     if (rejectedFiles.length > 0) {
       const names = rejectedFiles.map(f => f.name).join(', ')
@@ -543,8 +564,8 @@ function DataSection({
             {...getRootProps()}
             className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-all ${
               isDragActive
-                ? 'border-indigo-500 bg-indigo-50'
-                : 'border-slate-300 hover:border-indigo-400 hover:bg-slate-50'
+                ? 'border-accent-500 bg-accent-50'
+                : 'border-slate-300 hover:border-accent-400 hover:bg-slate-50'
             }`}
           >
             <input {...getInputProps()} accept={acceptAttr} />
@@ -572,11 +593,11 @@ function DataSection({
                     <div className="flex items-center gap-2 flex-shrink-0">
                       <div className="w-24 bg-slate-200 rounded-full h-1.5">
                         <div
-                          className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
+                          className="bg-accent-500 h-1.5 rounded-full transition-all duration-300"
                           style={{ width: `${item.progress}%` }}
                         />
                       </div>
-                      <span className="text-xs text-indigo-600 font-medium w-8">{Math.round(item.progress)}%</span>
+                      <span className="text-xs text-accent-600 font-medium w-8">{Math.round(item.progress)}%</span>
                     </div>
                   )}
                   {item.status === 'pending' && (

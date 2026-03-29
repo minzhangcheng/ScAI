@@ -29,6 +29,19 @@ import {
 
 const API_BASE = '/api'
 
+// Content shape from backend round_summary messages (snake_case)
+interface RoundSummaryContent {
+  round?: number
+  summary?: string
+  findings?: string[]
+  data_requests?: { pathology?: string[]; biochemistry?: string[]; other?: string[] }
+  status?: string
+  pathology_findings?: string[]
+  bioinformatics_findings?: string[]
+  biochemistry_findings?: string[]
+  literature_findings?: string[]
+}
+
 export interface RoundSummary {
   round: number
   summary: string
@@ -169,13 +182,17 @@ export function AnalysisPanel() {
 
     for (const msg of piMessages) {
       if (msg.type === 'round_summary' && typeof msg.content === 'object') {
-        const content = msg.content as any
+        const content = msg.content as RoundSummaryContent
         summaries.push({
           round: content.round || summaries.length + 1,
           summary: content.summary || '',
           findings: content.findings || [],
-          dataRequests: content.data_requests || { pathology: [], biochemistry: [], other: [] },
-          status: content.status || 'completed',
+          dataRequests: {
+            pathology: content.data_requests?.pathology || [],
+            biochemistry: content.data_requests?.biochemistry || [],
+            other: content.data_requests?.other || [],
+          },
+          status: (content.status as RoundSummary['status']) || 'completed',
           pathologyFindings: content.pathology_findings || [],
           bioinformaticsFindings: content.bioinformatics_findings || [],
           biochemistryFindings: content.biochemistry_findings || [],
@@ -690,6 +707,7 @@ export function AnalysisPanel() {
                 title={language === 'zh' ? '快照管理' : 'Snapshots'}
               >
                 <Camera className="w-3.5 h-3.5" />
+                {language === 'zh' ? '快照' : 'Snapshot'}
               </button>
             </div>
           )}

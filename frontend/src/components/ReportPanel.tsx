@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import { devLog } from '../utils/logger'
+import { fetchAndDownload } from '../utils/download'
+import { WS_CONNECT_TIMEOUT_MS } from '../hooks/useApi'
 import ReactMarkdown from 'react-markdown'
 import {
   FileText,
@@ -140,6 +142,17 @@ export function ReportPanel() {
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/report/${currentSession.id}`
     const websocket = new WebSocket(wsUrl)
 
+    // Connection timeout
+    const connectTimeout = setTimeout(() => {
+      if (websocket.readyState !== WebSocket.OPEN) {
+        websocket.close()
+        if (isMounted) {
+          setError('WebSocket connection timeout')
+          setGenerating(false)
+        }
+      }
+    }, WS_CONNECT_TIMEOUT_MS)
+
     websocket.onmessage = (event) => {
       if (!isMounted) return
       let data
@@ -196,11 +209,13 @@ export function ReportPanel() {
     }
 
     websocket.onopen = () => {
+      clearTimeout(connectTimeout)
       if (!isMounted) return
       // Connection established
     }
 
     websocket.onerror = () => {
+      clearTimeout(connectTimeout)
       if (!isMounted) return
       setError('WebSocket connection failed')
       setGenerating(false)
@@ -210,6 +225,7 @@ export function ReportPanel() {
 
     return () => {
       isMounted = false
+      clearTimeout(connectTimeout)
       if (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING) {
         websocket.close()
       }
@@ -321,16 +337,7 @@ export function ReportPanel() {
 
   const downloadFile = async (path: string, filename: string) => {
     try {
-      const response = await fetch(`${API_BASE}/download?path=${encodeURIComponent(path)}`)
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      await fetchAndDownload(`${API_BASE}/download?path=${encodeURIComponent(path)}`, filename)
     } catch (e) {
       console.error('Download failed:', e)
     }
@@ -338,20 +345,12 @@ export function ReportPanel() {
 
   const downloadAllFigures = async () => {
     if (!report || !currentSession) return
-
     try {
-      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/download-all-figures`, {
-        method: 'POST'
-      })
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${currentSession.name}_figures.zip`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      await fetchAndDownload(
+        `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
+        `${currentSession.name}_figures.zip`,
+        { method: 'POST' }
+      )
     } catch (e) {
       console.error('Download failed:', e)
     }
@@ -359,20 +358,12 @@ export function ReportPanel() {
 
   const downloadAllTables = async () => {
     if (!report || !currentSession) return
-
     try {
-      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/download-all-tables`, {
-        method: 'POST'
-      })
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${currentSession.name}_tables.zip`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      await fetchAndDownload(
+        `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
+        `${currentSession.name}_tables.zip`,
+        { method: 'POST' }
+      )
     } catch (e) {
       console.error('Download failed:', e)
     }
@@ -380,20 +371,12 @@ export function ReportPanel() {
 
   const downloadFullReport = async () => {
     if (!report || !currentSession) return
-
     try {
-      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/download-full`, {
-        method: 'POST'
-      })
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${currentSession.name}_full_report.zip`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      await fetchAndDownload(
+        `${API_BASE}/session/${currentSession.id}/report/download-full`,
+        `${currentSession.name}_full_report.zip`,
+        { method: 'POST' }
+      )
     } catch (e) {
       console.error('Download failed:', e)
     }
@@ -419,7 +402,7 @@ export function ReportPanel() {
     return (
       <div className="flex-1 flex items-center justify-center text-slate-500">
         <div className="text-center">
-          <Loader2 className="w-16 h-16 mx-auto mb-4 animate-spin text-indigo-400" />
+          <Loader2 className="w-16 h-16 mx-auto mb-4 animate-spin text-accent-400" />
           <p className="text-lg font-medium mb-2">
             {language === 'zh' ? '分析进行中...' : 'Analysis in progress...'}
           </p>
@@ -439,7 +422,7 @@ export function ReportPanel() {
       <div className="p-4 border-b border-slate-200 bg-white">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <FileText className="w-6 h-6 text-indigo-600" />
+            <FileText className="w-6 h-6 text-accent-600" />
             <h2 className="font-display text-xl font-semibold text-slate-900">
               {language === 'zh' ? '详细研究报告' : 'Detailed Research Report'}
             </h2>
@@ -454,7 +437,7 @@ export function ReportPanel() {
                     onClick={() => setViewMode('preview')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
                       viewMode === 'preview'
-                        ? 'bg-white text-indigo-700 shadow-sm'
+                        ? 'bg-white text-accent-700 shadow-sm'
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
@@ -465,7 +448,7 @@ export function ReportPanel() {
                     onClick={() => setViewMode('detail')}
                     className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
                       viewMode === 'detail'
-                        ? 'bg-white text-indigo-700 shadow-sm'
+                        ? 'bg-white text-accent-700 shadow-sm'
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
@@ -500,7 +483,7 @@ export function ReportPanel() {
                 </button>
                 <button
                   onClick={downloadFullReport}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-accent-50 text-accent-700 rounded-lg hover:bg-accent-100"
                 >
                   <Package className="w-4 h-4" />
                   {language === 'zh' ? '打包下载' : 'Download All'}
@@ -537,7 +520,7 @@ export function ReportPanel() {
             </div>
             <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
               <div
-                className="h-full bg-indigo-600 transition-all duration-300"
+                className="h-full bg-accent-600 transition-all duration-300"
                 style={{ width: `${report.progress}%` }}
               />
             </div>
@@ -549,7 +532,7 @@ export function ReportPanel() {
       <div className="flex-1 flex flex-col min-h-0">
         {loading ? (
           <div className="flex-1 flex items-center justify-center">
-            <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+            <Loader2 className="w-8 h-8 animate-spin text-accent-600" />
           </div>
         ) : error ? (
           <div className="flex-1 overflow-auto p-4">
@@ -574,7 +557,7 @@ export function ReportPanel() {
             <button
               onClick={generateReport}
               disabled={generating}
-              className="flex items-center gap-1.5 px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              className="flex items-center gap-1.5 px-4 py-2 text-sm bg-accent-600 text-white rounded-lg hover:bg-accent-700 disabled:opacity-50"
             >
               {generating ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -588,18 +571,18 @@ export function ReportPanel() {
           </div>
         ) : report.status === 'generating' ? (
           <div className="flex-1 flex flex-col items-center justify-center text-slate-500">
-            <Loader2 className="w-16 h-16 mb-4 animate-spin text-indigo-500" />
+            <Loader2 className="w-16 h-16 mb-4 animate-spin text-accent-500" />
             <p className="text-lg mb-2">
               {language === 'zh' ? '正在生成详细报告...' : 'Generating detailed report...'}
             </p>
-            <p className="text-sm text-indigo-600">
+            <p className="text-sm text-accent-600">
               {report.current_step || (language === 'zh' ? '准备中...' : 'Preparing...')}
             </p>
             {report.progress > 0 && (
               <div className="w-64 mt-4">
                 <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-indigo-600 transition-all duration-300"
+                    className="h-full bg-accent-600 transition-all duration-300"
                     style={{ width: `${report.progress}%` }}
                   />
                 </div>
@@ -646,7 +629,7 @@ export function ReportPanel() {
               {report.abstract && (
                 <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm">
                   <h2 className="font-display text-lg font-semibold text-slate-900 mb-3 flex items-center gap-2">
-                    <span className="w-1 h-6 bg-indigo-500 rounded-full" />
+                    <span className="w-1 h-6 bg-accent-500 rounded-full" />
                     {language === 'zh' ? '摘要' : 'Abstract'}
                   </h2>
                   <div className="prose prose-slate prose-sm max-w-none">
