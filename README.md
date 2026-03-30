@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.3
+**Version**: 0.18.4
 
 ## Installation
 
@@ -340,6 +340,18 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.4 (2026-03-30)
+
+- **Improvement: DashScope native image generation** — Painter Agent now detects DashScope base URLs and calls the native async task API (`/api/v1/services/aigc/text2image/image-synthesis` → poll `/api/v1/tasks/{task_id}`) directly, bypassing the OpenAI compatibility layer which does not expose image endpoints.
+- **Improvement: Snapshot kernel session backup** — Snapshots now copy the Jupyter kernel session pkl file alongside the state JSON, enabling full kernel state rollback on restore. Export (tar.gz) includes the snapshots directory. Delete and cleanup operations remove pkl backups.
+- **Improvement: Vision auto-disable on failure** — Bioinformatics Agent and PI Agent now set `has_vision = False` when a vision API call fails (including ZhipuAI error 1210), preventing repeated failures for the rest of the session.
+- **Improvement: Pre-round-wait auto-snapshot** — Workflow creates an automatic snapshot before each round wait HITL, preserving state at the exact moment the user is prompted to continue.
+- **Improvement: Supplementary analysis in round wait loop** — Round wait loop now handles supplementary analysis requests, running them inline and resuming the wait state afterward.
+- **Improvement: Multi-direction auto-skip removed** — Directions queue no longer auto-continues rounds; all rounds now follow normal wait logic, giving the user control at each round boundary.
+- **Improvement: Annotation context report redesign** — Per-step rendering with figures inlined alongside step descriptions; "Additional Figures" section with dynamic numbering replaces the flat figures grid; improved CSS for step layout and expandable raw output.
+- **Improvement: Analysis complete snapshot shortcut** — "Analysis Complete" banner in AnalysisPanel now shows a Snapshot button alongside the green badge, making it easy to capture the final state.
+- **Fix: Final summary card contrast** — `finalSummary` card background changed from `accent-500/600` to `accent-50/100` for improved text readability.
 
 ### v0.18.3 (2026-03-29)
 

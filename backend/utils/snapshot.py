@@ -1,13 +1,15 @@
 """Snapshot manager for saving and restoring analysis state at key points."""
 
+import asyncio
 import json
 import os
 import logging
+import shutil
 from pathlib import Path
 from typing import List, Optional
 
 from ..models.schemas import AnalysisState, Snapshot
-from ..config import get_session_dir
+from ..config import get_session_dir, get_session_states
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,7 @@ class SnapshotManager:
         description: str = "",
         parent_id: Optional[str] = None,
     ) -> Snapshot:
-        """Create a lightweight snapshot (AnalysisState JSON only)."""
+        """Create a snapshot: AnalysisState JSON + kernel session pkl backup."""
         self._ensure_dir()
 
         snapshot = Snapshot(
@@ -61,14 +63,26 @@ class SnapshotManager:
             f.write(state_json)
         os.replace(str(tmp_path), str(state_path))
 
-        logger.info(
-            f"[{self.session_id}] Snapshot created: {name} ({phase}), "
-            f"size={snapshot.size_bytes} bytes"
-        )
+        # Copy kernel session pkl (large file — run in thread to avoid blocking event loop)
+        pkl_src = get_session_states(self.session_id) / f"{self.session_id}_session.pkl"
+        pkl_dst = self.snapshots_dir / f"{snapshot.id}_session.pkl"
+        if pkl_src.exists():
+            await asyncio.to_thread(shutil.copy2, pkl_src, pkl_dst)
+            snapshot.size_bytes += pkl_dst.stat().st_size
+            logger.info(
+                f"[{self.session_id}] Snapshot created: {name} ({phase}), "
+                f"size={snapshot.size_bytes} bytes (includes pkl)"
+            )
+        else:
+            logger.info(
+                f"[{self.session_id}] Snapshot created: {name} ({phase}), "
+                f"size={snapshot.size_bytes} bytes (no pkl found)"
+            )
+
         return snapshot
 
     async def restore_snapshot(self, snapshot: Snapshot) -> AnalysisState:
-        """Load AnalysisState from a snapshot."""
+        """Load AnalysisState from a snapshot and restore kernel session pkl."""
         state_path = (self.snapshots_dir / snapshot.state_file).resolve()
         # Guard against path traversal
         if not state_path.is_relative_to(self.snapshots_dir.resolve()):
@@ -80,17 +94,32 @@ class SnapshotManager:
             state_dict = json.load(f)
 
         restored = AnalysisState.model_validate(state_dict)
+
+        # Restore kernel session pkl (large file — run in thread to avoid blocking event loop)
+        pkl_backup = self.snapshots_dir / f"{snapshot.id}_session.pkl"
+        if pkl_backup.exists():
+            pkl_dst = get_session_states(self.session_id) / f"{self.session_id}_session.pkl"
+            await asyncio.to_thread(shutil.copy2, pkl_backup, pkl_dst)
+            logger.info(f"[{self.session_id}] Kernel session restored from snapshot {snapshot.name}")
+        else:
+            logger.warning(
+                f"[{self.session_id}] No pkl backup found for snapshot {snapshot.name}; "
+                "kernel state will not be rolled back"
+            )
+
         logger.info(f"[{self.session_id}] Snapshot restored: {snapshot.name}")
         return restored
 
     async def delete_snapshot(self, snapshot: Snapshot):
-        """Delete a snapshot file."""
+        """Delete a snapshot file and its kernel session pkl backup."""
         state_path = (self.snapshots_dir / snapshot.state_file).resolve()
         if not state_path.is_relative_to(self.snapshots_dir.resolve()):
             raise ValueError(f"Invalid snapshot path: {snapshot.state_file}")
         if state_path.exists():
             state_path.unlink()
-            logger.info(f"[{self.session_id}] Snapshot deleted: {snapshot.name}")
+        pkl = self.snapshots_dir / f"{snapshot.id}_session.pkl"
+        pkl.unlink(missing_ok=True)
+        logger.info(f"[{self.session_id}] Snapshot deleted: {snapshot.name}")
 
     async def cleanup_old_snapshots(self, keep_count: int = 20) -> List[str]:
         """Remove oldest snapshots if count exceeds limit."""
@@ -105,11 +134,12 @@ class SnapshotManager:
             old = files.pop(0)
             old.unlink()
             removed.append(old.name)
+            # Remove corresponding pkl backup
+            (self.snapshots_dir / f"{old.stem}_session.pkl").unlink(missing_ok=True)
         return removed
 
     async def delete_checkpoint(self):
         """Delete LangGraph checkpoint files so resume() starts fresh after restore."""
-        from ..config import get_session_states
         states_dir = get_session_states(self.session_id)
         deleted = []
         for suffix in ("checkpoints.sqlite", "checkpoints.sqlite-wal", "checkpoints.sqlite-shm"):

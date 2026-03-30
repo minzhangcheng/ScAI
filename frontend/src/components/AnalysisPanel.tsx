@@ -737,9 +737,19 @@ export function AnalysisPanel() {
           )}
 
           {isCompleted && (
-            <div className="flex items-center gap-2 px-3 py-1 bg-green-100 text-green-700 rounded-lg">
-              <CheckCircle2 className="w-4 h-4" />
-              <span className="font-medium">{t('analysisComplete')}</span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowSnapshotPanel(true)}
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                title={language === 'zh' ? '快照管理' : 'Snapshots'}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                {language === 'zh' ? '快照' : 'Snapshot'}
+              </button>
+              <div className="flex items-center gap-2 px-3 py-1 bg-green-100 text-green-700 rounded-lg">
+                <CheckCircle2 className="w-4 h-4" />
+                <span className="font-medium">{t('analysisComplete')}</span>
+              </div>
             </div>
           )}
         </div>
@@ -995,7 +1005,7 @@ export function AnalysisPanel() {
 
         {/* Brief Analysis Result */}
         {currentSession.finalSummary && (
-          <div className="bg-gradient-to-br from-accent-500 to-accent-600 border border-accent-200 rounded-2xl p-6">
+          <div className="bg-gradient-to-br from-accent-50 to-accent-100 border border-accent-200 rounded-2xl p-6">
             <div className="flex items-center gap-3 mb-4">
               <div className="p-2 bg-accent-100 rounded-lg">
                 <CheckCircle2 className="w-5 h-5 text-accent-600" />

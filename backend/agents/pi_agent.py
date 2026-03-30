@@ -2101,8 +2101,10 @@ Group names: {', '.join(g.name for g in state.treatment_groups) if state.treatme
                 )
                 response_text = response.content if response and response.content else ""
             except Exception as e:
-                # User claimed vision support but it failed — fallback to text-only
-                logger.warning(f"[PI] Vision API failed despite user setting, falling back to text-only: {e}")
+                # Vision call failed — disable vision for the rest of this session to avoid
+                # repeated failures (e.g. model does not support multimodal input)
+                logger.warning(f"[PI] Vision API failed, disabling vision for this session: {e}")
+                self.has_vision = False
                 response_text = await self.chat(
                     f"{prompt}\n\n[Note: Unable to view image directly. Please provide general guidance based on figure type and description.]",
                     temperature=0.3

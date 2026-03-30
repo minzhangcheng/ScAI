@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.18.3"
+    version="0.18.4"
 )
 
 # CORS
@@ -2244,6 +2244,15 @@ async def request_human_input(session_id: str):
     )
 
 
+def _add_snapshots_to_tar(tf, session_id: str):
+    """Add snapshot files to tar archive."""
+    snapshots_dir = get_session_dir(session_id) / "snapshots"
+    if snapshots_dir.exists():
+        for snap_file in snapshots_dir.iterdir():
+            if snap_file.is_file():
+                tf.add(str(snap_file), arcname=f"{session_id}/snapshots/{snap_file.name}")
+
+
 @app.api_route("/api/session/{session_id}/export", methods=["GET", "HEAD"])
 async def export_state(session_id: str):
     """Export complete session as tar.gz including all uploads, workspace, reports, and state files.
@@ -2325,6 +2334,9 @@ async def export_state(session_id: str):
                     if file_path.is_file():
                         rel = file_path.relative_to(reports_dir)
                         tf.add(str(file_path), arcname=f"{session_id}/reports/{session_id}/{rel}")
+
+            # 6. snapshots (JSON state files + session pkl backups)
+            _add_snapshots_to_tar(tf, session_id)
 
     await asyncio.to_thread(_build_tar)
 
@@ -2437,6 +2449,9 @@ async def export_prepare(session_id: str):
                             continue
                         rel = file_path.relative_to(rpts_dir)
                         tf.add(str(file_path), arcname=f"{session_id}/reports/{session_id}/{rel}")
+
+            # snapshots (JSON state files + session pkl backups)
+            _add_snapshots_to_tar(tf, session_id)
 
     await asyncio.to_thread(_build_tar)
 
@@ -2649,6 +2664,31 @@ def _import_tar_gz(file_path: str) -> AnalysisState:
             elif relative_to_base.startswith(f"reports/{session_id}/"):
                 rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
                 dest_path = (get_session_reports(session_id) / rest).resolve()
+            elif relative_to_base.startswith("snapshots/"):
+                fname = relative_to_base.split("/", 1)[1]
+                dest_path = (get_session_dir(session_id) / "snapshots" / fname).resolve()
+                # Validate path stays within DATA_BASE_DIR
+                if not str(dest_path).startswith(data_base_str + os.sep) and str(dest_path) != data_base_str:
+                    logger.warning(f"Skipping entry outside data dir: {member.name}")
+                    continue
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                f = tf.extractfile(member)
+                if f:
+                    if fname.endswith(".json"):
+                        # Apply same path remapping as the main session state JSON
+                        content = f.read().decode("utf-8")
+                        if old_base_dir and old_base_dir != data_base_str:
+                            content = content.replace(old_base_dir, data_base_str)
+                        content = content.replace(
+                            str(UPLOAD_DIR / session_id), str(get_session_uploads(session_id)))
+                        content = content.replace(
+                            str(WORKSPACE_DIR / session_id), str(get_session_workspace(session_id)))
+                        content = content.replace(
+                            str(REPORTS_DIR / session_id), str(get_session_reports(session_id)))
+                        dest_path.write_text(content, encoding="utf-8")
+                    else:
+                        dest_path.write_bytes(f.read())
+                continue
             else:
                 dest_path = (DATA_BASE_DIR / relative_to_base).resolve()
 

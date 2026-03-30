@@ -2470,12 +2470,18 @@ Return only the Python code:"""
                     max_tokens=32768
                 )
             except Exception as vision_err:
-                if "NotFoundError" in type(vision_err).__name__ or "404" in str(vision_err):
-                    # Model does not support vision input — fall back to text-only
+                _is_vision_unsupported = (
+                    "NotFoundError" in type(vision_err).__name__
+                    or "404" in str(vision_err)
+                    or "1210" in str(vision_err)  # ZhipuAI: API params error (non-vision model)
+                )
+                if _is_vision_unsupported:
+                    # Model does not support vision input — disable for this session and fall back
                     logger.warning(
-                        f"[Bioinformatics] Model {self.model} does not support vision, "
-                        f"falling back to text-only for figure revision"
+                        f"[Bioinformatics] Model {self.model} does not support vision "
+                        f"({vision_err}), disabling vision for this session"
                     )
+                    self.has_vision = False
                     prompt = prompt.replace(
                         "**Current Figure:** An image of the current figure is attached. "
                         "Review it carefully to understand what needs to be changed.\n\n",

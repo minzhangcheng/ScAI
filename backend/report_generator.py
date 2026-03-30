@@ -52,6 +52,16 @@ def _build_figure_description_map(analysis_log) -> Dict[str, str]:
     return desc_map
 
 
+def _make_figure_block(src: str, caption: str, css_class: str = "step-figure") -> str:
+    """Return an HTML figure block with image and caption."""
+    return (
+        f'<div class="{css_class}">'
+        f'<img src="{src}" alt="{caption}"/>'
+        f'<div class="{css_class}-caption">{caption}</div>'
+        f'</div>'
+    )
+
+
 def _safe_parse_json(response: str) -> Optional[dict]:
     """Parse JSON from LLM response using balanced bracket matching (avoids greedy regex)."""
     if not response:
@@ -118,6 +128,33 @@ def markdown_to_html(text: str) -> str:
     # Bullet lists
     text = re.sub(r'^- (.+)$', r'<li>\1</li>', text, flags=re.MULTILINE)
     text = re.sub(r'(<li>.*?</li>\n?)+', r'<ul>\g<0></ul>', text)
+
+    # Markdown tables — process BEFORE line-break substitution
+    def _convert_table_block(m):
+        lines = m.group(0).strip().split('\n')
+        html = '<div class="table-wrapper"><table>'
+        in_body = False
+        for line in lines:
+            line = line.strip()
+            if not line or not line.startswith('|'):
+                continue
+            cells = [c.strip() for c in line.strip('|').split('|')]
+            # Separator row (e.g. |---|---|)
+            if all(re.match(r'^[-: ]+$', c) for c in cells if c.strip()):
+                if not in_body:
+                    html += '</thead><tbody>'
+                    in_body = True
+                continue
+            if not in_body:
+                html += '<thead><tr>' + ''.join(f'<th>{c}</th>' for c in cells) + '</tr>'
+            else:
+                html += '<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
+        if not in_body:
+            html += '</thead><tbody>'
+        html += '</tbody></table></div>'
+        return html
+
+    text = re.sub(r'(?:^[ \t]*\|[^\n]*\n?)+', _convert_table_block, text, flags=re.MULTILINE)
 
     # Line breaks
     text = text.replace('\n\n', '</p><p>')
@@ -4537,7 +4574,7 @@ def generate_exploration_report_html(
     Returns:
         Path to the saved HTML file
     """
-    from .config import get_session_reports
+    from .config import get_session_reports, get_session_workspace
 
     # Prepare data
     project_name = html_module.escape(state.name or "Untitled Analysis")
@@ -4568,6 +4605,42 @@ def generate_exploration_report_html(
     path_findings = build_list(round_result.pathology_findings[:5], "No pathology findings")
     biochem_findings = build_list(round_result.biochemistry_findings[:5], "No biochemistry findings")
     lit_findings = build_list(round_result.literature_findings[:5], "No literature findings")
+
+    # Key analysis figures from Round 1
+    key_figures_html = ""
+    try:
+        workspace_dir = get_session_workspace(state.id) if state.id else None
+        if workspace_dir and workspace_dir.exists():
+            fig_desc_map = _build_figure_description_map(state.analysis_log)
+            figure_blocks = []
+            seen_stems: set = set()
+            for scan_dir in [workspace_dir, workspace_dir / "figures"]:
+                if not scan_dir.exists():
+                    continue
+                for img_file in sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png")):
+                    if img_file.stem in seen_stems:
+                        continue
+                    seen_stems.add(img_file.stem)
+                    try:
+                        b64 = compress_image_to_base64(str(img_file), max_width=1100, quality=85)
+                        caption = html_module.escape(
+                            fig_desc_map.get(img_file.stem, img_file.stem.replace("_", " ").title())
+                        )
+                        figure_blocks.append(_make_figure_block(b64, caption))
+                    except Exception:
+                        logger.warning("Failed to embed figure in exploration report: %s", img_file, exc_info=True)
+            if figure_blocks:
+                key_figures_html = f"""
+        <div class="section">
+            <div class="section-header">
+                <h2>4b. Key Analysis Figures</h2>
+            </div>
+            <div class="section-content">
+                {"".join(figure_blocks)}
+            </div>
+        </div>"""
+    except Exception:
+        logger.warning("Could not build figures section for exploration report", exc_info=True)
 
     # Direction candidates table
     candidates = exploration_report.research_direction_candidates or []
@@ -4894,6 +4967,29 @@ def generate_exploration_report_html(
         margin-bottom: 12px;
     }}
 
+    .step-figure {{
+        margin: 16px 0;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }}
+
+    .step-figure img {{
+        width: 100%;
+        height: auto;
+        display: block;
+    }}
+
+    .step-figure-caption {{
+        padding: 12px 16px;
+        font-size: 0.9rem;
+        color: var(--text-secondary);
+        background: #f8fafc;
+        line-height: 1.5;
+        border-top: 1px solid var(--border-color);
+    }}
+
     .footer {{
         text-align: center;
         padding: 20px;
@@ -4994,6 +5090,8 @@ def generate_exploration_report_html(
                 </div>
             </div>
         </div>
+
+        {key_figures_html}
 
         <!-- Key Findings -->
         <div class="section">
@@ -5171,7 +5269,7 @@ def generate_detailed_report_segment_html(
                             fig_path = fig_info.get("png_path") or fig_info.get("path", "")
                             if not fig_path:
                                 continue
-                            b64 = compress_image_to_base64(fig_path, max_width=600, quality=70)
+                            b64 = compress_image_to_base64(fig_path, max_width=1000, quality=82)
                             fig_name = fig_info.get("name", "")
                             caption = fig_desc_map.get(fig_name, fig_name.replace("_", " ").title())
                             parts.append(f'<div class="figure-item"><img src="{b64}" />'
@@ -5266,7 +5364,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 .success {{ color: #16a34a; }}
 .error {{ color: #dc2626; }}
 .warning {{ color: #d97706; }}
-.figure-gallery {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 28px; }}
+.figure-gallery {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(700px, 1fr)); gap: 28px; }}
 .figure-item {{ border: 1px solid #e2e8f0; border-radius: 0.5rem; overflow: hidden; }}
 .figure-item img {{ width: 100%; height: auto; display: block; }}
 .caption {{ padding: 0.75rem 1rem; font-size: 0.88rem; color: #334155; line-height: 1.5; background: #f8fafc; }}
@@ -5344,34 +5442,84 @@ def generate_annotation_context_report_html(
             <div class="section-content"><ul>{items}</ul></div>
         </div>"""
 
-    # --- Key bioinformatics analysis steps ---
+    # --- Build figure description map ---
+    figure_desc_map = _build_figure_description_map(state.analysis_log)
+    workspace_dir = get_session_workspace(state.id) if state.id else None
+
+    def _resolve_fig_path(fname: str) -> Optional[Path]:
+        """Find figure file in workspace or figures subdirectory."""
+        if not workspace_dir:
+            return None
+        for candidate in [workspace_dir / fname, workspace_dir / "figures" / fname]:
+            if candidate.exists():
+                return candidate
+        return None
+
+    # --- Integrated bioinformatics steps + figures ---
     bio_steps_html = ""
     bio_steps = [s for s in state.analysis_log if s.step_type == "execute_code"]
+    linked_stems: set = set()
+
     if bio_steps:
         step_items = []
         for s in bio_steps:
             desc = html_module.escape(s.code_description or f"Step {s.step_number}")
-            output_preview = ""
+
+            output_html = ""
             if s.code_output:
-                output_preview = f'<pre class="step-output">{html_module.escape(s.code_output[:500])}</pre>'
-            step_items.append(f"<li><strong>{desc}</strong>{output_preview}</li>")
+                output_preview = html_module.escape(s.code_output[:400])
+                output_html = (
+                    f'<details class="step-output-details">'
+                    f'<summary>代码输出</summary>'
+                    f'<pre class="step-output">{output_preview}</pre>'
+                    f'</details>'
+                )
+
+            explanation_html = ""
+            if s.agent_reasoning:
+                explanation_html = (
+                    f'<div class="step-explanation">'
+                    f'{markdown_to_html(s.agent_reasoning[:800])}'
+                    f'</div>'
+                )
+
+            step_fig_blocks = []
+            for fname in (s.saved_figure_filenames or []):
+                stem = Path(fname).stem
+                linked_stems.add(stem)
+                fpath = _resolve_fig_path(fname)
+                if fpath:
+                    try:
+                        b64 = compress_image_to_base64(str(fpath), max_width=1100, quality=85)
+                        caption = html_module.escape(
+                            figure_desc_map.get(stem, s.code_description or fname)
+                        )
+                        step_fig_blocks.append(_make_figure_block(b64, caption))
+                    except Exception:
+                        logger.warning("Failed to embed step figure: %s", fpath, exc_info=True)
+
+            figures_block = "".join(step_fig_blocks)
+            step_items.append(
+                f'<div class="analysis-step">'
+                f'<div class="step-header"><span class="step-marker">&#9656;</span>'
+                f'<strong class="step-desc">{desc}</strong></div>'
+                f'{explanation_html}'
+                f'{output_html}'
+                f'{figures_block}'
+                f'</div>'
+            )
+
         bio_steps_html = f"""
         <div class="section">
             <div class="section-header"><h2>4. Bioinformatics Analysis Steps</h2></div>
-            <div class="section-content"><ul>{"".join(step_items)}</ul></div>
+            <div class="section-content">{"".join(step_items)}</div>
         </div>"""
 
-    # --- Figures ---
+    # --- Orphan figures (workspace figures not linked to any step) ---
     figures_html = ""
-    figure_blocks = []
-    seen_stems: set = set()
+    orphan_blocks = []
+    seen_stems: set = set(linked_stems)
 
-    # Build filename → description mapping from analysis_log for rich captions
-    figure_desc_map = _build_figure_description_map(state.analysis_log)
-
-    # Scan workspace directory for figures (works even when analysis_log is empty,
-    # e.g. when report is generated mid-execution before bioinformatics agent returns)
-    workspace_dir = get_session_workspace(state.id) if state.id else None
     if workspace_dir and workspace_dir.exists():
         scan_dirs = [workspace_dir]
         figures_subdir = workspace_dir / "figures"
@@ -5379,60 +5527,35 @@ def generate_annotation_context_report_html(
             scan_dirs.append(figures_subdir)
 
         for scan_dir in scan_dirs:
-            image_files = sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png"))
-            for img_file in image_files:
+            for img_file in sorted(scan_dir.glob("*.jpg")) + sorted(scan_dir.glob("*.png")):
                 if img_file.stem in seen_stems:
                     continue
                 seen_stems.add(img_file.stem)
                 try:
-                    b64 = compress_image_to_base64(str(img_file), max_width=700, quality=80)
+                    b64 = compress_image_to_base64(str(img_file), max_width=1100, quality=85)
                     caption = html_module.escape(
                         figure_desc_map.get(img_file.stem, img_file.stem.replace("_", " ").title())
                     )
-                    figure_blocks.append(
-                        f'<div class="figure-item"><img src="{b64}" alt="{caption}"/>'
-                        f'<div class="figure-caption">{caption}</div></div>'
-                    )
+                    orphan_blocks.append(_make_figure_block(b64, caption))
                 except Exception:
                     logger.warning("Failed to embed figure in HTML: %s", img_file, exc_info=True)
 
-        # Collect any analysis_log figures not found by directory scan
-        for s in state.analysis_log:
-            for fname in (s.saved_figure_filenames or []):
-                stem = Path(fname).stem
-                if stem in seen_stems:
-                    continue
-                fpath = workspace_dir / fname
-                if not fpath.exists():
-                    fpath = workspace_dir / "figures" / fname
-                if fpath.exists():
-                    seen_stems.add(stem)
-                    try:
-                        b64 = compress_image_to_base64(str(fpath), max_width=700, quality=80)
-                        caption = html_module.escape(s.code_description or fname)
-                        figure_blocks.append(
-                            f'<div class="figure-item"><img src="{b64}" alt="{caption}"/>'
-                            f'<div class="figure-caption">{caption}</div></div>'
-                        )
-                    except Exception:
-                        logger.warning("Failed to embed figure: %s", fpath, exc_info=True)
-
-    # From publication_figures (correct attribute names: png_base64, name)
+    # From publication_figures
     for pf in (state.publication_figures or []):
         pf_name = getattr(pf, 'name', '') or 'Figure'
         b64_data = getattr(pf, 'png_base64', None)
         if b64_data and pf_name not in seen_stems:
+            seen_stems.add(pf_name)
             title = html_module.escape(pf_name)
-            figure_blocks.append(
-                f'<div class="figure-item"><img src="data:image/{"png" if b64_data[:5] == "iVBOR" else "jpeg"};base64,{b64_data}" alt="{title}"/>'
-                f'<div class="figure-caption">{title}</div></div>'
-            )
+            fmt = "png" if b64_data[:5] == "iVBOR" else "jpeg"
+            orphan_blocks.append(_make_figure_block(f"data:image/{fmt};base64,{b64_data}", title))
 
-    if figure_blocks:
+    if orphan_blocks:
+        section_num = "5" if bio_steps_html else "4"
         figures_html = f"""
         <div class="section">
-            <div class="section-header"><h2>5. Analysis Figures</h2></div>
-            <div class="section-content"><div class="figures-grid">{"".join(figure_blocks)}</div></div>
+            <div class="section-header"><h2>{section_num}. Additional Figures</h2></div>
+            <div class="section-content">{"".join(orphan_blocks)}</div>
         </div>"""
 
     # --- Literature research ---
@@ -5552,20 +5675,33 @@ def generate_annotation_context_report_html(
     }}
     .step-output {{
         background: #f1f5f9; padding: 8px 12px; border-radius: 6px; font-size: 0.8rem;
-        margin-top: 4px; white-space: pre-wrap; max-height: 120px; overflow-y: auto;
+        margin-top: 4px; white-space: pre-wrap; max-height: 150px; overflow-y: auto;
     }}
-    .figures-grid {{
-        display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 28px;
+    .analysis-step {{
+        margin-bottom: 28px; padding-bottom: 28px;
+        border-bottom: 1px solid #f1f5f9;
     }}
-    .figure-item {{
-        border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden;
+    .analysis-step:last-child {{ border-bottom: none; margin-bottom: 0; }}
+    .step-header {{ display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }}
+    .step-marker {{ color: var(--primary-color); font-weight: bold; flex-shrink: 0; margin-top: 2px; }}
+    .step-desc {{ font-size: 1rem; color: var(--text-color); line-height: 1.5; }}
+    .step-figure {{
+        margin: 14px 0; border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden;
         box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     }}
-    .figure-item img {{ width: 100%; height: auto; display: block; }}
-    .figure-caption {{
-        padding: 12px 16px; font-size: 0.92rem; color: var(--text-color);
-        background: #f8fafc; text-align: left; line-height: 1.5;
-        border-top: 1px solid var(--border-color);
+    .step-figure img {{ width: 100%; height: auto; display: block; }}
+    .step-figure-caption {{
+        padding: 12px 16px; font-size: 0.9rem; color: var(--text-secondary);
+        background: #f8fafc; line-height: 1.5; border-top: 1px solid var(--border-color);
+    }}
+    .step-explanation {{
+        margin-top: 10px; padding: 12px 16px;
+        background: #f0f9ff; border-left: 3px solid #0284c7;
+        border-radius: 0 6px 6px 0; font-size: 0.88rem; color: #334155; line-height: 1.6;
+    }}
+    .step-output-details {{ margin-top: 6px; }}
+    .step-output-details summary {{
+        cursor: pointer; color: var(--text-secondary); font-size: 0.85rem; user-select: none;
     }}
     .lit-result {{ font-size: 0.88rem; color: var(--text-secondary); }}
     .ann-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}

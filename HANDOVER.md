@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.3
-**Last Updated**: 2026-03-29
+**Version**: 0.18.4
+**Last Updated**: 2026-03-30
 
 ## Project Overview
 
@@ -1446,6 +1446,18 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.18.4 (2026-03-30)
+
+- **DashScope image generation** (`agents/painter_agent.py`): Added `_DASHSCOPE_BASE_URL` constant and `_generate_image_dashscope()` method. The method submits a task via `POST /api/v1/services/aigc/text2image/image-synthesis` (with `X-DashScope-Async: enable`), polls `GET /api/v1/tasks/{task_id}` every 5 s (up to 60 attempts), downloads the result URL, and returns base64. `_generate_image()` gains Strategy 0: if `_DASHSCOPE_BASE_URL` is in `self.llm_client.base_url`, delegate to the native API and skip all OpenAI-compat strategies.
+- **Snapshot pkl backup** (`utils/snapshot.py`): `create_snapshot()` is now `async`; copies `{session_id}_session.pkl` from `session_states/` to `snapshots/{snapshot_id}_session.pkl` via `asyncio.to_thread(shutil.copy2)`. `restore_snapshot()` reverses the copy. `delete_snapshot()` and `cleanup_old_snapshots()` unlink pkl backups. `get_session_states` import moved to module level.
+- **Session export includes snapshots** (`main.py`): New `_add_snapshots_to_tar(tf, session_id)` helper iterates `snapshots/` and adds all files to the tar archive under `{session_id}/snapshots/`. Called as step 6 in `export_state`.
+- **Vision auto-disable** (`agents/bioinformatics_agent.py`, `agents/pi_agent.py`): Bioinformatics Agent broadens vision-unsupported detection to include ZhipuAI error code "1210" and sets `self.has_vision = False` on any vision failure. PI Agent similarly sets `self.has_vision = False` when vision call fails.
+- **Pre-round-wait snapshot + kernel save** (`workflow.py`): `_create_auto_snapshot()` calls `await self.sandbox.save_session()` before snapshotting. New `pre_round_wait` snapshot phase created before the round-wait HITL loop.
+- **Supplementary analysis in wait loop** (`workflow.py`): `_run_round_wait_loop()` handles `_supplementary_request` with `_supplementary_target == "round"`, executes supplementary analysis inline, then resumes `WAITING_INPUT`.
+- **Multi-direction auto-skip removed** (`workflow.py`): `directions_queue` filtering and auto-continue logic replaced with comment; all rounds now fall through to normal wait logic regardless of queue state.
+- **Annotation context report** (`report_generator.py`): Per-step rendering: each `StepAnalysis` emits an `.analysis-step` block with step marker, description, inline figure (`.step-figure`), and expandable raw output. `orphan_blocks` collects `publication_figures` not already shown; rendered as "Additional Figures" with dynamic section number. CSS gains `.analysis-step`, `.step-header`, `.step-marker`, `.step-desc`, `.step-figure`, `.step-figure-caption`, `.step-explanation`, `.step-output-details` rules.
+- **AnalysisPanel snapshot button** (`frontend/src/components/AnalysisPanel.tsx`): When `isCompleted`, renders a `<button>` calling `setShowSnapshotPanel(true)` with Camera icon beside the green "Analysis Complete" badge. `finalSummary` card: `from-accent-500 to-accent-600` → `from-accent-50 to-accent-100`.
 
 #### v0.18.3 (2026-03-29)
 

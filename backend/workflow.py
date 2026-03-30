@@ -788,6 +788,10 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         """Create an automatic snapshot at a key analysis point."""
         from .utils.snapshot import SnapshotManager
         try:
+            # Save kernel session first so the pkl reflects the current state
+            if self.sandbox:
+                await self.sandbox.save_session()
+
             mgr = SnapshotManager(self.session_id)
             name = f"Auto: {phase} (Round {state.current_round})"
             # Determine parent: if just restored, parent is the restored snapshot; otherwise the last snapshot
@@ -2874,6 +2878,9 @@ Return ONLY the JSON array, nothing else."""
             AgentType.PI
         )
         
+        # Auto-snapshot before round wait HITL
+        await self._create_auto_snapshot(analysis_state, "pre_round_wait")
+
         # Clear continue event BEFORE announcing waiting status to prevent race
         # condition where frontend signals between status message and event.wait()
         self._continue_event.clear()
@@ -2922,15 +2929,12 @@ Return ONLY the JSON array, nothing else."""
 
         wait_seconds = analysis_state.round_wait_seconds  # -1=manual, 0=no wait, >0=countdown
 
-        # Multi-direction mode: auto-skip wait if more directions remain in queue
+        # Filter out empty/whitespace-only directions from queue
         if analysis_state.directions_queue:
-            # Filter out empty/whitespace-only directions before deciding to skip
             analysis_state.directions_queue = [
                 d for d in analysis_state.directions_queue if d and d.get("direction", "").strip()
             ]
-        if analysis_state.directions_queue:
-            logger.info(f"[{self.session_id}] Directions queue has {len(analysis_state.directions_queue)} remaining, auto-continuing")
-            return {**state, "analysis_state": analysis_state}
+        # Note: no auto-skip for multi-direction mode — fall through to normal wait logic
 
         # After exploration phase (Round 1), force manual wait so user must choose direction
         if analysis_state.current_round == 1 and analysis_state.analysis_phase == "innovation":
@@ -2988,6 +2992,18 @@ Return ONLY the JSON array, nothing else."""
                     except Exception as e:
                         logger.error(f"[{self.session_id}] Exploration report regeneration failed: {e}")
                         await self._send_message("error", f"Report regeneration failed: {e}", AgentType.PI)
+
+                    analysis_state.status = TaskStatus.WAITING_INPUT
+                    await self._send_state_sync(analysis_state, "waiting_input")
+                    continue
+                elif self._supplementary_request and self._supplementary_target == "round":
+                    req = self._supplementary_request
+                    self._supplementary_request = None
+                    self._supplementary_target = None
+                    analysis_state.status = TaskStatus.RUNNING
+                    await self._send_state_sync(analysis_state, "supplementary_running")
+
+                    await self._run_supplementary_analysis(analysis_state, req, "round")
 
                     analysis_state.status = TaskStatus.WAITING_INPUT
                     await self._send_state_sync(analysis_state, "waiting_input")

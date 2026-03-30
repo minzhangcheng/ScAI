@@ -3,8 +3,9 @@ Painter Agent - Generates graphic abstracts using LLM image generation
 
 This agent uses the user-configured LLM hosting service to call image generation models.
 Supports multiple platforms via dual-path strategy:
-1. Chat completions with modalities=["image", "text"] (OpenRouter)
-2. Images API (/v1/images/generations) fallback (OpenAI, Google AI Studio, SiliconFlow, etc.)
+1. DashScope native async task API (when base_url contains dashscope.aliyuncs.com)
+2. Chat completions with modalities=["image", "text"] (OpenRouter)
+3. Images API (/v1/images/generations) fallback (OpenAI, Google AI Studio, SiliconFlow, etc.)
 """
 from typing import Dict, Any, Optional, List
 import logging
@@ -25,6 +26,8 @@ logger = logging.getLogger(__name__)
 _TOTAL_CONTEXT_TOKENS = 65_536
 _MAX_OUTPUT_TOKENS = 32_800
 _SAFE_INPUT_TOKEN_LIMIT = 30_000  # Conservative: 64K - 32.8K ≈ 31.2K, use 30K
+
+_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
 
 
 def _estimate_tokens(text: str) -> int:
@@ -482,15 +485,86 @@ The graphic abstract should tell the story of the research at a glance, highligh
         resp.raise_for_status()
         return base64.b64encode(resp.content).decode('utf-8')
 
+    async def _generate_image_dashscope(self, prompt: str) -> str:
+        """Generate image using DashScope native async task API.
+
+        DashScope's OpenAI compatibility mode does not support image generation.
+        This method calls the native DashScope task API directly:
+        1. POST /api/v1/services/aigc/text2image/image-synthesis  → task_id
+        2. Poll  GET /api/v1/tasks/{task_id}                      → until SUCCEEDED
+        3. Download the result URL and return as base64.
+        """
+        api_key = self.llm_client.api_key
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-DashScope-Async": "enable",
+        }
+        payload = {
+            "model": self.model,
+            "input": {"prompt": prompt},
+            "parameters": {"size": "1024*1024", "n": 1},
+        }
+        create_url = f"{_DASHSCOPE_BASE_URL}/api/v1/services/aigc/text2image/image-synthesis"
+
+        logger.info(f"[{self.session_id}][Painter] DashScope: submitting image task (model={self.model})")
+        resp = await self.llm_client.http_client.post(
+            create_url, json=payload, headers=headers, timeout=30.0
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        task_id = data.get("output", {}).get("task_id")
+        if not task_id:
+            raise ValueError(f"DashScope image generation: no task_id in response: {data}")
+        logger.info(f"[{self.session_id}][Painter] DashScope: task submitted, id={task_id}")
+
+        poll_url = f"{_DASHSCOPE_BASE_URL}/api/v1/tasks/{task_id}"
+        for attempt in range(60):  # up to 5 minutes (60 × 5 s)
+            await asyncio.sleep(5)
+            poll_resp = await self.llm_client.http_client.get(
+                poll_url, headers=headers, timeout=30.0
+            )
+            poll_resp.raise_for_status()
+            status_data = poll_resp.json()
+
+            task_status = status_data.get("output", {}).get("task_status", "")
+            logger.debug(
+                f"[{self.session_id}][Painter] DashScope task {task_id}: status={task_status} "
+                f"(attempt {attempt + 1}/60)"
+            )
+
+            if task_status == "SUCCEEDED":
+                results = status_data.get("output", {}).get("results", [])
+                if results:
+                    url = results[0].get("url") if isinstance(results[0], dict) else None
+                    if url:
+                        logger.info(
+                            f"[{self.session_id}][Painter] DashScope task succeeded, downloading image"
+                        )
+                        return await self._download_image_as_base64(url)
+                raise ValueError(
+                    f"DashScope image generation succeeded but no result URL found: {status_data}"
+                )
+            elif task_status in ("FAILED", "CANCELED"):
+                raise ValueError(
+                    f"DashScope image generation task {task_status}: {status_data}"
+                )
+
+        raise ValueError(
+            f"DashScope image generation timed out after 5 minutes (task_id={task_id})"
+        )
+
     async def _generate_image(self, prompt: str) -> str:
         """
         Call image generation API with multi-provider compatibility.
 
         Supports OpenRouter, OpenAI, Google AI Studio, n1n.ai, and SiliconFlow
         via a cascade of strategies:
-        1. Chat completions with modalities (OpenRouter, OpenAI, n1n.ai)
-        2. Images API with b64_json (OpenAI, Google AI Studio, n1n.ai)
-        3. Images API with URL response (SiliconFlow)
+        1. DashScope native async task API (when base_url contains dashscope.aliyuncs.com)
+        2. Chat completions with modalities (OpenRouter, OpenAI, n1n.ai)
+        3. Images API with b64_json (OpenAI, Google AI Studio, n1n.ai)
+        4. Images API with URL response (SiliconFlow)
 
         Args:
             prompt: The prompt for image generation
@@ -522,6 +596,11 @@ The graphic abstract should tell the story of the research at a glance, highligh
             prompt = prompt[:len(prompt) - excess_chars] + "\n... [trimmed to fit token limit]"
 
         logger.debug(f"[{self.session_id}][Painter] Calling image generation")
+
+        # Strategy 0: DashScope native async task API
+        # DashScope's OpenAI compatibility mode does not expose image generation endpoints.
+        if _DASHSCOPE_BASE_URL in self.llm_client.base_url:
+            return await self._generate_image_dashscope(prompt)
 
         messages = [
             {"role": "system", "content": self.system_prompt},
