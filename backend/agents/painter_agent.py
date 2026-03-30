@@ -28,6 +28,7 @@ _MAX_OUTPUT_TOKENS = 32_800
 _SAFE_INPUT_TOKEN_LIMIT = 30_000  # Conservative: 64K - 32.8K ≈ 31.2K, use 30K
 
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
+_GOOGLE_AI_STUDIO_BASE_URL = "generativelanguage.googleapis.com"
 
 
 def _estimate_tokens(text: str) -> int:
@@ -616,40 +617,50 @@ The graphic abstract should tell the story of the research at a glance, highligh
             {"role": "user", "content": prompt}
         ]
 
+        # Google AI Studio does not support modalities in chat completions;
+        # skip Strategy 1 and go directly to Images API (Strategy 2).
+        _is_google_ai_studio = _GOOGLE_AI_STUDIO_BASE_URL in self.llm_client.base_url
+
         try:
             # Strategy 1: Try chat completions with modalities (works on OpenRouter)
             chat_error = None
-            last_error = None
-            for attempt in range(3):
-                try:
-                    response = await self.llm_client.client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        temperature=self.config.temperature,
-                        max_tokens=4096,
-                        extra_body={
-                            "modalities": ["image", "text"]
-                        }
-                    )
-                    return self._extract_image_from_response(response)
-                except Exception as e:
-                    last_error = e
-                    # Don't retry client errors (4xx) — they'll always fail
-                    if _is_client_error(e):
-                        break
-                    if attempt < 2:
-                        delay = 2 ** attempt
-                        logger.warning(
-                            f"[{self.session_id}][Painter] Chat generation attempt {attempt + 1} failed: {e}, "
-                            f"retrying in {delay}s"
+            if not _is_google_ai_studio:
+                last_error = None
+                for attempt in range(3):
+                    try:
+                        response = await self.llm_client.client.chat.completions.create(
+                            model=self.model,
+                            messages=messages,
+                            temperature=self.config.temperature,
+                            extra_body={
+                                "modalities": ["image", "text"]
+                            }
                         )
-                        await asyncio.sleep(delay)
-            chat_error = last_error
+                        return self._extract_image_from_response(response)
+                    except Exception as e:
+                        last_error = e
+                        # Don't retry client errors (4xx) — they'll always fail
+                        if _is_client_error(e):
+                            break
+                        if attempt < 2:
+                            delay = 2 ** attempt
+                            logger.warning(
+                                f"[{self.session_id}][Painter] Chat generation attempt {attempt + 1} failed: {e}, "
+                                f"retrying in {delay}s"
+                            )
+                            await asyncio.sleep(delay)
+                chat_error = last_error
+            else:
+                logger.info(
+                    f"[{self.session_id}][Painter] Google AI Studio detected, "
+                    f"skipping chat modalities strategy"
+                )
 
             # Strategy 2: Try Images API (/v1/images/generations)
             # Works on OpenAI, Google AI Studio, n1n.ai, SiliconFlow, etc.
             logger.info(
-                f"[{self.session_id}][Painter] Chat completions image gen failed ({chat_error}), "
+                f"[{self.session_id}][Painter] Chat completions image gen "
+                f"{'skipped' if _is_google_ai_studio else f'failed ({chat_error})'}, "
                 f"trying Images API fallback"
             )
             try:

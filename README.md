@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.5
+**Version**: 0.18.6
 
 ## Installation
 
@@ -340,6 +340,16 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.6 (2026-03-30)
+
+- **Fix: Annotation snapshot timing** — Auto-snapshot before annotation HITL is now created after `annotation_state` is set, so rollback restores the dialog data needed by the frontend instead of leaving it empty.
+- **Fix: Pre-annotation snapshot backward compatibility** — Restoring a legacy `pre_annotation` snapshot that lacks `annotation_state` now falls back to PAUSED status, preventing the workflow from hanging in HITL-hold with no dialog data.
+- **Fix: PI Agent constructor** — Removed erroneous `session_id` keyword argument from PI Agent construction that could cause a TypeError.
+- **Improvement: Multimodal content text-first ordering** — Vision messages now place the text prompt before image attachments, following OpenRouter's recommended ordering for better model comprehension.
+- **Improvement: Painter Google AI Studio detection** — Extracted `_GOOGLE_AI_STUDIO_BASE_URL` constant; Google AI Studio endpoints now skip the chat modalities strategy entirely (Strategy 1) and go directly to the Images API, avoiding unnecessary failed requests.
+- **Improvement: Supervisor error tracking uses traceback tail** — `_recent_errors` now keeps the last 300 characters (tail) of each traceback instead of the first 200, capturing the Python error type that appears at the end of tracebacks for more accurate stuck detection.
+- **Improvement: Deep Research configurable model** — `GoogleDeepResearchClient` now accepts an optional `model` parameter (defaults to `deep-research-pro-preview-12-2025`), allowing model selection without code changes.
 
 ### v0.18.5 (2026-03-30)
 

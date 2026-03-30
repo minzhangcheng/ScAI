@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.5
+**Version**: 0.18.6
 **Last Updated**: 2026-03-30
 
 ## Project Overview
@@ -1447,6 +1447,16 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
+#### v0.18.6 (2026-03-30)
+
+- **Annotation snapshot timing fix** (`workflow.py`): `_create_auto_snapshot(state, "pre_annotation")` moved after `state.annotation_state = ann_state`, so rollback restores the `AnnotationConfirmationState` dialog data the frontend requires.
+- **Pre-annotation snapshot backward compat** (`main.py`): `restore_snapshot()` now detects `pre_annotation` phase snapshots lacking `annotation_state` and falls back to `TaskStatus.PAUSED`, preventing the workflow from hanging in HITL-hold with no dialog data.
+- **PI Agent constructor fix** (`workflow.py`): Removed `session_id=self.session_id` keyword from `PIAgent()` construction — `PIAgent.__init__` does not accept this parameter.
+- **Multimodal text-first ordering** (`utils/llm_client.py`): `send_message_with_images()` now appends the text content block before image blocks (previously images came first), following OpenRouter's recommended ordering.
+- **Painter Google AI Studio constant** (`agents/painter_agent.py`): Extracted `_GOOGLE_AI_STUDIO_BASE_URL = "generativelanguage.googleapis.com"` module-level constant. `_generate_image()` uses it to skip Strategy 1 (chat modalities) entirely for Google AI Studio, avoiding a guaranteed-fail request.
+- **Supervisor error tail tracking** (`agents/supervisor_agent.py`): `_recent_errors.append(step.code_error[-300:])` replaces `[:200]` — Python tracebacks place the error type at the end, so the tail is more useful for stuck detection than the head.
+- **Deep Research configurable model** (`utils/llm_client.py`): `GoogleDeepResearchClient.__init__` gains `model: Optional[str] = None` parameter; defaults to `DEFAULT_MODEL = "deep-research-pro-preview-12-2025"`. The `start_research()` payload uses `self.model` instead of a hardcoded string.
+
 #### v0.18.5 (2026-03-30)
 
 - **`safe_parse_json` shared utility** (`utils/formatting.py`): New `safe_parse_json(response, default=None)` function consolidates the balanced-bracket JSON extraction logic previously duplicated in `BaseAgent._safe_parse_json` and `report_generator._safe_parse_json`. Both callers now delegate to this single implementation. ~60 lines of duplicate code removed.
@@ -2056,4 +2066,4 @@ For issues, please contact the project maintainers.
 ---
 
 *Document updated: 2026-03-30*
-*Version: 0.18.5*
+*Version: 0.18.6*

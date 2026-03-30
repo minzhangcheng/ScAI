@@ -389,7 +389,6 @@ class SingleCellAnalysisWorkflow:
             llm_client=self._get_agent_llm_client('pi'),
             model=pi_model,
             system_prompt=pi_prompt,
-            session_id=self.session_id,
             config=AgentConfig(temperature=self.temperatures.get('pi', 0.5))
         )
         self.pi_agent.has_vision = self._vision_settings.get('pi', True)
@@ -1184,9 +1183,6 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 # Restore original log — proper sync happens in _after_bioinformatics
                 state.analysis_log = original_log
 
-            # Auto-snapshot before annotation HITL
-            await self._create_auto_snapshot(state, "pre_annotation")
-
             ann_state = AnnotationConfirmationState(
                 cluster_annotations=cluster_anns,
                 tissue=tissue,
@@ -1196,6 +1192,10 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 pending=True,
             )
             state.annotation_state = ann_state
+
+            # Auto-snapshot before annotation HITL (after annotation_state is set,
+            # so rollback restores the dialog data needed by the frontend)
+            await self._create_auto_snapshot(state, "pre_annotation")
 
             # Step 3: Annotation confirmation loop (supports supplementary analysis)
             original_status = state.status

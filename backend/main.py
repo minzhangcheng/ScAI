@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.18.5"
+    version="0.18.6"
 )
 
 # CORS
@@ -2153,6 +2153,15 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
                 "detailed_report_url": detailed_report_url,
             }
         ))
+    elif phase == "pre_annotation" and not restored_state.annotation_state:
+        # Backward compat: old snapshots taken before the fix lack annotation_state.
+        # Fall back to PAUSED so the workflow re-runs the annotation step from scratch
+        # instead of hanging in HITL-hold with no dialog data.
+        logger.warning(
+            f"[{session_id}] pre_annotation snapshot lacks annotation_state "
+            f"(legacy snapshot). Falling back to PAUSED status."
+        )
+        restored_state.status = TaskStatus.PAUSED
     elif phase == "pre_direction" and restored_state.exploration_report:
         exp = restored_state.exploration_report
         html_url = (

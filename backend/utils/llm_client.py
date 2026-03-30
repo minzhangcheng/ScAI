@@ -746,10 +746,16 @@ class OpenAICompatibleClient:
         Returns:
             LLMResponse object
         """
-        # Build multimodal content
+        # Build multimodal content (text first, then images — per OpenRouter recommendation)
         content = []
 
-        # Add images first
+        # Add text prompt first
+        content.append({
+            "type": "text",
+            "text": text_prompt
+        })
+
+        # Add images after text
         for img_b64 in images:
             mime_type = _detect_image_mime_type(img_b64)
             content.append({
@@ -758,12 +764,6 @@ class OpenAICompatibleClient:
                     "url": f"data:{mime_type};base64,{img_b64}"
                 }
             })
-        
-        # Add text prompt
-        content.append({
-            "type": "text",
-            "text": text_prompt
-        })
         
         messages = [
             {"role": "system", "content": ENGLISH_ENFORCEMENT},
@@ -847,8 +847,11 @@ class GoogleDeepResearchClient:
     
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
     
-    def __init__(self, api_key: str, proxy_url: Optional[str] = None):
+    DEFAULT_MODEL = "deep-research-pro-preview-12-2025"
+
+    def __init__(self, api_key: str, proxy_url: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key
+        self.model = model or self.DEFAULT_MODEL
         # httpx will also read from HTTP_PROXY/HTTPS_PROXY env vars if trust_env=True (default)
         if proxy_url:
             self.client = httpx.AsyncClient(
@@ -857,10 +860,10 @@ class GoogleDeepResearchClient:
             )
         else:
             self.client = httpx.AsyncClient(timeout=300.0)  # Long timeout for research
-        
+
     async def close(self):
         await self.client.aclose()
-    
+
     async def start_research(
         self,
         query: str,
@@ -868,19 +871,19 @@ class GoogleDeepResearchClient:
     ) -> str:
         """
         Start a Deep Research task
-        
+
         Args:
             query: Research query
             background: Whether to run in background
-            
+
         Returns:
             Interaction ID
         """
         url = f"{self.BASE_URL}/interactions"
-        
+
         payload = {
             "input": query,
-            "agent": "deep-research-pro-preview-12-2025",
+            "agent": self.model,
             "background": background
         }
 

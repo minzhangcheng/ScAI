@@ -701,8 +701,9 @@ class SupervisorAgent:
             err_snippet = step.code_error[:200]
             issues.append(f"Code error: {err_snippet}")
 
-            # Track recent errors for stuck detection
-            self._recent_errors.append(step.code_error[:200])
+            # Track recent errors for stuck detection.
+            # Keep the TAIL of the traceback (error type appears at the end).
+            self._recent_errors.append(step.code_error[-300:])
             if len(self._recent_errors) > 5:
                 self._recent_errors = self._recent_errors[-5:]
 
