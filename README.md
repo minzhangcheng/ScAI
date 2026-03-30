@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.4
+**Version**: 0.18.5
 
 ## Installation
 
@@ -340,6 +340,20 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.5 (2026-03-30)
+
+- **Improvement: `safe_parse_json` extracted to shared utility** — Duplicate JSON-extraction logic in `BaseAgent._safe_parse_json` and `report_generator._safe_parse_json` now delegates to a single `backend/utils/formatting.safe_parse_json` implementation, eliminating ~60 lines of duplicated bracket-matching code.
+- **Improvement: Supervisor stuck detection broadened** — "Stuck" condition now triggers when the same error type appears 3 or more times across recent error history (in addition to the existing two-consecutive check), ensuring the agent escalates to PI even when identical errors are not strictly back-to-back.
+- **Improvement: Supervisor PI escalation on stuck technical errors** — Technical errors (KeyError, TypeError, etc.) and LLM-classified technical issues now also escalate to PI when the agent is stuck, overriding the previous unconditional skip that could leave the analysis frozen.
+- **Fix: Supervisor null response guard** — `response.content or ""` replaced with `response.content if response else ""` to prevent AttributeError when the LLM client returns None.
+- **Fix: Biochemistry invalid value skip** — Non-finite float values (NaN, Inf) returned by the LLM are now skipped entirely rather than silently coerced to 0.0, preventing corrupt indicator records from propagating into downstream analysis.
+- **Improvement: Annotation cache size cap** — `LiteratureAgent._annotation_cache` is now capped at 100 entries; the oldest entry is evicted when the limit is reached, preventing unbounded memory growth in long multi-round sessions.
+- **Fix: DashScope painter revision text-only prompt** — When revising a graphic abstract via DashScope's native image API, the "look at attached image" instruction is stripped from the revision prompt, removing a misleading reference that the text-only endpoint cannot honour.
+- **Fix: `review_status` serialization None guard** — `AnalysisState.to_api_dict()` now guards `review_status` with `if fig.review_status` / `if tbl.review_status` before calling `_enum()`, preventing AttributeError when the field is None.
+- **Improvement: WebSocket reconnect deduplication** — Removed competing auto-reconnect `useEffect` from `App.tsx`; all reconnection logic is now consolidated in the `useWebSocket` hook, eliminating race conditions between two independent reconnect loops.
+- **Fix: WebSocket reconnect timer cleanup** — `disconnect()` now cancels any pending reconnect `setTimeout` via a tracked `reconnectTimerRef`, preventing ghost reconnect attempts after manual disconnection.
+- **Fix: Persisted `chatMessages` TTL eviction** — `chatMessages` is now cleared alongside `messages` and `currentSession` when the persistence TTL expires, preventing stale chat history from surfacing in new sessions after a browser refresh.
 
 ### v0.18.4 (2026-03-30)
 

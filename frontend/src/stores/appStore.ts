@@ -545,6 +545,7 @@ export const useAppStore = create<AppState>()(
         if (ps._persistedAt && Date.now() - ps._persistedAt > PERSIST_TTL_MS) {
           delete ps.messages
           delete ps.currentSession
+          delete ps.chatMessages
         }
         return { ...currentState, ...ps }
       },

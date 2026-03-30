@@ -15,6 +15,7 @@ from ..models.schemas import (
     AgentType, AgentMessage, MessageRole, AnalysisState
 )
 from ..utils.llm_client import OpenAICompatibleClient, LLMResponse
+from ..utils.formatting import safe_parse_json as _safe_parse_json_impl
 
 
 @dataclass
@@ -53,63 +54,18 @@ class BaseAgent(ABC):
         self.has_vision: bool = True
     
     def _safe_parse_json(self, response: str, default: Dict[str, Any] = None) -> Dict[str, Any]:
-        """
-        Safely parse JSON from LLM response using balanced bracket matching.
-
-        Args:
-            response: LLM response string (may be None)
-            default: Default value to return if parsing fails
-
-        Returns:
-            Parsed dict or default value
-        """
+        """Safely parse JSON from LLM response. Delegates to shared implementation."""
         if default is None:
             default = {"raw_response": "", "error": "Empty response from LLM"}
 
-        # Handle None or empty response
         if not response:
             return default
 
-        try:
-            # Find balanced JSON object using bracket counting (avoids greedy regex)
-            start = response.find('{')
-            if start == -1:
-                return {"raw_response": response}
+        result = _safe_parse_json_impl(response, default=None)
+        if result is not None:
+            return result
 
-            depth = 0
-            in_string = False
-            escape_next = False
-            end = start
-
-            for i, c in enumerate(response[start:], start):
-                if escape_next:
-                    escape_next = False
-                    continue
-                if c == '\\' and in_string:
-                    escape_next = True
-                    continue
-                if c == '"' and not escape_next:
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if c == '{':
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-
-            if depth == 0 and end > start:
-                json_str = response[start:end]
-                return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
-        except Exception as e:
-            return {"raw_response": response, "parse_error": str(e)}
-
-        return {"raw_response": response}
+        return {"raw_response": response, "parse_error": "Failed to extract valid JSON from response"}
     
     def _set_llm_context(self):
         """Set LLM client context before each call (since client is shared)"""

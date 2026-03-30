@@ -28,6 +28,7 @@ from .models.schemas import AnalysisState, AgentType, CodeExecution
 from .utils.llm_client import OpenAICompatibleClient
 from .utils.checkpoint import CheckpointManager
 from .utils.image_utils import compress_image_to_base64, categorize_figures
+from .utils.formatting import safe_parse_json
 from .config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir
 
 logger = logging.getLogger(__name__)
@@ -63,41 +64,8 @@ def _make_figure_block(src: str, caption: str, css_class: str = "step-figure") -
 
 
 def _safe_parse_json(response: str) -> Optional[dict]:
-    """Parse JSON from LLM response using balanced bracket matching (avoids greedy regex)."""
-    if not response:
-        return None
-    start = response.find('{')
-    if start == -1:
-        return None
-    depth = 0
-    in_string = False
-    escape_next = False
-    end = start
-    for i, c in enumerate(response[start:], start):
-        if escape_next:
-            escape_next = False
-            continue
-        if c == '\\' and in_string:
-            escape_next = True
-            continue
-        if c == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if c == '{':
-            depth += 1
-        elif c == '}':
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-    if depth == 0 and end > start:
-        try:
-            return json.loads(response[start:end])
-        except json.JSONDecodeError:
-            logger.debug("JSON extraction from LLM response failed at position %d-%d", start, end)
-    return None
+    """Parse JSON from LLM response. Delegates to shared implementation."""
+    return safe_parse_json(response)
 
 
 def markdown_to_html(text: str) -> str:
@@ -132,7 +100,7 @@ def markdown_to_html(text: str) -> str:
     # Markdown tables — process BEFORE line-break substitution
     def _convert_table_block(m):
         lines = m.group(0).strip().split('\n')
-        html = '<div class="table-wrapper"><table>'
+        html = '<div class="table-wrapper"><table><thead>'
         in_body = False
         for line in lines:
             line = line.strip()
@@ -146,7 +114,7 @@ def markdown_to_html(text: str) -> str:
                     in_body = True
                 continue
             if not in_body:
-                html += '<thead><tr>' + ''.join(f'<th>{c}</th>' for c in cells) + '</tr>'
+                html += '<tr>' + ''.join(f'<th>{c}</th>' for c in cells) + '</tr>'
             else:
                 html += '<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
         if not in_body:
@@ -4468,24 +4436,36 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         def _safe_format_value(v: str) -> str:
             return v.replace("{", "{{").replace("}", "}}")
 
-        # Build full HTML
-        html_content = HTML_TEMPLATE.format(
-            language="en",
-            title=_safe_format_value(report.get("title", "Analysis Report")),
-            generated_at=("Generated: ") + report.get("generated_at", ""),
-            toc_title="Table of Contents",
-            toc_items=_safe_format_value("\n".join(toc_items)),
-            graphic_abstract_html=_safe_format_value(ga_html),
-            abstract_title="Abstract",
-            abstract=_safe_format_value(abstract_html),
-            cluster_annotations_html=_safe_format_value(ca_html),
-            sections_html=_safe_format_value("\n".join(sections_html)),
-            conclusions_title="Conclusions",
-            conclusions=_safe_format_value(conclusions_html),
-            analysis_log_html=_safe_format_value(analysis_log_html),
-            score_definitions_html=_safe_format_value(score_definitions_html),
-            appendix_html=_safe_format_value(appendix_html)
-        )
+        # Build full HTML — protect against unescaped braces in dynamic content
+        try:
+            html_content = HTML_TEMPLATE.format(
+                language="en",
+                title=_safe_format_value(report.get("title", "Analysis Report")),
+                generated_at=("Generated: ") + report.get("generated_at", ""),
+                toc_title="Table of Contents",
+                toc_items=_safe_format_value("\n".join(toc_items)),
+                graphic_abstract_html=_safe_format_value(ga_html),
+                abstract_title="Abstract",
+                abstract=_safe_format_value(abstract_html),
+                cluster_annotations_html=_safe_format_value(ca_html),
+                sections_html=_safe_format_value("\n".join(sections_html)),
+                conclusions_title="Conclusions",
+                conclusions=_safe_format_value(conclusions_html),
+                analysis_log_html=_safe_format_value(analysis_log_html),
+                score_definitions_html=_safe_format_value(score_definitions_html),
+                appendix_html=_safe_format_value(appendix_html)
+            )
+        except (KeyError, ValueError, IndexError) as e:
+            logger.error(f"HTML template formatting failed: {e}, falling back to plain report")
+            # Fallback: produce a minimal valid HTML page with the report content
+            plain_sections = "\n".join(sections_html) if sections_html else ""
+            html_content = (
+                f"<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+                f"<title>{html_module.escape(report.get('title', 'Analysis Report'))}</title></head>"
+                f"<body><h1>{html_module.escape(report.get('title', 'Analysis Report'))}</h1>"
+                f"<p>Report formatting failed ({html_module.escape(str(e))}). Raw content below:</p>"
+                f"<div>{plain_sections}</div></body></html>"
+            )
 
         # Save HTML file
         html_path = self.output_dir / "report.html"

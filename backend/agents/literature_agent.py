@@ -96,6 +96,7 @@ class LiteratureAgent(BaseAgent):
 
         # Cache for annotate_clusters results to avoid redundant Deep Research calls
         self._annotation_cache: Dict[str, Any] = {}
+        self._ANNOTATION_CACHE_MAX = 100
 
     @property
     def is_deep_research_available(self) -> bool:
@@ -1249,6 +1250,10 @@ Return a JSON object with this EXACT structure:
             "organism": organism,
             "tissue": tissue
         }
+        # Evict oldest entries if cache exceeds limit
+        if len(self._annotation_cache) >= self._ANNOTATION_CACHE_MAX:
+            oldest_key = next(iter(self._annotation_cache))
+            del self._annotation_cache[oldest_key]
         self._annotation_cache[cache_key] = result
         return result
 

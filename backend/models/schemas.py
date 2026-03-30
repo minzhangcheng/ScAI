@@ -696,7 +696,7 @@ class AnalysisState(BaseModel):
                 {"id": fig.id, "name": fig.name, "description": fig.description,
                  "figure_type": fig.figure_type, "png_path": fig.png_path,
                  "pdf_path": fig.pdf_path, "png_base64": fig.png_base64,
-                 "review_status": _enum(fig.review_status),
+                 "review_status": _enum(fig.review_status) if fig.review_status else None,
                  "pi_feedback": fig.pi_feedback, "revision_count": fig.revision_count,
                  "created_at": _dt(fig.created_at)}
                 for fig in self.publication_figures
@@ -705,7 +705,7 @@ class AnalysisState(BaseModel):
                 {"id": tbl.id, "name": tbl.name, "description": tbl.description,
                  "csv_path": tbl.csv_path, "columns": tbl.columns,
                  "preview_data": tbl.preview_data,
-                 "review_status": _enum(tbl.review_status),
+                 "review_status": _enum(tbl.review_status) if tbl.review_status else None,
                  "pi_feedback": tbl.pi_feedback, "created_at": _dt(tbl.created_at)}
                 for tbl in self.publication_tables
             ],

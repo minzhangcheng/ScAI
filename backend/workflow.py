@@ -389,6 +389,7 @@ class SingleCellAnalysisWorkflow:
             llm_client=self._get_agent_llm_client('pi'),
             model=pi_model,
             system_prompt=pi_prompt,
+            session_id=self.session_id,
             config=AgentConfig(temperature=self.temperatures.get('pi', 0.5))
         )
         self.pi_agent.has_vision = self._vision_settings.get('pi', True)
@@ -1157,30 +1158,31 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             if analysis_log:
                 state.analysis_log = analysis_log
 
-            # Generate the context summary report
-            analysis_summary = self._build_annotation_context_report(state, self._current_graph_state)
-
-            # Generate downloadable HTML annotation context report
-            from .report_generator import generate_annotation_context_report_html
             try:
-                html_path = generate_annotation_context_report_html(state, self._current_graph_state, cluster_anns)
-                state.annotation_report_html_path = html_path
-                report_html_url = f"/api/session/{self.session_id}/annotation-report/html"
-            except Exception as e:
-                logger.warning(f"[{self.session_id}] Annotation context report generation failed: {e}")
-                report_html_url = None
+                # Generate the context summary report
+                analysis_summary = self._build_annotation_context_report(state, self._current_graph_state)
 
-            # Generate detailed report segment for annotation checkpoint
-            # (must happen before restoring original_log so the segment sees the in-progress log)
-            await self._build_and_save_detailed_segment(
-                state, "pre_annotation",
-                "Analysis Summary Before Cell Annotation",
-                graph_state=self._current_graph_state,
-            )
-            detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if state.detailed_report_html_path else None
+                # Generate downloadable HTML annotation context report
+                from .report_generator import generate_annotation_context_report_html
+                try:
+                    html_path = generate_annotation_context_report_html(state, self._current_graph_state, cluster_anns)
+                    state.annotation_report_html_path = html_path
+                    report_html_url = f"/api/session/{self.session_id}/annotation-report/html"
+                except Exception as e:
+                    logger.warning(f"[{self.session_id}] Annotation context report generation failed: {e}")
+                    report_html_url = None
 
-            # Restore original log — proper sync happens in _after_bioinformatics
-            state.analysis_log = original_log
+                # Generate detailed report segment for annotation checkpoint
+                # (must happen before restoring original_log so the segment sees the in-progress log)
+                await self._build_and_save_detailed_segment(
+                    state, "pre_annotation",
+                    "Analysis Summary Before Cell Annotation",
+                    graph_state=self._current_graph_state,
+                )
+                detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if state.detailed_report_html_path else None
+            finally:
+                # Restore original log — proper sync happens in _after_bioinformatics
+                state.analysis_log = original_log
 
             # Auto-snapshot before annotation HITL
             await self._create_auto_snapshot(state, "pre_annotation")
@@ -1889,11 +1891,11 @@ Approve if quality_score >= 7."""
             # Check directions_queue first (multi-direction mode), then single direction
             user_direction = analysis_state.user_chosen_direction
             if analysis_state.directions_queue:
-                # Multi-direction mode: pop next direction from queue
-                current_dir = analysis_state.directions_queue.pop(0)
+                # Multi-direction mode: peek first, pop only on success
+                current_dir = analysis_state.directions_queue[0]
                 dir_text = current_dir.get("direction", "")
                 dir_notes = current_dir.get("notes", "")
-                logger.info(f"[{self.session_id}] Innovation phase: direction from queue → {dir_text[:100]} (remaining: {len(analysis_state.directions_queue)})")
+                logger.info(f"[{self.session_id}] Innovation phase: direction from queue → {dir_text[:100]} (remaining: {len(analysis_state.directions_queue) - 1})")
                 # Set current direction immediately so retry has correct context
                 analysis_state.current_round_direction = dir_text
                 try:
@@ -1901,12 +1903,12 @@ Approve if quality_score >= 7."""
                         analysis_state, dir_text, notes=dir_notes
                     )
                 except Exception as e:
-                    # Re-insert direction at front of queue so it is not silently lost
-                    analysis_state.directions_queue.insert(0, current_dir)
-                    # Clear stale direction since this round's instruction failed
+                    # Direction stays in queue (never popped) — no re-insert needed
                     analysis_state.current_round_direction = None
-                    logger.exception(f"[{self.session_id}] innovation_instruction failed, direction re-queued")
+                    logger.exception(f"[{self.session_id}] innovation_instruction failed, direction stays in queue")
                     raise
+                # Pop only after successful instruction generation
+                analysis_state.directions_queue.pop(0)
                 # Persist state after instructions are successfully generated
                 if self.state_callback:
                     try:
@@ -3111,7 +3113,8 @@ Return ONLY the JSON array, nothing else."""
     
     def _check_convergence_condition(self, state: WorkflowState) -> str:
         """Conditional check for convergence"""
-        # Default to False (stop) to be conservative - only continue if explicitly set to True
+        if "should_continue" not in state:
+            logger.warning(f"[{self.session_id}] should_continue key missing from state, defaulting to stop")
         if state.get("should_continue", False):
             return "continue"
         return "stop"

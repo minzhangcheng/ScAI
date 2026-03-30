@@ -127,9 +127,9 @@ class BiochemistryAgent(BaseAgent):
                                 value = float(r.get("value", 0))
                                 if not math.isfinite(value):
                                     logger.warning(
-                                        f"Invalid value for {r.get('indicator')}: {r.get('value')}, using 0"
+                                        f"Invalid value for {r.get('indicator')}: {r.get('value')}, skipping"
                                     )
-                                    value = 0.0
+                                    continue
                                 await self.add_result(
                                     indicator=r.get("indicator", "Unknown"),
                                     value=value,

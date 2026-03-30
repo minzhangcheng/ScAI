@@ -289,10 +289,20 @@ class SupervisorAgent:
         # Skip LLM for first-occurrence technical errors — the agent can self-correct.
         # Only invoke LLM when the agent appears stuck (consecutive same-type errors)
         # or the error is non-technical (potential data/biological issue).
+        # Detect stuck: same error type appearing >= 3 times in recent history,
+        # OR two consecutive identical types (original check).
+        _current_err_type = extract_error_type(step.code_error) if step.code_error else None
+        _same_type_count = sum(
+            1 for e in self._recent_errors
+            if extract_error_type(e) == _current_err_type
+        ) if _current_err_type else 0
         is_stuck = (
-            len(self._recent_errors) >= 2
-            and extract_error_type(self._recent_errors[-1])
-                == extract_error_type(self._recent_errors[-2])
+            _same_type_count >= 3
+            or (
+                len(self._recent_errors) >= 2
+                and extract_error_type(self._recent_errors[-1])
+                    == extract_error_type(self._recent_errors[-2])
+            )
         )
         should_llm_evaluate = (
             (bool(step.code_error) and (not self._is_technical_error(step.code_error) or is_stuck))
@@ -326,17 +336,18 @@ class SupervisorAgent:
                 redirect = llm_result.get("redirect_instruction", "")
                 if redirect:
                     feedback_parts.append(f"Suggested action: {redirect}")
-                # Only escalate to PI for non-technical errors
-                # (PI gives biological guidance; can't help with KeyError/TypeError etc.)
+                # Only escalate to PI for non-technical errors — unless the agent
+                # is stuck (same error type repeated >= 3 times), in which case
+                # PI should be asked even for technical errors.
                 # Layer 1: deterministic check on Python exception type
-                if self._is_technical_error(step.code_error):
+                if self._is_technical_error(step.code_error) and not is_stuck:
                     logger.info(
                         f"[{self.session_id}] Skipping PI escalation for technical error "
                         f"(exception type) at step {step.step_number}"
                     )
                 # Layer 2: LLM classification catches logic errors with no exception
                 # (e.g. blank plot due to wrong column name, code ran without error)
-                elif llm_result.get("issue_type", "ambiguous") == "technical":
+                elif llm_result.get("issue_type", "ambiguous") == "technical" and not is_stuck:
                     logger.info(
                         f"[{self.session_id}] Skipping PI escalation for technical issue "
                         f"(LLM classified) at step {step.step_number}"
@@ -835,7 +846,7 @@ class SupervisorAgent:
                     temperature=self.temperature,
                     max_tokens=512,
                 )
-                return self._parse_supervisor_response(response.content or "")
+                return self._parse_supervisor_response(response.content if response else "")
 
             except Exception as e:
                 logger.warning(
@@ -854,7 +865,7 @@ class SupervisorAgent:
             temperature=self.temperature,
             max_tokens=512,
         )
-        return self._parse_supervisor_response(response.content or "")
+        return self._parse_supervisor_response(response.content if response else "")
 
     # ------------------------------------------------------------------
     # Internal: PI escalation

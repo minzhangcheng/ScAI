@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.4
+**Version**: 0.18.5
 **Last Updated**: 2026-03-30
 
 ## Project Overview
@@ -1447,6 +1447,20 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
+#### v0.18.5 (2026-03-30)
+
+- **`safe_parse_json` shared utility** (`utils/formatting.py`): New `safe_parse_json(response, default=None)` function consolidates the balanced-bracket JSON extraction logic previously duplicated in `BaseAgent._safe_parse_json` and `report_generator._safe_parse_json`. Both callers now delegate to this single implementation. ~60 lines of duplicate code removed.
+- **Supervisor stuck detection broadened** (`agents/supervisor_agent.py`): `is_stuck` now also fires when the same error type appears 3+ times across `_recent_errors` (not only when the last two errors match), allowing PI escalation for non-consecutive repeated errors.
+- **Supervisor PI escalation on stuck technical errors** (`agents/supervisor_agent.py`): The Layer 1 (exception-type) and Layer 2 (LLM-classified) technical-error PI-escalation skips now include `and not is_stuck`, so a frozen agent causing repeated technical errors is still escalated to PI.
+- **Supervisor null response guard** (`agents/supervisor_agent.py`): `response.content or ""` changed to `response.content if response else ""` in both `_evaluate_step()` call sites, preventing AttributeError when the LLM client returns None.
+- **Biochemistry invalid value skip** (`agents/biochemistry_agent.py`): Non-finite float values (NaN, Inf) from LLM responses now `continue` (skip the entry) instead of being silently replaced with 0.0, preventing corrupt indicator records.
+- **Annotation cache size cap** (`agents/literature_agent.py`): `_ANNOTATION_CACHE_MAX = 100` added; when `_annotation_cache` reaches the limit, the oldest key is evicted before inserting a new entry, bounding memory use in long sessions.
+- **DashScope painter revision fix** (`agents/painter_agent.py`): `revise_image()` now detects `_DASHSCOPE_BASE_URL` and calls `_generate_image_dashscope()` with a text-only prompt (stripped of the "look at attached image" instruction), matching the native API's text-only contract.
+- **`review_status` None guard in serialization** (`models/schemas.py`): `AnalysisState.to_api_dict()` wraps `_enum(fig.review_status)` / `_enum(tbl.review_status)` with `if … else None`, preventing AttributeError when `review_status` is None.
+- **WebSocket reconnect deduplication** (`frontend/src/App.tsx`): Removed the competing auto-reconnect `useEffect` (exponential backoff loop) from `App.tsx`; reconnection is now handled solely by the `useWebSocket` hook, eliminating race conditions between two independent reconnect loops. `devLog` import and `chatDelegationActive`/`connected` destructuring removed accordingly.
+- **WebSocket reconnect timer cleanup** (`frontend/src/hooks/useApi.ts`): `reconnectTimerRef` tracks the pending `setTimeout` handle; `disconnect()` cancels it, preventing ghost reconnect attempts after manual disconnection.
+- **Persisted `chatMessages` TTL eviction** (`frontend/src/stores/appStore.ts`): `chatMessages` is now cleared alongside `messages` and `currentSession` when the persistence TTL expires, preventing stale chat history from surfacing after a browser refresh.
+
 #### v0.18.4 (2026-03-30)
 
 - **DashScope image generation** (`agents/painter_agent.py`): Added `_DASHSCOPE_BASE_URL` constant and `_generate_image_dashscope()` method. The method submits a task via `POST /api/v1/services/aigc/text2image/image-synthesis` (with `X-DashScope-Async: enable`), polls `GET /api/v1/tasks/{task_id}` every 5 s (up to 60 attempts), downloads the result URL, and returns base64. `_generate_image()` gains Strategy 0: if `_DASHSCOPE_BASE_URL` is in `self.llm_client.base_url`, delegate to the native API and skip all OpenAI-compat strategies.
@@ -2041,5 +2055,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-29*
-*Version: 0.18.3*
+*Document updated: 2026-03-30*
+*Version: 0.18.5*

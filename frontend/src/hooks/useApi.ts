@@ -696,6 +696,7 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)
   const connectingRef = useRef<boolean>(false)  // Prevent multiple simultaneous connect attempts
   const reconnectCountRef = useRef<number>(0)  // Track reconnection attempts for history recovery
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [connected, setConnected] = useState(false)
 
   const connect = useCallback(() => {
@@ -1117,7 +1118,8 @@ export function useWebSocket() {
         if (reconnectCountRef.current < 5) {  // Max 5 reconnect attempts
           const delay = Math.min(1000 * Math.pow(2, reconnectCountRef.current - 1), 10000)  // Exponential backoff, max 10s
           devLog(`WebSocket: Auto-reconnecting in ${delay}ms (attempt ${reconnectCountRef.current})...`)
-          setTimeout(() => {
+          reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null
             if (!wsRef.current && !connectingRef.current) {
               connect()
             }
@@ -1138,6 +1140,10 @@ export function useWebSocket() {
   }, [currentSession, addMessage, updateSession, setWsConnected, setMessages, addAgentError, setStateVersion])
   
   const disconnect = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
     if (wsRef.current) {
       devLog('WebSocket: Disconnecting manually')
       wsRef.current.close()

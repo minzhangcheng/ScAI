@@ -212,6 +212,15 @@ class PainterAgent(BaseAgent):
                 "\n... [trimmed to fit token limit]"
 
         try:
+            # DashScope native API: OpenAI compat mode does not support image models.
+            # Re-generate with revised text prompt via the native task API.
+            if _DASHSCOPE_BASE_URL in self.llm_client.base_url:
+                logger.info(f"[{self.session_id}][Painter] DashScope: revising via native text2image API")
+                text_only_prompt = revision_prompt.replace(
+                    "- Look at the attached current graphic abstract image carefully\n", ""
+                )
+                return await self._generate_image_dashscope(text_only_prompt)
+
             # Build multimodal message: current image + revision instructions
             if self.has_vision:
                 # Vision enabled: send current image so model can see and modify it

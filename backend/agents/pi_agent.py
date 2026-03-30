@@ -655,7 +655,7 @@ IMPORTANT:
 
 Reply in JSON format:
 {{
-    "overview": "Innovation strategy for: {user_direction}",
+    "overview": "Innovation strategy for: {user_direction}",  # interpolated by outer f-string
     "biochemistry_tasks": [...],
     "pathology_tasks": [...],
     "bioinformatics_tasks": [...],

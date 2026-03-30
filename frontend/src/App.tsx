@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from './stores/appStore'
 import { useConfig, useWebSocket } from './hooks/useApi'
-import { devLog } from './utils/logger'
 import { useTranslation } from './i18n/translations'
 import { ConfigPanel } from './components/ConfigPanel'
 import { DisclaimerDialog, hasAcceptedDisclaimer } from './components/DisclaimerDialog'
@@ -31,9 +30,9 @@ import {
 } from 'lucide-react'
 
 function App() {
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, chatDelegationActive } = useAppStore()
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks } = useAppStore()
   const { checkStatus, saveConfig } = useConfig()
-  const { connect, disconnect, connected } = useWebSocket()
+  const { connect, disconnect } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
   const [configSkipped, setConfigSkipped] = useState(false)
@@ -115,27 +114,8 @@ function App() {
     return () => setWsCallbacks(null, null)
   }, [connect, disconnect, setWsCallbacks])
 
-  // Auto-reconnect WebSocket if session is running (with exponential backoff)
-  const reconnectAttemptRef = useRef(0)
-  const maxReconnectDelay = 30000 // Max 30 seconds between attempts
-
-  useEffect(() => {
-    if (currentSession && (currentSession.status === 'running' || chatDelegationActive) && !connected && !wsConnected) {
-      // Calculate delay with exponential backoff: 1s, 2s, 4s, 8s... up to maxReconnectDelay
-      const baseDelay = 1000
-      const delay = Math.min(baseDelay * Math.pow(2, reconnectAttemptRef.current), maxReconnectDelay)
-
-      const timer = setTimeout(() => {
-        devLog(`App: Session is running but not connected, attempting reconnect (attempt ${reconnectAttemptRef.current + 1}, delay ${delay}ms)...`)
-        reconnectAttemptRef.current += 1
-        connect()
-      }, delay)
-      return () => clearTimeout(timer)
-    } else if (connected || wsConnected) {
-      // Reset reconnect attempts on successful connection
-      reconnectAttemptRef.current = 0
-    }
-  }, [currentSession?.id, currentSession?.status, connected, wsConnected, connect, chatDelegationActive])
+  // Note: WebSocket auto-reconnect is handled entirely by useWebSocket hook.
+  // No duplicate reconnection logic here to avoid competing reconnect attempts.
 
   if (showDisclaimer) {
     return <DisclaimerDialog onAccept={() => setShowDisclaimer(false)} />
