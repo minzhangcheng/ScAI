@@ -380,7 +380,9 @@ class SingleCellAnalysisWorkflow:
                 llm_client=self._get_agent_llm_client('technique'),
                 model=technique_model,
                 temperature=self.temperatures.get('technique', 0.1),
+                message_callback=self._technique_message_callback,
             )
+            self.technique_agent.set_session(self.session_id)
         else:
             self.technique_agent = None
 
@@ -392,6 +394,7 @@ class SingleCellAnalysisWorkflow:
             config=AgentConfig(temperature=self.temperatures.get('pi', 0.5))
         )
         self.pi_agent.has_vision = self._vision_settings.get('pi', True)
+        self.pi_agent.set_session(self.session_id)
 
         self.bioinformatics_agent = BioinformaticsAgent(
             llm_client=self._get_agent_llm_client('bioinformatics'),
@@ -407,6 +410,7 @@ class SingleCellAnalysisWorkflow:
             config=AgentConfig(temperature=self.temperatures.get('bioinformatics', 0.1))
         )
         self.bioinformatics_agent.has_vision = self._vision_settings.get('bioinformatics', True)
+        self.bioinformatics_agent.set_session(self.session_id)
 
         # Initialize optional agents — disabled if model is empty
         if pathology_model and pathology_model.strip():
@@ -419,6 +423,7 @@ class SingleCellAnalysisWorkflow:
                 config=AgentConfig(temperature=self.temperatures.get('pathology', 0.2))
             )
             self.pathology_agent.has_vision = self._vision_settings.get('pathology', True)
+            self.pathology_agent.set_session(self.session_id)
         else:
             self.pathology_agent = None
             logger.info(f"[{self.session_id}] Pathology agent disabled (empty model)")
@@ -431,6 +436,7 @@ class SingleCellAnalysisWorkflow:
                 config=AgentConfig(temperature=self.temperatures.get('biochemistry', 0.2))
             )
             self.biochemistry_agent.has_vision = self._vision_settings.get('biochemistry', True)
+            self.biochemistry_agent.set_session(self.session_id)
         else:
             self.biochemistry_agent = None
             logger.info(f"[{self.session_id}] Biochemistry agent disabled (empty model)")
@@ -452,6 +458,7 @@ class SingleCellAnalysisWorkflow:
             proxy_url=self.config.api.proxy_url,
             fallback_model=pi_model,
         )
+        self.literature_agent.set_session(self.session_id)
 
         # Register deep research LLM client for cleanup (if literature agent created one)
         if hasattr(self.literature_agent, '_deep_research_llm_client') and self.literature_agent._deep_research_llm_client:
@@ -528,6 +535,7 @@ class SingleCellAnalysisWorkflow:
             getattr(self, 'literature_agent', None),
             getattr(self, 'painter_agent', None),
             getattr(self, 'supervisor_agent', None),
+            getattr(self, 'technique_agent', None),
         ]
         for agent in agents:
             if agent is not None and hasattr(agent, 'llm_client') and agent.llm_client is not None:
@@ -1302,6 +1310,10 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         """Callback for supervisor agent messages"""
         await self._send_message(msg_type, content, AgentType.SUPERVISOR)
 
+    async def _technique_message_callback(self, msg_type: str, content: str):
+        """Callback for technique agent messages"""
+        await self._send_message(msg_type, content, AgentType.TECHNIQUE)
+
     async def _supervisor_callback(self, step: AnalysisStep, figures: Optional[List[str]] = None) -> Optional[str]:
         """Bridge bioinformatics agent's supervisor_callback to SupervisorAgent."""
         if not self.supervisor_agent:
@@ -1800,8 +1812,10 @@ Approve if quality_score >= 7."""
             analysis_state.pending_human_input = None
             analysis_state.pending_uploaded_files = []
         
-        # Increment round counter
-        analysis_state.current_round += 1
+        # Increment round counter (skip if resuming from snapshot restore,
+        # since current_round is already correct from the snapshot)
+        if not analysis_state.last_restored_snapshot_id:
+            analysis_state.current_round += 1
         analysis_state.status = TaskStatus.RUNNING
 
         # Clear residual should_continue from previous convergence check

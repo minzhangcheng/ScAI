@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.7
+**Version**: 0.18.8
 
 ## Installation
 
@@ -340,6 +340,13 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.8 (2026-03-31)
+
+- **Feature: LLM temperature auto-fallback** — When a model rejects the `temperature` parameter (e.g., certain compatibility API endpoints), the LLM client now automatically retries the request without temperature, preventing BadRequestError on unsupported models. Models that reject temperature are cached in `_temp_unsupported_models` to avoid repeated failures.
+- **Improvement: Technique Agent message callback** — Added `message_callback` support for real-time status notifications during documentation extraction and error analysis. Sends `status` and `result` messages via WebSocket.
+- **Bug Fix: Round counter guard on snapshot restore** — `current_round` increment is now skipped when `last_restored_snapshot_id` is set, preventing incorrect round counting after resuming from a snapshot.
+- **Improvement: Agent session initialization** — PI, Bioinformatics, Pathology, Biochemistry, Literature, and Technique agents now call `set_session()` during workflow initialization for proper session context setup.
 
 ### v0.18.7 (2026-03-31)
 

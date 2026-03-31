@@ -8,7 +8,7 @@ as a fallback.
 import asyncio
 import re
 import logging
-from typing import Optional, Dict, Any, AsyncGenerator
+from typing import Optional, Dict, Any, AsyncGenerator, Callable, Awaitable
 
 from .base import BaseAgent, AgentConfig
 from ..models.schemas import AgentType, AnalysisState
@@ -50,6 +50,7 @@ class TechniqueAgent(BaseAgent):
         model: str,
         temperature: float = 0.1,
         system_prompt: str = "",
+        message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ):
         super().__init__(
             agent_type=AgentType.TECHNIQUE,
@@ -58,6 +59,15 @@ class TechniqueAgent(BaseAgent):
             system_prompt=system_prompt or _SUMMARIZE_PROMPT,
             config=AgentConfig(temperature=temperature),
         )
+        self.message_callback = message_callback
+
+    async def _notify(self, msg_type: str, content: str):
+        """Send notification via callback."""
+        if self.message_callback:
+            try:
+                await self.message_callback(msg_type, content)
+            except Exception as e:
+                logger.warning(f"[{self.agent_type}] notify failed: {e}")
 
     async def process(
         self,
@@ -213,6 +223,7 @@ except ImportError as e:
             Concise API summary (under 25 lines)
         """
         # Step 1: Extract raw docstring from sandbox
+        await self._notify("status", f"Extracting docs for `{function_path}`...")
         code = self._build_inspect_code(function_path)
         result = await sandbox.execute(code)
         raw_doc = result.output if result.output else ""
@@ -223,6 +234,7 @@ except ImportError as e:
             return f"Could not find documentation for `{function_path}`. Package may not be installed."
 
         # Step 2: Summarize with cheap LLM
+        await self._notify("status", f"Summarizing documentation for `{function_path}`...")
         user_msg = f"Summarize this Python API documentation:\n\n{raw_doc[:4000]}"
         if question:
             user_msg += f"\n\nSpecific question: {question}"
@@ -237,7 +249,9 @@ except ImportError as e:
                 temperature=self.config.temperature,
                 max_tokens=1024,
             )
-            return response.content if response.content else raw_doc[:2000]
+            summary = response.content if response.content else raw_doc[:2000]
+            await self._notify("result", summary)
+            return summary
         except Exception as e:
             logger.warning(f"Technique Agent LLM summarization failed: {e}")
             return raw_doc[:2000]
@@ -259,6 +273,9 @@ except ImportError as e:
         parsed = self._parse_error_for_lookup(error_text)
         if not parsed:
             return ""
+
+        error_type = parsed.get("error_type", "Unknown")
+        await self._notify("status", f"Analyzing {error_type}: looking up relevant docs...")
 
         doc_parts = []
 
@@ -308,6 +325,7 @@ except ImportError as e:
             f"Keep it under 15 lines total."
         )
 
+        await self._notify("status", "Summarizing error analysis and correct API usage...")
         try:
             response = await self.llm_client.chat(
                 model=self.model,
@@ -318,7 +336,9 @@ except ImportError as e:
                 temperature=self.config.temperature,
                 max_tokens=1024,
             )
-            return response.content if response.content else combined[:1500]
+            summary = response.content if response.content else combined[:1500]
+            await self._notify("result", summary)
+            return summary
         except Exception as e:
             logger.warning(f"Technique Agent error summarization failed: {e}")
             return combined[:1500]

@@ -8,9 +8,9 @@ import asyncio
 import json
 import logging
 import time
-from typing import List, Dict, Any, Optional, AsyncGenerator, Union, Callable, Awaitable
+from typing import List, Dict, Any, Optional, AsyncGenerator, Union, Callable, Awaitable, Tuple
 from dataclasses import dataclass, field
-from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError
+from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError
 
 from .llm_logger import get_llm_logger, LLMInteraction
 
@@ -113,6 +113,20 @@ def _get_effective_temperature(model: str, temperature: float) -> Optional[float
     if model_name.startswith(_GEMINI3_PREFIX):
         return 1.0
     return temperature
+
+
+def is_temperature_error(error: Exception) -> bool:
+    """Check if a BadRequestError is related to the temperature parameter."""
+    if not isinstance(error, BadRequestError):
+        return False
+
+    error_str = str(error).lower()
+    temperature_keywords = [
+        "temperature",
+        "only 1 is allowed",
+        "invalid temperature",
+    ]
+    return any(kw in error_str for kw in temperature_keywords)
 
 
 async def retry_with_backoff(
@@ -262,7 +276,11 @@ class OpenAICompatibleClient:
         # status updates to WebSocket so the frontend knows we're still alive.
         # Signature: async (attempt, max_retries, delay, error_type) -> None
         self.on_retry: Optional[Callable[[int, int, float, str], Awaitable[None]]] = None
-        
+
+        # Session-level cache of models that rejected temperature parameter
+        # Key is model name (extracted), value is True
+        self._temp_unsupported_models: set[str] = set()
+
         # Always create an explicit HTTP client with tuned timeouts and pool settings,
         # so both proxy and non-proxy scenarios get the same configuration.
         http_client_kwargs = {
@@ -307,8 +325,23 @@ class OpenAICompatibleClient:
             }
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-    def _apply_model_params(self, params: Dict[str, Any], model: str, temperature: float, max_tokens: Optional[int]) -> None:
-        """Apply temperature and max_tokens to request params based on model type."""
+    def _apply_model_params(self, params: Dict[str, Any], model: str, temperature: Optional[float], max_tokens: Optional[int], skip_temperature: bool = False) -> None:
+        """Apply temperature and max_tokens to request params based on model type.
+
+        Args:
+            params: Request parameters dict to modify in-place
+            model: Model identifier
+            temperature: Requested temperature (may be None)
+            max_tokens: Maximum tokens to generate
+            skip_temperature: If True, skip setting temperature entirely (for fallback mode)
+        """
+        if skip_temperature:
+            # Fallback mode: don't set temperature, but keep max_tokens
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
+            logger.info(f"[{self.agent_name}] Temperature skipped for {model} (using server default)")
+            return
+
         effective_temp = _get_effective_temperature(model, temperature)
         if effective_temp is not None:
             params["temperature"] = effective_temp
@@ -320,6 +353,69 @@ class OpenAICompatibleClient:
                 params["max_completion_tokens"] = max_tokens
         if effective_temp != temperature and effective_temp is not None:
             logger.info(f"[{self.agent_name}] Temperature overridden: {temperature} -> {effective_temp} for {model}")
+
+    async def _call_with_temp_fallback(
+        self,
+        make_request: Callable[[], Awaitable[Any]],
+        make_request_no_temp: Callable[[], Awaitable[Any]],
+        model_key: str,
+        retry_kwargs: Dict[str, Any],
+    ) -> Any:
+        """
+        Execute a request with automatic fallback to no-temperature mode if needed.
+
+        If the request fails with a BadRequestError related to the temperature
+        parameter, the model is added to _temp_unsupported_models and the request
+        is retried without the temperature parameter.
+        """
+        try:
+            return await retry_with_backoff(make_request, **retry_kwargs)
+        except BadRequestError as e:
+            if is_temperature_error(e) and model_key not in self._temp_unsupported_models:
+                logger.warning(
+                    f"[{self.agent_name}] Temperature rejected by {model_key}, "
+                    f"retrying without temperature..."
+                )
+                self._temp_unsupported_models.add(model_key)
+                return await retry_with_backoff(make_request_no_temp, **retry_kwargs)
+            else:
+                raise
+
+    def _build_retry_kwargs(self, request_timeout: Optional[float] = None) -> Dict[str, Any]:
+        """统一构建 retry_kwargs，保持各方法逻辑一致."""
+        kwargs: Dict[str, Any] = {"agent_name": self.agent_name}
+        if request_timeout is not None:
+            kwargs["request_timeout"] = request_timeout
+            if request_timeout > 300:
+                kwargs["max_retries"] = 0  # Don't retry expensive long-running requests
+        if self.on_retry is not None:
+            kwargs["on_retry"] = self.on_retry
+        return kwargs
+
+    def _build_request_pair(
+        self,
+        base_params: Dict[str, Any],
+        model: str,
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        request_timeout: Optional[float] = None,
+    ) -> tuple:
+        """构建请求闭包对：(标准请求, 无temperature备选请求)."""
+        async def make_request():
+            params = {**base_params}
+            self._apply_model_params(params, model, temperature, max_tokens)
+            if request_timeout is not None:
+                params["timeout"] = request_timeout
+            return await self.client.chat.completions.create(**params)
+
+        async def make_request_no_temp():
+            params = {**base_params}
+            self._apply_model_params(params, model, temperature, max_tokens, skip_temperature=True)
+            if request_timeout is not None:
+                params["timeout"] = request_timeout
+            return await self.client.chat.completions.create(**params)
+
+        return make_request, make_request_no_temp
 
     def _extract_content_from_message(self, message, response=None) -> str:
         """Extract text content from a chat completion message, handling multiple formats.
@@ -483,30 +579,19 @@ class OpenAICompatibleClient:
         start_time = time.time()
         error_msg = None
 
-        async def _make_request():
-            params: Dict[str, Any] = dict(
-                model=model,
-                messages=messages,
-                stream=stream,
-            )
-            self._apply_model_params(params, model, temperature, max_tokens)
-            if timeout is not None:
-                params["timeout"] = timeout
-            return await self.client.chat.completions.create(**params)
+        model_key = _extract_model_name(model)
+        base_params = {"model": model, "messages": messages, "stream": stream}
+        _make_request, _make_request_no_temp = self._build_request_pair(
+            base_params, model, temperature, max_tokens, request_timeout=timeout
+        )
+        retry_kwargs = self._build_retry_kwargs(request_timeout=timeout)
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat request to {model}")
+            response = await self._call_with_temp_fallback(
+                _make_request, _make_request_no_temp, model_key, retry_kwargs
+            )
 
-            # Use retry mechanism for the API call
-            retry_kwargs: Dict[str, Any] = {"agent_name": self.agent_name}
-            if timeout is not None:
-                retry_kwargs["request_timeout"] = timeout
-                if timeout > 300:
-                    retry_kwargs["max_retries"] = 0  # Don't retry expensive long-running requests
-            if self.on_retry is not None:
-                retry_kwargs["on_retry"] = self.on_retry
-            response = await retry_with_backoff(_make_request, **retry_kwargs)
-            
             # Extract content — handles reasoning models, list content, etc.
             content = ""
             if response and response.choices and len(response.choices) > 0:
@@ -519,7 +604,7 @@ class OpenAICompatibleClient:
                 usage=self._extract_usage(response),
                 raw_response=response
             )
-            
+
             # Log response
             self.llm_logger.log_response(
                 interaction=interaction,
@@ -527,13 +612,13 @@ class OpenAICompatibleClient:
                 usage=result.usage,
                 duration_ms=(time.time() - start_time) * 1000
             )
-            
+
             return result
-            
+
         except Exception as e:
             error_msg = str(e)
             logger.exception(f"[{self.agent_name}] Chat error")
-            
+
             # Log error
             self.llm_logger.log_response(
                 interaction=interaction,
@@ -584,33 +669,24 @@ class OpenAICompatibleClient:
 
         start_time = time.time()
 
-        async def _make_request():
-            params: Dict[str, Any] = dict(
-                model=model,
-                messages=messages,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-            self._apply_model_params(params, model, temperature, max_tokens)
-            return await self.client.chat.completions.create(**params)
+        model_key = _extract_model_name(model)
+        base_params = {"model": model, "messages": messages, "tools": tools, "tool_choice": tool_choice}
+        _make_request, _make_request_no_temp = self._build_request_pair(
+            base_params, model, temperature, max_tokens
+        )
+        retry_kwargs = self._build_retry_kwargs()
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat_with_tools request to {model}")
-            
-            # Use retry mechanism for the API call
-            retry_kwargs_tools: Dict[str, Any] = {"agent_name": self.agent_name}
-            if self.on_retry is not None:
-                retry_kwargs_tools["on_retry"] = self.on_retry
-            response = await retry_with_backoff(
-                _make_request,
-                **retry_kwargs_tools
+            response = await self._call_with_temp_fallback(
+                _make_request, _make_request_no_temp, model_key, retry_kwargs
             )
-            
+
             # Safely extract message from response
             message = None
             if response and response.choices and len(response.choices) > 0:
                 message = response.choices[0].message
-            
+
             # Parse tool calls if present
             tool_calls = []
             tool_calls_log = []
@@ -620,7 +696,7 @@ class OpenAICompatibleClient:
                         arguments = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
                         arguments = {"raw": tc.function.arguments}
-                    
+
                     tool_calls.append(ToolCall(
                         id=tc.id,
                         name=tc.function.name,
@@ -631,7 +707,7 @@ class OpenAICompatibleClient:
                         "name": tc.function.name,
                         "arguments": arguments
                     })
-            
+
             # Extract content — handles reasoning models, list content, etc.
             content = self._extract_content_from_message(message, response) if message else None
 
@@ -658,7 +734,7 @@ class OpenAICompatibleClient:
                 raw_response=response,
                 raw_assistant_message=raw_assistant_message
             )
-            
+
             # Log response
             self.llm_logger.log_response(
                 interaction=interaction,
@@ -667,12 +743,12 @@ class OpenAICompatibleClient:
                 usage=result.usage,
                 duration_ms=(time.time() - start_time) * 1000
             )
-            
+
             return result
-            
+
         except Exception as e:
             logger.exception(f"[{self.agent_name}] Chat with tools error")
-            
+
             # Log error
             self.llm_logger.log_response(
                 interaction=interaction,
@@ -702,24 +778,20 @@ class OpenAICompatibleClient:
         # Enforce English output
         messages = _inject_english_enforcement(messages)
 
-        params: Dict[str, Any] = dict(
-            model=model,
-            messages=messages,
-            stream=True,
+        # Extract model name for cache key
+        model_key = _extract_model_name(model)
+
+        base_params = {"model": model, "messages": messages, "stream": True}
+        _make_request, _make_request_no_temp = self._build_request_pair(
+            base_params, model, temperature, max_tokens
         )
-        self._apply_model_params(params, model, temperature, max_tokens)
 
         # Retry connection establishment (most common failure point)
-        stream_retry_kwargs: Dict[str, Any] = {
-            "max_retries": MAX_RETRIES,
-            "agent_name": self.agent_name,
-            "request_timeout": 120.0,
-        }
-        if self.on_retry is not None:
-            stream_retry_kwargs["on_retry"] = self.on_retry
-        stream = await retry_with_backoff(
-            lambda: self.client.chat.completions.create(**params),
-            **stream_retry_kwargs,
+        stream_retry_kwargs = self._build_retry_kwargs(request_timeout=120.0)
+        stream_retry_kwargs["max_retries"] = MAX_RETRIES  # stream needs explicit retries
+
+        stream = await self._call_with_temp_fallback(
+            _make_request, _make_request_no_temp, model_key, stream_retry_kwargs
         )
 
         async for chunk in stream:
@@ -786,26 +858,17 @@ class OpenAICompatibleClient:
 
         start_time = time.time()
 
-        async def _make_request():
-            params: Dict[str, Any] = dict(
-                model=model,
-                messages=messages,
-            )
-            self._apply_model_params(params, model, temperature, max_tokens)
-            return await self.client.chat.completions.create(**params)
+        model_key = _extract_model_name(model)
+        base_params = {"model": model, "messages": messages}
+        _make_request, _make_request_no_temp = self._build_request_pair(
+            base_params, model, temperature, max_tokens
+        )
+        retry_kwargs = self._build_retry_kwargs(request_timeout=request_timeout)
 
         try:
             logger.info(f"[{self.agent_name}] Sending vision request to {model} with {len(images)} images")
-
-            # Use retry mechanism for the API call
-            retry_kwargs_v: Dict[str, Any] = {"agent_name": self.agent_name}
-            if request_timeout is not None:
-                retry_kwargs_v["request_timeout"] = request_timeout
-            if self.on_retry is not None:
-                retry_kwargs_v["on_retry"] = self.on_retry
-            response = await retry_with_backoff(
-                _make_request,
-                **retry_kwargs_v
+            response = await self._call_with_temp_fallback(
+                _make_request, _make_request_no_temp, model_key, retry_kwargs
             )
 
             # Extract content — uses shared helper for reasoning / multimodal formats
@@ -822,7 +885,7 @@ class OpenAICompatibleClient:
                 usage=self._extract_usage(response),
                 raw_response=response
             )
-            
+
             # Log response
             self.llm_logger.log_response(
                 interaction=interaction,
@@ -830,12 +893,12 @@ class OpenAICompatibleClient:
                 usage=result.usage,
                 duration_ms=(time.time() - start_time) * 1000
             )
-            
+
             return result
-            
+
         except Exception as e:
             logger.exception(f"[{self.agent_name}] Vision error")
-            
+
             # Log error
             self.llm_logger.log_response(
                 interaction=interaction,

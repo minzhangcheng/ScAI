@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.7
-**Last Updated**: 2026-03-30
+**Version**: 0.18.8
+**Last Updated**: 2026-03-31
 
 ## Project Overview
 
@@ -1447,6 +1447,13 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
+#### v0.18.8 (2026-03-31)
+
+- **LLM temperature auto-fallback** (`llm_client.py`): New `_call_with_temp_fallback()` method automatically retries requests without temperature if the model rejects it via BadRequestError. `_temp_unsupported_models` set caches such models to avoid repeated failures. Refactored `_build_request_pair()` and `_build_retry_kwargs()` to unify request construction across all chat methods.
+- **Technique Agent message callback** (`technique_agent.py`): Added `message_callback: Optional[Callable[[str, str], Awaitable[None]]]` parameter to `__init__()`. `_notify()` helper sends status/result messages during doc extraction and error analysis stages.
+- **Round counter guard on snapshot restore** (`workflow.py`): `start_new_round()` now skips `current_round += 1` when `last_restored_snapshot_id` is set, preventing double-counting rounds after resuming from snapshot.
+- **Agent session initialization** (`workflow.py`): Added `set_session(self.session_id)` calls to PI, Bioinformatics, Pathology, Biochemistry, Literature, and Technique agents. Added `_technique_message_callback()` bridge for WebSocket notifications from Technique Agent.
+
 #### v0.18.7 (2026-03-31)
 
 - **Agent LLM Statistics** (`regenerate_report_html.py`): New `get_agent_llm_stats(session_id)` function reads `llm.jsonl` and aggregates per-agent statistics (llm_server, model, temperature, call_count, input_tokens, output_tokens, avg_response_time_ms). New `build_agent_stats_html(stats)` and `get_agent_stats_html(session_id)` functions render the data as an HTML table section.
@@ -2073,5 +2080,5 @@ For issues, please contact the project maintainers.
 
 ---
 
-*Document updated: 2026-03-30*
-*Version: 0.18.7*
+*Document updated: 2026-03-31*
+*Version: 0.18.8*
