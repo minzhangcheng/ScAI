@@ -91,24 +91,39 @@ _OPENAI_REASONING_PREFIXES = ("o1", "o3", "o4")
 # keeping it at 1.0. Lower values cause looping or degraded output quality.
 _GEMINI3_PREFIX = "gemini-3"
 
+# Models that do NOT allow custom temperature — the parameter must be omitted entirely.
+# (e.g., Moonshot kimi-k2.5: docs state "不能修改该参数")
+_NO_CUSTOM_TEMP_MODELS = {"kimi-k2.5"}
+
 
 def _extract_model_name(model: str) -> str:
     """Extract model name after provider prefix (e.g. 'google/gemini-3.1-pro' -> 'gemini-3.1-pro')."""
     return model.split("/")[-1] if "/" in model else model
 
 
+def _is_o_series(model_name: str) -> bool:
+    """Check if a model name matches OpenAI o-series reasoning models."""
+    for prefix in _OPENAI_REASONING_PREFIXES:
+        if model_name == prefix or model_name.startswith(prefix + "-"):
+            return True
+    return False
+
+
 def _get_effective_temperature(model: str, temperature: float) -> Optional[float]:
     """Determine the effective temperature for a model.
 
     - OpenAI o-series reasoning models: returns None (parameter not supported)
+    - Models in _NO_CUSTOM_TEMP_MODELS: returns None (must omit temperature)
     - Gemini 3.x thinking models: returns 1.0 (Google recommends default for thinking)
     - All other models: returns the requested temperature as-is
     """
     model_name = _extract_model_name(model)
     # OpenAI reasoning models: temperature not supported at all
-    for prefix in _OPENAI_REASONING_PREFIXES:
-        if model_name == prefix or model_name.startswith(prefix + "-"):
-            return None
+    if _is_o_series(model_name):
+        return None
+    # Models that prohibit custom temperature: omit entirely
+    if model_name in _NO_CUSTOM_TEMP_MODELS:
+        return None
     # Gemini 3.x thinking models: force temperature=1.0
     if model_name.startswith(_GEMINI3_PREFIX):
         return 1.0
@@ -338,20 +353,29 @@ class OpenAICompatibleClient:
         if skip_temperature:
             # Fallback mode: don't set temperature, but keep max_tokens
             if max_tokens is not None:
-                params["max_tokens"] = max_tokens
+                model_name = _extract_model_name(model)
+                if _is_o_series(model_name):
+                    params["max_completion_tokens"] = max_tokens
+                else:
+                    params["max_tokens"] = max_tokens
             logger.info(f"[{self.agent_name}] Temperature skipped for {model} (using server default)")
             return
 
         effective_temp = _get_effective_temperature(model, temperature)
         if effective_temp is not None:
             params["temperature"] = effective_temp
-            if max_tokens is not None:
-                params["max_tokens"] = max_tokens
-        else:
-            # OpenAI o-series: no temperature, use max_completion_tokens
-            if max_tokens is not None:
+        elif temperature is not None:
+            logger.info(f"[{self.agent_name}] Temperature omitted for {model} (not supported)")
+
+        # max_tokens: only OpenAI o-series uses max_completion_tokens
+        model_name = _extract_model_name(model)
+        if max_tokens is not None:
+            if _is_o_series(model_name):
                 params["max_completion_tokens"] = max_tokens
-        if effective_temp != temperature and effective_temp is not None:
+            else:
+                params["max_tokens"] = max_tokens
+
+        if effective_temp is not None and effective_temp != temperature:
             logger.info(f"[{self.agent_name}] Temperature overridden: {temperature} -> {effective_temp} for {model}")
 
     async def _call_with_temp_fallback(
@@ -368,10 +392,13 @@ class OpenAICompatibleClient:
         parameter, the model is added to _temp_unsupported_models and the request
         is retried without the temperature parameter.
         """
+        # If model is already known to reject temperature, skip directly
+        if model_key in self._temp_unsupported_models:
+            return await retry_with_backoff(make_request_no_temp, **retry_kwargs)
         try:
             return await retry_with_backoff(make_request, **retry_kwargs)
         except BadRequestError as e:
-            if is_temperature_error(e) and model_key not in self._temp_unsupported_models:
+            if is_temperature_error(e):
                 logger.warning(
                     f"[{self.agent_name}] Temperature rejected by {model_key}, "
                     f"retrying without temperature..."

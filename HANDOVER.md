@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.8
+**Version**: 0.18.9
 **Last Updated**: 2026-03-31
 
 ## Project Overview
@@ -1446,6 +1446,16 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.18.9 (2026-03-31)
+
+- **LLM temperature handling for kimi-k2.5** (`llm_client.py`): Added `_NO_CUSTOM_TEMP_MODELS = {"kimi-k2.5"}` set for models that prohibit custom temperature. `_get_effective_temperature()` now returns `None` for these models, omitting the temperature parameter entirely instead of causing BadRequestError.
+- **max_tokens for o-series models** (`llm_client.py`): Fixed `_prepare_request_params()` to correctly use `max_completion_tokens` (not `max_tokens`) for OpenAI o-series reasoning models when temperature is skipped.
+- **Zhipu AI support** (`agents/painter_agent.py`): Added `_ZHIPU_BASE_URL = "open.bigmodel.cn"` constant. `_is_zhipu` detection skips chat modalities strategy (same as Google AI Studio), going directly to the Images API. `_skip_chat_modalities = _is_google_ai_studio or _is_zhipu` consolidates both providers.
+- **Literature fallback LLM client** (`agents/literature_agent.py`): Added `fallback_llm_client: Optional["OpenAICompatibleClient"]` parameter to `__init__()`. When a fallback model is specified, the quick search now uses this client instead of the agent's own client, ensuring the correct LLM endpoint is used.
+- **Supervisor report LLM client** (`agents/supervisor_agent.py`): Added `report_llm_client: Optional["OpenAICompatibleClient"]` parameter to `generate_detailed_report()`. Uses the provided client (matching report_model's endpoint) instead of the supervisor's own client.
+- **Agent LLM client caching** (`workflow.py`): Added `_agent_client_cache` dict to cache per-agent LLM clients. `_get_agent_llm_client()` now checks the cache before creating new clients, avoiding duplicate client creation on repeated calls.
+- **Workflow LLM client fixes** (`workflow.py`): `create_agents()` now passes `fallback_llm_client=self._get_agent_llm_client('pi')` to LiteratureAgent, and `report_llm_client=self._get_agent_llm_client('pi')` to supervisor's `generate_detailed_report()`, ensuring correct endpoints are used.
 
 #### v0.18.8 (2026-03-31)
 

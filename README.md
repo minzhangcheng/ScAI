@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.8
+**Version**: 0.18.9
 
 ## Installation
 
@@ -340,6 +340,15 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.9 (2026-03-31)
+
+- **Fix: LLM temperature handling for kimi-k2.5** — Added `_NO_CUSTOM_TEMP_MODELS` set for models that prohibit custom temperature; these models now omit the temperature parameter entirely instead of failing.
+- **Fix: max_tokens for o-series models** — When temperature is skipped for OpenAI o-series reasoning models, `max_completion_tokens` is now correctly used instead of `max_tokens`.
+- **Improvement: Zhipu AI support** — Painter Agent now detects Zhipu AI endpoints and skips the chat modalities strategy (same as Google AI Studio), going directly to the Images API.
+- **Improvement: Literature fallback LLM client** — Literature Agent now accepts `fallback_llm_client` parameter to use the correct LLM endpoint when calling the fallback model, instead of using its own (potentially different) endpoint.
+- **Improvement: Supervisor report LLM client** — Supervisor Agent's `generate_detailed_report` now accepts `report_llm_client` to call the report model on the correct endpoint (e.g., PI's server).
+- **Improvement: Agent LLM client caching** — Workflow now caches per-agent LLM clients to avoid creating duplicate clients on repeated calls, improving connection pool efficiency.
 
 ### v0.18.8 (2026-03-31)
 

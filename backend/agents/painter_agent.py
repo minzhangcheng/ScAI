@@ -29,6 +29,7 @@ _SAFE_INPUT_TOKEN_LIMIT = 30_000  # Conservative: 64K - 32.8K ≈ 31.2K, use 30K
 
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
 _GOOGLE_AI_STUDIO_BASE_URL = "generativelanguage.googleapis.com"
+_ZHIPU_BASE_URL = "open.bigmodel.cn"
 
 
 def _estimate_tokens(text: str) -> int:
@@ -617,14 +618,16 @@ The graphic abstract should tell the story of the research at a glance, highligh
             {"role": "user", "content": prompt}
         ]
 
-        # Google AI Studio does not support modalities in chat completions;
+        # Google AI Studio and Zhipu do not support modalities in chat completions;
         # skip Strategy 1 and go directly to Images API (Strategy 2).
         _is_google_ai_studio = _GOOGLE_AI_STUDIO_BASE_URL in self.llm_client.base_url
+        _is_zhipu = _ZHIPU_BASE_URL in self.llm_client.base_url
+        _skip_chat_modalities = _is_google_ai_studio or _is_zhipu
 
         try:
             # Strategy 1: Try chat completions with modalities (works on OpenRouter)
             chat_error = None
-            if not _is_google_ai_studio:
+            if not _skip_chat_modalities:
                 last_error = None
                 for attempt in range(3):
                     try:
@@ -651,8 +654,9 @@ The graphic abstract should tell the story of the research at a glance, highligh
                             await asyncio.sleep(delay)
                 chat_error = last_error
             else:
+                provider = "Google AI Studio" if _is_google_ai_studio else "Zhipu"
                 logger.info(
-                    f"[{self.session_id}][Painter] Google AI Studio detected, "
+                    f"[{self.session_id}][Painter] {provider} detected, "
                     f"skipping chat modalities strategy"
                 )
 
@@ -660,7 +664,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
             # Works on OpenAI, Google AI Studio, n1n.ai, SiliconFlow, etc.
             logger.info(
                 f"[{self.session_id}][Painter] Chat completions image gen "
-                f"{'skipped' if _is_google_ai_studio else f'failed ({chat_error})'}, "
+                f"{'skipped' if _skip_chat_modalities else f'failed ({chat_error})'}, "
                 f"trying Images API fallback"
             )
             try:

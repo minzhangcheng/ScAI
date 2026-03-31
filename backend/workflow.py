@@ -256,7 +256,19 @@ class SingleCellAnalysisWorkflow:
             self._continue_event.set()
 
     def _get_agent_llm_client(self, agent_name: str) -> OpenAICompatibleClient:
-        """Get LLM client for an agent, using per-agent override if different from global."""
+        """Get LLM client for an agent, using per-agent override if different from global.
+
+        Results are cached per agent_name so repeated calls reuse the same client
+        (and its underlying connection pool) instead of creating duplicates.
+        """
+        # Return cached client if available
+        cache = getattr(self, '_agent_client_cache', None)
+        if cache is None:
+            self._agent_client_cache: Dict[str, OpenAICompatibleClient] = {}
+            cache = self._agent_client_cache
+        if agent_name in cache:
+            return cache[agent_name]
+
         agent_server_configs = getattr(self, '_agent_server_configs', {})
         agent_cfg = agent_server_configs.get(agent_name, {})
         agent_url = agent_cfg.get("llm_base_url", "")
@@ -264,16 +276,18 @@ class SingleCellAnalysisWorkflow:
         # If same as global config, share the default client
         if (not agent_url or agent_url == self.config.api.llm_base_url) and \
            (not agent_key or agent_key == self.config.api.api_key):
-            return self.llm_manager.openrouter
-        # Otherwise create a separate client
-        client = OpenAICompatibleClient(
-            api_key=agent_key or self.config.api.api_key,
-            base_url=agent_url or self.config.api.llm_base_url,
-            proxy_url=self.config.api.proxy_url,
-            session_id=self.session_id,
-            agent_name=agent_name,
-        )
-        self._extra_llm_clients.append(client)
+            client = self.llm_manager.openrouter
+        else:
+            # Otherwise create a separate client
+            client = OpenAICompatibleClient(
+                api_key=agent_key or self.config.api.api_key,
+                base_url=agent_url or self.config.api.llm_base_url,
+                proxy_url=self.config.api.proxy_url,
+                session_id=self.session_id,
+                agent_name=agent_name,
+            )
+            self._extra_llm_clients.append(client)
+        cache[agent_name] = client
         return client
 
     @staticmethod
@@ -457,6 +471,7 @@ class SingleCellAnalysisWorkflow:
             max_search_rounds=literature_config.get('max_search_rounds', 5),
             proxy_url=self.config.api.proxy_url,
             fallback_model=pi_model,
+            fallback_llm_client=self._get_agent_llm_client('pi'),
         )
         self.literature_agent.set_session(self.session_id)
 
@@ -3485,13 +3500,16 @@ Return ONLY the JSON array, nothing else."""
             workspace_dir = str(get_session_workspace(self.session_id))
 
             if self.supervisor_agent:
-                # Supervisor generates report from its accumulated analysis records
+                # Supervisor generates report from its accumulated analysis records.
+                # Pass the PI agent's LLM client so the report_model (pi_model) is
+                # called on the correct endpoint, not the supervisor's own endpoint.
                 report = await self.supervisor_agent.generate_detailed_report(
                     analysis_state=analysis_state,
                     report_model=pi_model,
                     output_dir=output_dir,
                     workspace_dir=str(get_session_workspace(self.session_id)),
                     progress_callback=progress_callback,
+                    report_llm_client=self._get_agent_llm_client('pi'),
                 )
             else:
                 # Fallback: use original DetailedReportGenerator

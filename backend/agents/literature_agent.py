@@ -59,6 +59,7 @@ class LiteratureAgent(BaseAgent):
         max_search_rounds: int = 5,
         proxy_url: Optional[str] = None,
         fallback_model: str = "",
+        fallback_llm_client: Optional["OpenAICompatibleClient"] = None,
     ):
         from .base import AgentConfig
         super().__init__(
@@ -77,6 +78,7 @@ class LiteratureAgent(BaseAgent):
         self.max_search_rounds = max(1, min(20, max_search_rounds))
         self.proxy_url = proxy_url
         self.fallback_model = fallback_model
+        self.fallback_llm_client = fallback_llm_client
 
         # Separate LLM client for deep research mode (optional)
         self._deep_research_llm_client: Optional[OpenAICompatibleClient] = None
@@ -888,8 +890,19 @@ Note: If you are not certain about specific citation information, please clearly
 """
 
         if self.fallback_model:
-            logger.info(f"[Literature] Quick search using fallback model: {self.fallback_model}")
-            resp = await self.llm_client.chat(
+            if self.fallback_llm_client:
+                client = self.fallback_llm_client
+                logger.info(
+                    f"[Literature] Quick search using fallback model: {self.fallback_model} "
+                    f"(via fallback client -> {client.base_url})"
+                )
+            else:
+                client = self.llm_client
+                logger.warning(
+                    f"[Literature] Quick search using fallback model: {self.fallback_model} "
+                    f"but fallback_llm_client is None, using default client -> {client.base_url}"
+                )
+            resp = await client.chat(
                 model=self.fallback_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,

@@ -503,6 +503,7 @@ class SupervisorAgent:
         output_dir: str,
         workspace_dir: str = None,
         progress_callback: Optional[Callable] = None,
+        report_llm_client: Optional["OpenAICompatibleClient"] = None,
     ) -> Dict[str, Any]:
         """
         Generate a detailed report from the supervisor's accumulated analysis records.
@@ -517,6 +518,8 @@ class SupervisorAgent:
             output_dir: Directory to save report files
             workspace_dir: Workspace directory containing generated figures
             progress_callback: Optional progress reporting callback
+            report_llm_client: LLM client matching report_model's endpoint.
+                If None, falls back to supervisor's own llm_client.
 
         Returns:
             Report dict compatible with existing frontend expectations.
@@ -555,11 +558,13 @@ class SupervisorAgent:
         )
 
         try:
-            # Set LLM context for correct logging label (shared client)
-            self.llm_client.set_context(self.session_id, "report_generator")
+            # Use the provided LLM client (matching report_model's endpoint),
+            # falling back to supervisor's own client if not provided.
+            client = report_llm_client or self.llm_client
+            client.set_context(self.session_id, "report_generator")
             for attempt in range(2):  # Single retry on connection error
                 try:
-                    response = await self.llm_client.chat(
+                    response = await client.chat(
                         model=report_model,
                         messages=[
                             {"role": "system", "content": self._get_report_system_prompt(language)},
