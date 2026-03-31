@@ -17,14 +17,93 @@ from pathlib import Path
 from datetime import datetime
 
 import logging
+from collections import defaultdict
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
 # Import shared utilities — supports both package import and standalone script execution
 try:
     from .utils.image_utils import compress_image_to_base64, categorize_figures
+    from .config import get_session_logs
 except ImportError:
     from utils.image_utils import compress_image_to_base64, categorize_figures
+    from config import get_session_logs
+
+
+def get_agent_llm_stats(session_id: str) -> Dict[str, Dict[str, Any]]:
+    """Read LLM interaction logs and aggregate statistics per agent.
+
+    Returns a dict mapping agent_name -> {
+        "llm_server": str,      # raw base_url from user config
+        "model_name": str,      # raw model string from user config
+        "temperature": float,
+        "call_count": int,
+        "total_input_tokens": int,
+        "total_output_tokens": int,
+        "avg_response_time_ms": float,
+    }
+    """
+    stats: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "llm_server": "",
+        "model_name": "",
+        "temperature": 0.0,
+        "call_count": 0,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_response_time_ms": 0.0,
+    })
+
+    log_path = get_session_logs(session_id) / "llm.jsonl"
+    if not log_path.exists():
+        return {}
+
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    interaction = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                agent = interaction.get("agent", "unknown")
+                model = interaction.get("model", "")
+                temperature = interaction.get("temperature", 0.0)
+                usage = interaction.get("usage") or {}
+                duration_ms = interaction.get("duration_ms")
+                base_url = interaction.get("base_url") or ""
+
+                s = stats[agent]
+                # Capture first-seen values (stable per agent)
+                if not s["llm_server"]:
+                    s["llm_server"] = base_url
+                if not s["model_name"]:
+                    s["model_name"] = model
+                if not s["temperature"]:
+                    s["temperature"] = temperature
+                s["call_count"] += 1
+                s["total_input_tokens"] += usage.get("prompt_tokens", 0)
+                s["total_output_tokens"] += usage.get("completion_tokens", 0)
+                if duration_ms is not None:
+                    s["total_response_time_ms"] += duration_ms
+
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"Failed to read LLM logs from {log_path}: {e}")
+        return {}
+
+    # Compute averages
+    for agent, s in stats.items():
+        count = s["call_count"]
+        if count > 0:
+            s["avg_response_time_ms"] = s["total_response_time_ms"] / count
+        else:
+            s["avg_response_time_ms"] = 0.0
+        del s["total_response_time_ms"]
+
+    return dict(stats)
 
 
 def markdown_to_html(text: str) -> str:
@@ -726,6 +805,9 @@ HTML_TEMPLATE = """
             <!-- Score Definitions -->
             {score_definitions_html}
 
+            <!-- Agent LLM Statistics -->
+            {agent_stats_html}
+
             <!-- Appendix: Analysis Settings & Records -->
             {appendix_html}
         </div>
@@ -1171,6 +1253,64 @@ def _build_appendix_from_report(report: dict, language: str) -> str:
     """
 
 
+def build_agent_stats_html(stats: Dict[str, Dict[str, Any]]) -> str:
+    """Build agent LLM statistics HTML section."""
+    if not stats:
+        return ""
+
+    esc = html_module.escape
+
+    # Column headers
+    headers = [
+        "Agent",
+        "LLM Server",
+        "Model",
+        "Temperature",
+        "Calls",
+        "Input Tokens",
+        "Output Tokens",
+        "Avg Response Time",
+    ]
+
+    header_html = "".join(f"<th>{esc(h)}</th>" for h in headers)
+
+    rows = []
+    for agent_name, s in sorted(stats.items()):
+        avg_time = s.get("avg_response_time_ms", 0)
+        avg_time_str = f"{avg_time:.0f}ms" if avg_time > 0 else "N/A"
+        rows.append(f"""<tr>
+            <td><strong>{esc(agent_name.replace("_", " ").title())}</strong></td>
+            <td>{esc(s.get("llm_server", "-"))}</td>
+            <td><code>{esc(s.get("model_name", "-"))}</code></td>
+            <td>{s.get("temperature", 0):.1f}</td>
+            <td>{s.get("call_count", 0)}</td>
+            <td>{s.get("total_input_tokens", 0):,}</td>
+            <td>{s.get("total_output_tokens", 0):,}</td>
+            <td>{avg_time_str}</td>
+        </tr>""")
+    rows_html = "".join(rows)
+
+    return f"""
+    <div class="section" id="agent-llm-stats">
+        <div class="section-header">
+            <h2>Agent LLM Statistics</h2>
+        </div>
+        <div class="section-content">
+            <p>The following table summarizes LLM usage for each agent during this analysis session.</p>
+            <table>
+                <thead><tr>{header_html}</tr></thead>
+                <tbody>{rows_html}</tbody>
+            </table>
+        </div>
+    </div>"""
+
+
+def get_agent_stats_html(session_id: str) -> str:
+    """Get agent LLM statistics HTML for a session, or empty string if unavailable."""
+    stats = get_agent_llm_stats(session_id)
+    return build_agent_stats_html(stats) if stats else ""
+
+
 def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     """
     Generate HTML report with embedded base64 images.
@@ -1466,6 +1606,12 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             f'<span class="section-type specific">Appendix</span></li>'
         )
 
+    # Build agent LLM statistics HTML
+    agent_stats_html = ""
+    session_id = report.get("session_id")
+    if session_id:
+        agent_stats_html = get_agent_stats_html(session_id)
+
     # Build full HTML
     html_content = HTML_TEMPLATE.format(
         language=language,
@@ -1480,6 +1626,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         conclusions=_safe_format_value(conclusions_html),
         analysis_log_html=_safe_format_value(analysis_log_html),
         score_definitions_html=_safe_format_value(score_definitions_html),
+        agent_stats_html=_safe_format_value(agent_stats_html),
         appendix_html=_safe_format_value(appendix_html)
     )
 

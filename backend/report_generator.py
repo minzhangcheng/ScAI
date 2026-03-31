@@ -30,6 +30,7 @@ from .utils.checkpoint import CheckpointManager
 from .utils.image_utils import compress_image_to_base64, categorize_figures
 from .utils.formatting import safe_parse_json
 from .config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir
+from .regenerate_report_html import get_agent_stats_html
 
 logger = logging.getLogger(__name__)
 
@@ -833,6 +834,9 @@ HTML_TEMPLATE = """
 
             <!-- Score Definitions -->
             {score_definitions_html}
+
+            <!-- Agent LLM Statistics -->
+            {agent_stats_html}
 
             <!-- Appendix: Analysis Settings & Records -->
             {appendix_html}
@@ -4432,6 +4436,11 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 f'<span class="section-type specific">{"Appendix"}</span></li>'
             )
 
+        # Build agent LLM statistics HTML
+        agent_stats_html = ""
+        if state is not None:
+            agent_stats_html = get_agent_stats_html(state.id)
+
         # Escape curly braces in content to prevent str.format() crash on LLM output
         def _safe_format_value(v: str) -> str:
             return v.replace("{", "{{").replace("}", "}}")
@@ -4453,6 +4462,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 conclusions=_safe_format_value(conclusions_html),
                 analysis_log_html=_safe_format_value(analysis_log_html),
                 score_definitions_html=_safe_format_value(score_definitions_html),
+                agent_stats_html=_safe_format_value(agent_stats_html),
                 appendix_html=_safe_format_value(appendix_html)
             )
         except (KeyError, ValueError, IndexError) as e:

@@ -27,6 +27,7 @@ from openai import APIConnectionError
 
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep
 from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type
+from ..regenerate_report_html import get_agent_stats_html
 
 # Python exception types that are purely technical (no PI guidance needed)
 _TECHNICAL_ERROR_TYPES = frozenset({
@@ -1872,6 +1873,9 @@ Report generation model call failed due to API connection error. Please refer to
 
         generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+        # Build agent LLM statistics HTML
+        agent_stats_html = get_agent_stats_html(self.session_id)
+
         html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1907,6 +1911,8 @@ Report generation model call failed due to API connection error. Please refer to
         </div>
 
         {self._build_score_definitions_html(report)}
+
+        {agent_stats_html}
 
         {self._build_appendix_html_section(report)}
     </div>

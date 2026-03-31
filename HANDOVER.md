@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.6
+**Version**: 0.18.7
 **Last Updated**: 2026-03-30
 
 ## Project Overview
@@ -1447,6 +1447,14 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
+#### v0.18.7 (2026-03-31)
+
+- **Agent LLM Statistics** (`regenerate_report_html.py`): New `get_agent_llm_stats(session_id)` function reads `llm.jsonl` and aggregates per-agent statistics (llm_server, model, temperature, call_count, input_tokens, output_tokens, avg_response_time_ms). New `build_agent_stats_html(stats)` and `get_agent_stats_html(session_id)` functions render the data as an HTML table section.
+- **Supervisor report integration** (`supervisor_agent.py`): `generate_html_report()` now calls `get_agent_stats_html(self.session_id)` and injects `{agent_stats_html}` into the report template.
+- **Report generator integration** (`report_generator.py`): `generate_html_report()` now calls `get_agent_stats_html(state.id)` and injects `{agent_stats_html}` into the report template.
+- **LLM logger base_url field** (`llm_logger.py`): `LLMInteraction` gains `base_url: Optional[str] = None` field; `start_interaction()` accepts and records the `base_url` parameter.
+- **LLM client max_tokens default None** (`llm_client.py`): `send_message()`, `send_message_with_tools()`, `stream_chat()`, and `send_message_with_images()` all changed `max_tokens` default from `32768` to `None`. All call sites now pass `base_url=self.base_url` to `start_interaction()`.
+
 #### v0.18.6 (2026-03-30)
 
 - **Annotation snapshot timing fix** (`workflow.py`): `_create_auto_snapshot(state, "pre_annotation")` moved after `state.annotation_state = ann_state`, so rollback restores the `AnnotationConfirmationState` dialog data the frontend requires.
@@ -2066,4 +2074,4 @@ For issues, please contact the project maintainers.
 ---
 
 *Document updated: 2026-03-30*
-*Version: 0.18.6*
+*Version: 0.18.7*

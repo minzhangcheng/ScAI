@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.6
+**Version**: 0.18.7
 
 ## Installation
 
@@ -340,6 +340,12 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.7 (2026-03-31)
+
+- **Feature: Agent LLM Statistics in reports** — HTML reports now include a per-agent LLM usage table (LLM server, model, temperature, call count, input/output tokens, average response time) aggregated from `llm.jsonl` session logs. Integrated into both supervisor and report generator HTML output.
+- **Improvement: `max_tokens` defaults to None** — LLM client methods now default `max_tokens` to `None` instead of `32768`, allowing the API to determine the appropriate limit rather than enforcing an arbitrary cap.
+- **Improvement: LLM logger records base_url** — `LLMInteraction` now captures the `base_url` (LLM server endpoint) alongside each interaction, enabling accurate per-agent server reporting.
 
 ### v0.18.6 (2026-03-30)
 

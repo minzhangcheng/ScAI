@@ -447,7 +447,7 @@ class OpenAICompatibleClient:
         model: str,
         messages: List[Dict[str, Any]],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = 32768,
+        max_tokens: Optional[int] = None,
         stream: bool = False,
         timeout: Optional[float] = None
     ) -> LLMResponse:
@@ -476,7 +476,8 @@ class OpenAICompatibleClient:
             messages=messages,
             interaction_type="chat",
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            base_url=self.base_url,
         )
 
         start_time = time.time()
@@ -548,7 +549,7 @@ class OpenAICompatibleClient:
         tools: List[Dict[str, Any]],
         tool_choice: Union[str, Dict[str, Any]] = "auto",
         temperature: float = 0.7,
-        max_tokens: int = 32768
+        max_tokens: Optional[int] = None
     ) -> LLMToolResponse:
         """
         Send chat request with function/tool calling support and automatic retry on timeout
@@ -577,11 +578,12 @@ class OpenAICompatibleClient:
             tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            base_url=self.base_url,
         )
-        
+
         start_time = time.time()
-        
+
         async def _make_request():
             params: Dict[str, Any] = dict(
                 model=model,
@@ -684,7 +686,7 @@ class OpenAICompatibleClient:
         model: str,
         messages: List[Dict[str, Any]],
         temperature: float = 0.7,
-        max_tokens: int = 32768
+        max_tokens: Optional[int] = None
     ) -> AsyncGenerator[str, None]:
         """
         Stream chat response from OpenAI-compatible API.
@@ -730,7 +732,7 @@ class OpenAICompatibleClient:
         text_prompt: str,
         images: List[str],  # Base64 encoded images
         temperature: float = 0.7,
-        max_tokens: int = 32768,
+        max_tokens: Optional[int] = None,
         request_timeout: Optional[float] = None
     ) -> LLMResponse:
         """
@@ -778,11 +780,12 @@ class OpenAICompatibleClient:
             messages=[{"role": "user", "content": f"[{len(images)} images] + {text_prompt[:500]}"}],
             interaction_type="vision",
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            base_url=self.base_url,
         )
-        
+
         start_time = time.time()
-        
+
         async def _make_request():
             params: Dict[str, Any] = dict(
                 model=model,

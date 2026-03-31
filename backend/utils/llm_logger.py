@@ -29,19 +29,20 @@ class LLMInteraction:
     agent: str
     model: str
     interaction_type: str  # "chat", "chat_with_tools", "vision"
-    
+
     # Request
     messages: List[Dict[str, Any]]
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Any] = None
     temperature: float = 0.7
-    max_tokens: int = 32768
-    
+    max_tokens: Optional[int] = None
+    base_url: Optional[str] = None  # LLM API endpoint
+
     # Response
     response_content: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     usage: Optional[Dict[str, int]] = None
-    
+
     # Metadata
     error: Optional[str] = None
     duration_ms: Optional[float] = None
@@ -169,7 +170,8 @@ class LLMLogger:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         temperature: float = 0.7,
-        max_tokens: int = 32768
+        max_tokens: Optional[int] = None,
+        base_url: Optional[str] = None,
     ) -> LLMInteraction:
         """
         Create an interaction record for a request.
@@ -185,7 +187,8 @@ class LLMLogger:
             tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            base_url=base_url,
         )
     
     def log_response(
