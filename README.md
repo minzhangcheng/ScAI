@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.9
+**Version**: 0.18.10
 
 ## Installation
 
@@ -341,7 +341,7 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 
 ## Changelog
 
-### v0.18.9 (2026-03-31)
+### v0.18.10 (2026-04-01)
 
 - **Fix: LLM temperature handling for kimi-k2.5** — Added `_NO_CUSTOM_TEMP_MODELS` set for models that prohibit custom temperature; these models now omit the temperature parameter entirely instead of failing.
 - **Fix: max_tokens for o-series models** — When temperature is skipped for OpenAI o-series reasoning models, `max_completion_tokens` is now correctly used instead of `max_tokens`.

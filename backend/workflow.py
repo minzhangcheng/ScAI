@@ -345,7 +345,7 @@ class SingleCellAnalysisWorkflow:
             base_url=self.config.api.llm_base_url,
             proxy_url=self.config.api.proxy_url,
             session_id=self.session_id,
-            agent_name="workflow"
+            agent_name="workflow",
         )
         
         # Initialize local Jupyter sandbox with session-specific paths

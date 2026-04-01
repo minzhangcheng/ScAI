@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.9
-**Last Updated**: 2026-03-31
+**Version**: 0.18.10
+**Last Updated**: 2026-04-01
 
 ## Project Overview
 
@@ -1447,7 +1447,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
-#### v0.18.9 (2026-03-31)
+#### v0.18.10 (2026-04-01)
 
 - **LLM temperature handling for kimi-k2.5** (`llm_client.py`): Added `_NO_CUSTOM_TEMP_MODELS = {"kimi-k2.5"}` set for models that prohibit custom temperature. `_get_effective_temperature()` now returns `None` for these models, omitting the temperature parameter entirely instead of causing BadRequestError.
 - **max_tokens for o-series models** (`llm_client.py`): Fixed `_prepare_request_params()` to correctly use `max_completion_tokens` (not `max_tokens`) for OpenAI o-series reasoning models when temperature is skipped.

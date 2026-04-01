@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, LiteratureReport
 )
-from ..utils.llm_client import OpenAICompatibleClient, GoogleDeepResearchClient
+from ..utils.llm_client import OpenAICompatibleClient, GoogleDeepResearchClient, RETRYABLE_EXCEPTIONS
+from openai import RateLimitError
+
+_FALLBACK_EXCEPTIONS = RETRYABLE_EXCEPTIONS + (RateLimitError,)
 
 
 class LiteratureAgent(BaseAgent):
@@ -677,7 +680,7 @@ Rules for PubMed query:
 
 Return ONLY the PubMed query string, nothing else."""
 
-        response = await self.chat(prompt, temperature=0.2)
+        response, _ = await self._chat_with_fallback(prompt, temperature=0.2)
         # Clean up the response - remove quotes, markdown, etc.
         query = response.strip().strip('"').strip("'").strip("`")
         # Remove markdown code block markers
@@ -688,6 +691,27 @@ Return ONLY the PubMed query string, nothing else."""
     # ===================================================================
     # LLM evaluation and synthesis helpers
     # ===================================================================
+
+    async def _chat_with_fallback(self, prompt: str, temperature: float = 0.3) -> Tuple[str, bool]:
+        """Returns (response, used_fallback)."""
+        try:
+            return await self.chat(prompt, temperature=temperature), False
+        except _FALLBACK_EXCEPTIONS as e:
+            if self.fallback_llm_client and self.fallback_model:
+                logger.warning(
+                    f"[Literature] LLM call failed ({type(e).__name__}: {str(e)[:100]}), "
+                    f"retrying with fallback model: {self.fallback_model}"
+                )
+                resp = await self.fallback_llm_client.chat(
+                    model=self.fallback_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                )
+                if not resp.content:
+                    logger.warning("[Literature] Fallback model returned empty content")
+                    raise
+                return resp.content, True
+            raise
 
     async def _evaluate_search_results(
         self,
@@ -767,7 +791,7 @@ IMPORTANT:
 - The refined_query MUST NOT duplicate any previous query listed above
 - If the articles are mostly irrelevant, try a simpler, broader query"""
 
-        response = await self.chat(prompt, temperature=0.3)
+        response, _ = await self._chat_with_fallback(prompt, temperature=0.3)
         result = self._safe_parse_json(response)
         if not result or "sufficient" not in result:
             return {"sufficient": True}
@@ -804,7 +828,8 @@ Please include:
 
 Write a well-structured review with clear sections."""
 
-        return await self.chat(prompt, temperature=0.4)
+        response, _ = await self._chat_with_fallback(prompt, temperature=0.4)
+        return response
 
     async def _synthesize_multiple_reports(
         self,

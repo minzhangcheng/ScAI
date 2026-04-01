@@ -275,12 +275,12 @@ class OpenAICompatibleClient:
     DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
     
     def __init__(
-        self, 
-        api_key: str, 
+        self,
+        api_key: str,
         base_url: Optional[str] = None,
         proxy_url: Optional[str] = None,
         session_id: str = "default",
-        agent_name: str = "unknown"
+        agent_name: str = "unknown",
     ):
         self.api_key = api_key
         self.base_url = base_url or self.DEFAULT_BASE_URL
@@ -836,14 +836,14 @@ class OpenAICompatibleClient:
     ) -> LLMResponse:
         """
         Send chat request with images to OpenAI-compatible API with automatic retry on timeout
-        
+
         Args:
             model: Model identifier
             text_prompt: Text prompt
             images: List of base64 encoded images
             temperature: Sampling temperature
             max_tokens: Maximum tokens
-            
+
         Returns:
             LLMResponse object
         """
@@ -856,7 +856,6 @@ class OpenAICompatibleClient:
             "text": text_prompt
         })
 
-        # Add images after text
         for img_b64 in images:
             mime_type = _detect_image_mime_type(img_b64)
             content.append({
@@ -865,7 +864,7 @@ class OpenAICompatibleClient:
                     "url": f"data:{mime_type};base64,{img_b64}"
                 }
             })
-        
+
         messages = [
             {"role": "system", "content": ENGLISH_ENFORCEMENT},
             {"role": "user", "content": content},
@@ -1109,14 +1108,14 @@ class LLMManager:
         base_url: Optional[str] = None,
         proxy_url: Optional[str] = None,
         session_id: str = "default",
-        agent_name: str = "unknown"
+        agent_name: str = "unknown",
     ):
         self.llm = OpenAICompatibleClient(
             api_key=api_key,
             base_url=base_url,
             proxy_url=proxy_url,
             session_id=session_id,
-            agent_name=agent_name
+            agent_name=agent_name,
         )
 
         # Alias for backward compatibility

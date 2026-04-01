@@ -14,7 +14,7 @@ import io
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Literal
+from typing import Optional, Dict, Any, List, Literal, Tuple
 import uuid
 import httpx
 
@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.18.9"
+    version="0.18.10"
 )
 
 # CORS
@@ -112,6 +112,10 @@ def _get_session_lock(session_id: str) -> asyncio.Lock:
     if session_id not in _session_locks:
         _session_locks[session_id] = asyncio.Lock()
     return _session_locks[session_id]
+
+
+# PI agent name constant
+_PI_AGENT_NAME = "pi"
 
 
 def _get_agent_llm_client(
@@ -1276,7 +1280,7 @@ async def get_prompts(session_id: str):
     
     # Merge default and custom prompts
     prompts = {
-        "pi": state.custom_prompts.get("pi", config.prompts.pi_prompt if config else ""),
+        _PI_AGENT_NAME: state.custom_prompts.get(_PI_AGENT_NAME, config.prompts.pi_prompt if config else ""),
         "pathology": state.custom_prompts.get("pathology", config.prompts.pathology_prompt if config else ""),
         "bioinformatics": state.custom_prompts.get("bioinformatics", config.prompts.bioinformatics_prompt if config else ""),
         "biochemistry": state.custom_prompts.get("biochemistry", config.prompts.biochemistry_prompt if config else ""),
@@ -1318,7 +1322,7 @@ async def get_models(session_id: str):
 
     # Merge default and custom models
     models = {
-        "pi": state.custom_models.get("pi", config.models.pi_model if config else ""),
+        _PI_AGENT_NAME: state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model if config else ""),
         "pathology": state.custom_models.get("pathology", config.models.pathology_model if config else ""),
         "bioinformatics": state.custom_models.get("bioinformatics", config.models.bioinformatics_model if config else ""),
         "biochemistry": state.custom_models.get("biochemistry", config.models.biochemistry_model if config else ""),
@@ -3435,10 +3439,10 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                 logger.warning(f"Failed to send error to WebSocket for session {session_id}: {e}", exc_info=True)
         return
     
-    llm_client = _get_agent_llm_client(state, config, "pi", session_id)
+    llm_client = _get_agent_llm_client(state, config, _PI_AGENT_NAME, session_id)
 
     # Get models from state or use defaults
-    pi_model = state.custom_models.get("pi", config.models.pi_model)
+    pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
     bio_model = state.custom_models.get("bioinformatics", config.models.bioinformatics_model)
 
     try:
@@ -4699,8 +4703,9 @@ async def _execute_chat_agent(
     llm_client: OpenAICompatibleClient,
     message_callback,
     saved_files: List[Dict[str, str]],
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], List[OpenAICompatibleClient]]:
     """Execute a single agent in chat delegation context."""
+    extra_clients: List[OpenAICompatibleClient] = []
     from .agents.base import AgentConfig
     from .utils.sandbox import LocalJupyterSandbox
 
@@ -4727,7 +4732,9 @@ async def _execute_chat_agent(
         lit_model = state.custom_models.get("literature", config.models.literature_model)
         lit_prompt = state.custom_prompts.get("literature", config.prompts.literature_prompt)
         lit_config = state.literature_config or {}
-        pi_model = state.custom_models.get("pi", config.models.pi_model)
+        pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
+        pi_llm_client = _get_agent_llm_client(state, config, _PI_AGENT_NAME, session_id)
+        extra_clients.append(pi_llm_client)
 
         from .agents.literature_agent import LiteratureAgent
         literature_agent = LiteratureAgent(
@@ -4744,6 +4751,7 @@ async def _execute_chat_agent(
             max_search_rounds=lit_config.get("max_search_rounds", 5),
             proxy_url=config.api.proxy_url if config.api else None,
             fallback_model=pi_model,
+            fallback_llm_client=pi_llm_client,
         )
 
         async def lit_callback(topic: str) -> str:
@@ -4752,7 +4760,7 @@ async def _execute_chat_agent(
 
         async def pi_callback(question: str, context: str) -> str:
             await _send_agent_msg("pi_question", f"Question: {question}\nContext: {context}", AgentType.BIOINFORMATICS)
-            pi_model = state.custom_models.get("pi", config.models.pi_model)
+            pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
             prompt = (
                 f"The bioinformatics analyst is asking for your guidance:\n\n"
                 f"QUESTION: {question}\n\nCONTEXT: {context}\n\n"
@@ -4761,7 +4769,7 @@ async def _execute_chat_agent(
             resp = await llm_client.chat(
                 model=pi_model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=state.custom_temperatures.get("pi", 0.5),
+                temperature=state.custom_temperatures.get(_PI_AGENT_NAME, 0.5),
                 max_tokens=2048
             )
             answer = resp.content or "Proceed with standard bioinformatics practices."
@@ -4801,7 +4809,7 @@ async def _execute_chat_agent(
             )
             # Collect only figures generated during THIS analysis (not historical ones)
             result["figures"] = _collect_session_figures(session_id, since_time=analysis_start_time)
-            return result
+            return result, extra_clients
         finally:
             _chat_sandboxes.pop(session_id, None)
             try:
@@ -4821,7 +4829,7 @@ async def _execute_chat_agent(
             config=AgentConfig(temperature=state.custom_temperatures.get("pathology", 0.2)),
         )
         result = await pathology_agent.process(state, instruction)
-        return result
+        return result, extra_clients
 
     elif agent_name == "biochemistry":
         from .agents.biochemistry_agent import BiochemistryAgent
@@ -4833,12 +4841,14 @@ async def _execute_chat_agent(
             config=AgentConfig(temperature=state.custom_temperatures.get("biochemistry", 0.2)),
         )
         result = await biochem_agent.process(state, instruction)
-        return result
+        return result, extra_clients
 
     elif agent_name == "literature":
         from .agents.literature_agent import LiteratureAgent
         lit_config = state.literature_config or {}
-        pi_model = state.custom_models.get("pi", config.models.pi_model)
+        pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
+        pi_llm_client = _get_agent_llm_client(state, config, _PI_AGENT_NAME, session_id)
+        extra_clients.append(pi_llm_client)
 
         lit_agent = LiteratureAgent(
             llm_client=llm_client,
@@ -4854,9 +4864,10 @@ async def _execute_chat_agent(
             max_search_rounds=lit_config.get("max_search_rounds", 5),
             proxy_url=config.api.proxy_url if config.api else None,
             fallback_model=pi_model,
+            fallback_llm_client=pi_llm_client,
         )
         result = await lit_agent.process(state, instruction)
-        return result
+        return result, extra_clients
 
     else:
         raise ValueError(f"Unknown agent for chat delegation: {agent_name}")
@@ -4889,7 +4900,7 @@ async def _run_chat_delegation(
             base_url=config.api.llm_base_url,
             proxy_url=config.api.proxy_url,
             session_id=session_id,
-            agent_name="chat_delegation"
+            agent_name="chat_delegation",
         )
         # Per-agent clients for delegation
         _delegation_extra_clients: List[OpenAICompatibleClient] = []
@@ -4944,10 +4955,11 @@ async def _run_chat_delegation(
                     agent_client = _get_agent_llm_client(state, config, agent_name, session_id)
                     if agent_client is not llm_manager.openrouter:
                         _delegation_extra_clients.append(agent_client)
-                    result = await _execute_chat_agent(
+                    result, extra = await _execute_chat_agent(
                         session_id, state, agent_name, d.get("instruction", ""),
                         agent_client, chat_msg_callback, saved_files
                     )
+                    _delegation_extra_clients.extend(extra)
                     agent_results[agent_name] = result
                     if "figures" in result:
                         all_figures.extend(result["figures"])
@@ -4974,22 +4986,35 @@ async def _run_chat_delegation(
                     ))
                 # Global timeout to prevent indefinite hang if an agent's LLM call stalls
                 try:
-                    results = await asyncio.wait_for(
+                    raw_results = await asyncio.wait_for(
                         asyncio.gather(*tasks, return_exceptions=True),
                         timeout=CHAT_DELEGATION_TIMEOUT
                     )
                 except asyncio.TimeoutError:
                     logger.error(f"Chat delegation timed out after {CHAT_DELEGATION_TIMEOUT}s for session {session_id}")
-                    results = [TimeoutError(f"Delegation timed out after {CHAT_DELEGATION_TIMEOUT}s")] * len(tasks)
-                for d, result in zip(group, results):
+                    # Cancel all tasks and wait for them to finish cleanup
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    for task in tasks:
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            pass
+                    raw_results = [TimeoutError(f"Delegation timed out after {CHAT_DELEGATION_TIMEOUT}s")] * len(tasks)
+                for d, raw_result in zip(group, raw_results):
                     agent_name = d.get("agent", "unknown")
-                    if isinstance(result, Exception):
-                        logger.error(f"Chat delegation agent {agent_name} failed: {result}")
-                        agent_results[agent_name] = {"error": str(result), "findings": []}
+                    if isinstance(raw_result, Exception):
+                        logger.error(f"Chat delegation agent {agent_name} failed: {raw_result}")
+                        agent_results[agent_name] = {"error": str(raw_result), "findings": []}
                         await _send_chat_ws(session_id, "chat_delegation", {
-                            "status": "agent_error", "agent": agent_name, "error": str(result),
+                            "status": "agent_error", "agent": agent_name, "error": str(raw_result),
                         })
                     else:
+                        result, extra = raw_result
+                        _delegation_extra_clients.extend(extra)
                         agent_results[agent_name] = result
                         if "figures" in result:
                             all_figures.extend(result["figures"])
@@ -5003,8 +5028,8 @@ async def _run_chat_delegation(
         })
 
         synthesis_prompt = _build_synthesis_prompt(user_message, delegation, agent_results)
-        pi_model = state.custom_models.get("pi", config.models.pi_model)
-        pi_temp = state.custom_temperatures.get("pi", 0.5)
+        pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
+        pi_temp = state.custom_temperatures.get(_PI_AGENT_NAME, 0.5)
 
         pi_response = await llm_manager.openrouter.chat(
             model=pi_model,
@@ -5197,7 +5222,7 @@ async def chat_with_pi(
         ext = dest.suffix.lower()
         is_image = ext in IMAGE_EXTS
         file_type = "image" if is_image else "file"
-        file_agent = per_file_agents[idx] if idx < len(per_file_agents) else "pi"
+        file_agent = per_file_agents[idx] if idx < len(per_file_agents) else _PI_AGENT_NAME
 
         file_group = per_file_groups[idx] if idx < len(per_file_groups) else None
         file_sample = per_file_samples[idx] if idx < len(per_file_samples) else None
@@ -5244,8 +5269,8 @@ async def chat_with_pi(
 
     # --- Build context & prompt ---
     context, figure_inventory = _build_chat_context(state)
-    pi_model = state.custom_models.get("pi", config.models.pi_model)
-    pi_temp = state.custom_temperatures.get("pi", 0.5)
+    pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
+    pi_temp = state.custom_temperatures.get(_PI_AGENT_NAME, 0.5)
 
     system_prompt = (
         "You are the PI (Principal Investigator) Agent of a biomedical research analysis system. "
@@ -5319,7 +5344,7 @@ async def chat_with_pi(
             agent_files.setdefault(sf["target_agent"], []).append(sf["filename"])
         file_parts = []
         for agent, fnames in agent_files.items():
-            label = agent.upper() if agent != "pi" else "PI"
+            label = agent.upper() if agent != _PI_AGENT_NAME else "PI"
             file_parts.append(f"{label} Agent: {', '.join(fnames)}")
         user_content += f"\n\n[Attached {len(saved_files)} file(s) — {'; '.join(file_parts)}]"
     if data_file_contents:
@@ -5337,7 +5362,7 @@ async def chat_with_pi(
 
     # --- Call LLM ---
     try:
-        llm_client = _get_agent_llm_client(state, config, "pi", session_id)
+        llm_client = _get_agent_llm_client(state, config, _PI_AGENT_NAME, session_id)
 
         if image_b64_list:
             # Vision API for images
