@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.10
-**Last Updated**: 2026-04-01
+**Version**: 0.18.11
+**Last Updated**: 2026-04-02
 
 ## Project Overview
 
@@ -1446,6 +1446,14 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.18.11 (2026-04-02)
+
+- **Literature agent main model retry** (`agents/literature_agent.py`): Added main model retry logic with `_MAX_MAIN_RETRIES = 2` and `_RETRY_DELAY_BASE = 2.0`. `_chat_with_fallback()` now retries main model failures before falling back, with special handling for RateLimitError to skip directly to fallback. Fallback error chaining now preserves the original exception context.
+- **Subprocess pip install in sandbox** (`utils/sandbox.py`): Improved `_is_safe_subprocess()` with better multiline regex matching for subprocess calls. Combined Figure.savefig monkey-patch with PNG→JPG auto-conversion and workspace root path redirect to prevent writes outside session directory.
+- **WebSocket timeout increased** (`config.py`): `WS_RECEIVE_TIMEOUT` increased from 30.0s to 60.0s to handle longer-running operations.
+- **Graph recursion limit** (`workflow.py`): Added `GRAPH_RECURSION_LIMIT = 100` constant and applied it to workflow config in both `run()` and `resume()` methods to prevent infinite recursion in LangGraph.
+- **Bioinformatics subprocess pip install** (`agents/bioinformatics_agent.py`): Updated system prompts to use `subprocess.run(['pip', 'install', 'package_name'])` instead of `!pip install` magic command, aligning with sandbox security policy.
 
 #### v0.18.10 (2026-04-01)
 

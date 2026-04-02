@@ -668,29 +668,42 @@ The graphic abstract should tell the story of the research at a glance, highligh
                 f"trying Images API fallback"
             )
             try:
-                # Try with b64_json first (OpenAI, Google AI Studio, n1n.ai)
-                # then fall back without it (SiliconFlow only supports URL responses)
-                try:
-                    response = await self.llm_client.client.images.generate(
-                        model=self.model,
-                        prompt=prompt,
-                        n=1,
-                        response_format="b64_json",
-                    )
-                except Exception as b64_err:
-                    # Only fall back for client errors (400/422 = unsupported param);
-                    # propagate transient/auth errors immediately
-                    if not _is_client_error(b64_err):
-                        raise
+                # Zhipu AI does not support response_format="b64_json" parameter;
+                # skip it and use the default URL response format.
+                if _is_zhipu:
                     logger.info(
-                        f"[{self.session_id}][Painter] Images API with b64_json failed ({b64_err}), "
-                        f"trying without response_format"
+                        f"[{self.session_id}][Painter] Zhipu AI detected, "
+                        f"using default URL response format"
                     )
                     response = await self.llm_client.client.images.generate(
                         model=self.model,
                         prompt=prompt,
                         n=1,
                     )
+                else:
+                    # Try with b64_json first (OpenAI, Google AI Studio, n1n.ai)
+                    # then fall back without it (SiliconFlow only supports URL responses)
+                    try:
+                        response = await self.llm_client.client.images.generate(
+                            model=self.model,
+                            prompt=prompt,
+                            n=1,
+                            response_format="b64_json",
+                        )
+                    except Exception as b64_err:
+                        # Only fall back for client errors (400/422 = unsupported param);
+                        # propagate transient/auth errors immediately
+                        if not _is_client_error(b64_err):
+                            raise
+                        logger.info(
+                            f"[{self.session_id}][Painter] Images API with b64_json failed ({b64_err}), "
+                            f"trying without response_format"
+                        )
+                        response = await self.llm_client.client.images.generate(
+                            model=self.model,
+                            prompt=prompt,
+                            n=1,
+                        )
 
                 # Extract image from response
                 if response.data and len(response.data) > 0:

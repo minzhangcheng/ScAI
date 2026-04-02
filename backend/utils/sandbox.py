@@ -116,11 +116,35 @@ def _is_safe_os_system(code: str) -> bool:
 
 def _is_safe_subprocess(code: str) -> bool:
     """Check if all subprocess calls are pip install commands."""
+    # 先排除纯 import 行
     lines = [l.strip() for l in code.splitlines() if re.search(r'\bsubprocess\b', l)]
-    pip_pattern = r'subprocess\.\w+\(\s*\[?\s*["\'](?:pip|pip3)["\'].*install'
     import_pattern = r'^(?:import|from)\s+subprocess'
     non_import = [l for l in lines if not re.match(import_pattern, l)]
-    return not non_import or all(re.search(pip_pattern, l) for l in non_import)
+    if not non_import:
+        return True
+
+    # 移除注释后，在完整代码上用多行正则匹配
+    code_no_comments = re.sub(r'#.*$', '', code, flags=re.MULTILINE)
+
+    pip_patterns = [
+        r'subprocess\.\w+\(\s*\[[\s\S]*?["\'](?:pip|pip3)["\'][\s\S]*?\]',  # 列表形式
+        r'subprocess\.\w+\(\s*["\'][^"\']*(?:pip|pip3)\s+install',           # 字符串形式
+    ]
+
+    # 找出所有完整的 subprocess 调用
+    all_calls = re.findall(r'subprocess\.\w+\([^)]*\)', code_no_comments, re.DOTALL)
+    if not all_calls:
+        # 有 subprocess 引用但无完整调用（可能跨行未闭合），回退到逐行检查
+        return all(
+            any(re.search(p, l) for p in pip_patterns)
+            for l in non_import
+        )
+
+    # 所有 subprocess 调用都必须是 pip install
+    return all(
+        any(re.search(p, call) for p in pip_patterns)
+        for call in all_calls
+    )
 
 
 def _is_safe_importlib(code: str) -> bool:
@@ -674,34 +698,52 @@ plt.rcParams.update({
     'ps.fonttype': 42,
 })
 
-# === Monkey-patch Figure.savefig to auto-convert PNG→JPG ===
+# === Combined Monkey-patch: Figure.savefig with PNG→JPG + path redirect ===
 import matplotlib.figure as _mpl_figure
 _original_savefig = _mpl_figure.Figure.savefig
 
-def _savefig_as_jpg(self, fname, *args, **kwargs):
-    # Auto-convert PNG→JPG: save directly as JPEG (no intermediate PNG file).
-    _fname_str = str(fname)
-    if _fname_str.lower().endswith('.png'):
+_FIGURES_DIR = _WORKSPACE_DIR / 'figures'
+_WORKSPACE_DIR_RESOLVED = _WORKSPACE_DIR.resolve()
+
+def _combined_savefig(self, fname, *args, **kwargs):
+    """Combined patch: PNG→JPG conversion + workspace root redirect."""
+    # Step 1: Handle PNG→JPG conversion (if fname is a path string)
+    _fname_str = str(fname) if isinstance(fname, (str, os.PathLike)) else None
+    _needs_jpg_convert = _fname_str and _fname_str.lower().endswith('.png')
+
+    if _needs_jpg_convert:
         try:
             _base, _ = os.path.splitext(_fname_str)
             _jpg_path = _base + '.jpg'
-            _kw = dict(kwargs)
-            _kw['format'] = 'jpeg'
-            _kw.setdefault('facecolor', 'white')
-            if 'pil_kwargs' not in _kw:
-                _kw['pil_kwargs'] = {}
-            _kw['pil_kwargs'].setdefault('quality', 85)
-            _kw['pil_kwargs'].setdefault('optimize', True)
-            _original_savefig(self, _jpg_path, *args, **_kw)
+            # Modify kwargs only; let the final return handle saving
+            kwargs = dict(kwargs)
+            kwargs['format'] = 'jpeg'
+            kwargs.setdefault('facecolor', 'white')
+            if 'pil_kwargs' not in kwargs:
+                kwargs['pil_kwargs'] = {}
+            kwargs['pil_kwargs'].setdefault('quality', 85)
+            kwargs['pil_kwargs'].setdefault('optimize', True)
             print(f"[Auto-convert] {os.path.basename(_fname_str)} -> {os.path.basename(_jpg_path)}")
+            # Only update fname, do NOT save here — let final return handle it
+            fname = _jpg_path
         except Exception as _err:
             # Fallback: save as original PNG if JPEG conversion fails
             print(f"[Auto-convert] Warning: {_err}, saving as PNG")
-            _original_savefig(self, fname, *args, **kwargs)
-    else:
-        _original_savefig(self, fname, *args, **kwargs)
 
-_mpl_figure.Figure.savefig = _savefig_as_jpg
+    # Step 2: Redirect workspace root → figures/ (only for path strings)
+    if isinstance(fname, (str, os.PathLike)):
+        try:
+            _p = Path(str(fname)).resolve()
+            if _p.parent == _WORKSPACE_DIR_RESOLVED:
+                _new = _FIGURES_DIR / _p.name
+                print(f"[savefig-redirect] {_p.name} -> figures/")
+                fname = str(_new)
+        except Exception as _redir_err:
+            print(f"[savefig-redirect] failed: {_redir_err}")
+
+    return _original_savefig(self, fname, *args, **kwargs)
+
+_mpl_figure.Figure.savefig = _combined_savefig
 
 # === Monkey-patch plt.show() to capture figures as display_data ===
 # With Agg backend, plt.show() is a no-op — figures are silently lost.
@@ -962,31 +1004,6 @@ os.unlink = _sandboxed_os_unlink
 os.rmdir = _sandboxed_os_rmdir
 _pathlib.Path.unlink = _sandboxed_path_unlink
 _pathlib.Path.rmdir = _sandboxed_path_rmdir
-
-# === Redirect Figure.savefig: workspace root → figures/ subdirectory ===
-import matplotlib.figure as _mpl_figure
-_prev_savefig = _mpl_figure.Figure.savefig
-
-_FIGURES_DIR = _WORKSPACE_DIR / 'figures'
-_WORKSPACE_DIR_RESOLVED = _WORKSPACE_DIR.resolve()
-
-def _redirected_savefig(self, fname, *args, **kwargs):
-    '''Redirect savefig calls from workspace root into figures/ subdirectory.'''
-    # Skip non-path arguments (e.g. BytesIO buffers)
-    if not isinstance(fname, (str, os.PathLike)):
-        return _prev_savefig(self, fname, *args, **kwargs)
-    try:
-        _p = Path(str(fname)).resolve()
-        # Only redirect if target is directly under workspace root (not in a subdirectory)
-        if _p.parent == _WORKSPACE_DIR_RESOLVED:
-            _new = _FIGURES_DIR / _p.name
-            print(f"[savefig-redirect] {{_p.name}} -> figures/")
-            fname = str(_new)
-    except Exception as _redir_err:
-        print(f"[savefig-redirect] failed: {{_redir_err}}")
-    return _prev_savefig(self, fname, *args, **kwargs)
-
-_mpl_figure.Figure.savefig = _redirected_savefig
 
 print(f"Working directory set to: {{os.getcwd()}}")
 print(f"I/O sandbox active: writes restricted to session directory")

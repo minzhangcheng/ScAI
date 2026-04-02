@@ -32,6 +32,10 @@ from openai import RateLimitError
 
 _FALLBACK_EXCEPTIONS = RETRYABLE_EXCEPTIONS + (RateLimitError,)
 
+# 主模型重试配置（用于 _chat_with_fallback）
+_MAX_MAIN_RETRIES = 2
+_RETRY_DELAY_BASE = 2.0  # 秒，与 llm_client 保持一致
+
 
 class LiteratureAgent(BaseAgent):
     """
@@ -694,14 +698,40 @@ Return ONLY the PubMed query string, nothing else."""
 
     async def _chat_with_fallback(self, prompt: str, temperature: float = 0.3) -> Tuple[str, bool]:
         """Returns (response, used_fallback)."""
-        try:
-            return await self.chat(prompt, temperature=temperature), False
-        except _FALLBACK_EXCEPTIONS as e:
-            if self.fallback_llm_client and self.fallback_model:
-                logger.warning(
-                    f"[Literature] LLM call failed ({type(e).__name__}: {str(e)[:100]}), "
-                    f"retrying with fallback model: {self.fallback_model}"
-                )
+        # 主模型重试 N 次
+        last_err: Optional[Exception] = None
+        for attempt in range(_MAX_MAIN_RETRIES):
+            try:
+                return await self.chat(prompt, temperature=temperature), False
+            except _FALLBACK_EXCEPTIONS as e:
+                last_err = e
+                if isinstance(e, RateLimitError):
+                    # RateLimitError 已由内层 retry_with_backoff 做了充分退避，外层继续重试无意义
+                    logger.warning(
+                        f"[Literature] LLM call hit RateLimitError on attempt {attempt + 1}/{_MAX_MAIN_RETRIES}, skipping to fallback"
+                    )
+                    break  # 跳出主模型重试循环，走 fallback
+                if attempt < _MAX_MAIN_RETRIES - 1:
+                    delay = _RETRY_DELAY_BASE * (attempt + 1)
+                    logger.warning(
+                        f"[Literature] LLM call failed (attempt {attempt + 1}/{_MAX_MAIN_RETRIES}): "
+                        f"{type(e).__name__}: {str(e)[:100]}. Retrying in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    # 最后一次失败（且非 RateLimitError），记录日志
+                    logger.warning(
+                        f"[Literature] LLM call failed final attempt ({attempt + 1}/{_MAX_MAIN_RETRIES}): "
+                        f"{type(e).__name__}: {str(e)[:100]}"
+                    )
+
+        # 所有主模型重试都失败，尝试 fallback model
+        if self.fallback_llm_client and self.fallback_model:
+            logger.warning(
+                f"[Literature] Main model failed after {_MAX_MAIN_RETRIES} attempts, "
+                f"trying fallback model: {self.fallback_model}"
+            )
+            try:
                 resp = await self.fallback_llm_client.chat(
                     model=self.fallback_model,
                     messages=[{"role": "user", "content": prompt}],
@@ -709,9 +739,18 @@ Return ONLY the PubMed query string, nothing else."""
                 )
                 if not resp.content:
                     logger.warning("[Literature] Fallback model returned empty content")
-                    raise
+                    raise last_err or ValueError("Fallback model returned empty content")
                 return resp.content, True
-            raise
+            except Exception as fallback_err:
+                # fallback 也失败时，记录 fallback 的真实错误
+                logger.error(
+                    f"[Literature] Fallback model also failed: "
+                    f"{type(fallback_err).__name__}: {str(fallback_err)[:150]}"
+                )
+                raise fallback_err from last_err
+
+        # 无 fallback 时抛出主模型的最后错误
+        raise last_err or ValueError("LLM call failed")
 
     async def _evaluate_search_results(
         self,

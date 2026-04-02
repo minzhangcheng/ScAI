@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Maximum retry attempts for workflow nodes
 MAX_NODE_RETRIES = 3
+GRAPH_RECURSION_LIMIT = 100
 
 from .models.schemas import (
     AnalysisState, AnalysisStep, AgentType, TaskStatus, RoundResult,
@@ -3606,7 +3607,7 @@ Return ONLY the JSON array, nothing else."""
         workflow_state = self._make_initial_workflow_state(initial_state)
         
         # Run workflow
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
 
         # Verify workflow was properly initialized
         if self.compiled_graph is None:
@@ -3738,7 +3739,7 @@ Return ONLY the JSON array, nothing else."""
             logger.info(f"[{self.session_id}] Re-initializing workflow components for resume")
             await self.initialize()
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
 
         # Get current state
         state = await self.compiled_graph.aget_state(config)

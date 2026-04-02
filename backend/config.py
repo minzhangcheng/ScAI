@@ -51,7 +51,7 @@ MAX_REALTIME_MESSAGES = 1000  # Maximum realtime messages per session
 SESSION_CACHE_TTL = 3600  # Seconds before inactive session eviction (1 hour)
 IMPORT_JOB_TTL = 3600  # Cleanup completed/failed import jobs after (seconds)
 CLEANUP_INTERVAL = 300  # Background cleanup task interval (seconds)
-WS_RECEIVE_TIMEOUT = 30.0  # WebSocket receive timeout (seconds)
+WS_RECEIVE_TIMEOUT = 60.0  # WebSocket receive timeout (seconds) — increased from 30s
 CHAT_DELEGATION_TIMEOUT = 600  # Chat delegation global timeout (seconds)
 
 

@@ -640,9 +640,9 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
          ct = ct.str.replace(f'_{{cond}}', '', regex=False)
 
 SECURITY RESTRICTIONS:
-- Do NOT use globals(), exec(), eval(), __import__(), subprocess, or importlib — these are blocked by the sandbox for security and will cause repeated errors.
+- Do NOT use globals(), exec(), eval(), __import__(), or importlib — these are blocked by the sandbox. subprocess is only allowed for `subprocess.run(['pip', 'install', 'package_name'])`.
 - ALWAYS use standard `import xxx` or `from xxx import yyy` syntax. NEVER use `__import__('xxx')` — it will be blocked.
-- If a package import fails (ModuleNotFoundError), install it using `!pip install package_name` in a code cell, then import it normally. Do NOT use subprocess.run(['pip', ...]) or importlib.
+- If a package import fails (ModuleNotFoundError), install it using `subprocess.run(['pip', 'install', 'package_name'])`, then import it normally. Do NOT use importlib.
 - Do NOT write files to disk using open(..., 'w') or similar — direct file writes are blocked by the sandbox. Saving via library methods (e.g. pandas df.to_csv(), scanpy sc.pl.*, matplotlib savefig) to the workspace directory IS allowed. Store intermediate data in adata.uns, adata.obs, adata.var, or Python variables.
 - Do NOT call annotate_clusters in the same response as execute_code that generates markers.
   You must FIRST execute code and see the printed output, THEN call annotate_clusters in a separate step.
@@ -785,11 +785,11 @@ Do NOT call open('filename', 'w') with bare filenames — use open(_WORKSPACE_DI
 {self._build_analysis_context()}
 
 **PACKAGE INSTALLATION**:
-If you need a Python package that is not currently installed, you can install it using:
-- `!pip install package_name` (preferred, Jupyter magic command)
+If you need a Python package that is not currently installed:
+- Use `subprocess.run(['pip', 'install', 'package_name'])` to install it
 - After installation, import the package normally in the same or next code cell
 - Only install well-known scientific/bioinformatics packages
-- Example: `!pip install palettable` then `import palettable`
+- Example: `subprocess.run(['pip', 'install', 'palettable'])` then `import palettable`
 
 **CRITICAL: DATA PREPROCESSING (MUST DO BEFORE PCA)**
 Before running sc.tl.pca() or any dimensionality reduction:
@@ -1229,11 +1229,11 @@ except Exception as _autosave_block_err:
                                 missing = m.group(1).split(".")[0]
                             tool_result += (
                                 f"\nHint: The package '{missing}' is not installed. "
-                                f"You can install it by running `!pip install {missing}` in a code cell, "
+                                f"Install it by running: subprocess.run(['pip', 'install', '{missing}']), "
                                 f"then retry the import.\n"
                             ) if missing else (
                                 "\nHint: A required package is not installed. "
-                                "You can install it using `!pip install <package_name>` in a code cell.\n"
+                                "Install it using: subprocess.run(['pip', 'install', '<package_name>']).\n"
                             )
                     if result.figures:
                         tool_result += f"Generated {len(result.figures)} figure(s).\n"
