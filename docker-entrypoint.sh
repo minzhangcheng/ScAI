@@ -50,7 +50,11 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 echo "Installing/updating Python dependencies..."
-"$VENV_DIR/bin/pip" install -q -r "$APP_DIR/requirements.txt"
+if [ -n "$PIP_INDEX_URL" ]; then
+    "$VENV_DIR/bin/pip" install -q -r "$APP_DIR/requirements.txt" -i "$PIP_INDEX_URL"
+else
+    "$VENV_DIR/bin/pip" install -q -r "$APP_DIR/requirements.txt"
+fi
 
 # ── Node.js dependencies ─────────────────────────────────────────
 # Symlink node_modules from dep volume into frontend directory

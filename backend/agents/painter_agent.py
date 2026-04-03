@@ -728,6 +728,13 @@ The graphic abstract should tell the story of the research at a glance, highligh
                 # Zhipu / standard: 'data' array
                 if raw is not None:
 
+                    # Check error field first (Zhipu may return 500 with data=None)
+                    if 'error' in raw and raw['error']:
+                        error_info = raw['error']
+                        error_msg = error_info.get('message', str(error_info)) if isinstance(error_info, dict) else str(error_info)
+                        logger.warning(f"[{self.session_id}][Painter] Images API returned error: {error_info}")
+                        raise ValueError(f"Images API error: {error_msg}")
+
                     # Check content_filter for 审核拦截
                     if 'content_filter' in raw and raw['content_filter']:
                         logger.warning(f"[{self.session_id}][Painter] Content filter triggered: {raw['content_filter']}")

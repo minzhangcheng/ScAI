@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.12
+**Version**: 0.18.13
 
 ## Installation
 
@@ -13,8 +13,8 @@ Pull and run the pre-built image from GitHub Container Registry:
 ```bash
 docker run -d --name scai \
   -p 3000:3000 \
-  -v scai-dep:/dep \
-  -v scai-data:/data \
+  -v ./scai-dep:/dep \
+  -v ./scai-data:/data \
   ghcr.io/minzhangcheng/scai:latest
 ```
 
@@ -340,6 +340,10 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.13 (2026-04-03)
+
+- **Improvement: Docker PyPI mirror support** — Docker startup now supports `-e PIP_INDEX_URL` parameter to pass a PyPI mirror URL, significantly speeding up Python package installation in containers.
 
 ### v0.18.12 (2026-04-03)
 

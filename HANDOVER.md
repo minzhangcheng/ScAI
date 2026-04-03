@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.12
+**Version**: 0.18.13
 **Last Updated**: 2026-04-03
 
 ## Project Overview
@@ -1446,6 +1446,10 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.18.13 (2026-04-03)
+
+- **Docker PyPI mirror support** (`docker-entrypoint.sh`): Docker startup now supports `-e PIP_INDEX_URL` parameter to pass a PyPI mirror URL (e.g., Aliyun, Tsinghua). When set, pip install uses the specified mirror for faster package installation in containers.
 
 #### v0.18.12 (2026-04-03)
 
