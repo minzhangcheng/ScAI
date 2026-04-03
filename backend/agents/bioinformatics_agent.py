@@ -879,6 +879,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         MAX_FIGURE_ITERATIONS = 5  # Max figure-only iterations excluded from step count
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 3  # Force report_findings after this many consecutive code errors
+        total_errors = 0
+        MAX_TOTAL_ERRORS = 30  # Hard limit: force report_findings after this many total errors
 
         while step_count < max_steps and not completed:
             step_count += 1
@@ -1102,7 +1104,10 @@ try:
 finally:
     plt.close = _orig_close
     plt.show = _orig_show
-    _mpl_figure.Figure.savefig = _prev_fig_savefig
+    try:
+        _mpl_figure.Figure.savefig = _prev_fig_savefig
+    except Exception:
+        pass  # Ignore restore errors to avoid masking real user code errors
 
 # Detect and save all active figures
 try:
@@ -1213,6 +1218,7 @@ except Exception as _autosave_block_err:
                     if result.error:
                         await self._notify("error", result.error)
                         consecutive_errors += 1
+                        total_errors += 1
                     else:
                         consecutive_errors = 0
 
@@ -1267,6 +1273,19 @@ except Exception as _autosave_block_err:
                                     "using the report_findings tool and move on."
                                 )
                             })
+                        consecutive_errors = 0  # Reset after circuit breaker triggers
+
+                    # Hard limit: too many total errors → force report without giving more chances
+                    elif total_errors >= MAX_TOTAL_ERRORS:
+                        logger.warning(f"[Bioinformatics] {total_errors} total errors reached hard limit, forcing report")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[System] Too many code execution errors overall. "
+                                "Stop trying to fix the code. Report your findings so far "
+                                "using the report_findings tool and move on."
+                            )
+                        })
 
                 elif tool_name == "consult_pi":
                     has_substantive_work = True
@@ -1423,8 +1442,11 @@ except Exception as _autosave_block_err:
                     # and do NOT set annotation_completed (so report_findings gate blocks)
                     if annotation_result.get("status") == "error":
                         error_detail = annotation_result.get("error", "Unknown annotation error")
+                        # Check if there's raw_response for debugging
+                        raw_response = annotation_result.get("raw_response", "")
                         tool_result = (
                             f"[ANNOTATION FAILED] {error_detail}\n"
+                            f"Raw response preview: {raw_response[:500] if raw_response else 'N/A'}\n"
                             "Do NOT manually assign cell types via execute_code. "
                             "Cell type annotation MUST go through annotate_clusters for user review. "
                             "You may retry annotate_clusters or consult_pi for guidance."

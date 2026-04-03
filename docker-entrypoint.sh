@@ -2,6 +2,26 @@
 set -e
 trap 'echo "Error on line $LINENO"; exit 1' ERR
 
+# Default to production mode
+MODE="${SCAI_MODE:-prod}"
+
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dev)
+            MODE="dev"
+            shift
+            ;;
+        --prod)
+            MODE="prod"
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
 APP_DIR="/app"
 DEP_DIR="/dep"
 DATA_DIR="/data"
@@ -19,6 +39,7 @@ LOG_FILE="$DATA_DIR/logs/scai.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo ""
 echo "========== ScAI starting at $(date) =========="
+echo "Mode: $MODE"
 
 export SCAI_DATA_DIR="$DATA_DIR"
 
@@ -52,6 +73,14 @@ else
     echo "Node.js dependencies up to date."
 fi
 
+# ── Frontend build for production mode ───────────────────────────
+if [ "$MODE" = "prod" ]; then
+    echo "Building frontend for production..."
+    cd "$APP_DIR/frontend"
+    npm run build
+    cd "$APP_DIR"
+fi
+
 # ── Start backend ─────────────────────────────────────────────────
 echo "Starting backend..."
 cd "$APP_DIR"
@@ -74,7 +103,11 @@ done
 # ── Start frontend ────────────────────────────────────────────────
 echo "Starting frontend..."
 cd "$APP_DIR/frontend"
-SCAI_HOST=127.0.0.1 SCAI_BACKPORT=8000 npx vite --host 0.0.0.0 --port 3000 &
+if [ "$MODE" = "dev" ]; then
+    SCAI_HOST=127.0.0.1 SCAI_BACKPORT=8000 npx vite --host 0.0.0.0 --port 3000 &
+else
+    SCAI_HOST=127.0.0.1 SCAI_BACKPORT=8000 npx vite preview --host 0.0.0.0 --port 3000 &
+fi
 FRONTEND_PID=$!
 
 echo ""

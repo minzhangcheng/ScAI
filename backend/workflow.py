@@ -1821,6 +1821,26 @@ Approve if quality_score >= 7."""
                         except (ValueError, TypeError) as e:
                             logger.warning(f"[{self.session_id}] Failed to parse biochemistry value for {indicator}: {e}")
 
+            # Track biochemistry data in new_data_files for agent activation logic
+            if biochemistry_values:
+                new_data_files.append({
+                    "section": "biochemistry",
+                    "filename": None,
+                    "data_type": "indicator_values",
+                    "reason": "User-provided biochemistry indicators"
+                })
+
+            # Track biochemistry files from file_assignments (reuse from line 1793)
+            if file_assignments.get("biochemistry"):
+                for file_info in file_assignments["biochemistry"]:
+                    if file_info:
+                        new_data_files.append({
+                            "section": "biochemistry",
+                            "filename": file_info.get("filename"),
+                            "data_type": file_info.get("image_type", "user_upload"),
+                            "reason": file_info.get("reason", "")
+                        })
+
             # Get adjusted instructions
             adjusted_instructions = pi_response.get("adjusted_instructions")
             
@@ -2031,7 +2051,23 @@ Approve if quality_score >= 7."""
 
             # Build skip_nodes from PI's agent activation decision
             agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
+            reanalysis_agents = set(last_round.reanalysis_agents) if last_round else set()
             agents_to_activate.add("bioinformatics")  # Always activate bioinformatics
+
+            # Default disable logic (from round 2 onwards): skip pathology/biochemistry if no new data
+            if analysis_state.current_round >= 2:
+                new_pathology_files = [f for f in state.get("new_data_files", []) if f.get("section") == "pathology"]
+                new_biochemistry_files = [f for f in state.get("new_data_files", []) if f.get("section") == "biochemistry"]
+
+                # Pathology: default disabled unless new data or PI explicitly requests reanalysis
+                if not new_pathology_files and "pathology" not in reanalysis_agents:
+                    agents_to_activate.discard("pathology")
+                    logger.info(f"[{self.session_id}] Default disabling pathology: no new data and no reanalysis request")
+
+                # Biochemistry: default disabled unless new data or PI explicitly requests reanalysis
+                if not new_biochemistry_files and "biochemistry" not in reanalysis_agents:
+                    agents_to_activate.discard("biochemistry")
+                    logger.info(f"[{self.session_id}] Default disabling biochemistry: no new data and no reanalysis request")
 
             # Reconcile: if prefix parsing found tasks for an agent, ensure it's activated
             task_to_agent = {

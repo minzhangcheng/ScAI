@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.18.11"
+    version="0.18.12"
 )
 
 # CORS
@@ -2930,9 +2930,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "type": "ping",
                             "timestamp": datetime.now().isoformat()
                         })
+                    except WebSocketDisconnect:
+                        logger.debug("Observer WebSocket disconnected during ping")
+                        break
                     except Exception:
                         logger.warning("Observer WebSocket ping failed, closing", exc_info=True)
                         break
+                except WebSocketDisconnect:
+                    logger.debug("Observer WebSocket disconnected normally")
+                    break
                 except Exception:
                     logger.warning("Observer WebSocket receive failed, closing", exc_info=True)
                     break

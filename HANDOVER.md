@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.11
-**Last Updated**: 2026-04-02
+**Version**: 0.18.12
+**Last Updated**: 2026-04-03
 
 ## Project Overview
 
@@ -1446,6 +1446,19 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.18.12 (2026-04-03)
+
+- **Bioinformatics total error hard limit** (`agents/bioinformatics_agent.py`): Added `total_errors` counter with `MAX_TOTAL_ERRORS = 30` hard limit. Forces `report_findings` after 30 total code errors, preventing infinite error loops. Added try/except around matplotlib savefig restore to avoid masking real user code errors. Added `raw_response` preview in annotation failure messages for debugging.
+- **Painter image API response handling** (`agents/painter_agent.py`): Removed redundant `n=1` from direct generation call. Added debug logging for image API raw responses. Added `content_filter` detection for content moderation interception. Better handling of SiliconFlow (`images` array) vs standard Zhipu (`data` array) response formats.
+- **PI annotation JSON retry + reanalysis agents** (`agents/pi_agent.py`): Added retry logic for annotation JSON parsing with a more explicit prompt on first failure. Added `reanalysis_agents: List[str]` field to `RoundResult` schema (`models/schemas.py`) for re-analysis of existing data with different parameters/perspectives. Updated PI prompt documentation to clarify distinction between `agents_for_next_round` (new data processing) vs `reanalysis_agents` (existing data re-analysis).
+- **WebSocket observer disconnect handling** (`backend/main.py`): Added `WebSocketDisconnect` exception handling for observer ping/receive loops, preventing spurious error logs when observers disconnect.
+- **JSON repair for LLM responses** (`utils/formatting.py`): Added optional `json_repair` import. `safe_parse_json()` now falls back to `repair_json()` when standard JSON parsing fails, handling malformed JSON from LLM responses.
+- **Sandbox savefig redirect recovery** (`utils/sandbox.py`): Improved error handling in savefig redirect with recovery mechanism; original path is tried as last resort if redirect fails.
+- **Selective agent activation from round 2+** (`workflow.py`): Track biochemistry data in `new_data_files`. From round 2 onwards, pathology and biochemistry agents are disabled by default unless new data arrives or PI explicitly requests reanalysis via `reanalysis_agents`.
+- **Dev/prod mode for startup scripts** (`docker-entrypoint.sh`, `start.sh`): Added `--dev`/`--prod` mode flags. Production mode builds the frontend and uses `vite preview`. Development mode uses `vite dev`. Default is production mode.
+- **DataPanel type annotation** (`frontend/src/components/DataPanel.tsx`): Changed `typeOptions` prop type from `string[]` to `readonly string[]` for better TypeScript compatibility.
+- **New dependency: json-repair** (`requirements.txt`): Added `json-repair>=0.30,<1.0` for repairing malformed JSON from LLM responses.
 
 #### v0.18.11 (2026-04-02)
 

@@ -311,7 +311,7 @@ function DataSection({
   iconColor: string
   groups: TreatmentGroup[]
   dataFiles: DataFileType[]
-  typeOptions: string[]
+  typeOptions: readonly string[]
   multipleFiles: boolean
   onUpload: (file: File, section: 'pathology' | 'sequencing' | 'biochemistry', dataType: string, groupId?: string, sampleNumber?: number, description?: string, signal?: AbortSignal) => Promise<any>
   onDelete: (fileId: string) => Promise<void>

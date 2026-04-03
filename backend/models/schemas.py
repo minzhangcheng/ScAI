@@ -296,6 +296,7 @@ class RoundResult(BaseModel):
     agents_for_next_round: List[str] = Field(
         default_factory=lambda: ["bioinformatics", "pathology", "biochemistry", "literature"]
     )
+    reanalysis_agents: List[str] = Field(default_factory=list)  # Agents needing reanalysis of existing data
     phase: str = "exploration"  # "exploration" or "innovation"
     direction: str = ""  # Research direction for innovation rounds
     exploration_report: Optional[ExplorationReport] = None  # Only for Phase 1

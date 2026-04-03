@@ -7,6 +7,13 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+# Optional import for json_repair (handles malformed JSON from LLM responses)
+try:
+    from json_repair import repair_json as _repair_json
+    _JSON_REPAIR_AVAILABLE = True
+except ImportError:
+    _JSON_REPAIR_AVAILABLE = False
+
 
 def fmt_tokens(n: int) -> str:
     """Format token count with K/M suffix."""
@@ -77,6 +84,14 @@ def safe_parse_json(response: str, default: Optional[Dict[str, Any]] = None) -> 
         try:
             return json.loads(response[start:end])
         except json.JSONDecodeError:
+            # Try to repair malformed JSON from LLM responses
+            if _JSON_REPAIR_AVAILABLE:
+                try:
+                    repaired = _repair_json(response[start:end], return_objects=True)
+                    if isinstance(repaired, dict):
+                        return repaired
+                except Exception:
+                    pass
             logger.debug("JSON extraction from LLM response failed at position %d-%d", start, end)
 
     return default

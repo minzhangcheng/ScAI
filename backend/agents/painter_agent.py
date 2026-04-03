@@ -678,7 +678,6 @@ The graphic abstract should tell the story of the research at a glance, highligh
                     response = await self.llm_client.client.images.generate(
                         model=self.model,
                         prompt=prompt,
-                        n=1,
                     )
                 else:
                     # Try with b64_json first (OpenAI, Google AI Studio, n1n.ai)
@@ -705,6 +704,15 @@ The graphic abstract should tell the story of the research at a glance, highligh
                             n=1,
                         )
 
+                # Debug: log raw response for diagnosis
+                raw = None
+                if hasattr(response, 'model_dump'):
+                    raw = response.model_dump()
+                    logger.info(f"[{self.session_id}][Painter] Images API raw response keys: {list(raw.keys())}")
+                    logger.debug(f"[{self.session_id}][Painter] Images API raw response: {raw}")
+                else:
+                    logger.debug(f"[{self.session_id}][Painter] Images API response type: {type(response)}, attrs: {dir(response)}")
+
                 # Extract image from response
                 if response.data and len(response.data) > 0:
                     img_item = response.data[0]
@@ -716,17 +724,29 @@ The graphic abstract should tell the story of the research at a glance, highligh
                         logger.info(f"[{self.session_id}][Painter] Downloading image from URL")
                         return await self._download_image_as_base64(img_item.url)
 
-                # SiliconFlow non-standard format: 'images' array instead of 'data'
-                if hasattr(response, 'model_dump'):
-                    raw = response.model_dump()
+                # SiliconFlow non-standard: 'images' array
+                # Zhipu / standard: 'data' array
+                if raw is not None:
+
+                    # Check content_filter for 审核拦截
+                    if 'content_filter' in raw and raw['content_filter']:
+                        logger.warning(f"[{self.session_id}][Painter] Content filter triggered: {raw['content_filter']}")
+
+                    # SiliconFlow non-standard: 'images' array
                     if 'images' in raw and raw['images']:
                         for img in raw['images']:
                             url = img.get('url', '') if isinstance(img, dict) else ''
                             if url:
-                                logger.info(
-                                    f"[{self.session_id}][Painter] Downloading image from "
-                                    f"non-standard response format"
-                                )
+                                logger.info(f"[{self.session_id}][Painter] Downloading image from non-standard response")
+                                return await self._download_image_as_base64(url)
+
+                    # Zhipu / standard: 'data' array
+                    if 'data' in raw and raw['data']:
+                        img_data = raw['data'][0]
+                        if isinstance(img_data, dict):
+                            url = img_data.get('url', '')
+                            if url:
+                                logger.info(f"[{self.session_id}][Painter] Downloading image from standard response (data[0].url)")
                                 return await self._download_image_as_base64(url)
 
                 raise ValueError("Images API returned no image data")

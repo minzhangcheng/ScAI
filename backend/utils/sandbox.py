@@ -698,7 +698,7 @@ plt.rcParams.update({
     'ps.fonttype': 42,
 })
 
-# === Combined Monkey-patch: Figure.savefig with PNG→JPG + path redirect ===
+# === Combined Monkey-patch: Figure.savefig with PNG->JPG + path redirect ===
 import matplotlib.figure as _mpl_figure
 _original_savefig = _mpl_figure.Figure.savefig
 
@@ -706,8 +706,8 @@ _FIGURES_DIR = _WORKSPACE_DIR / 'figures'
 _WORKSPACE_DIR_RESOLVED = _WORKSPACE_DIR.resolve()
 
 def _combined_savefig(self, fname, *args, **kwargs):
-    """Combined patch: PNG→JPG conversion + workspace root redirect."""
-    # Step 1: Handle PNG→JPG conversion (if fname is a path string)
+    '''Combined patch: PNG->JPG conversion + workspace root redirect.'''
+    # Step 1: Handle PNG->JPG conversion (if fname is a path string)
     _fname_str = str(fname) if isinstance(fname, (str, os.PathLike)) else None
     _needs_jpg_convert = _fname_str and _fname_str.lower().endswith('.png')
 
@@ -730,7 +730,8 @@ def _combined_savefig(self, fname, *args, **kwargs):
             # Fallback: save as original PNG if JPEG conversion fails
             print(f"[Auto-convert] Warning: {_err}, saving as PNG")
 
-    # Step 2: Redirect workspace root → figures/ (only for path strings)
+    # Step 2: Redirect workspace root -> figures/ (only for path strings)
+    _redirect_failed = False
     if isinstance(fname, (str, os.PathLike)):
         try:
             _p = Path(str(fname)).resolve()
@@ -739,9 +740,23 @@ def _combined_savefig(self, fname, *args, **kwargs):
                 print(f"[savefig-redirect] {_p.name} -> figures/")
                 fname = str(_new)
         except Exception as _redir_err:
-            print(f"[savefig-redirect] failed: {_redir_err}")
+            print(f"[savefig-redirect] failed: {_redir_err}, saving to original location")
+            _redirect_failed = True
 
-    return _original_savefig(self, fname, *args, **kwargs)
+    try:
+        return _original_savefig(self, fname, *args, **kwargs)
+    except Exception as _save_err:
+        # Last resort: if redirect caused issues, retry with original fname
+        if not _redirect_failed:
+            raise
+        print(f"[savefig] redirect recovery failed: {_save_err}, trying original path")
+        _orig_path_str = str(fname)
+        if str(_FIGURES_DIR) in _orig_path_str:
+            _relative = _orig_path_str.replace(str(_FIGURES_DIR), "", 1)
+            _recovery = str(_WORKSPACE_DIR / _relative.lstrip("/"))
+        else:
+            _recovery = _orig_path_str
+        return _original_savefig(self, _recovery, *args, **kwargs)
 
 _mpl_figure.Figure.savefig = _combined_savefig
 
@@ -888,7 +903,7 @@ def _is_write_allowed(filepath):
         resolved = str(Path(filepath).resolve())
     except Exception as e:
         print(f"[sandbox] Path resolution failed for {{filepath!r}}: {{e}}")
-        return False  # Can't resolve → deny by default for safety
+        return False  # Can't resolve -> deny by default for safety
     # Check allowed roots
     for root in _ALLOWED_WRITE_ROOTS:
         if resolved.startswith(root):
@@ -906,8 +921,8 @@ def _sandboxed_open(file, mode='r', *args, **kwargs):
             raise PermissionError(
                 f"\\n[Sandbox] Write blocked: {{file}}\\n"
                 f"Files must be saved within the session workspace.\\n"
-                f"  - CSV/Excel → {{_WORKSPACE_DIR}}/tables/\\n"
-                f"  - H5AD      → {{_WORKSPACE_DIR}}/\\n"
+                f"  - CSV/Excel -> {{_WORKSPACE_DIR}}/tables/\\n"
+                f"  - H5AD      -> {{_WORKSPACE_DIR}}/\\n"
                 f"  - Figures are saved automatically by the system."
             )
     return _ORIGINAL_OPEN(file, mode, *args, **kwargs)

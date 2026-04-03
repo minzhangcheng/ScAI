@@ -503,15 +503,24 @@ Return a JSON object with this EXACT structure:
 
         if parsed and "annotations" in parsed:
             return parsed
-        else:
-            logger.warning("[PI] Failed to parse annotation matching JSON")
-            return {
-                "annotations": {
-                    "error": "Failed to parse structured annotations",
-                    "raw_response": response[:2000]
-                },
-                "tissue_summary": ""
-            }
+
+        # Retry once with a more explicit prompt if first attempt fails
+        retry_prompt = prompt + "\n\nIMPORTANT: Respond with ONLY the JSON object, no additional text or markdown formatting."
+        response_retry = await self.chat_without_history(retry_prompt, temperature=0.2)
+        parsed_retry = self._safe_parse_json(response_retry, default={})
+
+        if parsed_retry and "annotations" in parsed_retry:
+            return parsed_retry
+
+        # Both attempts failed
+        logger.warning(f"[PI] Failed to parse annotation matching JSON after 2 attempts. Response preview: {response[:500]}")
+        return {
+            "status": "error",
+            "error": "Failed to parse structured annotations after 2 attempts",
+            "raw_response": response[:2000],
+            "annotations": {},
+            "tissue_summary": ""
+        }
 
     async def generate_exploration_report(
         self,
@@ -1445,7 +1454,8 @@ Please provide comprehensive analysis in JSON format:
     "new_findings": true/false,
     "should_stop": true/false,
     "stop_reason": "reason for stopping (if applicable)",
-    "agents_for_next_round": ["bioinformatics", ...]
+    "agents_for_next_round": ["bioinformatics", ...],
+    "reanalysis_agents": ["pathology", ...]  // Only if re-analysis of existing data is needed
 }}
 
 IMPORTANT: When generating next_* tasks:
@@ -1460,12 +1470,14 @@ IMPORTANT for next_literature topics:
 - Focus on filling knowledge GAPS identified in this round's literature findings
 - Avoid overly broad topics or raw gene lists
 
-IMPORTANT: agents_for_next_round controls which agents are ACTIVATED in the next round:
-- "bioinformatics" MUST ALWAYS be included (it is the core analysis agent)
-- Only include "pathology" if new image analysis or re-examination is needed
-- Only include "biochemistry" if biochemistry data needs further analysis or reinterpretation
-- Only include "literature" if new literature search is needed for newly discovered topics
-- EXCLUDE agents that have no meaningful new work to save time and resources
+IMPORTANT: agents_for_next_round vs reanalysis_agents:
+- agents_for_next_round: which agents should RUN in the next round (general control)
+  - "bioinformatics" MUST ALWAYS be included (it is the core analysis agent)
+  - Only include "pathology"/"biochemistry" if NEW data needs processing
+- reanalysis_agents: agents needing re-analysis of EXISTING data with different parameters/perspectives
+  - Only use when NO new data but re-analysis is needed (e.g., "pathology" to re-examine existing images)
+  - Example: "pathology" to re-examine existing images with different staining analysis
+- EXCLUDE agents with no meaningful new work to save time and resources
 """
 
         # Add phase-specific synthesis instructions
@@ -1510,6 +1522,8 @@ INNOVATION PHASE — focused synthesis:
             if "bioinformatics" not in agents_next:
                 agents_next.insert(0, "bioinformatics")
 
+            reanalysis_next = data.get("reanalysis_agents", [])
+
             return RoundResult(
                 round_number=state.current_round,
                 pathology_findings=data.get("pathology_findings", []),
@@ -1521,6 +1535,7 @@ INNOVATION PHASE — focused synthesis:
                 next_steps=self._extract_next_steps(data),
                 new_findings=data.get("new_findings", True),
                 agents_for_next_round=agents_next,
+                reanalysis_agents=reanalysis_next,
             )
 
         # If we have a response but couldn't parse JSON, use it as summary
@@ -1528,7 +1543,8 @@ INNOVATION PHASE — focused synthesis:
             return RoundResult(
                 round_number=state.current_round,
                 pi_summary=response,
-                new_findings=True
+                new_findings=True,
+                reanalysis_agents=[]
             )
 
         # If response is completely empty, create a fallback summary
@@ -1536,7 +1552,8 @@ INNOVATION PHASE — focused synthesis:
         return RoundResult(
             round_number=state.current_round,
             pi_summary=f"Round {state.current_round} analysis completed. Results collected from agents pending synthesis.",
-            new_findings=True
+            new_findings=True,
+            reanalysis_agents=[]
         )
     
     async def generate_final_summary(self, state: AnalysisState) -> str:

@@ -8,9 +8,20 @@ HOST="127.0.0.1"
 PORT=3000
 BACKPORT=8000
 
+# Default to production mode
+MODE="prod"
+
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --dev)
+            MODE="dev"
+            shift
+            ;;
+        --prod)
+            MODE="prod"
+            shift
+            ;;
         --host)
             HOST="$2"
             shift 2
@@ -27,6 +38,8 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: ./start.sh [OPTIONS]"
             echo ""
             echo "Options:"
+            echo "  --dev              Start in development mode (default: prod)"
+            echo "  --prod             Start in production mode"
             echo "  --host HOST        Listen address (default: 127.0.0.1)"
             echo "  --port PORT        Frontend port (default: 3000)"
             echo "  --backport PORT    Backend port (default: 8000)"
@@ -41,7 +54,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "Starting ScAI - Single Cell Sequencing Analysis Driven by AI..."
+echo "Starting ScAI - Single Cell Sequencing Analysis Driven by AI ($MODE mode)..."
 echo ""
 
 # Get the script directory
@@ -74,6 +87,28 @@ fi
 if ! command -v node &> /dev/null; then
     echo "Error: Node.js not installed. Please install Node.js first"
     exit 1
+fi
+
+# ── Frontend build for production mode ───────────────────────────
+if [ "$MODE" = "prod" ]; then
+    echo "Production mode: Building frontend..."
+    if [ ! -d "$SCRIPT_DIR/frontend/dist" ]; then
+        echo "Building frontend for production (no dist found)..."
+        cd "$SCRIPT_DIR/frontend"
+        npm run build
+        cd "$SCRIPT_DIR"
+    else
+        _SRC_MTIME=$(find "$SCRIPT_DIR/frontend/src" -type f -exec stat -c %Y {} + 2>/dev/null | sort -rn | head -1)
+        _DIST_MTIME=$(stat -c %Y "$SCRIPT_DIR/frontend/dist/index.html" 2>/dev/null || echo 0)
+        if [ "$_SRC_MTIME" -gt "$_DIST_MTIME" ]; then
+            echo "Building frontend for production (src modified)..."
+            cd "$SCRIPT_DIR/frontend"
+            npm run build
+            cd "$SCRIPT_DIR"
+        else
+            echo "Frontend build up to date, skipping."
+        fi
+    fi
 fi
 
 # Create dependencies directory
@@ -164,7 +199,11 @@ sleep 2
 # Start frontend
 echo "   Frontend: http://$HOST:$PORT"
 cd "$SCRIPT_DIR/frontend"
-SCAI_HOST="$HOST" SCAI_BACKPORT="$BACKPORT" npx vite --host "$HOST" --port "$PORT" &
+if [ "$MODE" = "dev" ]; then
+    SCAI_HOST="$HOST" SCAI_BACKPORT="$BACKPORT" npx vite --host "$HOST" --port "$PORT" &
+else
+    SCAI_HOST="$HOST" SCAI_BACKPORT="$BACKPORT" npx vite preview --host "$HOST" --port "$PORT" &
+fi
 FRONTEND_PID=$!
 
 # Save PIDs and paths to file for stop.sh
