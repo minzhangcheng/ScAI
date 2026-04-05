@@ -322,7 +322,7 @@ Reply in JSON format (include ALL clusters):
         # Sample top genes across clusters (same logic as literature_agent.annotate_clusters)
         all_genes: set = set()
         for genes in cluster_markers.values():
-            all_genes.update(genes[:5])
+            all_genes.update(genes[:10])
         gene_sample = ", ".join(list(all_genes)[:20])
 
         n_clusters = len(cluster_markers)

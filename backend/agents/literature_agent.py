@@ -1176,7 +1176,7 @@ Please return in JSON format:
         # --- Cache check: avoid redundant Deep Research calls ---
         all_genes_for_key: set = set()
         for genes in cluster_markers.values():
-            all_genes_for_key.update(genes[:5])
+            all_genes_for_key.update(genes[:10])
         import hashlib
         genes_hash = hashlib.md5(",".join(sorted(all_genes_for_key)).encode()).hexdigest()[:16]
         cache_key = f"{organism}:{tissue}:{genes_hash}"
@@ -1203,7 +1203,7 @@ Please return in JSON format:
         # Sample top genes across clusters for the search query
         all_genes: set = set()
         for genes in cluster_markers.values():
-            all_genes.update(genes[:5])  # Top 5 per cluster
+            all_genes.update(genes[:10])  # Top 10 per cluster
         gene_sample = ", ".join(list(all_genes)[:20])  # Cap at 20 genes
 
         tissue_part = f" {tissue}" if tissue else ""

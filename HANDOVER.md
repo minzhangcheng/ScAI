@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.13
-**Last Updated**: 2026-04-03
+**Version**: 0.18.14
+**Last Updated**: 2026-04-05
 
 ## Project Overview
 
@@ -1446,6 +1446,12 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.18.14 (2026-04-05)
+
+- **Malformed cluster_markers sanitization** (`agents/bioinformatics_agent.py`): Added `_sanitize_cluster_markers()` method to handle LLM-generated malformed cluster_markers formats. Handles `{"str": "<JSON string>"}` pattern (unwraps and parses inner JSON), string types (tries JSON parsing), and validates each value is `list[str]`. Invalid formats return `{}` to trigger auto-extraction.
+- **Gene sample expansion** (`agents/literature_agent.py`, `agents/pi_agent.py`): Expanded gene sample size from 5 to 10 per cluster in annotation and literature search queries for more comprehensive literature searches.
+- **pre_round_wait snapshot restore** (`backend/main.py`): Added `pre_round_wait` phase handling in `restore_snapshot()`. Synthesizes `round_summary` and `status` messages for frontend dialog. Falls back to PAUSED if no round_results available.
 
 #### v0.18.13 (2026-04-03)
 

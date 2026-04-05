@@ -432,6 +432,72 @@ class BioinformaticsAgent(BaseAgent):
                 parts.append(f"{key}: {value}")
         return "\n".join(parts)
 
+    def _sanitize_cluster_markers(self, cluster_markers) -> dict:
+        """Sanitize and validate LLM-provided cluster_markers format.
+
+        Handles known malformed patterns:
+        1. {"str": "<JSON string>"} — unwrap and parse the inner JSON
+        2. String type — try to parse as JSON
+        3. Values that are not list[str] — mark as invalid, return {} to trigger auto-extraction
+
+        Returns a cleaned dict of cluster_id -> list of gene names.
+        """
+        # Step 1: Handle non-dict inputs
+        if not isinstance(cluster_markers, dict):
+            if isinstance(cluster_markers, str):
+                try:
+                    parsed = json.loads(cluster_markers)
+                    if isinstance(parsed, dict):
+                        cluster_markers = parsed
+                    else:
+                        return {}
+                except (json.JSONDecodeError, TypeError):
+                    return {}
+            else:
+                return {}
+
+        # Step 2: Detect and unwrap {"str": "<JSON>"} pattern from LLM JSON serialization bug
+        if len(cluster_markers) == 1:
+            only_key = next(iter(cluster_markers))
+            only_val = cluster_markers[only_key]
+            if isinstance(only_val, str) and only_val.strip().startswith("{"):
+                try:
+                    parsed = json.loads(only_val)
+                    if isinstance(parsed, dict) and len(parsed) > 1:
+                        logger.warning(
+                            f"[Bioinformatics] Fixed malformed cluster_markers: "
+                            f"unwrapped JSON string from key '{only_key}', "
+                            f"recovered {len(parsed)} clusters"
+                        )
+                        cluster_markers = parsed
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(
+                        f"[Bioinformatics] Failed to parse suspected JSON string "
+                        f"in cluster_markers['{only_key}']: {e}, "
+                        f"value preview: {str(only_val)[:200]}"
+                    )
+
+        # Step 3: Validate each value is list[str] (gene name list)
+        valid = {}
+        for k, v in cluster_markers.items():
+            if isinstance(v, list) and len(v) > 0 and all(isinstance(g, str) for g in v):
+                valid[k] = v
+
+        if len(valid) == 0 and len(cluster_markers) > 0:
+            logger.warning(
+                f"[Bioinformatics] cluster_markers has {len(cluster_markers)} entries "
+                f"but none contain valid gene lists, forcing auto-extraction"
+            )
+            return {}
+
+        if len(valid) < len(cluster_markers):
+            logger.warning(
+                f"[Bioinformatics] Dropped {len(cluster_markers) - len(valid)} "
+                f"invalid entries from cluster_markers"
+            )
+
+        return valid
+
     async def _discover_adata_in_sandbox(self) -> Tuple[Optional[str], Optional[str]]:
         """Discover the active AnnData variable name and clustering key in the sandbox.
 
@@ -1352,6 +1418,9 @@ except Exception as _autosave_block_err:
                     cluster_markers = args.get("cluster_markers", {})
                     tissue = args.get("tissue", "")
                     organism = args.get("organism", "mouse")
+
+                    # Sanitize LLM-provided cluster_markers (handles malformed dict/string formats)
+                    cluster_markers = self._sanitize_cluster_markers(cluster_markers)
 
                     n_clusters = len(cluster_markers)
 

@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.13
+**Version**: 0.18.14
 
 ## Installation
 
@@ -341,9 +341,12 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 
 ## Changelog
 
-### v0.18.13 (2026-04-03)
+### v0.18.14 (2026-04-05)
 
-- **Improvement: Docker PyPI mirror support** — Docker startup now supports `-e PIP_INDEX_URL` parameter to pass a PyPI mirror URL, significantly speeding up Python package installation in containers.
+- **Fix: Malformed cluster_markers sanitization** — Added `_sanitize_cluster_markers` to bioinformatics agent to handle LLM-generated malformed cluster_markers formats, including `{"str": "<JSON string>"}` unwrapping and list[str] validation.
+- **Improvement: Gene sample expansion** — Expanded gene sample size from 5 to 10 per cluster in literature agent and PI agent annotation queries for more comprehensive literature searches.
+
+### v0.18.13 (2026-04-03)
 
 ### v0.18.12 (2026-04-03)
 

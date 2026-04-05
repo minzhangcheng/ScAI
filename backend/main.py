@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.18.13"
+    version="0.18.14"
 )
 
 # CORS
@@ -2128,6 +2128,10 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
     elif phase == "pre_annotation":
         # User wants to re-annotate — frontend shows annotation dialog
         restored_state.status = TaskStatus.WAITING_ANNOTATION
+    elif phase == "pre_round_wait":
+        # User wants to continue after round completion — frontend shows round wait dialog
+        # Will be set to PAUSED if no round_results available (defensive check below)
+        restored_state.status = TaskStatus.WAITING_INPUT
     else:
         # Other phases: set to PAUSED, WebSocket reconnect will start fresh run
         restored_state.status = TaskStatus.PAUSED
@@ -2188,6 +2192,52 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
                 "detailed_report_url": detailed_report_url,
             }
         ))
+
+    elif phase == "pre_round_wait":
+        # Synthesize round_summary and status messages for frontend dialog
+        # Note: status already set to WAITING_INPUT at top; PAUSED if no round_results
+        last_round = restored_state.round_results[-1] if restored_state.round_results else None
+        if not last_round:
+            # Defensive: no round results available, fallback to PAUSED
+            # Workflow will re-run the round completion step from scratch
+            logger.warning(
+                f"[{session_id}] pre_round_wait snapshot has no round_results. "
+                f"Falling back to PAUSED status."
+            )
+            restored_state.status = TaskStatus.PAUSED
+        else:
+            restored_state.realtime_messages.append(WebSocketMessage(
+                type="round_summary",
+                agent=AgentType.PI,
+                content={
+                    "round": last_round.round_number,
+                    "summary": last_round.pi_summary or "",
+                    "pathology_findings": last_round.pathology_findings or [],
+                    "bioinformatics_findings": last_round.bioinformatics_findings or [],
+                    "biochemistry_findings": last_round.biochemistry_findings or [],
+                    "literature_findings": last_round.literature_findings or [],
+                    "findings": [
+                        *(last_round.pathology_findings or []),
+                        *(last_round.bioinformatics_findings or []),
+                        *(last_round.biochemistry_findings or []),
+                        *(last_round.literature_findings or []),
+                    ],
+                    "data_requests": getattr(last_round, 'data_requests', []) or [],
+                    "status": "waiting_input"
+                }
+            ))
+            # Add status message
+            max_rounds = restored_state.max_rounds if restored_state.max_rounds > 0 else 4
+            is_last_round = last_round.round_number >= max_rounds
+            if is_last_round:
+                status_msg = f"Round {last_round.round_number} complete (final round). You can provide additional data to extend analysis, or skip to generate the final report."
+            else:
+                status_msg = f"Round {last_round.round_number} complete. Waiting for your input."
+            restored_state.realtime_messages.append(WebSocketMessage(
+                type="status",
+                agent=AgentType.PI,
+                content=status_msg
+            ))
 
     # Reset annotation confirmed flag so the restored HITL checkpoint works correctly
     if phase == "pre_annotation" and restored_state.annotation_state:
