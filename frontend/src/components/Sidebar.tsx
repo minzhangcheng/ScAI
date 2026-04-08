@@ -119,7 +119,8 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
         await deleteSession(sessionId)
         fetchSessions()
       } catch (e) {
-        console.error('Failed to delete session:', e)
+        const msg = e instanceof Error ? e.message : String(e)
+        alert(msg)
       }
     }
   }

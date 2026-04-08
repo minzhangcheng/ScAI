@@ -645,14 +645,17 @@ For each bioinformatics task, specify the CONCRETE analysis method and target:
 
 Available analysis toolkit (use as many as relevant):
 - **Targeted DEG**: Specify which cell populations to compare, which contrasts, and threshold strategy
-- **Pathway enrichment**: GO/KEGG for broad screening; GSEA/ssGSEA for quantitative pathway scoring; MSigDB hallmark gene sets for cancer/metabolism
-- **Gene signature scoring**: Score cells for specific gene signatures (e.g., ferroptosis, autophagy, EMT) using sc.tl.score_genes
-- **Trajectory/pseudotime**: Diffusion pseudotime (DPT), PAGA for lineage inference — specify root cell type
-- **Transcription factor activity**: decoupleR / pySCENIC to infer TF activity from expression
-- **Cell-cell communication**: CellChat or CellPhoneDB focused on relevant cell types and signaling pathways
-- **Subpopulation re-clustering**: Re-cluster specific cell types at higher resolution to find subtypes
+- **Pathway enrichment**: GO/KEGG for broad screening; GSEA/ssGSEA for quantitative pathway scoring; MSigDB hallmark gene sets
+- **Gene signature & Metabolic scoring**: Score cells for specific biological or metabolic signatures using sc.tl.score_genes or AUCell; choose gene sets based on data-driven findings, not prior assumptions
+- **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scVelo or CellRank for directed cell fate mapping and driver gene identification (if spliced/unspliced data available)
+- **Transcription factor & Gene Regulatory Networks (GRN)**: decoupleR / pySCENIC to infer TF activity; hdWGCNA or gene co-expression analysis to identify co-expressed gene modules and hub genes
+- **Cell-cell communication & Target prediction**: CellChat / CellPhoneDB for ligand-receptor interactions; NicheNet-style analysis (via decoupleR) to predict downstream target gene activation in receiver cells
+- **Cellular Stemness & Plasticity**: CytoTRACE-like scoring to infer differentiation potential and developmental states
+- **Tumor/Malignancy estimation**: inferCNV (infercnvpy) to detect large-scale chromosomal copy number variations (use only when oncology data is present)
+- **Subpopulation re-clustering**: Re-cluster specific cell types at higher resolution to discover subtypes or functional states
 - **Correlation analysis**: Gene-gene correlation, module scoring, or regression analysis within cell populations
-- **Compositional analysis**: Compare cell type proportions between conditions with statistical testing
+- **Compositional analysis**: Compare cell type proportions between conditions with statistical testing (Milo/milopy, scCODA, or DA-seq)
+- **Immune repertoire analysis**: Scirpy for TCR/BCR clonotype expansion, diversity, and sharing analysis (use only when paired VDJ data is available)
 - **Marker gene visualization**: Dot plots, violin plots, feature plots for key genes across conditions
 
 IMPORTANT:

@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.18.14
+**Version**: 0.18.15
 
 ## Installation
 
@@ -340,6 +340,19 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.18.15 (2026-04-08)
+
+- **Improvement: PI Agent分析工具包全面升级** — 新增/细化了多个高级分析模块：
+  - Gene signature & Metabolic scoring：使用sc.tl.score_genes或AUCell进行生物/代谢特征评分
+  - Trajectory & RNA Velocity：新增scVelo/CellRank进行定向细胞命运映射和驱动基因识别
+  - Transcription factor & Gene Regulatory Networks：新增hdWGCNA进行共表达基因模块和hub基因识别
+  - Cell-cell communication & Target prediction：新增NicheNet-style分析预测配体-受体下游目标基因激活
+  - Cellular Stemness & Plasticity：新增CytoTRACE-like评分推断细胞分化潜能
+  - Tumor/Malignancy estimation：新增inferCNV进行染色体拷贝数变异检测
+  - Compositional analysis：明确支持Milo/milopy、scCODA、DA-seq等统计方法
+  - Immune repertoire analysis：新增Scirpy进行TCR/BCR克隆型扩展和多样性分析
+- **Fix: 前端错误处理优化** — Sidebar组件删除会话失败时将错误信息通过alert显示给用户，而非仅输出到console
 
 ### v0.18.14 (2026-04-05)
 

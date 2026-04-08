@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.14
-**Last Updated**: 2026-04-05
+**Version**: 0.18.15
+**Last Updated**: 2026-04-08
 
 ## Project Overview
 
@@ -1446,6 +1446,19 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.18.15 (2026-04-08)
+
+- **PI Agent分析工具包全面升级** (`agents/pi_agent.py`): 新增/细化了多个高级分析模块：
+  - Gene signature & Metabolic scoring：使用sc.tl.score_genes或AUCell进行生物/代谢特征评分
+  - Trajectory & RNA Velocity：新增scVelo/CellRank进行定向细胞命运映射和驱动基因识别
+  - Transcription factor & Gene Regulatory Networks：新增hdWGCNA进行共表达基因模块和hub基因识别
+  - Cell-cell communication & Target prediction：新增NicheNet-style分析预测配体-受体下游目标基因激活
+  - Cellular Stemness & Plasticity：新增CytoTRACE-like评分推断细胞分化潜能
+  - Tumor/Malignancy estimation：新增inferCNV进行染色体拷贝数变异检测
+  - Compositional analysis：明确支持Milo/milopy、scCODA、DA-seq等统计方法
+  - Immune repertoire analysis：新增Scirpy进行TCR/BCR克隆型扩展和多样性分析
+- **前端错误处理优化** (`frontend/src/components/Sidebar.tsx`): 删除会话失败时将错误信息通过alert显示给用户，而非仅输出到console
 
 #### v0.18.14 (2026-04-05)
 
