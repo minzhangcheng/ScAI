@@ -280,6 +280,16 @@ Standard analysis workflow (adjust based on data type):
 8. Cell-cell communication analysis (CellChat, CellPhoneDB, etc.)
 9. Transcription factor activity analysis (pySCENIC, decoupleR, etc.)
 
+**Bulk RNA-seq integration** (when both scRNA-seq and bulk RNA-seq data are available):
+- Load bulk expression matrix and perform DESeq2/PyDESeq2 differential expression analysis
+- Cross-validate: compare bulk DEG list with scRNA-seq pseudobulk DEG (Venn diagram, correlation scatter plot)
+- Localize: for significant bulk DEGs, show expression across cell types in scRNA-seq (dot plot, violin plot)
+- The bulk results (with biological replicates) provide statistical rigor; scRNA-seq provides cellular resolution
+
+**CRITICAL for PyDESeq2**: PyDESeq2 requires the count matrix in (Samples × Genes) orientation.
+Standard bulk matrices are (Genes × Samples). You MUST transpose (df.T) before initializing DeseqDataSet.
+You also need a metadata DataFrame with sample names as index and a 'condition' column for the design formula.
+
 **Specialized analyses** (conduct based on specific findings or PI's direction):
 - When you observe unexpected cell populations, signaling changes, or pathway alterations
 - When PI Agent requests deeper investigation into specific biological questions

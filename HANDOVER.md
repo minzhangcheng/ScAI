@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.18.15
-**Last Updated**: 2026-04-08
+**Version**: 0.19.1
+**Last Updated**: 2026-04-09
 
 ## Project Overview
 
@@ -1446,6 +1446,18 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.19.1 (2026-04-09)
+
+- **Bulk RNA-seq Analysis Support** — Complete integration of bulk RNA-seq data analysis:
+  - **Frontend** (`DataPanel.tsx`, `dataTypes.ts`, `translations.ts`): Added `bulk RNA-seq` as new sequencing data type; supports `.csv`, `.tsv`, `.txt` file uploads; updated UI text and file extension mapping
+  - **Bioinformatics Agent** (`bioinformatics_agent.py`): Generates pandas loading code for bulk expression matrices; adds proper metadata comments for DESeq2 usage
+  - **PI Agent** (`pi_agent.py`): Added bulk DEG analysis tasks (PyDESeq2), cross-validation with scRNA-seq pseudobulk DEG, and comparison visualizations (Venn diagram, correlation plot)
+  - **Supervisor Agent** (`supervisor_agent.py`): Skips low-cell-count check for bulk RNA-seq analysis (avoids false positives on aggregated bulk data)
+  - **Config** (`config.py`): Documented bulk-scRNA integration workflow and PyDESeq2 matrix orientation requirements (Samples × Genes, use `.T` transpose)
+  - **Workflow** (`workflow.py`): Dynamic instruction generation based on detected data types; bulk analysis automatically triggered when bulk RNA-seq data is available
+  - **Main** (`main.py`): Added `bulk_rna_seq` file type mapping in chunked upload endpoint
+  - **Dependencies** (`requirements.txt`): Added `pydeseq2>=0.4.4` and `matplotlib-venn>=0.11.9`
 
 #### v0.18.15 (2026-04-08)
 

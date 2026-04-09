@@ -194,6 +194,10 @@ CRITICAL CONSTRAINTS:
 7. Condition-level DEG (treatment vs control) + GO/KEGG enrichment for all cell types
    (merge similar subtypes/states into unified groups first, e.g., merge stress hepatocytes with hepatocytes)
 8. Cell-cell communication analysis (CellChat or NicheNet)
+9. If bulk RNA-seq data is available:
+   a. Load bulk expression matrix and perform differential expression analysis (PyDESeq2)
+   b. Cross-validate bulk DEG with scRNA-seq pseudobulk DEG
+   c. Generate comparison visualizations (Venn diagram, correlation plot)
 
 ## Your Additional Planning (UNBIASED exploration)
 Beyond the fixed pipeline, plan these additional analyses:
@@ -657,6 +661,7 @@ Available analysis toolkit (use as many as relevant):
 - **Compositional analysis**: Compare cell type proportions between conditions with statistical testing (Milo/milopy, scCODA, or DA-seq)
 - **Immune repertoire analysis**: Scirpy for TCR/BCR clonotype expansion, diversity, and sharing analysis (use only when paired VDJ data is available)
 - **Marker gene visualization**: Dot plots, violin plots, feature plots for key genes across conditions
+- **Bulk-scRNA integration**: Cross-validate bulk DEG (with biological replicates) against scRNA-seq pseudobulk DEG; localize bulk-identified genes to specific cell types via scRNA-seq
 
 IMPORTANT:
 - Generate AT LEAST 4-6 bioinformatics tasks to ensure comprehensive analysis

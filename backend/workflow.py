@@ -2312,6 +2312,11 @@ Approve if quality_score >= 7."""
 
         # Build comprehensive instruction for bioinformatics agent
         # Phase-aware instruction for bioinformatics agent
+        # Detect data types for dynamic instruction (single pass)
+        seq_files = analysis_state.get_files_by_section("sequencing")
+        has_scrna = any(f.data_type == "scRNA-seq" for f in seq_files)
+        has_bulk = any(f.data_type == "bulk RNA-seq" for f in seq_files)
+
         phase_instruction = ""
         if analysis_state.analysis_phase == "exploration":
             phase_instruction = """
@@ -2327,6 +2332,13 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
 7. Complete cell communication analysis (CellChat or similar)
 8. For EACH cell type group's DEG results, generate a visualization figure (volcano plot or bar chart)
 9. For EACH cell type group's KEGG/GO enrichment, generate a bar plot of top enriched pathways
+"""
+            if has_bulk:
+                phase_instruction += """
+10. If bulk RNA-seq data is available alongside scRNA-seq:
+    - Perform bulk DEG analysis using PyDESeq2 (the bulk data has biological replicates)
+    - Compare bulk DEG results with scRNA-seq pseudobulk DEG results (Venn diagram)
+    - For overlapping DEGs, visualize their cell-type-specific expression in scRNA-seq
 """
         else:
             direction_ctx = analysis_state.current_round_direction or "PI-directed"
@@ -2358,13 +2370,20 @@ Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc
         if cluster_comparison_strategy:
             merge_context += f"\n\nPI's cluster comparison strategy:\n{cluster_comparison_strategy}"
 
-        instruction = f"""Analyze single-cell RNA-seq data for project: {analysis_state.name}
+        if has_scrna and has_bulk:
+            data_desc = "single-cell RNA-seq and bulk RNA-seq"
+        elif has_bulk:
+            data_desc = "bulk RNA-seq"
+        else:
+            data_desc = "single-cell RNA-seq"
+
+        instruction = f"""Analyze {data_desc} data for project: {analysis_state.name}
 
 Research context: {analysis_state.initial_instruction}
 {phase_instruction}
 
 PI's analysis goals for this round:
-{chr(10).join(f"- {task}" for task in _normalize_tasks(bioinf_tasks)) if bioinf_tasks else "- Perform standard scRNA-seq analysis pipeline"}
+{chr(10).join(f"- {task}" for task in _normalize_tasks(bioinf_tasks)) if bioinf_tasks else ("- Perform standard bulk RNA-seq analysis (DESeq2/PyDESeq2, pathway enrichment)" if has_bulk and not has_scrna else "- Perform standard scRNA-seq analysis pipeline")}
 {merge_context}
 {human_guidance}
 {pathology_context}

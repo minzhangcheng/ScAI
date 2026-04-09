@@ -1,7 +1,7 @@
 /** Shared data type constants and helpers for file upload/selection */
 
 export const PATHOLOGY_TYPES = ['H&E', 'Other'] as const
-export const SEQUENCING_TYPES = ['scRNA-seq', 'Loom'] as const
+export const SEQUENCING_TYPES = ['scRNA-seq', 'bulk RNA-seq', 'Loom'] as const
 export const BIOCHEMISTRY_TYPES = ['image', 'file'] as const
 
 /** Map agent name to its data section identifier */

@@ -23,7 +23,7 @@ import {
 
 // --- Data type options ---
 import { PATHOLOGY_TYPES, BIOCHEMISTRY_TYPES } from '../utils/dataTypes'
-const SEQUENCING_TYPES = ['scRNA-seq', 'Loom', 'Other'] as const  // DataPanel adds 'Other' for upload flexibility
+const SEQUENCING_TYPES = ['scRNA-seq', 'bulk RNA-seq', 'Loom', 'Other'] as const  // DataPanel adds 'Other' for upload flexibility
 
 // Allowed extensions per section + data type (used for manual validation instead of
 // react-dropzone accept filter, which silently rejects files with unrecognized MIME types
@@ -39,6 +39,7 @@ function getAllowedExtensions(section: string, dataType: string): string[] {
   if (section === 'sequencing') {
     if (dataType === 'Other') return []  // allow-all mode, blocked extensions checked separately
     if (dataType === 'Loom') return ['.loom']
+    if (dataType === 'bulk RNA-seq') return ['.csv', '.tsv', '.txt']
     return ['.h5ad', '.h5']
   }
   if (section === 'biochemistry') {
@@ -550,7 +551,7 @@ function DataSection({
                   onChange={(e) => setCustomType(e.target.value)}
                   placeholder={
                     section === 'sequencing'
-                      ? (language === 'zh' ? '如 bulk RNA-Seq' : 'e.g. bulk RNA-Seq')
+                      ? (language === 'zh' ? '如 spatial transcriptomics' : 'e.g. spatial transcriptomics')
                       : (language === 'zh' ? '如 Sirius Red' : 'e.g. Sirius Red')
                   }
                   className="w-full px-2 py-1.5 border border-slate-300 rounded-lg text-sm"

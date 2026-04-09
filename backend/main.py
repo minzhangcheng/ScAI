@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.18.15"
+    version="0.19.1"
 )
 
 # CORS
@@ -4235,6 +4235,8 @@ async def complete_chunked_upload(
         final_path = session_uploads / "snrna_seq" / (group or "control") / filename
     elif file_type == "loom":
         final_path = session_uploads / "loom" / (group or "control") / filename
+    elif file_type == "bulk_rna_seq":
+        final_path = session_uploads / "bulk_rna_seq" / (group or "control") / filename
     elif file_type == "pathology":
         final_path = session_uploads / "pathology" / filename
     elif file_type == "biochemistry":
@@ -4249,8 +4251,8 @@ async def complete_chunked_upload(
         raise HTTPException(status_code=400, detail=result["error"])
 
     # Update session state - create DataFile for all chunked uploads
-    section_map = {"snrna_seq": "sequencing", "loom": "sequencing", "pathology": "pathology", "biochemistry": "biochemistry"}
-    type_map = {"snrna_seq": "scRNA-seq", "loom": "loom", "pathology": "uploaded", "biochemistry": "file"}
+    section_map = {"snrna_seq": "sequencing", "bulk_rna_seq": "sequencing", "loom": "sequencing", "pathology": "pathology", "biochemistry": "biochemistry"}
+    type_map = {"snrna_seq": "scRNA-seq", "bulk_rna_seq": "bulk RNA-seq", "loom": "loom", "pathology": "uploaded", "biochemistry": "file"}
     section = section_map.get(file_type, file_type)
     data_type = type_map.get(file_type, file_type)
 

@@ -389,6 +389,8 @@ class BioinformaticsAgent(BaseAgent):
         # List sequencing files with group/sample context
         seq_files = [f for f in state.data_files if f.section == "sequencing"]
         var_name_counts: dict = {}  # Track usage to disambiguate duplicates
+        bulk_var_name_counts: dict = {}  # Separate counter for bulk files
+        pandas_imported = False
         if seq_files:
             data_parts.append("Sequencing Data Files:")
             for f in seq_files:
@@ -409,6 +411,25 @@ class BioinformaticsAgent(BaseAgent):
                     data_parts.append(f"    adata_{var_name}.var_names_make_unique()")
                 elif f.data_type == "loom":
                     data_parts.append(f"    Loom file for RNA velocity analysis")
+                elif f.data_type == "bulk RNA-seq":
+                    # Generate a safe variable name for loading (deduplicate)
+                    base_name = (group_label.lower().replace(" ", "_") +
+                                (f"_s{f.sample_number}" if f.sample_number else ""))
+                    bulk_var_name_counts[base_name] = bulk_var_name_counts.get(base_name, 0) + 1
+                    bulk_var_name = f"{base_name}_{bulk_var_name_counts[base_name]}" if bulk_var_name_counts[base_name] > 1 else base_name
+                    if not pandas_imported:
+                        data_parts.append(f"    Load: import pandas as pd")
+                        pandas_imported = True
+                    ext = f.file_path.rsplit('.', 1)[-1].lower()
+                    if ext == 'tsv':
+                        sep_hint = "sep='\\t'"
+                    elif ext == 'csv':
+                        sep_hint = "sep=','"
+                    else:
+                        sep_hint = "sep='\\t'  # .txt files are usually tab-separated in bioinformatics; change to ',' if needed"
+                    data_parts.append(f"    bulk_{bulk_var_name} = pd.read_csv('{f.file_path}', index_col=0, {sep_hint})")
+                    data_parts.append(f"    # Bulk matrix (genes x samples). Print bulk_{bulk_var_name}.columns to infer sample grouping for DESeq2 metadata.")
+                    data_parts.append(f"    # CRITICAL: PyDESeq2 requires (samples x genes) - transpose with .T before use.")
         else:
             data_parts.append("⚠️ No sequencing data uploaded")
 
