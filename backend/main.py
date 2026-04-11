@@ -37,7 +37,7 @@ from .config import (
     get_session_states, get_session_uploads, get_session_reports, ensure_session_dirs,
 )
 from .models.schemas import (
-    AnalysisState, APIRequest, APIResponse, TaskStatus,
+    AnalysisState, AnalysisPhase, APIRequest, APIResponse, TaskStatus,
     WebSocketMessage, AgentType, TreatmentGroup, DataFile, BiochemistryIndicator
 )
 from .workflow import SingleCellAnalysisWorkflow
@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.19.1"
+    version="0.19.2"
 )
 
 # CORS
@@ -1577,7 +1577,7 @@ async def resume_analysis(session_id: str):
         )
     elif state.status == TaskStatus.WAITING_INPUT:
         # Guard: if in innovation phase after round 1, ensure direction is set
-        if (state.analysis_phase == "innovation"
+        if (state.analysis_phase == AnalysisPhase.INNOVATION
             and state.current_round >= 1
             and not state.user_chosen_direction
             and not state.directions_queue

@@ -26,7 +26,7 @@ MAX_NODE_RETRIES = 3
 GRAPH_RECURSION_LIMIT = 100
 
 from .models.schemas import (
-    AnalysisState, AnalysisStep, AgentType, TaskStatus, RoundResult,
+    AnalysisState, AnalysisStep, AnalysisPhase, AgentType, TaskStatus, RoundResult,
     WebSocketMessage, AgentMessage, MessageRole, BiochemistryIndicator,
     PublicationFigure, FigureReviewStatus,
     ClusterAnnotation, AnnotationConfirmationState, DetailedReportSegment,
@@ -1936,7 +1936,7 @@ Approve if quality_score >= 7."""
         else:
             # Round 2+: Innovation phase — hypothesis-driven targeted analysis
             if analysis_state.analysis_phase != "innovation":
-                analysis_state.analysis_phase = "innovation"
+                analysis_state.analysis_phase = AnalysisPhase.INNOVATION
 
             # Check directions_queue first (multi-direction mode), then single direction
             user_direction = analysis_state.user_chosen_direction
@@ -2318,7 +2318,7 @@ Approve if quality_score >= 7."""
         has_bulk = any(f.data_type == "bulk RNA-seq" for f in seq_files)
 
         phase_instruction = ""
-        if analysis_state.analysis_phase == "exploration":
+        if analysis_state.analysis_phase == AnalysisPhase.EXPLORATION:
             phase_instruction = """
 ## EXPLORATION PHASE INSTRUCTIONS
 This is Round 1 — comprehensive, unbiased exploration. You MUST:
@@ -2335,10 +2335,11 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
 """
             if has_bulk:
                 phase_instruction += """
-10. If bulk RNA-seq data is available alongside scRNA-seq:
-    - Perform bulk DEG analysis using PyDESeq2 (the bulk data has biological replicates)
+10. **MANDATORY — Bulk RNA-seq Analysis** (DO NOT SKIP):
+    - Load the bulk RNA-seq count matrix and perform DEG analysis using PyDESeq2
     - Compare bulk DEG results with scRNA-seq pseudobulk DEG results (Venn diagram)
     - For overlapping DEGs, visualize their cell-type-specific expression in scRNA-seq
+    NOTE: This step is REQUIRED, not optional. report_findings will be REJECTED if bulk data is not analyzed.
 """
         else:
             direction_ctx = analysis_state.current_round_direction or "PI-directed"
@@ -2377,13 +2378,23 @@ Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc
         else:
             data_desc = "single-cell RNA-seq"
 
+        if bioinf_tasks:
+            goals_text = "\n".join(f"- {task}" for task in _normalize_tasks(bioinf_tasks))
+        elif has_bulk and not has_scrna:
+            goals_text = "- Perform standard bulk RNA-seq analysis (DESeq2/PyDESeq2, pathway enrichment)"
+        elif has_bulk and has_scrna:
+            goals_text = ("- Perform standard scRNA-seq analysis pipeline\n"
+                          "- Perform bulk RNA-seq DEG analysis (PyDESeq2) and cross-validate with scRNA-seq pseudobulk DEGs")
+        else:
+            goals_text = "- Perform standard scRNA-seq analysis pipeline"
+
         instruction = f"""Analyze {data_desc} data for project: {analysis_state.name}
 
 Research context: {analysis_state.initial_instruction}
 {phase_instruction}
 
 PI's analysis goals for this round:
-{chr(10).join(f"- {task}" for task in _normalize_tasks(bioinf_tasks)) if bioinf_tasks else ("- Perform standard bulk RNA-seq analysis (DESeq2/PyDESeq2, pathway enrichment)" if has_bulk and not has_scrna else "- Perform standard scRNA-seq analysis pipeline")}
+{goals_text}
 {merge_context}
 {human_guidance}
 {pathology_context}
@@ -2815,7 +2826,7 @@ Return ONLY the JSON array, nothing else."""
         round_result.direction = analysis_state.current_round_direction or ""
 
         # Exploration phase: generate structured Report A and transition to innovation
-        if analysis_state.analysis_phase == "exploration":
+        if analysis_state.analysis_phase == AnalysisPhase.EXPLORATION:
             await self._send_message(
                 "status",
                 "Generating exploration report (Report A)...",
@@ -2870,7 +2881,7 @@ Return ONLY the JSON array, nothing else."""
                 )
 
             # Transition to innovation phase for next round
-            analysis_state.analysis_phase = "innovation"
+            analysis_state.analysis_phase = AnalysisPhase.INNOVATION
             logger.info(f"[{self.session_id}] Transitioning to innovation phase")
 
         analysis_state.round_results.append(round_result)
@@ -2879,7 +2890,7 @@ Return ONLY the JSON array, nothing else."""
         if (
             not analysis_state.directions_queue
             and len(analysis_state.user_chosen_directions) > 1
-            and analysis_state.analysis_phase == "innovation"
+            and analysis_state.analysis_phase == AnalysisPhase.INNOVATION
             and analysis_state.multi_direction_correlation is None
         ):
             try:
@@ -3024,7 +3035,7 @@ Return ONLY the JSON array, nothing else."""
         # Note: no auto-skip for multi-direction mode — fall through to normal wait logic
 
         # After exploration phase (Round 1), force manual wait so user must choose direction
-        if analysis_state.current_round == 1 and analysis_state.analysis_phase == "innovation":
+        if analysis_state.current_round == 1 and analysis_state.analysis_phase == AnalysisPhase.INNOVATION:
             wait_seconds = -1
             logger.info(f"[{self.session_id}] Exploration phase complete, forcing manual wait for direction selection")
 

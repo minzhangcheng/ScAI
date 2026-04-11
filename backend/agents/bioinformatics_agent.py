@@ -27,7 +27,7 @@ from ..utils.checkpoint import CheckpointManager
 logger = logging.getLogger(__name__)
 
 from ..models.schemas import (
-    AgentType, AnalysisState, MessageRole, CodeExecution,
+    AgentType, AnalysisPhase, AnalysisState, MessageRole, CodeExecution,
     PublicationFigure, FigureReviewStatus, AnalysisStep
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall
@@ -1115,7 +1115,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     # Guard: block manual cell_type assignment when annotation
                     # has not been completed through the annotate_clusters workflow
                     if (
-                        state.analysis_phase == "exploration"
+                        state.analysis_phase == AnalysisPhase.EXPLORATION
                         and not annotation_completed
                         and _CELL_TYPE_ASSIGN_RE.search(code)
                     ):
@@ -1339,7 +1339,7 @@ except Exception as _autosave_block_err:
 
                     # Circuit breaker: too many consecutive errors → force report or redirect
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        if state.analysis_phase == "exploration" and not annotation_completed:
+                        if state.analysis_phase == AnalysisPhase.EXPLORATION and not annotation_completed:
                             logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive errors, redirecting to mandatory steps")
                             messages.append({
                                 "role": "user",
@@ -1644,7 +1644,7 @@ except Exception as _autosave_block_err:
 
                 elif tool_name == "report_findings":
                     # Enforce mandatory pipeline in exploration phase
-                    if state.analysis_phase == "exploration" and not annotation_completed:
+                    if state.analysis_phase == AnalysisPhase.EXPLORATION and not annotation_completed:
                         logger.warning(
                             f"[Bioinformatics] report_findings rejected: annotate_clusters not yet called"
                         )
@@ -1664,6 +1664,41 @@ except Exception as _autosave_block_err:
                             findings=[], findings_summary="REJECTED: annotate_clusters not completed",
                         ))
                         continue
+
+                    # Enforce bulk RNA-seq analysis in exploration phase when bulk data exists
+                    if state.analysis_phase == AnalysisPhase.EXPLORATION:
+                        seq_files = state.get_files_by_section("sequencing")
+                        bulk_files = [f for f in seq_files if f.data_type == "bulk RNA-seq"]
+                        if bulk_files:
+                            code_mentions_bulk = any(
+                                "bulk" in ce.code.lower() or "merged_counts" in ce.code.lower()
+                                or "pydeseq" in ce.code.lower() or "deseqdataset" in ce.code.lower()
+                                for ce in self.code_history if ce.code
+                            )
+                            if not code_mentions_bulk:
+                                logger.warning(
+                                    "[Bioinformatics] report_findings rejected: bulk RNA-seq data exists but was not analyzed"
+                                )
+                                bulk_paths = ", ".join(f.file_path for f in bulk_files)
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": (
+                                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                        "bulk RNA-seq analysis. Bulk RNA-seq data is available and MUST be analyzed. "
+                                        f"Bulk data files: {bulk_paths}. "
+                                        "You MUST: (1) Load bulk count matrix with pd.read_csv(), "
+                                        "(2) Perform DEG analysis using PyDESeq2, "
+                                        "(3) Compare bulk DEGs with scRNA-seq pseudobulk DEGs (Venn diagram), "
+                                        "THEN call report_findings."
+                                    )
+                                })
+                                analysis_log.append(AnalysisStep(
+                                    step_number=step_count, step_type="report_findings",
+                                    agent_reasoning=agent_reasoning,
+                                    findings=[], findings_summary="REJECTED: bulk RNA-seq not analyzed",
+                                ))
+                                continue
                     has_substantive_work = True
                     findings = args.get("findings", [])
                     summary = args.get("summary", "")

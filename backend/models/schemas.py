@@ -360,7 +360,7 @@ class AnalysisState(BaseModel):
     round_wait_seconds: int = 300  # Countdown seconds between rounds (-1=manual, 0=no wait)
 
     # Two-phase workflow state
-    analysis_phase: str = "exploration"  # "exploration" (Round 1) / "innovation" (Round 2+)
+    analysis_phase: AnalysisPhase = AnalysisPhase.EXPLORATION
     annotation_state: Optional[AnnotationConfirmationState] = None
     exploration_report: Optional[ExplorationReport] = None
     user_chosen_direction: Optional[str] = None  # User's chosen direction for innovation phase (backward compat)

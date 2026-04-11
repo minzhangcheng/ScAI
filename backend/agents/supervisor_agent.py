@@ -745,9 +745,10 @@ class SupervisorAgent:
                             n = int(m.group(1))
                             if n < 50:
                                 code_lower = (step.code or "").lower()
-                                is_bulk_analysis = ("pydeseq" in code_lower
-                                                    or "deseqdataset" in code_lower
-                                                    or "bulk_" in code_lower)
+                                is_bulk_analysis = ("bulk" in code_lower
+                                                    or "merged_counts" in code_lower
+                                                    or "pydeseq" in code_lower
+                                                    or "deseqdataset" in code_lower)
                                 if not is_bulk_analysis:
                                     issues.append(f"Very low cell count: n_obs={n}")
                         except (ValueError, IndexError):

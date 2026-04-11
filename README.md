@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by seven specialized AI agents that collaborate like a research team.
 
-**Version**: 0.19.1
+**Version**: 0.19.2
 
 ## Installation
 
@@ -340,6 +340,14 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.19.2 (2026-04-11)
+
+- **Improvement: AnalysisPhase enum refactoring** — Replaced string-based `analysis_phase` ("exploration"/"innovation") with typed `AnalysisPhase` enum to eliminate typo errors and improve code reliability
+- **Improvement: PI Agent dynamic task builder** — Added `_build_default_bio_tasks()` function that dynamically generates bioinformatics tasks based on detected sequencing data types (scRNA-seq, bulk RNA-seq, or both)
+- **Improvement: Enforced bulk RNA-seq analysis** — Bioinformatics agent now REJECTS `report_findings` if bulk RNA-seq data exists but has not been analyzed with PyDESeq2
+- **Improvement: Supervisor bulk detection expansion** — Extended low-cell-count check bypass to include `"bulk"` and `"merged_counts"` keywords in addition to `"pydeseq"` and `"deseqdataset"`
+- **Improvement: Expanded pathology image formats** — Added support for `.gif`, `.bmp`, `.webp`, and `.svg` formats in pathology data uploads
 
 ### v0.19.1 (2026-04-09)
 

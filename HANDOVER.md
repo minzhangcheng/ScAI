@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.19.1
-**Last Updated**: 2026-04-09
+**Version**: 0.19.2
+**Last Updated**: 2026-04-11
 
 ## Project Overview
 
@@ -1446,6 +1446,24 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.19.2 (2026-04-11)
+
+- **AnalysisPhase enum refactoring** — Replaced string-based `analysis_phase` with typed `AnalysisPhase` enum (`ExplorationPhase`/`InnovationPhase`) across all agents and workflow to eliminate typo errors and improve code reliability
+  - **Models** (`schemas.py`): Changed `analysis_phase: str` to `analysis_phase: AnalysisPhase`
+  - **Bioinformatics Agent** (`bioinformatics_agent.py`): Updated all phase comparisons to use `AnalysisPhase.EXPLORATION`/`AnalysisPhase.INNOVATION`
+  - **PI Agent** (`pi_agent.py`): Updated phase comparisons and added `_build_default_bio_tasks()` for dynamic task generation
+  - **Supervisor Agent** (`supervisor_agent.py`): Updated phase comparisons
+  - **Main** (`main.py`): Updated phase comparisons in resume_analysis
+  - **Workflow** (`workflow.py`): Updated all phase comparisons throughout
+
+- **PI Agent dynamic task builder** — Added `_build_default_bio_tasks()` function that dynamically generates bioinformatics tasks based on detected sequencing data types (scRNA-seq, bulk RNA-seq, or both)
+
+- **Enforced bulk RNA-seq analysis** — Bioinformatics agent now REJECTS `report_findings` tool call if bulk RNA-seq data exists but has not been analyzed with PyDESeq2; forces mandatory bulk DEG analysis before allowing exploration phase completion
+
+- **Supervisor bulk detection expansion** — Extended low-cell-count check bypass to include `"bulk"` and `"merged_counts"` keywords in addition to `"pydeseq"` and `"deseqdataset"`
+
+- **Expanded pathology image formats** — Added support for `.gif`, `.bmp`, `.webp`, and `.svg` formats in pathology and biochemistry image data uploads
 
 #### v0.19.1 (2026-04-09)
 

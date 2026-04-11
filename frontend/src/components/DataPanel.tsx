@@ -35,7 +35,7 @@ const BLOCKED_EXTENSIONS = new Set([
 ])
 
 function getAllowedExtensions(section: string, dataType: string): string[] {
-  if (section === 'pathology') return ['.png', '.jpg', '.jpeg', '.tiff', '.tif']
+  if (section === 'pathology') return ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg']
   if (section === 'sequencing') {
     if (dataType === 'Other') return []  // allow-all mode, blocked extensions checked separately
     if (dataType === 'Loom') return ['.loom']
@@ -43,7 +43,7 @@ function getAllowedExtensions(section: string, dataType: string): string[] {
     return ['.h5ad', '.h5']
   }
   if (section === 'biochemistry') {
-    if (dataType === 'image') return ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp']
+    if (dataType === 'image') return ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg']
     return ['.csv', '.txt', '.tsv', '.xls', '.xlsx']
   }
   return []

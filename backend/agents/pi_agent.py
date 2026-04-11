@@ -12,10 +12,33 @@ from .base import BaseAgent
 # Configure logger
 logger = logging.getLogger(__name__)
 from ..models.schemas import (
-    AgentType, AnalysisState, MessageRole, RoundResult, ExplorationReport,
+    AgentType, AnalysisPhase, AnalysisState, MessageRole, RoundResult, ExplorationReport,
     PublicationFigure, FigureReviewStatus, GraphicAbstract
 )
 from ..utils.llm_client import OpenAICompatibleClient
+
+
+def _build_default_bio_tasks(state: AnalysisState, detailed: bool = False) -> list:
+    """Build default bioinformatics task list based on available sequencing data types."""
+    seq_files = state.get_files_by_section("sequencing")
+    has_bulk = any(f.data_type == "bulk RNA-seq" for f in seq_files)
+    has_scrna = any(f.data_type == "scRNA-seq" for f in seq_files)
+    tasks = []
+    if has_scrna:
+        if detailed:
+            tasks.append(
+                "Execute standard scRNA-seq analysis: QC, normalization, clustering, annotation, "
+                "then condition-level DEG + GO/KEGG for ALL clusters, cell communication analysis"
+            )
+        else:
+            tasks.append("Execute standard scRNA-seq/snRNA-seq analysis workflow")
+    if has_bulk:
+        tasks.append("Perform bulk RNA-seq DEG analysis using PyDESeq2")
+        if has_scrna:
+            tasks.append("Cross-validate bulk DEGs with scRNA-seq pseudobulk DEGs (Venn diagram, correlation)")
+    if not tasks:
+        tasks.append("Execute standard sequencing analysis workflow")
+    return tasks
 
 
 class PIAgent(BaseAgent):
@@ -151,7 +174,7 @@ Reply in JSON format as follows:
         return {
             "overview": response or "Failed to generate initial instructions",
             "pathology_tasks": ["Analyze tissue sections, assess overall morphological changes"],
-            "bioinformatics_tasks": ["Execute standard scRNA-seq/snRNA-seq analysis workflow"],
+            "bioinformatics_tasks": _build_default_bio_tasks(state, detailed=False),
             "biochemistry_tasks": ["Summarize existing biochemical indicators"],
             "literature_topics": ["Literature related to the research topic and phenotype"]
         }
@@ -240,10 +263,7 @@ Reply in JSON format:
         return {
             "overview": response or "Failed to generate exploration instructions",
             "pathology_tasks": ["Analyze tissue sections, assess overall morphological changes"],
-            "bioinformatics_tasks": [
-                "Execute standard scRNA-seq analysis: QC, normalization, clustering, annotation, "
-                "then condition-level DEG + GO/KEGG for ALL clusters, cell communication analysis"
-            ],
+            "bioinformatics_tasks": _build_default_bio_tasks(state, detailed=True),
             "biochemistry_tasks": ["Summarize existing biochemical indicators"],
             "literature_topics": ["Cell types and pathways relevant to the tissue and disease context"]
         }
@@ -1489,7 +1509,7 @@ IMPORTANT: agents_for_next_round vs reanalysis_agents:
 """
 
         # Add phase-specific synthesis instructions
-        if state.analysis_phase == "exploration":
+        if state.analysis_phase == AnalysisPhase.EXPLORATION:
             prompt += """
 EXPLORATION PHASE — additional synthesis requirements:
 - Summarize ALL findings comprehensively, without hypothesis bias
