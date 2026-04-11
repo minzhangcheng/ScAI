@@ -2335,11 +2335,18 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
 """
             if has_bulk:
                 phase_instruction += """
-10. **MANDATORY — Bulk RNA-seq Analysis** (DO NOT SKIP):
+10. **MANDATORY — Bulk RNA-seq DEG Analysis** (DO NOT SKIP):
     - Load the bulk RNA-seq count matrix and perform DEG analysis using PyDESeq2
-    - Compare bulk DEG results with scRNA-seq pseudobulk DEG results (Venn diagram)
-    - For overlapping DEGs, visualize their cell-type-specific expression in scRNA-seq
-    NOTE: This step is REQUIRED, not optional. report_findings will be REJECTED if bulk data is not analyzed.
+      (CRITICAL: If PyDESeq2 raises ImportError, fallback to scipy.stats.ttest_ind with statsmodels multipletests for FDR correction)
+    - Generate a volcano plot for bulk DEG results
+    NOTE: report_findings will be REJECTED if bulk DEG analysis is not performed.
+
+11. **MANDATORY — Bulk/scRNA-seq Cross-Validation** (DO NOT SKIP):
+    - Aggregate scRNA-seq data to pseudobulk level OR use condition-level DEGs across all cells
+    - Find overlapping DEGs between bulk and scRNA-seq results using set intersection
+    - Visualize the overlap with a Venn diagram (from matplotlib_venn import venn2)
+    - For overlapping DEGs, visualize their cell-type-specific expression in scRNA-seq (e.g., dotplot or heatmap)
+    NOTE: This is a SEPARATE mandatory gate. report_findings will be REJECTED if cross-validation is not performed.
 """
         else:
             direction_ctx = analysis_state.current_round_direction or "PI-directed"

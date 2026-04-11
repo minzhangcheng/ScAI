@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.19.3
+**Version**: 0.19.4
 **Last Updated**: 2026-04-12
 
 ## Project Overview
@@ -1446,6 +1446,13 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.19.4 (2026-04-12)
+
+- **Bulk/scRNA-seq cross-validation enforcement** (`bioinformatics_agent.py`): Added mandatory gate that rejects `report_findings` when both bulk and scRNA-seq data exist but no cross-validation code (Venn diagram, pseudobulk overlap, set intersection) has been executed; includes escape hatch (`MAX_INTEGRATION_REJECTIONS=2`) to allow reporting after repeated failures
+- **PyDESeq2 fallback** (`bioinformatics_agent.py`, `pi_agent.py`, `config.py`, `workflow.py`): When PyDESeq2 raises ImportError, the system now falls back to `scipy.stats.ttest_ind` with `statsmodels.multipletests` FDR correction for bulk RNA-seq DEG analysis
+- **Split bulk analysis into two mandatory gates** (`workflow.py`): Separated bulk DEG analysis (step 10) and bulk/scRNA-seq cross-validation (step 11) into independent mandatory steps, each with its own rejection logic
+- **PI Agent task descriptions** (`pi_agent.py`): Updated default task descriptions with PyDESeq2 fallback instructions and more detailed cross-validation requirements (Venn diagram, set intersection, cell-type-specific expression)
 
 #### v0.19.3 (2026-04-12)
 

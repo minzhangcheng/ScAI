@@ -1063,6 +1063,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
         completed = False
         annotation_completed = False  # Mandatory step tracker for exploration phase
+        integration_reject_count = 0  # Track rejections for bulk/scRNA-seq integration gate
+        MAX_INTEGRATION_REJECTIONS = 2  # Escape hatch: allow through after N rejections
         llm_error: Optional[str] = None
         text_response_count = 0
         MAX_TEXT_RESPONSES = 2
@@ -1815,7 +1817,7 @@ except Exception as _autosave_block_err:
                                         "bulk RNA-seq analysis. Bulk RNA-seq data is available and MUST be analyzed. "
                                         f"Bulk data files: {bulk_paths}. "
                                         "You MUST: (1) Load bulk count matrix with pd.read_csv(), "
-                                        "(2) Perform DEG analysis using PyDESeq2, "
+                                        "(2) Perform DEG analysis using PyDESeq2 (if ImportError, fallback to scipy.stats.ttest_ind + statsmodels FDR correction), "
                                         "(3) Compare bulk DEGs with scRNA-seq pseudobulk DEGs (Venn diagram), "
                                         "THEN call report_findings."
                                     )
@@ -1826,6 +1828,58 @@ except Exception as _autosave_block_err:
                                     findings=[], findings_summary="REJECTED: bulk RNA-seq not analyzed",
                                 ))
                                 continue
+
+                    # Enforce bulk/scRNA-seq cross-validation when both data types exist
+                    if state.analysis_phase == AnalysisPhase.EXPLORATION:
+                        seq_files_integ = state.get_files_by_section("sequencing")
+                        has_scrna_data = any(f.data_type == "scRNA-seq" for f in seq_files_integ)
+                        has_bulk_data = any(f.data_type == "bulk RNA-seq" for f in seq_files_integ)
+                        if has_scrna_data and has_bulk_data:
+                            integration_keywords = [
+                                "venn", "pseudobulk", "overlap", "intersect",
+                                "matplotlib_venn", "venn2", "venn3",
+                            ]
+                            code_mentions_integration = any(
+                                any(kw in ce.code.lower() for kw in integration_keywords)
+                                for ce in self.code_history if ce.code
+                            )
+                            if not code_mentions_integration:
+                                if integration_reject_count >= MAX_INTEGRATION_REJECTIONS:
+                                    logger.warning(
+                                        "[Bioinformatics] Integration gate: max rejections reached, "
+                                        "allowing report_findings without cross-validation"
+                                    )
+                                else:
+                                    integration_reject_count += 1
+                                    logger.warning(
+                                        "[Bioinformatics] report_findings rejected: "
+                                        "bulk/scRNA-seq cross-validation not performed "
+                                        f"(rejection {integration_reject_count}/{MAX_INTEGRATION_REJECTIONS})"
+                                    )
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": (
+                                            "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                            "bulk/scRNA-seq cross-validation. "
+                                            "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
+                                            "compare their DEG results before reporting. Specifically:\n"
+                                            "(1) Aggregate scRNA-seq to pseudobulk DEGs (or use your existing "
+                                            "condition-level DEG results across all cells)\n"
+                                            "(2) Find overlapping DEGs between bulk and scRNA-seq using set intersection\n"
+                                            "(3) Visualize overlap with a Venn diagram (from matplotlib_venn import venn2)\n"
+                                            "(4) For overlapping DEGs, show cell-type-specific expression patterns\n"
+                                            "THEN call report_findings."
+                                        )
+                                    })
+                                    analysis_log.append(AnalysisStep(
+                                        step_number=step_count, step_type="report_findings",
+                                        agent_reasoning=agent_reasoning,
+                                        findings=[],
+                                        findings_summary="REJECTED: bulk/scRNA-seq cross-validation not performed",
+                                    ))
+                                    continue
+
                     has_substantive_work = True
                     findings = args.get("findings", [])
                     summary = args.get("summary", "")

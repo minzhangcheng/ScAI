@@ -281,7 +281,7 @@ Standard analysis workflow (adjust based on data type):
 9. Transcription factor activity analysis (pySCENIC, decoupleR, etc.)
 
 **Bulk RNA-seq integration** (when both scRNA-seq and bulk RNA-seq data are available):
-- Load bulk expression matrix and perform DESeq2/PyDESeq2 differential expression analysis
+- Load bulk expression matrix and perform DESeq2/PyDESeq2 differential expression analysis (fallback: scipy.stats.ttest_ind + statsmodels multipletests FDR correction if PyDESeq2 unavailable)
 - Cross-validate: compare bulk DEG list with scRNA-seq pseudobulk DEG (Venn diagram, correlation scatter plot)
 - Localize: for significant bulk DEGs, show expression across cell types in scRNA-seq (dot plot, violin plot)
 - The bulk results (with biological replicates) provide statistical rigor; scRNA-seq provides cellular resolution

@@ -33,9 +33,13 @@ def _build_default_bio_tasks(state: AnalysisState, detailed: bool = False) -> li
         else:
             tasks.append("Execute standard scRNA-seq/snRNA-seq analysis workflow")
     if has_bulk:
-        tasks.append("Perform bulk RNA-seq DEG analysis using PyDESeq2")
+        tasks.append("Perform bulk RNA-seq DEG analysis using PyDESeq2 (fallback: scipy.stats.ttest_ind + FDR correction if PyDESeq2 unavailable)")
         if has_scrna:
-            tasks.append("Cross-validate bulk DEGs with scRNA-seq pseudobulk DEGs (Venn diagram, correlation)")
+            tasks.append(
+                "Cross-validate bulk DEGs with scRNA-seq pseudobulk DEGs: "
+                "compute set intersection, generate Venn diagram (from matplotlib_venn import venn2), "
+                "and visualize overlapping DEGs' cell-type-specific expression"
+            )
     if not tasks:
         tasks.append("Execute standard sequencing analysis workflow")
     return tasks
