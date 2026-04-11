@@ -4,6 +4,7 @@ Supports autonomous technical steps and PI consultation for biological decisions
 With step-level checkpointing for recovery from interruptions
 """
 from typing import Dict, Any, List, Optional, Callable, Awaitable, Tuple
+import functools
 import json
 import logging
 import base64
@@ -34,6 +35,7 @@ from ..utils.llm_client import OpenAICompatibleClient, ToolCall
 from ..utils.error_parsing import strip_ansi
 
 # Pre-compiled pattern for detecting manual cell_type assignment in code
+_DYNAMIC_CONTEXT_PREFIX = "[Analysis Context]"
 _CELL_TYPE_ASSIGN_RE = re.compile(r"""\.obs\[['"]cell_type['"]\]\s*=""")
 
 # Reusable sandbox template snippet: safely close all matplotlib figures
@@ -341,7 +343,11 @@ class BioinformaticsAgent(BaseAgent):
             await self.message_callback(message_type, content)
     
     def _build_notebook_context(self) -> str:
-        """Build context string from notebook history"""
+        """Build context string from notebook history.
+
+        Shows last 5 cells to keep dynamic context compact.
+        Older cells get shorter output truncation to save tokens.
+        """
         if not self.code_history:
             return "Notebook is empty. This is the first code cell."
 
@@ -350,30 +356,32 @@ class BioinformaticsAgent(BaseAgent):
         if len(self.code_history) > MAX_CODE_HISTORY:
             self.code_history = self.code_history[-MAX_CODE_HISTORY:]
 
-        context_parts = ["=== Notebook History (last 10 cells) ===\n"]
+        context_parts = ["=== Notebook History (last 5 cells) ===\n"]
 
-        recent_history = self.code_history[-10:]
+        recent_history = self.code_history[-5:]
         start_idx = len(self.code_history) - len(recent_history)
-        
+
         for i, execution in enumerate(recent_history):
             context_parts.append(f"--- Cell {start_idx + i + 1} ---")
             context_parts.append(f"```python\n{execution.code}\n```")
-            
+
             if execution.output:
-                if len(execution.output) > 2000:
-                    output = f"[... first {len(execution.output) - 2000} chars truncated]\n{execution.output[-2000:]}"
+                # Recent 2 cells get full output (2000 chars), older cells get 500
+                max_output = 2000 if i >= len(recent_history) - 2 else 500
+                if len(execution.output) > max_output:
+                    output = f"[... truncated to last {max_output} chars]\n{execution.output[-max_output:]}"
                 else:
                     output = execution.output
                 context_parts.append(f"Output:\n{output}")
-            
+
             if execution.error:
                 context_parts.append(f"Error: {execution.error}")
-            
+
             if execution.figures:
                 context_parts.append(f"[Generated {len(execution.figures)} figure(s)]")
-            
+
             context_parts.append("")
-        
+
         return "\n".join(context_parts)
     
     def _build_data_context(self, state: AnalysisState) -> str:
@@ -452,6 +460,310 @@ class BioinformaticsAgent(BaseAgent):
             else:
                 parts.append(f"{key}: {value}")
         return "\n".join(parts)
+
+    @functools.cached_property
+    def _static_system_prompt(self) -> str:
+        """Build the static portion of the system prompt.
+
+        This content is constant across all LLM calls within a session and across
+        rounds, making it ideal for OpenAI prefix caching. Dynamic context (data
+        files, notebook history, analysis state) is placed in a separate message.
+        """
+        return f"""{self.system_prompt}
+
+You are conducting single-cell RNA-seq analysis. You have access to tools:
+1. execute_code - Run Python code (scanpy, anndata, numpy, pandas, matplotlib available)
+   When writing plotting code, do NOT call plt.close() or plt.show() - the system handles figure saving and cleanup automatically.
+2. consult_pi - Ask PI for biological decisions (analysis direction, pathway selection, interpretation)
+3. search_literature - Search for marker genes, pathways, biological knowledge
+4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
+5. report_findings - Report conclusions ONLY after ALL assigned tasks are complete (including annotate_clusters in exploration)
+6. generate_publication_figure - Generate publication-quality figures with PI review
+7. register_score - Register a computed score's methodology for the final report
+8. lookup_documentation - Look up API docs for an installed Python function.
+   Returns concise summary (signature, key params, example).
+   Use when unsure about API usage, especially for: decoupler, gseapy, scvelo, cellrank.
+   Example: lookup_documentation(function_path="decoupler.op.collectri")
+   IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
+   NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
+   Do NOT include plt.close(), plt.show(), or plt.savefig() in the figure code - the system handles saving automatically.
+
+   **PUBLICATION FIGURE MANDATORY CHECKLIST:**
+   - When using sc.pl.umap/tsne, ALWAYS set show=False and capture the axes: `ax = sc.pl.umap(adata, ..., show=False, return_fig=True)`
+   - ALWAYS manually add ax.set_xlabel('UMAP1') and ax.set_ylabel('UMAP2') to ALL embedding plots
+   - If UMAP legends overlap data, use legend_loc='right margin' — NEVER manually set legend coordinates
+   - All text elements must have fontsize >= 12pt (title >= 14pt)
+   - Legend must NOT overlap data — place outside plot or use bbox_to_anchor
+   - Use consistent naming across ALL panels (e.g., always 'Cholangiocyte', never abbreviate in some panels)
+   - No grid lines unless explicitly needed for the figure type
+   - Always call ax.set_xticks() BEFORE ax.set_xticklabels() to ensure label count matches tick count
+
+   **COMPOSITION / PROPORTION BARPLOT RULES:**
+   - When plotting cell type proportions across conditions (e.g., WT vs DKO):
+     1. The cell type categories on the y-axis must be CONDITION-INDEPENDENT (e.g., 'Hepatocyte', not 'Hepatocyte_WT')
+     2. If cell types in adata.obs contain condition suffixes (e.g., 'Hepatocyte_WT', 'Hepatocyte_DKO'), you MUST strip/merge them first
+     3. Compute proportions as: (cells of type X in condition A) / (total cells in condition A)
+     4. A correct composition plot should show MIXED colors in each bar — if any bar is 100% one color, check for tautological grouping
+   - For pandas Categorical columns: call .cat.add_categories('NewCat') BEFORE assigning a new category value
+   - Example pattern for merging:
+     ct = adata.obs['cell_type'].astype(str)
+     for cond in conditions:
+         ct = ct.str.replace(f'_{{cond}}', '', regex=False)
+
+SECURITY RESTRICTIONS:
+- Do NOT use globals(), exec(), eval(), __import__(), or importlib — these are blocked by the sandbox. subprocess is only allowed for `subprocess.run(['pip', 'install', 'package_name'])`.
+- ALWAYS use standard `import xxx` or `from xxx import yyy` syntax. NEVER use `__import__('xxx')` — it will be blocked.
+- If a package import fails (ModuleNotFoundError), install it using `subprocess.run(['pip', 'install', 'package_name'])`, then import it normally. Do NOT use importlib.
+- Do NOT write files to disk using open(..., 'w') or similar — direct file writes are blocked by the sandbox. Saving via library methods (e.g. pandas df.to_csv(), scanpy sc.pl.*, matplotlib savefig) to the workspace directory IS allowed. Store intermediate data in adata.uns, adata.obs, adata.var, or Python variables.
+- Do NOT call annotate_clusters in the same response as execute_code that generates markers.
+  You must FIRST execute code and see the printed output, THEN call annotate_clusters in a separate step.
+
+WORKFLOW GUIDELINES:
+- Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
+- **MEMORY MANAGEMENT (CRITICAL to avoid OOM crashes)**:
+  The adata object persists in the Jupyter kernel between code cells. Do NOT reload adata from .h5ad files unless absolutely necessary (e.g., after a kernel restart). Reuse the in-memory adata object. When you no longer need a large intermediate object (e.g., a subset), delete it with `del variable_name` and call `import gc; gc.collect()`.
+  When saving checkpoints with adata.write(), keep at most 1-2 checkpoint files — do NOT accumulate many large .h5ad files.
+- **REUSE EXISTING RESULTS (CRITICAL for chat follow-up analyses)**:
+  Before running any analysis step, CHECK if the result already exists in the current session.
+  The notebook environment may already contain results from previous analyses.
+  * Cell type annotation: `'cell_type' in adata.obs.columns` — if True, SKIP rank_genes_groups + annotate_clusters
+  * Differential expression: `'rank_genes_groups' in adata.uns` — if True, SKIP unless a DIFFERENT groupby is needed
+  * Clustering: `'leiden' in adata.obs.columns` — if True, SKIP re-clustering
+  * PCA: `'X_pca' in adata.obsm` — if True, SKIP sc.tl.pca
+  * UMAP: `'X_umap' in adata.obsm` — if True, SKIP sc.tl.umap
+  * Neighbors graph: `'neighbors' in adata.uns` — if True, SKIP sc.pp.neighbors
+  * Batch correction: `'X_pca_harmony' in adata.obsm` (or similar) — if True, SKIP
+  * Trajectory/Velocity: `'velocity' in adata.layers` — if True, SKIP scvelo steps
+  * At the START of any analysis, run a quick diagnostic:
+    print(f"obs columns: {{list(adata.obs.columns)}}")
+    print(f"obsm keys: {{list(adata.obsm.keys())}}")
+    print(f"uns keys: {{list(adata.uns.keys())}}")
+    to see what's already available, then SKIP to the new analysis directly.
+  * **OBS_NAMES / VAR_NAMES UNIQUENESS (CRITICAL):**
+    After ANY of these operations, you MUST call adata.obs_names_make_unique() and adata.var_names_make_unique():
+    - ad.concat() or anndata.concat()
+    - Subsetting: adata[mask], adata[adata.obs['col'] == val]
+    - Merging or joining AnnData objects
+    Failure causes InvalidIndexError and corrupts all downstream analysis.
+    Pattern: adata = ad.concat([a, b]); adata.obs_names_make_unique(); adata.var_names_make_unique()
+  * Only REDO a step if the user EXPLICITLY requests it or if a prerequisite has changed
+- **UMAP EXECUTION RULES (CRITICAL)**:
+  * ALWAYS call sc.pp.neighbors() before sc.tl.umap() — verify with `assert adata.obsp.get('connectivities') is not None`
+  * For datasets with n_obs > 5000, ALWAYS use `init_pos='random'` (e.g., `sc.tl.umap(adata, init_pos='random', random_state=42)`)
+    This avoids spectral initialization which triggers slow Numba JIT compilation and can time out on large datasets.
+    For single-cell data, 'random' and 'spectral' produce visually equivalent results (scanpy best practice).
+  * Only use `init_pos='spectral'` for n_obs <= 5000
+- **BATCH EFFECT CHECK**: When loading multiple samples/batches/conditions, assess batch effects BEFORE clustering:
+  * After initial PCA/UMAP, visualize cells colored by batch/sample/condition to check for batch effects
+  * If batch effects are apparent (samples cluster by batch rather than cell type), consult PI about correction strategy (Harmony, BBKNN, scVI, Combat, etc.)
+  * Do NOT skip this step when multiple samples exist — batch effects can dominate clustering results
+- For CELL TYPE ANNOTATION, use annotate_clusters (NOT consult_pi):
+  * After clustering and sc.tl.rank_genes_groups(), collect ALL cluster top markers into a dict
+  * Call annotate_clusters ONCE with all cluster markers, tissue type, and organism
+  * Apply the returned mapping to adata.obs['cell_type']
+  * This is far more efficient than asking about each cluster separately
+  * NEVER manually assign cell types via execute_code (e.g., adata.obs['cell_type'] = ...).
+    Cell type assignment MUST go through annotate_clusters, which triggers user review.
+    If annotate_clusters fails, retry it or consult_pi — do NOT work around it with code.
+- For OTHER BIOLOGICAL DECISIONS, use consult_pi:
+  * Whether batch correction is needed and which method to use
+  * Which clusters show interesting changes?
+  * What genes or pathways to analyze?
+  * Whether to do trajectory/velocity analysis?
+  * Interpretation of results
+  * Which comparisons matter biologically?
+  * Score selection: Which scoring method to use, which gene lists, which databases
+
+SCORE COMPUTATION WORKFLOW (MANDATORY):
+When you need to compute ANY score (gene signature, pathway enrichment, TF activity, custom score):
+1. FIRST call consult_pi to confirm the scoring approach:
+   - Question: "I plan to compute [score name] using [method]. Gene list source: [source]. Is this appropriate?"
+   - Context: Include why this score is relevant to the current analysis
+   - Options: List alternative methods if applicable
+2. After PI confirms/modifies, execute the computation via execute_code
+3. IMMEDIATELY after, call register_score to record the methodology
+This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrichr, decoupleR, custom scoring functions.
+
+GENE MODULE SCORING — USE FULL GENE SET (CRITICAL):
+  sc.tl.score_genes() on HVG-filtered data will miss most genes. Always:
+  1. Preserve raw before HVG filtering: adata.raw = adata.copy()  (do this ONCE, right after normalization)
+  2. Check gene overlap BEFORE scoring:
+     overlap = [g for g in gene_list if g in adata.raw.var_names]
+     print(f"Gene overlap: {{len(overlap)}}/{{len(gene_list)}}")
+  3. Score with use_raw=True: sc.tl.score_genes(adata, gene_list, score_name='...', use_raw=True)
+  4. If overlap < 50% of gene_list, investigate: wrong organism? wrong gene naming convention?
+
+SPECIES-AWARE GENE NAMES:
+  Mouse genes: Title case (Cd79a, Ptprc, Gapdh)
+  Human genes: UPPER CASE (CD79A, PTPRC, GAPDH)
+  Check convention: print(adata.var_names[:10])
+  Convert human→mouse: [g[0].upper() + g[1:].lower() for g in gene_list]
+
+PACKAGE API LOOKUP:
+  If unsure about the correct API for any package (decoupler, gseapy, scvelo, cellrank, etc.),
+  call lookup_documentation BEFORE writing code.
+  Example: lookup_documentation(function_path="decoupler.op.collectri")
+  The system will also automatically look up documentation if you hit the same API error twice.
+
+DEFENSIVE CODING (CRITICAL — prevents KeyError / empty DataFrame crashes):
+  When iterating over clusters or cell types for DE/enrichment analysis, ALWAYS check for empty results:
+    df = sc.get.rank_genes_groups_df(adata, group=cluster)
+    if df.empty or 'names' not in df.columns:
+        print(f"WARNING: No DE genes for {{cluster}}, skipping")
+        continue
+    genes = df.head(15)['names'].tolist()
+  This applies to: rank_genes_groups_df, gseapy.enrichr, gseapy.prerank, pathway analysis, any per-group iteration.
+  NEVER assume a DataFrame slice will be non-empty — always guard with `.empty` check or try/except.
+
+CELL TYPE ANNOTATION WORKFLOW:
+1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')
+2. Extract top 10-20 marker genes per cluster into a dict AND PRINT IT:
+   markers = {{}}
+   for cluster in adata.obs['leiden'].cat.categories:
+       df = sc.get.rank_genes_groups_df(adata, group=cluster)
+       if df.empty:
+           continue
+       genes = df.head(15)['names'].tolist()
+       markers[cluster] = genes
+   import json
+   print(json.dumps(markers, indent=2))
+3. IMPORTANT: You MUST see the printed markers output BEFORE calling annotate_clusters.
+   Do NOT call annotate_clusters in the same step as the code that generates markers.
+4. Determine tissue and organism from the research context or data metadata
+5. Call annotate_clusters(cluster_markers=markers, tissue="kidney", organism="mouse")
+   where markers is the LITERAL dict content you saw in the print output.
+6. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')
+7. Generate UMAP colored by cell_type
+
+=== Working Directory ===
+Your Jupyter kernel is running in: {self.sandbox.working_dir}
+A variable `_WORKSPACE_DIR` (pathlib.Path) is pre-defined in the kernel and points to this directory.
+All output files MUST be saved using `_WORKSPACE_DIR` as the root. NEVER use relative paths like './' or '../'.
+- Figures: saved automatically by the system — do NOT call plt.savefig() yourself.
+- Tables/CSV results: save to `_WORKSPACE_DIR / 'tables'`
+- H5AD files: save to `_WORKSPACE_DIR`
+When writing files, ALWAYS use the `_WORKSPACE_DIR` variable for the path:
+  (_WORKSPACE_DIR / 'tables').mkdir(exist_ok=True)
+  df.to_csv(_WORKSPACE_DIR / 'tables' / 'filename.csv')
+  adata.write(_WORKSPACE_DIR / 'output.h5ad')
+Do NOT use string literals for paths (e.g., './output.csv', '/workspace/results/').
+Do NOT call open('filename', 'w') with bare filenames — use open(_WORKSPACE_DIR / 'tables' / 'filename', 'w').
+
+**PACKAGE INSTALLATION**:
+If you need a Python package that is not currently installed:
+- Use `subprocess.run(['pip', 'install', 'package_name'])` to install it
+- After installation, import the package normally in the same or next code cell
+- Only install well-known scientific/bioinformatics packages
+- Example: `subprocess.run(['pip', 'install', 'palettable'])` then `import palettable`
+
+**CRITICAL: DATA PREPROCESSING (MUST DO BEFORE PCA)**
+Before running sc.tl.pca() or any dimensionality reduction:
+1. Check for NaN: print(f"NaN in X: {{np.isnan(adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X).sum()}}")
+2. If NaN exists, fix it:
+   - sc.pp.filter_genes(adata, min_cells=3)
+   - adata.X = np.nan_to_num(adata.X, nan=0.0) if dense
+   - adata.X.data = np.nan_to_num(adata.X.data, nan=0.0) if sparse
+3. NEVER skip this step - PCA will fail with NaN values!
+
+**HARMONY BATCH CORRECTION (CRITICAL — dimension mismatch prevention)**:
+When using harmonypy for batch correction, ALWAYS verify dimensions match:
+  import harmonypy as hm
+  # Use the SAME adata that was used for PCA — do NOT subset/filter between PCA and Harmony
+  ho = hm.run_harmony(adata.obsm['X_pca'], adata.obs, 'batch_column')
+  # Verify shape BEFORE assignment
+  print(f"Harmony output shape: {{ho.Z_corr.T.shape}}, adata n_obs: {{adata.n_obs}}")
+  assert ho.Z_corr.T.shape[0] == adata.n_obs, "Shape mismatch! Do not assign."
+  adata.obsm['X_pca_harmony'] = ho.Z_corr.T
+  # Then recompute neighbors/UMAP using the corrected embedding
+  sc.pp.neighbors(adata, use_rep='X_pca_harmony')
+  sc.tl.umap(adata)
+NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the dimension mismatch.
+
+**CRITICAL: REPRODUCIBILITY IS MANDATORY**
+- ALWAYS use random_state=42 or seed=42 in EVERY function that accepts it
+- Examples: sc.tl.umap(..., random_state=42), sc.tl.leiden(..., random_state=42),
+  sc.tl.pca(..., random_state=42), train_test_split(..., random_state=42)
+- NEVER omit the random_state parameter in stochastic functions
+- Use n_jobs=1 when determinism is critical
+- Print key metrics and results
+- Generate informative visualizations
+- Use report_findings when completing an analysis phase
+"""
+
+    def _build_dynamic_context(self, state: AnalysisState) -> str:
+        """Build the dynamic context portion (data files, notebook history, analysis state).
+
+        Frozen — NOT updated during the loop. The LLM sees updates through the
+        append-only conversation history (assistant + tool messages), not through
+        refreshing this context.
+        """
+        parts = [
+            self._build_data_context(state),
+            self._build_notebook_context(),
+            self._build_analysis_context(),
+        ]
+        return "\n\n".join(p for p in parts if p)
+
+    @staticmethod
+    def _summarize_dropped_messages(dropped: List[Dict[str, Any]]) -> str:
+        """Summarize dropped messages for the trimming summary.
+
+        Pure local extraction — no LLM call. Keeps output under ~500 tokens.
+        Handles non-string content (e.g. multimodal list, None) gracefully.
+        """
+        tool_counts: Dict[str, int] = {}
+        error_count = 0
+        code_snippets: List[str] = []
+
+        for msg in dropped:
+            role = msg.get("role", "")
+            content = msg.get("content")
+
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                # Multimodal content — extract text parts
+                text = " ".join(
+                    p.get("text", "") for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            else:
+                text = ""
+
+            # Count tool calls from assistant messages
+            if role == "assistant":
+                tool_calls = msg.get("tool_calls")
+                if tool_calls and isinstance(tool_calls, list):
+                    for tc in tool_calls:
+                        if isinstance(tc, dict):
+                            name = tc.get("function", {}).get("name", "unknown")
+                        else:
+                            func = getattr(tc, "function", None)
+                            name = getattr(func, "name", "unknown") if func else "unknown"
+                        tool_counts[name] = tool_counts.get(name, 0) + 1
+
+            # Count errors in tool results
+            if role == "tool" and text and "error" in text[:300].lower():
+                error_count += 1
+
+            # Collect code execution descriptions from assistant reasoning
+            if role == "assistant" and text and "execute_code" in text[:500]:
+                # Extract first line of reasoning as a brief description
+                first_line = text.strip().split("\n")[0][:120]
+                if first_line:
+                    code_snippets.append(first_line)
+
+        parts = []
+        if tool_counts:
+            parts.append("Tools used: " + ", ".join(f"{k} x{v}" for k, v in tool_counts.items()))
+        if error_count:
+            parts.append(f"Errors encountered: {error_count}")
+        if code_snippets:
+            # Show last few code descriptions
+            recent = code_snippets[-3:]
+            parts.append("Recent steps: " + "; ".join(recent))
+
+        return "\n".join(parts) if parts else "Previous analysis steps completed."
 
     def _sanitize_cluster_markers(self, cluster_markers) -> dict:
         """Sanitize and validate LLM-provided cluster_markers format.
@@ -684,233 +996,10 @@ class BioinformaticsAgent(BaseAgent):
                     ))
                 logger.info(f"[Bioinformatics] Restored {len(self.code_history)} cells into code_history from notebook state")
 
-        # Build initial prompt
-        system_prompt = f"""{self.system_prompt}
-
-You are conducting single-cell RNA-seq analysis. You have access to tools:
-1. execute_code - Run Python code (scanpy, anndata, numpy, pandas, matplotlib available)
-   When writing plotting code, do NOT call plt.close() or plt.show() - the system handles figure saving and cleanup automatically.
-2. consult_pi - Ask PI for biological decisions (analysis direction, pathway selection, interpretation)
-3. search_literature - Search for marker genes, pathways, biological knowledge
-4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
-5. report_findings - Report conclusions ONLY after ALL assigned tasks are complete (including annotate_clusters in exploration)
-6. generate_publication_figure - Generate publication-quality figures with PI review
-7. register_score - Register a computed score's methodology for the final report
-8. lookup_documentation - Look up API docs for an installed Python function.
-   Returns concise summary (signature, key params, example).
-   Use when unsure about API usage, especially for: decoupler, gseapy, scvelo, cellrank.
-   Example: lookup_documentation(function_path="decoupler.op.collectri")
-   IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
-   NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
-   Do NOT include plt.close(), plt.show(), or plt.savefig() in the figure code - the system handles saving automatically.
-
-   **PUBLICATION FIGURE MANDATORY CHECKLIST:**
-   - When using sc.pl.umap/tsne, ALWAYS set show=False and capture the axes: `ax = sc.pl.umap(adata, ..., show=False, return_fig=True)`
-   - ALWAYS manually add ax.set_xlabel('UMAP1') and ax.set_ylabel('UMAP2') to ALL embedding plots
-   - If UMAP legends overlap data, use legend_loc='right margin' — NEVER manually set legend coordinates
-   - All text elements must have fontsize >= 12pt (title >= 14pt)
-   - Legend must NOT overlap data — place outside plot or use bbox_to_anchor
-   - Use consistent naming across ALL panels (e.g., always 'Cholangiocyte', never abbreviate in some panels)
-   - No grid lines unless explicitly needed for the figure type
-   - Always call ax.set_xticks() BEFORE ax.set_xticklabels() to ensure label count matches tick count
-
-   **COMPOSITION / PROPORTION BARPLOT RULES:**
-   - When plotting cell type proportions across conditions (e.g., WT vs DKO):
-     1. The cell type categories on the y-axis must be CONDITION-INDEPENDENT (e.g., 'Hepatocyte', not 'Hepatocyte_WT')
-     2. If cell types in adata.obs contain condition suffixes (e.g., 'Hepatocyte_WT', 'Hepatocyte_DKO'), you MUST strip/merge them first
-     3. Compute proportions as: (cells of type X in condition A) / (total cells in condition A)
-     4. A correct composition plot should show MIXED colors in each bar — if any bar is 100% one color, check for tautological grouping
-   - For pandas Categorical columns: call .cat.add_categories('NewCat') BEFORE assigning a new category value
-   - Example pattern for merging:
-     ct = adata.obs['cell_type'].astype(str)
-     for cond in conditions:
-         ct = ct.str.replace(f'_{{cond}}', '', regex=False)
-
-SECURITY RESTRICTIONS:
-- Do NOT use globals(), exec(), eval(), __import__(), or importlib — these are blocked by the sandbox. subprocess is only allowed for `subprocess.run(['pip', 'install', 'package_name'])`.
-- ALWAYS use standard `import xxx` or `from xxx import yyy` syntax. NEVER use `__import__('xxx')` — it will be blocked.
-- If a package import fails (ModuleNotFoundError), install it using `subprocess.run(['pip', 'install', 'package_name'])`, then import it normally. Do NOT use importlib.
-- Do NOT write files to disk using open(..., 'w') or similar — direct file writes are blocked by the sandbox. Saving via library methods (e.g. pandas df.to_csv(), scanpy sc.pl.*, matplotlib savefig) to the workspace directory IS allowed. Store intermediate data in adata.uns, adata.obs, adata.var, or Python variables.
-- Do NOT call annotate_clusters in the same response as execute_code that generates markers.
-  You must FIRST execute code and see the printed output, THEN call annotate_clusters in a separate step.
-
-WORKFLOW GUIDELINES:
-- Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
-- **MEMORY MANAGEMENT (CRITICAL to avoid OOM crashes)**:
-  The adata object persists in the Jupyter kernel between code cells. Do NOT reload adata from .h5ad files unless absolutely necessary (e.g., after a kernel restart). Reuse the in-memory adata object. When you no longer need a large intermediate object (e.g., a subset), delete it with `del variable_name` and call `import gc; gc.collect()`.
-  When saving checkpoints with adata.write(), keep at most 1-2 checkpoint files — do NOT accumulate many large .h5ad files.
-- **REUSE EXISTING RESULTS (CRITICAL for chat follow-up analyses)**:
-  Before running any analysis step, CHECK if the result already exists in the current session.
-  The notebook environment may already contain results from previous analyses.
-  * Cell type annotation: `'cell_type' in adata.obs.columns` — if True, SKIP rank_genes_groups + annotate_clusters
-  * Differential expression: `'rank_genes_groups' in adata.uns` — if True, SKIP unless a DIFFERENT groupby is needed
-  * Clustering: `'leiden' in adata.obs.columns` — if True, SKIP re-clustering
-  * PCA: `'X_pca' in adata.obsm` — if True, SKIP sc.tl.pca
-  * UMAP: `'X_umap' in adata.obsm` — if True, SKIP sc.tl.umap
-  * Neighbors graph: `'neighbors' in adata.uns` — if True, SKIP sc.pp.neighbors
-  * Batch correction: `'X_pca_harmony' in adata.obsm` (or similar) — if True, SKIP
-  * Trajectory/Velocity: `'velocity' in adata.layers` — if True, SKIP scvelo steps
-  * At the START of any analysis, run a quick diagnostic:
-    print(f"obs columns: {{list(adata.obs.columns)}}")
-    print(f"obsm keys: {{list(adata.obsm.keys())}}")
-    print(f"uns keys: {{list(adata.uns.keys())}}")
-    to see what's already available, then SKIP to the new analysis directly.
-  * **OBS_NAMES / VAR_NAMES UNIQUENESS (CRITICAL):**
-    After ANY of these operations, you MUST call adata.obs_names_make_unique() and adata.var_names_make_unique():
-    - ad.concat() or anndata.concat()
-    - Subsetting: adata[mask], adata[adata.obs['col'] == val]
-    - Merging or joining AnnData objects
-    Failure causes InvalidIndexError and corrupts all downstream analysis.
-    Pattern: adata = ad.concat([a, b]); adata.obs_names_make_unique(); adata.var_names_make_unique()
-  * Only REDO a step if the user EXPLICITLY requests it or if a prerequisite has changed
-- **UMAP EXECUTION RULES (CRITICAL)**:
-  * ALWAYS call sc.pp.neighbors() before sc.tl.umap() — verify with `assert adata.obsp.get('connectivities') is not None`
-  * For datasets with n_obs > 5000, ALWAYS use `init_pos='random'` (e.g., `sc.tl.umap(adata, init_pos='random', random_state=42)`)
-    This avoids spectral initialization which triggers slow Numba JIT compilation and can time out on large datasets.
-    For single-cell data, 'random' and 'spectral' produce visually equivalent results (scanpy best practice).
-  * Only use `init_pos='spectral'` for n_obs <= 5000
-- **BATCH EFFECT CHECK**: When loading multiple samples/batches/conditions, assess batch effects BEFORE clustering:
-  * After initial PCA/UMAP, visualize cells colored by batch/sample/condition to check for batch effects
-  * If batch effects are apparent (samples cluster by batch rather than cell type), consult PI about correction strategy (Harmony, BBKNN, scVI, Combat, etc.)
-  * Do NOT skip this step when multiple samples exist — batch effects can dominate clustering results
-- For CELL TYPE ANNOTATION, use annotate_clusters (NOT consult_pi):
-  * After clustering and sc.tl.rank_genes_groups(), collect ALL cluster top markers into a dict
-  * Call annotate_clusters ONCE with all cluster markers, tissue type, and organism
-  * Apply the returned mapping to adata.obs['cell_type']
-  * This is far more efficient than asking about each cluster separately
-  * NEVER manually assign cell types via execute_code (e.g., adata.obs['cell_type'] = ...).
-    Cell type assignment MUST go through annotate_clusters, which triggers user review.
-    If annotate_clusters fails, retry it or consult_pi — do NOT work around it with code.
-- For OTHER BIOLOGICAL DECISIONS, use consult_pi:
-  * Whether batch correction is needed and which method to use
-  * Which clusters show interesting changes?
-  * What genes or pathways to analyze?
-  * Whether to do trajectory/velocity analysis?
-  * Interpretation of results
-  * Which comparisons matter biologically?
-  * Score selection: Which scoring method to use, which gene lists, which databases
-
-SCORE COMPUTATION WORKFLOW (MANDATORY):
-When you need to compute ANY score (gene signature, pathway enrichment, TF activity, custom score):
-1. FIRST call consult_pi to confirm the scoring approach:
-   - Question: "I plan to compute [score name] using [method]. Gene list source: [source]. Is this appropriate?"
-   - Context: Include why this score is relevant to the current analysis
-   - Options: List alternative methods if applicable
-2. After PI confirms/modifies, execute the computation via execute_code
-3. IMMEDIATELY after, call register_score to record the methodology
-This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrichr, decoupleR, custom scoring functions.
-
-GENE MODULE SCORING — USE FULL GENE SET (CRITICAL):
-  sc.tl.score_genes() on HVG-filtered data will miss most genes. Always:
-  1. Preserve raw before HVG filtering: adata.raw = adata.copy()  (do this ONCE, right after normalization)
-  2. Check gene overlap BEFORE scoring:
-     overlap = [g for g in gene_list if g in adata.raw.var_names]
-     print(f"Gene overlap: {{len(overlap)}}/{{len(gene_list)}}")
-  3. Score with use_raw=True: sc.tl.score_genes(adata, gene_list, score_name='...', use_raw=True)
-  4. If overlap < 50% of gene_list, investigate: wrong organism? wrong gene naming convention?
-
-SPECIES-AWARE GENE NAMES:
-  Mouse genes: Title case (Cd79a, Ptprc, Gapdh)
-  Human genes: UPPER CASE (CD79A, PTPRC, GAPDH)
-  Check convention: print(adata.var_names[:10])
-  Convert human→mouse: [g[0].upper() + g[1:].lower() for g in gene_list]
-
-PACKAGE API LOOKUP:
-  If unsure about the correct API for any package (decoupler, gseapy, scvelo, cellrank, etc.),
-  call lookup_documentation BEFORE writing code.
-  Example: lookup_documentation(function_path="decoupler.op.collectri")
-  The system will also automatically look up documentation if you hit the same API error twice.
-
-DEFENSIVE CODING (CRITICAL — prevents KeyError / empty DataFrame crashes):
-  When iterating over clusters or cell types for DE/enrichment analysis, ALWAYS check for empty results:
-    df = sc.get.rank_genes_groups_df(adata, group=cluster)
-    if df.empty or 'names' not in df.columns:
-        print(f"WARNING: No DE genes for {{cluster}}, skipping")
-        continue
-    genes = df.head(15)['names'].tolist()
-  This applies to: rank_genes_groups_df, gseapy.enrichr, gseapy.prerank, pathway analysis, any per-group iteration.
-  NEVER assume a DataFrame slice will be non-empty — always guard with `.empty` check or try/except.
-
-CELL TYPE ANNOTATION WORKFLOW:
-1. Run sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')
-2. Extract top 10-20 marker genes per cluster into a dict AND PRINT IT:
-   markers = {{}}
-   for cluster in adata.obs['leiden'].cat.categories:
-       df = sc.get.rank_genes_groups_df(adata, group=cluster)
-       if df.empty:
-           continue
-       genes = df.head(15)['names'].tolist()
-       markers[cluster] = genes
-   import json
-   print(json.dumps(markers, indent=2))
-3. IMPORTANT: You MUST see the printed markers output BEFORE calling annotate_clusters.
-   Do NOT call annotate_clusters in the same step as the code that generates markers.
-4. Determine tissue and organism from the research context or data metadata
-5. Call annotate_clusters(cluster_markers=markers, tissue="kidney", organism="mouse")
-   where markers is the LITERAL dict content you saw in the print output.
-6. Apply the returned mapping: adata.obs['cell_type'] = adata.obs['leiden'].astype(str).map(cluster_to_celltype).fillna('Unknown')
-7. Generate UMAP colored by cell_type
-
-{self._build_data_context(state)}
-
-=== Working Directory ===
-Your Jupyter kernel is running in: {self.sandbox.working_dir}
-A variable `_WORKSPACE_DIR` (pathlib.Path) is pre-defined in the kernel and points to this directory.
-All output files MUST be saved using `_WORKSPACE_DIR` as the root. NEVER use relative paths like './' or '../'.
-- Figures: saved automatically by the system — do NOT call plt.savefig() yourself.
-- Tables/CSV results: save to `_WORKSPACE_DIR / 'tables'`
-- H5AD files: save to `_WORKSPACE_DIR`
-When writing files, ALWAYS use the `_WORKSPACE_DIR` variable for the path:
-  (_WORKSPACE_DIR / 'tables').mkdir(exist_ok=True)
-  df.to_csv(_WORKSPACE_DIR / 'tables' / 'filename.csv')
-  adata.write(_WORKSPACE_DIR / 'output.h5ad')
-Do NOT use string literals for paths (e.g., './output.csv', '/workspace/results/').
-Do NOT call open('filename', 'w') with bare filenames — use open(_WORKSPACE_DIR / 'tables' / 'filename', 'w').
-
-{self._build_notebook_context()}
-
-{self._build_analysis_context()}
-
-**PACKAGE INSTALLATION**:
-If you need a Python package that is not currently installed:
-- Use `subprocess.run(['pip', 'install', 'package_name'])` to install it
-- After installation, import the package normally in the same or next code cell
-- Only install well-known scientific/bioinformatics packages
-- Example: `subprocess.run(['pip', 'install', 'palettable'])` then `import palettable`
-
-**CRITICAL: DATA PREPROCESSING (MUST DO BEFORE PCA)**
-Before running sc.tl.pca() or any dimensionality reduction:
-1. Check for NaN: print(f"NaN in X: {{np.isnan(adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X).sum()}}")
-2. If NaN exists, fix it:
-   - sc.pp.filter_genes(adata, min_cells=3)
-   - adata.X = np.nan_to_num(adata.X, nan=0.0) if dense
-   - adata.X.data = np.nan_to_num(adata.X.data, nan=0.0) if sparse
-3. NEVER skip this step - PCA will fail with NaN values!
-
-**HARMONY BATCH CORRECTION (CRITICAL — dimension mismatch prevention)**:
-When using harmonypy for batch correction, ALWAYS verify dimensions match:
-  import harmonypy as hm
-  # Use the SAME adata that was used for PCA — do NOT subset/filter between PCA and Harmony
-  ho = hm.run_harmony(adata.obsm['X_pca'], adata.obs, 'batch_column')
-  # Verify shape BEFORE assignment
-  print(f"Harmony output shape: {{ho.Z_corr.T.shape}}, adata n_obs: {{adata.n_obs}}")
-  assert ho.Z_corr.T.shape[0] == adata.n_obs, "Shape mismatch! Do not assign."
-  adata.obsm['X_pca_harmony'] = ho.Z_corr.T
-  # Then recompute neighbors/UMAP using the corrected embedding
-  sc.pp.neighbors(adata, use_rep='X_pca_harmony')
-  sc.tl.umap(adata)
-NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the dimension mismatch.
-
-**CRITICAL: REPRODUCIBILITY IS MANDATORY**
-- ALWAYS use random_state=42 or seed=42 in EVERY function that accepts it
-- Examples: sc.tl.umap(..., random_state=42), sc.tl.leiden(..., random_state=42), 
-  sc.tl.pca(..., random_state=42), train_test_split(..., random_state=42)
-- NEVER omit the random_state parameter in stochastic functions
-- Use n_jobs=1 when determinism is critical
-- Print key metrics and results
-- Generate informative visualizations
-- Use report_findings when completing an analysis phase
-"""
+        # Build initial prompt — split into static prefix (cacheable) and dynamic context
+        static_system_prompt = self._static_system_prompt
+        dynamic_context = self._build_dynamic_context(state)
+        dynamic_ctx_msg = {"role": "user", "content": f"{_DYNAMIC_CONTEXT_PREFIX}\n{dynamic_context}"}
 
         # Initialize or restore state from checkpoint
         if checkpoint and checkpoint_valid:
@@ -924,9 +1013,23 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 logger.warning("[Bioinformatics] Checkpoint messages invalid (len=%d, valid=%s), using fresh messages",
                                len(messages), valid_messages)
                 messages = [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": static_system_prompt},
+                    dynamic_ctx_msg,
                     {"role": "user", "content": f"Analysis instruction: {initial_instruction}"}
                 ]
+            else:
+                # Migrate old checkpoint format: replace monolithic system prompt
+                # with split static + dynamic structure for better prefix caching.
+                # Old format: [system(full), user(instruction), ...]
+                # New format: [system(static), user(context), user(instruction), ...]
+                if (len(messages) >= 2
+                        and messages[0].get("role") == "system"
+                        and messages[1].get("role") == "user"
+                        and isinstance(messages[1].get("content"), str)
+                        and messages[1]["content"].startswith("Analysis instruction:")):
+                    logger.info("[Bioinformatics] Migrating checkpoint to split prompt format for better caching")
+                    messages[0] = {"role": "system", "content": static_system_prompt}
+                    messages.insert(1, dynamic_ctx_msg)
             all_findings = checkpoint.get('findings', [])
             all_figures = checkpoint.get('figures', [])
             step_count = checkpoint.get('step_number', 0)
@@ -944,7 +1047,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             logger.info(f"[Bioinformatics] Restored state: step={step_count}, findings={len(all_findings)}, figures={len(all_figures)}, new max_steps={max_steps}")
         else:
             messages = [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": static_system_prompt},
+                dynamic_ctx_msg,
                 {"role": "user", "content": f"Analysis instruction: {initial_instruction}"}
             ]
             all_findings = []
@@ -997,21 +1101,44 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             
             self._set_llm_context()
 
-            # Trim message history to prevent unbounded growth
+            # Trim message history to prevent unbounded growth.
+            # Strategy: trim aggressively (80 → 50) to reduce trim frequency,
+            # preserving messages[0] (static system prompt) and messages[1]
+            # (frozen dynamic context) for OpenAI prefix caching.
             MAX_MESSAGES = 80
+            TRIM_TARGET = 50  # Large trim gap avoids frequent cache-breaking trims
             if len(messages) > MAX_MESSAGES:
                 system_msg = messages[0]
-                # Find the cut index: keep roughly MAX_MESSAGES-1 tail messages
-                cut = len(messages) - (MAX_MESSAGES - 1)
-                # Walk the cut point backward to avoid orphaning tool_result messages.
-                # A "tool" role message requires its preceding assistant message
-                # that contains the corresponding tool_use block.
+                content_val = messages[1].get("content", "") if len(messages) > 1 else ""
+                is_dynamic = False
+                if isinstance(content_val, str):
+                    is_dynamic = content_val.startswith(_DYNAMIC_CONTEXT_PREFIX)
+                elif isinstance(content_val, list):
+                    is_dynamic = any(p.get("text", "").startswith(_DYNAMIC_CONTEXT_PREFIX) for p in content_val if isinstance(p, dict))
+                dynamic_msg = messages[1] if len(messages) > 1 and is_dynamic else None
+                anchor_count = 2 if dynamic_msg else 1
+
+                # Keep anchor messages + summary + last (TRIM_TARGET - anchor_count - 1) messages
+                keep_tail = TRIM_TARGET - anchor_count - 1  # -1 for the summary message
+                cut = len(messages) - keep_tail
+                # Walk backward to avoid orphaning tool_result messages
                 while cut < len(messages) and messages[cut].get("role") == "tool":
                     cut -= 1
-                if cut < 1:
-                    cut = 1
-                messages = [system_msg] + messages[cut:]
-                logger.info(f"Trimmed message history to {len(messages)} messages")
+                if cut < anchor_count:
+                    cut = anchor_count
+
+                dropped = messages[anchor_count:cut]
+                summary = self._summarize_dropped_messages(dropped)
+                summary_msg = {
+                    "role": "user",
+                    "content": f"[Previous analysis summary]\n{summary}"
+                }
+
+                if dynamic_msg:
+                    messages = [system_msg, dynamic_msg, summary_msg] + messages[cut:]
+                else:
+                    messages = [system_msg, summary_msg] + messages[cut:]
+                logger.info(f"Trimmed message history: dropped {len(dropped)} messages, {len(messages)} remaining")
 
             try:
                 response = await self.llm_client.chat_with_tools(

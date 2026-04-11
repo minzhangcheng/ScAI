@@ -333,11 +333,16 @@ class OpenAICompatibleClient:
     def _extract_usage(response) -> Dict[str, int]:
         """Extract usage dict from an LLM response."""
         if response and response.usage:
-            return {
+            result = {
                 "prompt_tokens": response.usage.prompt_tokens or 0,
                 "completion_tokens": response.usage.completion_tokens or 0,
                 "total_tokens": response.usage.total_tokens or 0,
             }
+            details = getattr(response.usage, 'prompt_tokens_details', None)
+            cached = getattr(details, 'cached_tokens', 0) if details else 0
+            if cached:
+                result["cached_tokens"] = cached
+            return result
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     def _apply_model_params(self, params: Dict[str, Any], model: str, temperature: Optional[float], max_tokens: Optional[int], skip_temperature: bool = False) -> None:

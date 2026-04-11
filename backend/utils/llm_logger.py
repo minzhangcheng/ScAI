@@ -150,13 +150,21 @@ class LLMLogger:
         
         # Log
         duration_str = f"{interaction.duration_ms:.0f}ms" if interaction.duration_ms is not None else "N/A"
+        # Build token summary with cache info
+        if interaction.usage and interaction.usage.get("cached_tokens", 0) > 0:
+            cached = interaction.usage["cached_tokens"]
+            prompt = interaction.usage.get("prompt_tokens", 0)
+            cache_pct = f"{cached / prompt * 100:.0f}%" if prompt else "N/A"
+            token_summary = f"{interaction.usage} (cache hit: {cache_pct})"
+        else:
+            token_summary = str(interaction.usage)
         logger.info(
             f"\n{'='*60}\n"
             f"[LLM] [{interaction.agent}] - {interaction.model}\n"
             f"{'='*60}\n"
             f"> PROMPT: {last_user_msg}{'...' if len(last_user_msg) >= 200 else ''}\n"
             f"< RESPONSE: {response_summary}{'...' if len(response_summary) >= 200 else ''}\n"
-            f"  Duration: {duration_str} | Tokens: {interaction.usage}\n"
+            f"  Duration: {duration_str} | Tokens: {token_summary}\n"
             f"{'='*60}"
         )
     

@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.19.2
-**Last Updated**: 2026-04-11
+**Version**: 0.19.3
+**Last Updated**: 2026-04-12
 
 ## Project Overview
 
@@ -1447,6 +1447,12 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 ## Version History
 
+#### v0.19.3 (2026-04-12)
+
+- **Prompt caching optimization** (`bioinformatics_agent.py`): Split system prompt into static (`_static_system_prompt`) and dynamic (`_build_dynamic_context`) parts for OpenAI prefix caching; reduced notebook history from 10 to 5 cells; improved message trimming preserves cacheable prefix messages
+- **Cache hit tracking** (`llm_client.py`, `llm_logger.py`): Added `prompt_tokens_details.cached_tokens` support to track cache efficiency in LLM responses
+- **Checkpoint migration** (`bioinformatics_agent.py`): Added automatic migration of old checkpoint format to split static+dynamic prompt structure for better prefix caching
+
 #### v0.19.2 (2026-04-11)
 
 - **AnalysisPhase enum refactoring** — Replaced string-based `analysis_phase` with typed `AnalysisPhase` enum (`ExplorationPhase`/`InnovationPhase`) across all agents and workflow to eliminate typo errors and improve code reliability
@@ -1479,16 +1485,16 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 #### v0.18.15 (2026-04-08)
 
-- **PI Agent分析工具包全面升级** (`agents/pi_agent.py`): 新增/细化了多个高级分析模块：
-  - Gene signature & Metabolic scoring：使用sc.tl.score_genes或AUCell进行生物/代谢特征评分
-  - Trajectory & RNA Velocity：新增scVelo/CellRank进行定向细胞命运映射和驱动基因识别
-  - Transcription factor & Gene Regulatory Networks：新增hdWGCNA进行共表达基因模块和hub基因识别
-  - Cell-cell communication & Target prediction：新增NicheNet-style分析预测配体-受体下游目标基因激活
-  - Cellular Stemness & Plasticity：新增CytoTRACE-like评分推断细胞分化潜能
-  - Tumor/Malignancy estimation：新增inferCNV进行染色体拷贝数变异检测
-  - Compositional analysis：明确支持Milo/milopy、scCODA、DA-seq等统计方法
-  - Immune repertoire analysis：新增Scirpy进行TCR/BCR克隆型扩展和多样性分析
-- **前端错误处理优化** (`frontend/src/components/Sidebar.tsx`): 删除会话失败时将错误信息通过alert显示给用户，而非仅输出到console
+- **PI Agent Analysis Toolkit Comprehensive Upgrade** (`agents/pi_agent.py`): Added/refined multiple advanced analysis modules:
+  - Gene signature & Metabolic scoring: Using sc.tl.score_genes or AUCell for biological/metabolic signature scoring
+  - Trajectory & RNA Velocity: Added scVelo/CellRank for directed cell fate mapping and driver gene identification
+  - Transcription factor & Gene Regulatory Networks: Added hdWGCNA for co-expression gene module and hub gene identification
+  - Cell-cell communication & Target prediction: Added NicheNet-style analysis for ligand-receptor downstream target gene activation
+  - Cellular Stemness & Plasticity: Added CytoTRACE-like scoring for cell differentiation potential inference
+  - Tumor/Malignancy estimation: Added inferCNV for chromosome copy number variation detection
+  - Compositional analysis: Explicitly supporting Milo/milopy, scCODA, DA-seq and other statistical methods
+  - Immune repertoire analysis: Added Scirpy for TCR/BCR clone expansion and diversity analysis
+- **Frontend Error Handling Optimization** (`frontend/src/components/Sidebar.tsx`): Now displays error messages via alert when session fails, instead of only outputting to console
 
 #### v0.18.14 (2026-04-05)
 
@@ -1782,7 +1788,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 - **Frontend: JPG MIME Auto-Detection** (`FigureGallery.tsx`, `GraphicAbstract.tsx`, `MessageStream.tsx`, `ChatPanel.tsx`): Base64 strings starting with `iVBOR` are treated as PNG; all others as JPEG. Applied to `<img src>` attributes and download link generation. Figure gallery download button label updated PNG→JPG.
 - **`useApi.ts`: Message Merge Race Condition Fix** (`useApi.ts`): On WebSocket reconnect, `setMessages()` is only called when there are genuinely new server messages. Merge reads the latest store state (not the stale closure) and only adds messages not already present locally.
 - **`ChatPanel.tsx`: Stale Closure Fix** (`ChatPanel.tsx`): Message-sync effect reads latest chat messages from `useAppStore.getState()` instead of the stale `chatMessages` closure value. Optimistic local-only messages are preserved when merging server state.
-- **`MessageStream.tsx`: Bilingual TruncatedText** (`MessageStream.tsx`): "展开全文"/"收起" toggle now renders "Expand"/"Collapse" in English when `language !== 'zh'`. `language` prop threaded through all `TruncatedText` usages. Memoization condition expanded to re-render on content or timestamp change.
+- **`MessageStream.tsx`: Bilingual TruncatedText** (`MessageStream.tsx`): "Expand"/"Collapse" toggle now renders "Expand"/"Collapse" in English when `language !== 'zh'`. `language` prop threaded through all `TruncatedText` usages. Memoization condition expanded to re-render on content or timestamp change.
 - **`RoundFeedbackDialog.tsx`: Finally Block** (`RoundFeedbackDialog.tsx`): Submission handler now has a `finally` block to ensure loading state is always cleared on error.
 
 #### v0.14.2 (2026-03-16)
@@ -2003,7 +2009,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 - **Import Proxy Timeout Resilience**: Frontend pre-generates `import_id` before upload and sends it with the request, so even if a reverse proxy (nginx) timeout prevents the HTTP response from reaching the client, it can still poll for extraction status. Backend registers the import job before saving the file, ensuring the polling endpoint is available immediately
 - **Import UX Improvements**: Success/failure states with proper icons (CheckCircle for success, AlertCircle for errors). Polling includes retry logic that tolerates transient network errors and early 404s. 30-minute timeout for very large archives. Success confirmation dialog replaces silent dismissal
-- **Branding Update**: App subtitle updated to "Integrated & Intelligent Single Cell Analysis" / "整合与智能单细胞分析" across footer, About dialog, Disclaimer dialog, and i18n translations
+- **Branding Update**: App subtitle updated to "Integrated & Intelligent Single Cell Analysis" across footer, About dialog, Disclaimer dialog, and i18n translations
 
 #### v0.8.7 (2026-03-02)
 
@@ -2015,7 +2021,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 - **Async Session Import**: Large tar.gz imports no longer block the HTTP response (avoiding nginx proxy timeouts). Backend returns `import_id` immediately after upload, extracts in background; frontend polls `GET /api/session/import/{import_id}` for status
 - **First-Visit Disclaimer Dialog**: Shows an AI reliability warning on first visit (stored in localStorage), requiring user acknowledgment before entering the system
-- **About Button Text**: Added "About"/"关于" text label next to the info icon
+- **About Button Text**: Added "About" text label next to the info icon
 - **Footer Copyright**: Added persistent footer with project name and copyright notice
 
 #### v0.8.5 (2026-02-28)
