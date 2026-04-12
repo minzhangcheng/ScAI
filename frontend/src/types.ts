@@ -131,6 +131,10 @@ export interface RawGraphicAbstract {
   prompt?: string
   image_base64?: string
   imageBase64?: string
+  text_diagram?: string
+  textDiagram?: string
+  is_text_mode?: boolean
+  isTextMode?: boolean
   created_at?: string
   createdAt?: string
 }
@@ -152,6 +156,20 @@ export interface RawMessage {
   agent?: string
   content: unknown
   timestamp?: string
+}
+
+/** Graphic abstract message content (snake_case/camelCase flexible) */
+export interface GraphicAbstractContent {
+  id?: string
+  prompt?: string
+  image_base64?: string
+  imageBase64?: string
+  text_diagram?: string
+  textDiagram?: string
+  is_text_mode?: boolean
+  isTextMode?: boolean
+  created_at?: string
+  createdAt?: string
 }
 
 // ============================================================

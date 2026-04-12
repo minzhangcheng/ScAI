@@ -23,6 +23,7 @@ from ..utils.sandbox import (
     LocalJupyterSandbox, CodeExecutionResult,
 )
 from ..utils.checkpoint import CheckpointManager
+from ..utils.formatting import format_revision_history
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -436,8 +437,8 @@ class BioinformaticsAgent(BaseAgent):
                     else:
                         sep_hint = "sep='\\t'  # .txt files are usually tab-separated in bioinformatics; change to ',' if needed"
                     data_parts.append(f"    bulk_{bulk_var_name} = pd.read_csv('{f.file_path}', index_col=0, {sep_hint})")
-                    data_parts.append(f"    # Bulk matrix (genes x samples). Print bulk_{bulk_var_name}.columns to infer sample grouping for DESeq2 metadata.")
-                    data_parts.append(f"    # CRITICAL: PyDESeq2 requires (samples x genes) - transpose with .T before use.")
+                    data_parts.append(f"    # Bulk matrix (genes x samples). Print bulk_{bulk_var_name}.columns to infer sample grouping for pydeseq2 metadata.")
+                    data_parts.append(f"    # CRITICAL: pydeseq2 requires (samples x genes) - transpose with .T before use.")
         else:
             data_parts.append("⚠️ No sequencing data uploaded")
 
@@ -555,7 +556,7 @@ WORKFLOW GUIDELINES:
   * Only use `init_pos='spectral'` for n_obs <= 5000
 - **BATCH EFFECT CHECK**: When loading multiple samples/batches/conditions, assess batch effects BEFORE clustering:
   * After initial PCA/UMAP, visualize cells colored by batch/sample/condition to check for batch effects
-  * If batch effects are apparent (samples cluster by batch rather than cell type), consult PI about correction strategy (Harmony, BBKNN, scVI, Combat, etc.)
+  * If batch effects are apparent (samples cluster by batch rather than cell type), consult PI about correction strategy (harmonypy, bbknn, scvi, scanpy.pp.combat, etc.)
   * Do NOT skip this step when multiple samples exist — batch effects can dominate clustering results
 - For CELL TYPE ANNOTATION, use annotate_clusters (NOT consult_pi):
   * After clustering and sc.tl.rank_genes_groups(), collect ALL cluster top markers into a dict
@@ -582,7 +583,7 @@ When you need to compute ANY score (gene signature, pathway enrichment, TF activ
    - Options: List alternative methods if applicable
 2. After PI confirms/modifies, execute the computation via execute_code
 3. IMMEDIATELY after, call register_score to record the methodology
-This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrichr, decoupleR, custom scoring functions.
+This applies to: sc.tl.score_genes, gseapy.ssgsea, gseapy.prerank, gseapy.enrichr, decoupler, custom scoring functions.
 
 GENE MODULE SCORING — USE FULL GENE SET (CRITICAL):
   sc.tl.score_genes() on HVG-filtered data will miss most genes. Always:
@@ -1065,6 +1066,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         annotation_completed = False  # Mandatory step tracker for exploration phase
         integration_reject_count = 0  # Track rejections for bulk/scRNA-seq integration gate
         MAX_INTEGRATION_REJECTIONS = 2  # Escape hatch: allow through after N rejections
+        deconv_reject_count = 0  # Track rejections for cell-type deconvolution gate
+        MAX_DECONV_REJECTIONS = 2  # Escape hatch: allow through after N rejections
         llm_error: Optional[str] = None
         text_response_count = 0
         MAX_TEXT_RESPONSES = 2
@@ -1794,15 +1797,22 @@ except Exception as _autosave_block_err:
                         ))
                         continue
 
-                    # Enforce bulk RNA-seq analysis in exploration phase when bulk data exists
+                    # Enforce mandatory analysis gates in exploration phase
                     if state.analysis_phase == AnalysisPhase.EXPLORATION:
                         seq_files = state.get_files_by_section("sequencing")
                         bulk_files = [f for f in seq_files if f.data_type == "bulk RNA-seq"]
+                        has_scrna_data = any(f.data_type == "scRNA-seq" for f in seq_files)
+                        has_bulk_data = len(bulk_files) > 0
+
+                        # Pre-lowercase code history once for all gate keyword checks
+                        lowered_codes = [ce.code.lower() for ce in self.code_history if ce.code]
+
+                        # Gate 1: Bulk RNA-seq analysis
                         if bulk_files:
                             code_mentions_bulk = any(
-                                "bulk" in ce.code.lower() or "merged_counts" in ce.code.lower()
-                                or "pydeseq" in ce.code.lower() or "deseqdataset" in ce.code.lower()
-                                for ce in self.code_history if ce.code
+                                "bulk" in lc or "merged_counts" in lc
+                                or "pydeseq" in lc or "deseqdataset" in lc
+                                for lc in lowered_codes
                             )
                             if not code_mentions_bulk:
                                 logger.warning(
@@ -1817,7 +1827,7 @@ except Exception as _autosave_block_err:
                                         "bulk RNA-seq analysis. Bulk RNA-seq data is available and MUST be analyzed. "
                                         f"Bulk data files: {bulk_paths}. "
                                         "You MUST: (1) Load bulk count matrix with pd.read_csv(), "
-                                        "(2) Perform DEG analysis using PyDESeq2 (if ImportError, fallback to scipy.stats.ttest_ind + statsmodels FDR correction), "
+                                        "(2) Perform DEG analysis using pydeseq2 (if ImportError, fallback to scipy.stats.ttest_ind + statsmodels FDR correction), "
                                         "(3) Compare bulk DEGs with scRNA-seq pseudobulk DEGs (Venn diagram), "
                                         "THEN call report_findings."
                                     )
@@ -1829,19 +1839,15 @@ except Exception as _autosave_block_err:
                                 ))
                                 continue
 
-                    # Enforce bulk/scRNA-seq cross-validation when both data types exist
-                    if state.analysis_phase == AnalysisPhase.EXPLORATION:
-                        seq_files_integ = state.get_files_by_section("sequencing")
-                        has_scrna_data = any(f.data_type == "scRNA-seq" for f in seq_files_integ)
-                        has_bulk_data = any(f.data_type == "bulk RNA-seq" for f in seq_files_integ)
+                        # Gate 2: Bulk/scRNA-seq cross-validation
                         if has_scrna_data and has_bulk_data:
                             integration_keywords = [
                                 "venn", "pseudobulk", "overlap", "intersect",
                                 "matplotlib_venn", "venn2", "venn3",
                             ]
                             code_mentions_integration = any(
-                                any(kw in ce.code.lower() for kw in integration_keywords)
-                                for ce in self.code_history if ce.code
+                                any(kw in lc for kw in integration_keywords)
+                                for lc in lowered_codes
                             )
                             if not code_mentions_integration:
                                 if integration_reject_count >= MAX_INTEGRATION_REJECTIONS:
@@ -1877,6 +1883,50 @@ except Exception as _autosave_block_err:
                                         agent_reasoning=agent_reasoning,
                                         findings=[],
                                         findings_summary="REJECTED: bulk/scRNA-seq cross-validation not performed",
+                                    ))
+                                    continue
+
+                        # Gate 3: Cell-type deconvolution
+                        if has_scrna_data and has_bulk_data:
+                            deconv_keywords = [
+                                "deconvolution", "nnls", "scaden", "least_squares"
+                            ]
+                            code_mentions_deconv = any(
+                                any(kw in lc for kw in deconv_keywords)
+                                for lc in lowered_codes
+                            )
+                            if not code_mentions_deconv:
+                                if deconv_reject_count >= MAX_DECONV_REJECTIONS:
+                                    logger.warning(
+                                        "[Bioinformatics] Deconvolution gate: max rejections reached, "
+                                        "allowing report_findings without deconvolution"
+                                    )
+                                else:
+                                    deconv_reject_count += 1
+                                    logger.warning(
+                                        "[Bioinformatics] report_findings rejected: "
+                                        "cell-type deconvolution not performed "
+                                        f"(rejection {deconv_reject_count}/{MAX_DECONV_REJECTIONS})"
+                                    )
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": (
+                                            "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                            "cell-type deconvolution. "
+                                            "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
+                                            "perform deconvolution to estimate cell-type proportions in the bulk samples.\n"
+                                            "(1) Use scRNA-seq as a reference profile\n"
+                                            "(2) Prioritize pure Python methods like scipy.optimize.nnls or sklearn Non-negative Least Squares\n"
+                                            "(3) Visualize inferred cell-type proportions across bulk conditions\n"
+                                            "THEN call report_findings."
+                                        )
+                                    })
+                                    analysis_log.append(AnalysisStep(
+                                        step_number=step_count, step_type="report_findings",
+                                        agent_reasoning=agent_reasoning,
+                                        findings=[],
+                                        findings_summary="REJECTED: cell-type deconvolution not performed",
                                     ))
                                     continue
 
@@ -2841,3 +2891,177 @@ Return only the Python code:"""
         code = extract_code_from_markdown(response_text)
 
         return code.strip()
+
+    # ============================================
+    # Text-Mode Graphic Abstract (ASCII diagram)
+    # ============================================
+
+    _TEXT_DIAGRAM_SYSTEM_PROMPT = (
+        "You are a scientific diagram designer. You draw ASCII/Unicode flow diagrams "
+        "of molecular signaling pathways and cellular processes. You do NOT run code, "
+        "perform analyses, or produce prose reports. Your entire output is a plain-text "
+        "diagram that renders correctly inside an HTML <pre> block."
+    )
+
+    _TEXT_DIAGRAM_RULES = textwrap.dedent("""
+        Rules for the diagram:
+        - Use ONLY English labels. Non-ASCII (Chinese, Japanese, emoji) breaks alignment.
+        - Allowed drawing characters:  | │ ▼ ▲ ─ ──► ◄── → ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ ● ○ ■ □ [ ] { } and the double arrow ══►
+        - Each line must be at most 80 columns wide.
+        - Use real newline characters to separate lines.
+        - Wrap node labels in square brackets, e.g. [TGFBR1/2 receptor]. Protein/gene tokens
+          may additionally be wrapped in curly braces, e.g. {SMAD2/3}.
+        - Show at least 5 nodes and make the directional flow obvious with arrows.
+        - Include cellular processes (proliferation, apoptosis, migration, EMT, ...) when relevant.
+        - Do NOT wrap the output in markdown code fences (no ``` lines).
+        - Output ONLY the diagram — no prose explanation before or after.
+    """).strip()
+
+    async def generate_text_diagram(
+        self,
+        state,
+        pi_prompt: str
+    ) -> str:
+        """
+        Draw an ASCII/Unicode pathway diagram following PI's instruction.
+
+        Raises ValueError if the LLM returns empty content.
+        """
+        logger.info(f"[{getattr(self, 'session_id', '')}][Bio] Generating text-mode diagram")
+
+        user_message = f"""## Draw a text-mode graphic abstract
+
+**PI instruction:**
+{pi_prompt}
+
+{self._TEXT_DIAGRAM_RULES}
+
+Draw the diagram now.
+"""
+        response = await self.chat_without_history(
+            user_message, temperature=0.3,
+            system_prompt=self._TEXT_DIAGRAM_SYSTEM_PROMPT
+        )
+        diagram = extract_code_from_markdown(response).strip()
+        if not diagram:
+            raise ValueError("Bioinformatics agent returned empty text diagram")
+        return diagram
+
+    async def revise_text_diagram(
+        self,
+        state,
+        current_diagram: str,
+        pi_prompt: str,
+        review: Dict[str, Any],  # Consistently pass the review dict
+        revision_history: List[Dict[str, Any]]
+    ) -> str:
+        """
+        Revise a text-mode diagram based on reviewer feedback.
+
+        Raises on empty response.
+        """
+        feedback = review.get("feedback", "")
+        suggestions = review.get("suggestions", [])
+        must_fix = review.get("must_fix", [])
+
+        logger.info(f"[{getattr(self, 'session_id', '')}][Bio] Revising text diagram (round {len(revision_history)})")
+
+        history_text = format_revision_history(revision_history)
+
+        suggestions_text = "\n".join(f"  - {s}" for s in (suggestions or [])) or "  (none)"
+        must_fix_text = "\n".join(f"  - {m}" for m in (must_fix or [])) or "  (none)"
+
+        user_message = f"""## Revise the text-mode graphic abstract
+
+**PI instruction (unchanged):**
+{pi_prompt}
+
+**Current diagram:**
+{current_diagram}
+
+**New reviewer feedback:**
+{feedback}
+
+**Specific suggestions:**
+{suggestions_text}
+
+**Must-fix:**
+{must_fix_text}
+
+{history_text}
+
+{self._TEXT_DIAGRAM_RULES}
+
+Return the revised diagram only — no prose, no markdown fences.
+"""
+        response = await self.chat_without_history(
+            user_message, temperature=0.3,
+            system_prompt=self._TEXT_DIAGRAM_SYSTEM_PROMPT
+        )
+        diagram = extract_code_from_markdown(response).strip()
+        if not diagram:
+            raise ValueError("Bioinformatics agent returned empty revised diagram")
+        return diagram
+
+    async def review_text_diagram(
+        self,
+        state,
+        text_diagram: str,
+        revision_history: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Fallback reviewer when the PI is unavailable.
+
+        Raises on failure so the workflow descends to the Supervisor tier.
+        """
+        logger.info(f"[{getattr(self, 'session_id', '')}][Bio] Reviewing text diagram (fallback reviewer)")
+
+        history_text = format_revision_history(revision_history)
+
+        system_prompt = (
+            "You are a bioinformatics analyst reviewing a text-mode (ASCII) pathway "
+            "diagram. You are the fallback reviewer — the PI is unavailable. Read the "
+            "diagram character by character and give concrete feedback."
+        )
+
+        user_message = f"""## Review the text diagram
+
+{history_text}
+
+**Diagram:**
+```
+{text_diagram}
+```
+
+Evaluate scientific accuracy, completeness, clarity of directional flow, and label
+correctness. Respond in JSON:
+
+```json
+{{
+    "quality_score": 1-10,
+    "feedback": "Plain-English assessment",
+    "strengths": ["..."],
+    "issues": ["..."],
+    "suggestions": ["Concrete text edits, e.g. 'Add [SMAD4] between {{SMAD2/3}} and the nucleus'"],
+    "must_fix": ["Critical omissions"]
+}}
+```
+"""
+        response_text = await self.chat_without_history(
+            user_message, temperature=0.3, system_prompt=system_prompt
+        )
+        if not response_text or not response_text.strip():
+            raise ValueError("Bio text diagram review returned empty response")
+
+        data = self._safe_parse_json(response_text, default={})
+        if not data or "feedback" not in data:
+            raise ValueError("Bio text diagram review did not return parseable JSON")
+
+        return {
+            "quality_score": int(data.get("quality_score", 5)),
+            "feedback": data.get("feedback", ""),
+            "strengths": data.get("strengths", []),
+            "issues": data.get("issues", []),
+            "suggestions": data.get("suggestions", []),
+            "must_fix": data.get("must_fix", [])
+        }

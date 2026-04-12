@@ -1620,7 +1620,7 @@ Be specific and actionable. Include:
                 "mito_genes", "quality_control", "doublet", "scrublet"],
         "normalization": ["normalize_total", "log1p", "highly_variable_genes",
                           "sc.pp.scale", "regress_out"],
-        "integration": ["harmony", "scanorama", "bbknn", "harmony_integrate",
+        "integration": ["harmonypy", "scanorama", "bbknn", "harmony_integrate",
                         "ingest", "sc.external.pp"],
         "dimensionality_reduction": ["sc.tl.pca", "sc.tl.umap", "sc.tl.tsne",
                                      "sc.pp.pca", "n_comps"],
@@ -1850,7 +1850,7 @@ Be specific and actionable. Include:
             # Key function calls
             elif any(kw in stripped.lower() for kw in [
                 'savefig', 'save_figure', 'to_csv', 'read_h5ad', 'write',
-                'rank_genes_groups', 'enrichr', 'gsea', 'harmony',
+                'rank_genes_groups', 'enrichr', 'gsea', 'harmonypy',
                 'scvelo', 'cellrank', 'liana', 'decoupler'
             ]):
                 is_key = True

@@ -129,12 +129,20 @@ export const translations = {
     figurePending: '待审核',
     figureRevisionRequested: '需修改',
     graphicAbstract: '图形摘要',
+    graphicAbstractTextMode: '图形摘要 (文字模式)',
+    graphicAbstractGenerated: '图形摘要生成',
     integratedReport: '整合报告',
+    integratedReportGenerated: '整合报告生成',
     downloadPDF: '下载 PDF',
     downloadPNG: '下载 PNG',
+    downloadText: '下载文本',
+    downloadHD: '下载高清图',
     downloadAllFigures: '下载所有图片',
     downloadAllTables: '下载所有表格',
     generatingGraphicAbstract: '正在生成图形摘要...',
+    graphicAbstractPrompt: '生成提示: ',
+    generatedAt: '生成于 ',
+    clickToEnlarge: '点击放大',
     noFiguresYet: '暂无图片',
     noTablesYet: '暂无表格',
     piReviewingFigure: 'PI 正在审核图片...',
@@ -317,7 +325,7 @@ Analysis pipeline (adjust based on data type):
 7. Other specialized analyses
 
 Code requirements:
-- Use appropriate analysis libraries (scanpy, DESeq2, etc.)
+- Use appropriate analysis libraries (scanpy, pydeseq2, etc.)
 - Set random_state=42 for reproducibility
 - Generate visualizations at each step
 - Save key intermediate results
@@ -546,12 +554,20 @@ Please provide a detailed literature review report with specific citation inform
     figurePending: 'Pending Review',
     figureRevisionRequested: 'Revision Requested',
     graphicAbstract: 'Graphic Abstract',
+    graphicAbstractTextMode: 'Graphic Abstract (Text Mode)',
+    graphicAbstractGenerated: 'Graphic Abstract Generated',
     integratedReport: 'Integrated Report',
+    integratedReportGenerated: 'Integrated Report Generated',
     downloadPDF: 'Download PDF',
     downloadPNG: 'Download PNG',
+    downloadText: 'Download Text',
+    downloadHD: 'Download HD',
     downloadAllFigures: 'Download All Figures',
     downloadAllTables: 'Download All Tables',
     generatingGraphicAbstract: 'Generating graphic abstract...',
+    graphicAbstractPrompt: 'Prompt: ',
+    generatedAt: 'Generated at ',
+    clickToEnlarge: 'Click to enlarge',
     noFiguresYet: 'No figures yet',
     noTablesYet: 'No tables yet',
     piReviewingFigure: 'PI reviewing figure...',
@@ -734,7 +750,7 @@ Analysis pipeline (adjust based on data type):
 7. Other specialized analyses
 
 Code requirements:
-- Use appropriate analysis libraries (scanpy, DESeq2, etc.)
+- Use appropriate analysis libraries (scanpy, pydeseq2, etc.)
 - Set random_state=42 for reproducibility
 - Generate visualizations at each step
 - Save key intermediate results
@@ -923,12 +939,12 @@ Standard analysis workflow (adjust based on data type):
 5. Differential expression analysis
 6. Pathway enrichment analysis
 7. Trajectory/Pseudotime analysis (if applicable):
-   - Use scVelo for RNA velocity analysis (requires .loom files with spliced/unspliced counts)
+   - Use scvelo for RNA velocity analysis (requires .loom files with spliced/unspliced counts)
    - Use PAGA for trajectory inference and partition-based graph abstraction
    - Use diffusion pseudotime (DPT) for ordering cells along differentiation paths
    - Identify key genes driving cell state transitions
-8. Cell-cell communication analysis (CellChat, CellPhoneDB, etc.)
-9. Transcription factor activity analysis (pySCENIC, decoupleR, etc.)
+8. Cell-cell communication analysis (liana)
+9. Transcription factor activity analysis (pyscenic, decoupler, etc.)
 
 **Specialized analyses** (conduct based on specific findings or PI's direction):
 - When you observe unexpected cell populations, signaling changes, or pathway alterations

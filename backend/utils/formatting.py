@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -95,3 +95,29 @@ def safe_parse_json(response: str, default: Optional[Dict[str, Any]] = None) -> 
             logger.debug("JSON extraction from LLM response failed at position %d-%d", start, end)
 
     return default
+
+
+def format_revision_history(entries: List[Dict[str, Any]], include_reviewer: bool = True) -> str:
+    """Format revision history entries as a human-readable text block.
+
+    Args:
+        entries: List of revision entries with 'round', 'reviewer', 'feedback' keys.
+        include_reviewer: Whether to include reviewer name in the output.
+
+    Returns:
+        Formatted history text with "Previous feedback:" header, or empty string if no entries.
+    """
+    if not entries:
+        return ""
+
+    lines = []
+    for entry in entries:
+        r = entry.get("round", "?")
+        fb = entry.get("feedback", "")
+        if include_reviewer:
+            rev = entry.get("reviewer", "reviewer")
+            lines.append(f"  Round {r} ({rev}): {fb}")
+        else:
+            lines.append(f"  Round {r}: {fb}")
+
+    return "Previous feedback:\n" + "\n".join(lines)

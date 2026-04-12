@@ -19,17 +19,27 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
   const { t } = useTranslation(language)
   const [showModal, setShowModal] = useState(false)
 
-  if (!graphicAbstract?.imageBase64) {
+  const isTextMode = !!graphicAbstract?.isTextMode || !!graphicAbstract?.textDiagram
+  const imageB64 = graphicAbstract?.imageBase64 || ''
+  const textDiagram = graphicAbstract?.textDiagram || ''
+
+  if (!imageB64 && !textDiagram) {
     return null
   }
 
   const downloadImage = () => {
-    const mimeType = detectBase64MimeType(graphicAbstract.imageBase64)
+    if (!imageB64) return
+    const mimeType = detectBase64MimeType(imageB64)
     const ext = mimeType === 'image/jpeg' ? 'jpg' : (mimeType.split('/')[1] ?? 'png')
-    const byteString = atob(graphicAbstract.imageBase64)
+    const byteString = atob(imageB64)
     const bytes = new Uint8Array(byteString.length)
     for (let i = 0; i < byteString.length; i++) bytes[i] = byteString.charCodeAt(i)
     downloadBlob(new Blob([bytes], { type: mimeType }), `graphic_abstract.${ext}`)
+  }
+
+  const downloadTextDiagram = () => {
+    if (!textDiagram) return
+    downloadBlob(new Blob([textDiagram], { type: 'text/plain;charset=utf-8' }), 'graphic_abstract.txt')
   }
 
   return (
@@ -37,18 +47,36 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
       {/* Header */}
       <h3 className="text-sm font-medium text-slate-500 uppercase tracking-wide mb-3 flex items-center gap-2">
         <Sparkles className="w-4 h-4 text-amber-500" />
-        {t('graphicAbstract')}
+        {isTextMode ? t('graphicAbstractTextMode') : t('graphicAbstract')}
       </h3>
 
       {/* Card */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        {/* Image Preview */}
+        {/* Preview */}
+        {isTextMode ? (
+          <div
+            className="relative bg-slate-50 cursor-pointer group p-4"
+            onClick={() => setShowModal(true)}
+          >
+            <pre className="font-mono text-xs text-slate-800 whitespace-pre overflow-auto max-h-96 leading-5">
+              {textDiagram}
+            </pre>
+            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+              <div className="flex items-center gap-2 text-white bg-black/50 px-4 py-2 rounded-full">
+                <ZoomIn className="w-5 h-5" />
+                <span className="text-sm font-medium">
+                  {t('clickToEnlarge')}
+                </span>
+              </div>
+            </div>
+          </div>
+        ) : (
         <div
           className="relative bg-slate-50 cursor-pointer group"
           onClick={() => setShowModal(true)}
         >
           <img
-            src={base64ToDataUri(graphicAbstract.imageBase64)}
+            src={base64ToDataUri(imageB64)}
             alt="Graphic Abstract"
             className="w-full h-auto max-h-96 object-contain"
           />
@@ -58,11 +86,12 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
             <div className="flex items-center gap-2 text-white bg-black/50 px-4 py-2 rounded-full">
               <ZoomIn className="w-5 h-5" />
               <span className="text-sm font-medium">
-                {language === 'zh' ? '点击放大' : 'Click to enlarge'}
+                {t('clickToEnlarge')}
               </span>
             </div>
           </div>
         </div>
+        )}
 
         {/* Info & Actions */}
         <div className="p-4 border-t border-slate-200">
@@ -70,22 +99,22 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
             <div className="flex-1">
               <p className="text-sm text-slate-600">
                 <span className="font-medium text-slate-700">
-                  {language === 'zh' ? '生成提示: ' : 'Prompt: '}
+                  {t('graphicAbstractPrompt')}
                 </span>
                 {graphicAbstract.prompt}
               </p>
               <p className="text-xs text-slate-400 mt-1">
-                {language === 'zh' ? '生成于 ' : 'Generated at '}
+                {t('generatedAt')}
                 {new Date(graphicAbstract.createdAt).toLocaleString()}
               </p>
             </div>
 
             <button
-              onClick={downloadImage}
+              onClick={isTextMode ? downloadTextDiagram : downloadImage}
               className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors shrink-0"
             >
               <Download className="w-4 h-4" />
-              {language === 'zh' ? '下载' : 'Download'}
+              {isTextMode ? t('downloadText') : t('downloadHD')}
             </button>
           </div>
         </div>
@@ -109,21 +138,29 @@ export function GraphicAbstract({ graphicAbstract }: GraphicAbstractProps) {
               <X className="w-8 h-8" />
             </button>
 
-            {/* Image */}
-            <img
-              src={base64ToDataUri(graphicAbstract.imageBase64)}
-              alt="Graphic Abstract"
-              className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl"
-            />
+            {/* Content */}
+            {isTextMode ? (
+              <pre className="font-mono text-sm text-slate-100 bg-slate-900 rounded-lg shadow-2xl p-6 max-w-full max-h-[85vh] overflow-auto whitespace-pre leading-6">
+                {textDiagram}
+              </pre>
+            ) : (
+              <img
+                src={base64ToDataUri(imageB64)}
+                alt="Graphic Abstract"
+                className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl"
+              />
+            )}
 
             {/* Bottom bar */}
             <div className="absolute -bottom-14 left-0 right-0 flex items-center justify-center gap-4">
               <button
-                onClick={downloadImage}
+                onClick={isTextMode ? downloadTextDiagram : downloadImage}
                 className="flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors"
               >
                 <Download className="w-4 h-4" />
-                {language === 'zh' ? '下载高清图' : 'Download HD'}
+                {isTextMode
+                  ? t('downloadText')
+                  : t('downloadHD')}
               </button>
             </div>
           </div>

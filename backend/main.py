@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.19.4"
+    version="0.19.6"
 )
 
 # CORS
@@ -741,7 +741,8 @@ def _strip_message_base64(msg_type: str, content) -> Any:
     # figure type: content is raw base64 string
     if msg_type == "figure" and isinstance(content, str) and len(content) > 1000:
         return "[image]"
-    # graphic_abstract type: content has image_base64
+    # graphic_abstract type: content has image_base64. 
+    # NOTE: Keep text_diagram and is_text_mode as they are small and needed for UI.
     if msg_type == "graphic_abstract" and isinstance(content, dict):
         return {k: v for k, v in content.items() if k not in ("image_base64", "imageBase64")}
     # figure_review / figure_approved / figure_revision: content has png_base64

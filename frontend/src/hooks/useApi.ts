@@ -256,6 +256,8 @@ export function useSession() {
           id: data.graphic_abstract.id,
           prompt: data.graphic_abstract.prompt || '',
           imageBase64: data.graphic_abstract.image_base64 || data.graphic_abstract.imageBase64 || '',
+          textDiagram: data.graphic_abstract.text_diagram || data.graphic_abstract.textDiagram || undefined,
+          isTextMode: data.graphic_abstract.is_text_mode ?? data.graphic_abstract.isTextMode ?? false,
           createdAt: data.graphic_abstract.created_at || data.graphic_abstract.createdAt || '',
         } : undefined,
         integratedReport: data.integrated_report || undefined,

@@ -30,6 +30,7 @@ from .models.schemas import (
     WebSocketMessage, AgentMessage, MessageRole, BiochemistryIndicator,
     PublicationFigure, FigureReviewStatus,
     ClusterAnnotation, AnnotationConfirmationState, DetailedReportSegment,
+    GraphicAbstract,
 )
 from .agents.pi_agent import PIAgent
 from .agents.pathology_agent import PathologyAgent
@@ -2329,15 +2330,15 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
 4. Run GO/KEGG pathway enrichment on ALL DEG results
 5. Keep analyses simple and high-throughput (DEG + GO/KEGG)
 6. Do NOT skip any cell type — but DO merge related subtypes/states of the same cell type
-7. Complete cell communication analysis (CellChat or similar)
+7. Complete cell communication analysis (liana)
 8. For EACH cell type group's DEG results, generate a visualization figure (volcano plot or bar chart)
 9. For EACH cell type group's KEGG/GO enrichment, generate a bar plot of top enriched pathways
 """
             if has_bulk:
                 phase_instruction += """
 10. **MANDATORY — Bulk RNA-seq DEG Analysis** (DO NOT SKIP):
-    - Load the bulk RNA-seq count matrix and perform DEG analysis using PyDESeq2
-      (CRITICAL: If PyDESeq2 raises ImportError, fallback to scipy.stats.ttest_ind with statsmodels multipletests for FDR correction)
+    - Load the bulk RNA-seq count matrix and perform DEG analysis using pydeseq2
+      (CRITICAL: If pydeseq2 raises ImportError, fallback to scipy.stats.ttest_ind with statsmodels multipletests for FDR correction)
     - Generate a volcano plot for bulk DEG results
     NOTE: report_findings will be REJECTED if bulk DEG analysis is not performed.
 
@@ -2347,6 +2348,13 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
     - Visualize the overlap with a Venn diagram (from matplotlib_venn import venn2)
     - For overlapping DEGs, visualize their cell-type-specific expression in scRNA-seq (e.g., dotplot or heatmap)
     NOTE: This is a SEPARATE mandatory gate. report_findings will be REJECTED if cross-validation is not performed.
+
+12. **MANDATORY — Cell-Type Deconvolution** (DO NOT SKIP):
+    - Use the annotated scRNA-seq data as a reference to perform cell-type deconvolution on the bulk RNA-seq matrix.
+    - Prioritize pure Python methods like scipy.optimize.nnls or sklearn.linear_model.LinearRegression(positive=True).
+    - If needed and available, use advanced tools like scaden (prioritize scipy.optimize.nnls).
+    - Generate a stacked bar plot or box plot showing the inferred cell-type proportions across bulk samples/conditions.
+    NOTE: This is a SEPARATE mandatory gate. report_findings will be REJECTED if deconvolution is not performed.
 """
         else:
             direction_ctx = analysis_state.current_round_direction or "PI-directed"
@@ -2388,10 +2396,10 @@ Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc
         if bioinf_tasks:
             goals_text = "\n".join(f"- {task}" for task in _normalize_tasks(bioinf_tasks))
         elif has_bulk and not has_scrna:
-            goals_text = "- Perform standard bulk RNA-seq analysis (DESeq2/PyDESeq2, pathway enrichment)"
+            goals_text = "- Perform standard bulk RNA-seq analysis (pydeseq2, pathway enrichment)"
         elif has_bulk and has_scrna:
             goals_text = ("- Perform standard scRNA-seq analysis pipeline\n"
-                          "- Perform bulk RNA-seq DEG analysis (PyDESeq2) and cross-validate with scRNA-seq pseudobulk DEGs")
+                          "- Perform bulk RNA-seq DEG analysis (pydeseq2) and cross-validate with scRNA-seq pseudobulk DEGs")
         else:
             goals_text = "- Perform standard scRNA-seq analysis pipeline"
 
@@ -2764,7 +2772,7 @@ Which topics are NOT sufficiently covered in the report? Return a JSON array of 
 Return ONLY the JSON array, nothing else."""
 
         try:
-            response = await self.literature_agent.chat(prompt, temperature=0.2)
+            response = await self.literature_agent.chat_without_history(prompt, temperature=0.2)
             # Strip markdown code fences if present (e.g. ```json ... ```)
             cleaned = response.strip()
             if cleaned.startswith('```'):
@@ -3377,13 +3385,38 @@ Return ONLY the JSON array, nothing else."""
         }
 
     async def _generate_graphic_abstract(self, state: WorkflowState) -> WorkflowState:
-        """Generate graphic abstract with revision loop (max 2 revisions, PI selects best)"""
-        analysis_state = state["analysis_state"]
+        """
+        Dispatcher: try image mode first when Painter is available; on failure (or when
+        Painter is disabled) fall back to text-mode ASCII diagram drawn by the Bio agent.
+        """
+        if self.painter_agent:
+            try:
+                return await self._generate_image_graphic_abstract(state)
+            except Exception as e:
+                logger.exception(
+                    f"[{self.session_id}] Image graphic abstract failed; "
+                    f"falling back to text-mode diagram"
+                )
+                await self._send_message(
+                    "status",
+                    "Image generation failed, falling back to text-mode diagram...",
+                    AgentType.PAINTER,
+                )
+        else:
+            logger.info(
+                f"[{self.session_id}] Painter agent disabled; generating text-mode diagram"
+            )
 
-        # Skip if painter agent is disabled
-        if not self.painter_agent:
-            logger.info(f"[{self.session_id}] Painter agent disabled, skipping graphic abstract generation")
-            return state
+        return await self._generate_text_graphic_abstract(state)
+
+    async def _generate_image_graphic_abstract(self, state: WorkflowState) -> WorkflowState:
+        """Generate image graphic abstract with revision loop (max 2 revisions, PI selects best).
+
+        NOTE: must only write `analysis_state.graphic_abstract` on successful completion
+        so that exceptions leave the state untouched and the dispatcher can cleanly fall
+        back to text mode.
+        """
+        analysis_state = state["analysis_state"]
 
         logger.info(f"[{self.session_id}] Generating graphic abstract")
         await self._send_message("status", "Generating graphic abstract...", AgentType.PAINTER)
@@ -3524,14 +3557,11 @@ Return ONLY the JSON array, nothing else."""
                 f"{len(candidates) - 1} revisions"
             )
 
-        except Exception as e:
-            logger.exception(f"[{self.session_id}] Failed to generate graphic abstract")
-            await self._send_message(
-                "error",
-                f"Graphic abstract generation failed: {str(e)}. Continuing with detailed report...",
-                AgentType.PAINTER
-            )
-            # Don't fail the workflow - graphic abstract is optional
+        except Exception:
+            logger.exception(f"[{self.session_id}] Failed to generate image graphic abstract")
+            # Re-raise so the dispatcher (_generate_graphic_abstract) can fall back to text mode.
+            # `analysis_state.graphic_abstract` is only assigned on success, so state is untouched.
+            raise
 
         logger.info(f"[{self.session_id}] Graphic abstract step completed")
 
@@ -3539,6 +3569,238 @@ Return ONLY the JSON array, nothing else."""
             **state,
             "analysis_state": analysis_state
         }
+
+    # ------------------------------------------------------------------
+    # Text-mode graphic abstract (Painter unavailable fallback)
+    # ------------------------------------------------------------------
+
+    _DEFAULT_TEXT_DIAGRAM_PROMPT = (
+        "Draw an ASCII/Unicode flow diagram summarizing the study's key signaling "
+        "pathway and cellular processes. Reason from the final summary provided and "
+        "highlight ligand -> receptor -> downstream effector -> transcription factor "
+        "-> cellular outcome relationships. Include at least 5 nodes and use "
+        "directional arrows. English labels only.\n\n"
+        "Study summary:\n{summary}"
+    )
+
+    async def _select_diagram_reviewer(
+        self,
+        state: AnalysisState,
+        diagram: str,
+        revision_history: List[Dict[str, Any]],
+    ):
+        """Pick a text-diagram reviewer by exception-based cascade: PI -> Bio -> Supervisor.
+
+        Returns (review_dict, reviewer_name) or (None, None) if all reviewers fail.
+        """
+        try:
+            r = await self.pi_agent.review_text_diagram(state, diagram, revision_history)
+            return r, "pi"
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] PI text diagram review failed: {e}")
+
+        if self.bioinformatics_agent is not None:
+            try:
+                r = await self.bioinformatics_agent.review_text_diagram(
+                    state, diagram, revision_history
+                )
+                return r, "bioinformatics"
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] Bio text diagram review failed: {e}")
+
+        if self.supervisor_agent is not None:
+            try:
+                r = await self.supervisor_agent.review_text_diagram(
+                    state, diagram, revision_history
+                )
+                return r, "supervisor"
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] Supervisor text diagram review failed: {e}")
+
+        return None, None
+
+    async def _select_best_diagram_across_reviewers(
+        self,
+        state: AnalysisState,
+        candidates: List[str],
+        revision_history: List[Dict[str, Any]],
+    ) -> int:
+        """Pick best text diagram with same PI -> Bio -> Supervisor cascade."""
+        try:
+            return await self.pi_agent.select_best_text_diagram(
+                state, candidates, revision_history
+            )
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] PI best-diagram selection failed: {e}")
+
+        # Bio and Supervisor don't have select_best_text_diagram; use PI's as the only
+        # LLM-driven selection. On failure, fall back to the most recent candidate.
+        return len(candidates) - 1
+
+    async def _generate_text_graphic_abstract(self, state: WorkflowState) -> WorkflowState:
+        """Generate ASCII/Unicode text-mode graphic abstract with tiered review."""
+        analysis_state = state["analysis_state"]
+
+        if self.bioinformatics_agent is None:
+            logger.error(
+                f"[{self.session_id}] Bioinformatics agent missing; cannot generate "
+                f"text-mode graphic abstract"
+            )
+            return state
+
+        await self._send_message(
+            "status",
+            "Generating text-mode graphic abstract (ASCII diagram)...",
+            AgentType.BIOINFORMATICS,
+        )
+
+        # Explicit fresh containers — must not inherit any image-mode residue.
+        candidates: List[str] = []
+        revision_history: List[Dict[str, Any]] = []
+        pi_prompt: str = ""
+
+        try:
+            # Step 1: PI generates drawing instruction (or hardcoded fallback)
+            try:
+                pi_prompt = await self.pi_agent.generate_text_diagram_prompt(analysis_state)
+            except Exception as e:
+                logger.warning(
+                    f"[{self.session_id}] PI generate_text_diagram_prompt raised: {e}"
+                )
+                pi_prompt = ""
+
+            if not pi_prompt:
+                summary = (analysis_state.final_summary or "")[:1500]
+                pi_prompt = self._DEFAULT_TEXT_DIAGRAM_PROMPT.format(summary=summary)
+
+            # Step 2: Bio draws initial diagram
+            initial = await self.bioinformatics_agent.generate_text_diagram(
+                analysis_state, pi_prompt
+            )
+            candidates.append(initial)
+
+            await self._send_message(
+                "graphic_abstract",
+                {
+                    "image_base64": "",
+                    "text_diagram": initial,
+                    "is_text_mode": True,
+                    "prompt": pi_prompt,
+                    "created_at": datetime.now().isoformat(),
+                },
+                AgentType.BIOINFORMATICS,
+            )
+
+            # Step 3: revision loop (max 2 rounds)
+            for round_idx in range(2):
+                review, reviewer_name = await self._select_diagram_reviewer(
+                    analysis_state, candidates[-1], revision_history
+                )
+                if review is None:
+                    logger.info(
+                        f"[{self.session_id}] No reviewer available for text diagram; "
+                        f"ending revision loop at round {round_idx + 1}"
+                    )
+                    break
+
+                revision_history.append({
+                    "round": round_idx + 1,
+                    "reviewer": reviewer_name,
+                    "feedback": review.get("feedback", ""),
+                    "suggestions": review.get("suggestions", []),
+                    "must_fix": review.get("must_fix", []),
+                    "quality_score": review.get("quality_score"),
+                })
+
+                try:
+                    await self._send_message(
+                        "status",
+                        f"Revising text diagram (round {round_idx + 1}/2, reviewer={reviewer_name})...",
+                        AgentType.BIOINFORMATICS,
+                    )
+                    revised = await self.bioinformatics_agent.revise_text_diagram(
+                        analysis_state,
+                        candidates[-1],
+                        pi_prompt,
+                        review,
+                        revision_history,
+                    )
+                    candidates.append(revised)
+
+                    await self._send_message(
+                        "graphic_abstract",
+                        {
+                            "image_base64": "",
+                            "text_diagram": revised,
+                            "is_text_mode": True,
+                            "prompt": pi_prompt,
+                            "created_at": datetime.now().isoformat(),
+                        },
+                        AgentType.BIOINFORMATICS,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.session_id}] Text diagram revision round {round_idx + 1} failed: {e}"
+                    )
+                    break
+
+            # Step 4: pick best candidate
+            if len(candidates) > 1:
+                selected_idx = await self._select_best_diagram_across_reviewers(
+                    analysis_state, candidates, revision_history
+                )
+            else:
+                selected_idx = 0
+            if not (0 <= selected_idx < len(candidates)):
+                logger.warning(
+                    f"[{self.session_id}] Selected candidate index {selected_idx} is out of bounds, "
+                    f"falling back to last candidate."
+                )
+                selected_idx = len(candidates) - 1
+
+            # Step 5: commit state (LAST, after everything succeeded)
+            graphic = GraphicAbstract(
+                prompt=pi_prompt,
+                image_base64="",
+                text_diagram=candidates[selected_idx],
+                revision_count=len(candidates) - 1,
+                revision_history=revision_history,
+                all_candidates=candidates,
+                selected_index=selected_idx,
+            )
+            analysis_state.graphic_abstract = graphic
+
+            if revision_history:
+                await self._send_message(
+                    "graphic_abstract",
+                    {
+                        "image_base64": "",
+                        "text_diagram": candidates[selected_idx],
+                        "is_text_mode": True,
+                        "prompt": pi_prompt,
+                        "created_at": graphic.created_at.isoformat(),
+                    },
+                    AgentType.BIOINFORMATICS,
+                )
+
+            logger.info(
+                f"[{self.session_id}] Text-mode graphic abstract completed: "
+                f"selected candidate {selected_idx + 1}/{len(candidates)}, "
+                f"{len(candidates) - 1} revisions"
+            )
+
+        except Exception as e:
+            logger.exception(
+                f"[{self.session_id}] Failed to generate text-mode graphic abstract"
+            )
+            await self._send_message(
+                "error",
+                f"Text-mode graphic abstract failed: {e}. Continuing with detailed report...",
+                AgentType.BIOINFORMATICS,
+            )
+            # Don't fail the workflow - graphic abstract is optional
+
+        return {**state, "analysis_state": analysis_state}
 
     async def _generate_detailed_report(self, state: WorkflowState) -> WorkflowState:
         """Generate detailed report with figures and tables"""
@@ -3923,6 +4185,11 @@ Return ONLY the JSON array, nothing else."""
             except Exception as e:
                 logger.debug(f"Failed to close extra LLM client: {e}")
     
+    def get_notebook_path(self) -> Optional[str]:
+        """Get path to the saved Jupyter notebook"""
+        if self.sandbox:
+            return self.sandbox.get_notebook_path()
+        return None
     def get_notebook_path(self) -> Optional[str]:
         """Get path to the saved Jupyter notebook"""
         if self.sandbox:

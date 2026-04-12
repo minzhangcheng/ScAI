@@ -702,7 +702,7 @@ Return ONLY the PubMed query string, nothing else."""
         last_err: Optional[Exception] = None
         for attempt in range(_MAX_MAIN_RETRIES):
             try:
-                return await self.chat(prompt, temperature=temperature), False
+                return await self.chat_without_history(prompt, temperature=temperature), False
             except _FALLBACK_EXCEPTIONS as e:
                 last_err = e
                 if isinstance(e, RateLimitError):
@@ -776,7 +776,7 @@ Respond in JSON format:
     "missing_aspects": ["aspects not yet covered"]
 }}"""
 
-        response = await self.chat(prompt, temperature=0.3)
+        response = await self.chat_without_history(prompt, temperature=0.3)
         result = self._safe_parse_json(response)
         if not result or "sufficient" not in result:
             return {"sufficient": True}
@@ -891,7 +891,7 @@ Create a unified, well-structured review that:
 3. Provides a coherent narrative
 4. Highlights the most important findings"""
 
-        return await self.chat(prompt, temperature=0.4)
+        return await self.chat_without_history(prompt, temperature=0.4)
 
     # ===================================================================
     # Result finalization helper
@@ -973,7 +973,7 @@ Note: If you are not certain about specific citation information, please clearly
             )
             response = resp.content or ""
         else:
-            response = await self.chat(prompt, temperature=0.3)
+            response = await self.chat_without_history(prompt, temperature=0.3)
 
         report = LiteratureReport(
             topic=topic,
@@ -1074,7 +1074,7 @@ Extract key findings from the following literature review (in list form):
 Please list 3-5 most important findings, one per line.
 """
 
-        response = await self.chat(prompt, temperature=0.3)
+        response = await self.chat_without_history(prompt, temperature=0.3)
 
         findings = []
         for line in response.strip().split('\n'):
@@ -1118,7 +1118,7 @@ Please return in JSON format:
 }}
 """
 
-        response = await self.chat(prompt, temperature=0.2)
+        response = await self.chat_without_history(prompt, temperature=0.2)
 
         try:
             parsed = self._safe_parse_json(response)
@@ -1295,7 +1295,7 @@ Return a JSON object with this EXACT structure:
 """
 
         logger.info(f"[Literature] annotate_clusters Phase 2: LLM matching {n_clusters} clusters")
-        response = await self.chat(matching_prompt, temperature=0.2)
+        response = await self.chat_without_history(matching_prompt, temperature=0.2)
 
         # Parse the JSON response
         parsed = self._safe_parse_json(response)
@@ -1372,7 +1372,7 @@ Reply in JSON format:
 }}
 """
 
-        response = await self.chat(prompt, temperature=0.3)
+        response = await self.chat_without_history(prompt, temperature=0.3)
 
         try:
             parsed = self._safe_parse_json(response)

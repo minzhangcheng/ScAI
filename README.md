@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.19.4
+**Version**: 0.19.6
 
 ## Installation
 
@@ -341,6 +341,17 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 5. Network interruptions are handled gracefully — the interface automatically reconnects and restores message history
 
 ## Changelog
+
+### v0.19.6 (2026-04-12)
+
+- **New: Text-mode graphic abstract fallback** — When Painter Agent fails or is disabled, the Bioinformatics Agent generates ASCII/Unicode text diagrams as a fallback; PI Agent generates prompts and reviews with multi-round revision support and best candidate selection
+
+### v0.19.5 (2026-04-12)
+
+- **New: Cell-type deconvolution enforcement** — Added mandatory Gate 3 for cell-type deconvolution when both bulk and scRNA-seq data exist; system now rejects `report_findings` until deconvolution is performed using scRNA-seq as reference
+- **Improvement: Library name standardization** — Unified tool naming to lowercase format: pydeseq2, scvelo, liana, pyscenic, decoupler, harmonypy, bbknn, scvi, scanpy.pp.combat, cellphonedb, scirpy, cytotrace2-py, pertpy
+- **Improvement: Code efficiency** — Pre-lowercase code history once for all gate keyword checks to improve performance
+- **Improvement: Literature agent optimization** — Use `chat_without_history()` for internal LLM calls to avoid unnecessary history accumulation and prevent prompt explosion
 
 ### v0.19.4 (2026-04-12)
 

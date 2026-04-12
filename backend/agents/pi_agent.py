@@ -33,12 +33,14 @@ def _build_default_bio_tasks(state: AnalysisState, detailed: bool = False) -> li
         else:
             tasks.append("Execute standard scRNA-seq/snRNA-seq analysis workflow")
     if has_bulk:
-        tasks.append("Perform bulk RNA-seq DEG analysis using PyDESeq2 (fallback: scipy.stats.ttest_ind + FDR correction if PyDESeq2 unavailable)")
+        tasks.append("Perform bulk RNA-seq DEG analysis using pydeseq2 (fallback: scipy.stats.ttest_ind + FDR correction if pydeseq2 unavailable)")
         if has_scrna:
             tasks.append(
                 "Cross-validate bulk DEGs with scRNA-seq pseudobulk DEGs: "
                 "compute set intersection, generate Venn diagram (from matplotlib_venn import venn2), "
-                "and visualize overlapping DEGs' cell-type-specific expression"
+                "and visualize overlapping DEGs' cell-type-specific expression. "
+                "CRITICAL: Perform cell-type deconvolution of bulk RNA-seq data using scRNA-seq as a reference "
+                "(prioritize scipy.optimize.nnls or sklearn Non-negative Least Squares; if unavailable, try scaden) to estimate cell-type proportion changes."
             )
     if not tasks:
         tasks.append("Execute standard sequencing analysis workflow")
@@ -220,11 +222,12 @@ CRITICAL CONSTRAINTS:
 6. Cell type annotation via annotate_clusters tool
 7. Condition-level DEG (treatment vs control) + GO/KEGG enrichment for all cell types
    (merge similar subtypes/states into unified groups first, e.g., merge stress hepatocytes with hepatocytes)
-8. Cell-cell communication analysis (CellChat or NicheNet)
+8. Cell-cell communication analysis (liana)
 9. If bulk RNA-seq data is available:
-   a. Load bulk expression matrix and perform differential expression analysis (PyDESeq2)
+   a. Load bulk expression matrix and perform differential expression analysis (pydeseq2)
    b. Cross-validate bulk DEG with scRNA-seq pseudobulk DEG
    c. Generate comparison visualizations (Venn diagram, correlation plot)
+   d. Perform cell-type deconvolution on the bulk RNA-seq data using the annotated scRNA-seq data as a reference to estimate cell-type proportions (prioritize pure Python NNLS).
 
 ## Your Additional Planning (UNBIASED exploration)
 Beyond the fixed pipeline, plan these additional analyses:
@@ -674,18 +677,18 @@ For each bioinformatics task, specify the CONCRETE analysis method and target:
 Available analysis toolkit (use as many as relevant):
 - **Targeted DEG**: Specify which cell populations to compare, which contrasts, and threshold strategy
 - **Pathway enrichment**: GO/KEGG for broad screening; GSEA/ssGSEA for quantitative pathway scoring; MSigDB hallmark gene sets
-- **Gene signature & Metabolic scoring**: Score cells for specific biological or metabolic signatures using sc.tl.score_genes or AUCell; choose gene sets based on data-driven findings, not prior assumptions
-- **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scVelo or CellRank for directed cell fate mapping and driver gene identification (if spliced/unspliced data available)
-- **Transcription factor & Gene Regulatory Networks (GRN)**: decoupleR / pySCENIC to infer TF activity; hdWGCNA or gene co-expression analysis to identify co-expressed gene modules and hub genes
-- **Cell-cell communication & Target prediction**: CellChat / CellPhoneDB for ligand-receptor interactions; NicheNet-style analysis (via decoupleR) to predict downstream target gene activation in receiver cells
-- **Cellular Stemness & Plasticity**: CytoTRACE-like scoring to infer differentiation potential and developmental states
-- **Tumor/Malignancy estimation**: inferCNV (infercnvpy) to detect large-scale chromosomal copy number variations (use only when oncology data is present)
+- **Gene signature & Metabolic scoring**: Score cells for specific biological or metabolic signatures using sc.tl.score_genes or pyscenic.aucell; choose gene sets based on data-driven findings, not prior assumptions
+- **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scvelo or cellrank for directed cell fate mapping and driver gene identification (if spliced/unspliced data available)
+- **Transcription factor & Gene Regulatory Networks (GRN)**: decoupler / pyscenic to infer TF activity; PyWGCNA or gene co-expression analysis to identify co-expressed gene modules and hub genes
+- **Cell-cell communication**: liana / cellphonedb for ligand-receptor interactions; ligand-target analysis (via decoupler) to predict downstream target gene activation in receiver cells
+- **Cellular Stemness & Plasticity**: cytotrace2-py for CytoTRACE-like scoring to infer differentiation potential and developmental states
+- **Tumor/Malignancy estimation**: infercnvpy to detect large-scale chromosomal copy number variations (use only when oncology data is present)
 - **Subpopulation re-clustering**: Re-cluster specific cell types at higher resolution to discover subtypes or functional states
 - **Correlation analysis**: Gene-gene correlation, module scoring, or regression analysis within cell populations
-- **Compositional analysis**: Compare cell type proportions between conditions with statistical testing (Milo/milopy, scCODA, or DA-seq)
-- **Immune repertoire analysis**: Scirpy for TCR/BCR clonotype expansion, diversity, and sharing analysis (use only when paired VDJ data is available)
+- **Compositional analysis**: Compare cell type proportions between conditions with statistical testing (pertpy or sccoda)
+- **Immune repertoire analysis**: scirpy for TCR/BCR clonotype expansion, diversity, and sharing analysis (use only when paired VDJ data is available)
 - **Marker gene visualization**: Dot plots, violin plots, feature plots for key genes across conditions
-- **Bulk-scRNA integration**: Cross-validate bulk DEG (with biological replicates) against scRNA-seq pseudobulk DEG; localize bulk-identified genes to specific cell types via scRNA-seq
+- **Bulk-scRNA integration**: Cross-validate bulk DEG (with biological replicates) against scRNA-seq pseudobulk DEG; localize bulk-identified genes to specific cell types via scRNA-seq; perform cell-type deconvolution on bulk data using scRNA-seq reference to infer compositional changes.
 
 IMPORTANT:
 - Generate AT LEAST 4-6 bioinformatics tasks to ensure comprehensive analysis
@@ -2420,6 +2423,219 @@ Consider:
                 logger.warning(f"[PI] Invalid selected_index {idx}, defaulting to last")
 
         # Default to last candidate
+        return len(candidates) - 1
+
+    # ============================================
+    # Text-Mode Graphic Abstract (ASCII diagram)
+    # ============================================
+
+    async def generate_text_diagram_prompt(
+        self,
+        state: AnalysisState
+    ) -> str:
+        """
+        Generate an instruction for the Bioinformatics Agent to draw an ASCII/Unicode
+        text-mode pathway diagram. Used when Painter Agent is disabled or fails.
+
+        Returns empty string on failure so the caller can fall back to a hardcoded template.
+        """
+        logger.info(f"[{self.session_id}][PI] Generating text diagram prompt")
+
+        all_findings = []
+        for result in state.round_results:
+            all_findings.extend(result.bioinformatics_findings[:3])
+            all_findings.extend(result.pathology_findings[:2])
+            all_findings.extend(result.biochemistry_findings[:2])
+
+        prompt = f"""## Generate Text-Mode Diagram Instruction
+
+You are directing a bioinformatics collaborator to draw an ASCII/Unicode flow diagram
+(not a real image) that summarizes the key signaling pathways or cellular processes
+discovered in this study.
+
+**Research Project:**
+- Name: {state.name}
+- Objective: {state.initial_instruction[:400] if state.initial_instruction else 'Biomedical research'}
+
+**Key Findings:**
+{chr(10).join(f'- {f}' for f in all_findings[:10]) if all_findings else 'No specific findings'}
+
+**Final Summary:**
+{state.final_summary[:1200] if state.final_summary else 'Summary not yet generated'}
+
+**Task:**
+Write a 300-500 word instruction that tells the bioinformatics agent EXACTLY what to
+draw. The output will be rendered inside a <pre> block on a web page, so it must be
+pure ASCII/Unicode text.
+
+Your instruction MUST:
+1. List 5-10 key nodes (ligands, receptors, transcription factors, cell states, phenotypes)
+2. State the directional relationships between them (A -> B, B phosphorylates C, etc.)
+3. Mention cellular processes to include (proliferation, apoptosis, migration, ...)
+4. Use English labels only (non-ASCII characters will break alignment)
+5. NOT include drawing symbols — the diagram author will choose them
+
+Return ONLY the instruction text, no markdown headers, no code fences.
+"""
+
+        try:
+            text = await self.chat_without_history(prompt, temperature=0.4)
+        except Exception as e:
+            logger.warning(f"[PI] generate_text_diagram_prompt failed: {e}")
+            return ""
+
+        return (text or "").strip()
+
+    async def review_text_diagram(
+        self,
+        state: AnalysisState,
+        text_diagram: str,
+        revision_history: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Review an ASCII/Unicode text-mode graphic abstract.
+
+        Pure text, so vision capability is NOT required. Raises on any failure so the
+        workflow can fall back to a lower-priority reviewer.
+        """
+        logger.info(f"[{self.session_id}][PI] Reviewing text diagram (round {len(revision_history) + 1})")
+
+        revision_text = self._build_ga_revision_history_text(revision_history)
+
+        system_prompt = (
+            "You are a principal investigator reviewing a text-mode (ASCII/Unicode) "
+            "pathway diagram prepared for a publication's graphic abstract. "
+            "You read the diagram character by character; it is not an image."
+        )
+
+        prompt = f"""## Text Diagram Review
+
+**Research Context:**
+Project: {state.name}
+Objective: {state.initial_instruction[:400] if state.initial_instruction else 'Biomedical research'}
+
+**Final Summary:**
+{state.final_summary[:1000] if state.final_summary else 'Not available'}
+
+**Review Round:** {len(revision_history) + 1}
+{revision_text}
+
+**Diagram to review:**
+```
+{text_diagram}
+```
+
+**Review Criteria:**
+1. Scientific accuracy — do the nodes and arrows match the key findings?
+2. Completeness — are critical pathways, cell states, or processes missing?
+3. Clarity — is the directional flow (arrows) unambiguous?
+4. Layout — do lines align cleanly (watch for mis-aligned arrows, stray characters)?
+5. Labels — are node labels in English, short, scientifically precise?
+
+**Respond in JSON:**
+```json
+{{
+    "quality_score": 1-10,
+    "feedback": "Plain-English assessment of the diagram",
+    "strengths": ["..."],
+    "issues": ["..."],
+    "suggestions": ["Describe text edits, e.g., 'Add a node for SMAD4 between SMAD2/3 and the nucleus'"],
+    "must_fix": ["Critical omissions that block publication"]
+}}
+```
+
+Describe edits in terms of nodes and arrows, NOT visual styling (color, size, etc.).
+"""
+
+        response_text = await self.chat_without_history(
+            prompt, temperature=0.3, system_prompt=system_prompt
+        )
+        if not response_text or not response_text.strip():
+            raise ValueError("PI text diagram review returned empty response")
+
+        data = self._safe_parse_json(response_text, default={})
+        if not data or "feedback" not in data:
+            raise ValueError("PI text diagram review did not return parseable JSON with 'feedback'")
+
+        result = {
+            "quality_score": int(data.get("quality_score", 5)),
+            "feedback": data.get("feedback", ""),
+            "strengths": data.get("strengths", []),
+            "issues": data.get("issues", []),
+            "suggestions": data.get("suggestions", []),
+            "must_fix": data.get("must_fix", [])
+        }
+        logger.info(f"[PI] Text diagram review: score={result['quality_score']}")
+        return result
+
+    async def select_best_text_diagram(
+        self,
+        state: AnalysisState,
+        candidates: List[str],
+        revision_history: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Select the best text-mode diagram from multiple ASCII candidates.
+
+        Pure text, no vision needed. On failure returns the last (most revised) candidate.
+        """
+        logger.info(f"[{self.session_id}][PI] Selecting best text diagram from {len(candidates)} candidates")
+
+        revision_text = self._build_ga_revision_history_text(revision_history)
+
+        candidates_block = "\n\n".join(
+            f"--- Candidate {i+1} ---\n{c}" for i, c in enumerate(candidates)
+        )
+
+        system_prompt = (
+            "You are a principal investigator comparing multiple text-mode pathway "
+            "diagrams and selecting the best one for a publication graphic abstract."
+        )
+
+        prompt = f"""## Select Best Text Diagram
+
+**Research Context:**
+Project: {state.name}
+Objective: {state.initial_instruction[:400] if state.initial_instruction else 'Biomedical research'}
+
+**Final Summary:**
+{state.final_summary[:800] if state.final_summary else 'Not available'}
+
+**Revision History:**
+{revision_text if revision_text else 'No previous feedback'}
+
+**Candidates ({len(candidates)} versions):**
+{candidates_block}
+
+**Task:**
+Select the ONE candidate that is most scientifically accurate, complete, and cleanly
+laid out. Prefer later revisions only if they genuinely addressed feedback; otherwise
+an earlier version may win.
+
+**Respond in JSON:**
+```json
+{{
+    "selected_index": <0-based index>,
+    "reason": "Brief justification"
+}}
+```
+"""
+
+        try:
+            response_text = await self.chat_without_history(
+                prompt, temperature=0.2, system_prompt=system_prompt
+            )
+        except Exception as e:
+            logger.warning(f"[PI] select_best_text_diagram failed: {e}")
+            return len(candidates) - 1
+
+        data = self._safe_parse_json(response_text or "", default={})
+        if data and "selected_index" in data:
+            idx = int(data["selected_index"])
+            if 0 <= idx < len(candidates):
+                logger.info(f"[PI] Selected text diagram {idx + 1}/{len(candidates)}")
+                return idx
+
         return len(candidates) - 1
 
     # ============================================

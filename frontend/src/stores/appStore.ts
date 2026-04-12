@@ -56,7 +56,9 @@ export interface PublicationTable {
 export interface GraphicAbstract {
   id: string
   prompt: string
-  imageBase64: string
+  imageBase64?: string
+  textDiagram?: string
+  isTextMode?: boolean
   createdAt: string
 }
 
@@ -590,7 +592,7 @@ export const useAppStore = create<AppState>()(
           if (msg.type === 'figure') {
             return { ...msg, content: '[image]' }
           }
-          // graphic_abstract type: content has image_base64/imageBase64
+          // graphic_abstract type: content has image_base64/imageBase64 (strip); keep text_diagram (small)
           if (msg.type === 'graphic_abstract' && msg.content != null && typeof msg.content === 'object') {
             return { ...msg, content: { ...msg.content, image_base64: undefined, imageBase64: undefined } }
           }

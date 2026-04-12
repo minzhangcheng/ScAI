@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.19.4
+**Version**: 0.19.6
 **Last Updated**: 2026-04-12
 
 ## Project Overview
@@ -1446,6 +1446,25 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.19.6 (2026-04-12)
+
+- **Text-mode graphic abstract fallback** (`bioinformatics_agent.py`, `pi_agent.py`, `supervisor_agent.py`, `workflow.py`, `formatting.py`, `schemas.py`, frontend): When Painter Agent fails or is disabled, the system generates ASCII/Unicode text diagrams as a fallback for publication graphic abstracts
+  - `bioinformatics_agent.py`: Added `generate_text_diagram()`, `revise_text_diagram()`, `review_text_diagram()` methods for ASCII diagram generation and revision
+  - `pi_agent.py`: Added `generate_text_diagram_prompt()`, `review_text_diagram()`, `select_best_text_diagram()` methods for prompt generation and candidate selection
+  - `supervisor_agent.py`: Added `review_text_diagram()` as final fallback reviewer
+  - `workflow.py`: Added `_generate_text_graphic_abstract()` with three-tier review cascade (PI -> Bio -> Supervisor)
+  - `formatting.py`: Added `format_revision_history()` helper function for revision tracking
+  - `schemas.py`: Extended `GraphicAbstract` model with `text_diagram`, `is_text_mode`, `all_candidates` fields
+  - Frontend (`MessageStream.tsx`, `ResultsPanel.tsx`, `GraphicAbstract.tsx`): Added text diagram rendering, modal preview, and text file download
+  - `translations.ts`: Added text-mode UI strings (graphicAbstractTextMode, integratedReportGenerated, downloadText, downloadHD, etc.)
+
+#### v0.19.5 (2026-04-12)
+
+- **Cell-type deconvolution enforcement** (`bioinformatics_agent.py`): Added mandatory Gate 3 that rejects `report_findings` when both bulk and scRNA-seq data exist but no deconvolution code has been executed; uses keywords (deconvolution, nnls, scaden, least_squares) to detect; includes escape hatch (`MAX_DECONV_REJECTIONS=2`); requires visualization of cell-type proportions across bulk conditions
+- **Library name standardization** (`bioinformatics_agent.py`, `pi_agent.py`, `config.py`, `workflow.py`, `report_generator.py`, `translations.ts`): Unified tool naming to lowercase format across all agent prompts and documentation: pydeseq2, scvelo, liana, pyscenic, decoupler, harmonypy, bbknn, scvi, scanpy.pp.combat, cellphonedb, scirpy, cytotrace2-py, pertpy
+- **Code efficiency optimization** (`bioinformatics_agent.py`): Pre-lowercase code history once per iteration (`lowered_codes`) instead of repeated `.code.lower()` calls in every gate check; improves performance when code history is large
+- **Literature agent optimization** (`literature_agent.py`): Changed multiple `self.chat()` calls to `self.chat_without_history()` in internal methods (`_generate_pubmed_query`, `_evaluate_pubmed_results`, `_synthesize_pubmed_results`, `_quick_search`, `_extract_findings`, `get_cell_markers`, `annotate_clusters`, `validate_pathway`) to avoid unnecessary history accumulation and prevent prompt explosion
 
 #### v0.19.4 (2026-04-12)
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useAppStore, PublicationFigure, PublicationTable, GraphicAbstract as GraphicAbstractType } from '../stores/appStore'
 import { useSession } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
+import type { GraphicAbstractContent } from '../types'
 import { FigureGallery, IntegratedReport, GraphicAbstract, DownloadButtons } from './analysis'
 import { downloadBlob } from '../utils/download'
 import {
@@ -24,15 +25,6 @@ interface IntegratedReportContent {
   report?: string
   figures?: Record<string, unknown>[]
   tables?: PublicationTable[]
-}
-
-interface GraphicAbstractContent {
-  id?: string
-  prompt?: string
-  image_base64?: string
-  imageBase64?: string
-  created_at?: string
-  createdAt?: string
 }
 
 export function ResultsPanel() {
@@ -138,11 +130,14 @@ export function ResultsPanel() {
       }
       if (msg.type === 'graphic_abstract') {
         const content = msg.content as GraphicAbstractContent
-        if (content?.image_base64 || content?.imageBase64) {
+        const textDiagram = content?.text_diagram || content?.textDiagram || ''
+        if (content?.image_base64 || content?.imageBase64 || textDiagram) {
           setGraphicAbstract({
             id: content.id || 'ga-1',
             prompt: content.prompt || '',
             imageBase64: content.image_base64 || content.imageBase64 || '',
+            textDiagram: textDiagram || undefined,
+            isTextMode: content.is_text_mode ?? content.isTextMode ?? !!textDiagram,
             createdAt: content.created_at || content.createdAt || new Date().toISOString()
           })
         }

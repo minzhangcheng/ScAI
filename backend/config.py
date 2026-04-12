@@ -274,19 +274,20 @@ Standard analysis workflow (adjust based on data type):
    - Always include KEGG_2021_Human as a complementary pathway source
    - If a library call fails, log the error and try the next library in the list automatically
 7. Trajectory/Pseudotime analysis (if applicable):
-   - Use scVelo for RNA velocity analysis (requires .loom files with spliced/unspliced counts)
+   - Use scvelo for RNA velocity analysis (requires .loom files with spliced/unspliced counts)
    - Use PAGA for trajectory inference and partition-based graph abstraction
    - Use diffusion pseudotime (DPT) for ordering cells along differentiation paths
-8. Cell-cell communication analysis (CellChat, CellPhoneDB, etc.)
-9. Transcription factor activity analysis (pySCENIC, decoupleR, etc.)
+8. Cell-cell communication analysis (liana)
+9. Transcription factor activity analysis (pyscenic, decoupler, etc.)
 
 **Bulk RNA-seq integration** (when both scRNA-seq and bulk RNA-seq data are available):
-- Load bulk expression matrix and perform DESeq2/PyDESeq2 differential expression analysis (fallback: scipy.stats.ttest_ind + statsmodels multipletests FDR correction if PyDESeq2 unavailable)
+- Load bulk expression matrix and perform pydeseq2 differential expression analysis (fallback: scipy.stats.ttest_ind + statsmodels multipletests FDR correction if pydeseq2 unavailable)
 - Cross-validate: compare bulk DEG list with scRNA-seq pseudobulk DEG (Venn diagram, correlation scatter plot)
 - Localize: for significant bulk DEGs, show expression across cell types in scRNA-seq (dot plot, violin plot)
+- Deconvolution: perform cell-type deconvolution on bulk data using scRNA-seq as a reference to estimate proportions. Prioritize pure Python non-negative least squares (NNLS) before trying pure Python packages like scaden.
 - The bulk results (with biological replicates) provide statistical rigor; scRNA-seq provides cellular resolution
 
-**CRITICAL for PyDESeq2**: PyDESeq2 requires the count matrix in (Samples × Genes) orientation.
+**CRITICAL for pydeseq2**: pydeseq2 requires the count matrix in (Samples × Genes) orientation.
 Standard bulk matrices are (Genes × Samples). You MUST transpose (df.T) before initializing DeseqDataSet.
 You also need a metadata DataFrame with sample names as index and a 'condition' column for the design formula.
 
@@ -295,7 +296,7 @@ You also need a metadata DataFrame with sample names as index and a 'condition' 
 - When PI Agent requests deeper investigation into specific biological questions
 
 Code requirements:
-- Use appropriate analysis libraries (scanpy, DESeq2, etc.)
+- Use appropriate analysis libraries (scanpy, pydeseq2, etc.)
 - Set random_state=42 for reproducibility
 - Generate visualization results for each step
 - Save key intermediate results

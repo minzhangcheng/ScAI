@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, useMemo, memo } from 'react'
 import { useAppStore, Message, AgentType } from '../stores/appStore'
+import { useTranslation } from '../i18n/translations'
+import type { GraphicAbstractContent } from '../types'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import {
@@ -57,12 +59,6 @@ interface ReportContent {
   figures?: unknown[]
 }
 
-interface GraphicAbstractContent {
-  prompt?: string
-  image_base64?: string
-  imageBase64?: string
-}
-
 // Reusable truncated text with expand/collapse
 function TruncatedText({ text, limit, className, language }: { text: string; limit: number; className?: string; language?: string }) {
   const [expanded, setExpanded] = useState(false)
@@ -115,6 +111,7 @@ const agentGradients: Record<AgentType, string> = {
 
 const MessageItem = memo(function MessageItem({ message, language }: { message: Message; language: 'zh' | 'en' }) {
   const [expanded, setExpanded] = useState(true)
+  const { t } = useTranslation(language)
 
   const agentNames: Record<AgentType, string> = {
     pi: 'PI Agent',
@@ -413,7 +410,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs text-violet-600">
               <FileText className="w-3 h-3" />
-              <span>{language === 'zh' ? '整合报告生成' : 'Integrated Report Generated'}</span>
+              <span>{t('integratedReportGenerated')}</span>
             </div>
             <div className="bg-violet-50 border border-violet-200 rounded-lg p-3">
               <p className="text-sm text-violet-800">
@@ -436,23 +433,31 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           ? message.content as GraphicAbstractContent
           : {}
         const imageBase64 = gaContent.image_base64 || gaContent.imageBase64
+        const textDiagram = gaContent.text_diagram || gaContent.textDiagram
+        const isTextMode = gaContent.is_text_mode ?? gaContent.isTextMode ?? !!textDiagram
         return (
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs text-pink-600">
               <Sparkles className="w-3 h-3" />
-              <span>{language === 'zh' ? '图形摘要生成' : 'Graphic Abstract Generated'}</span>
+              <span>
+                {isTextMode ? t('graphicAbstractTextMode') : t('graphicAbstractGenerated')}
+              </span>
             </div>
             <div className="bg-pink-50 border border-pink-200 rounded-lg p-3">
               {gaContent.prompt && (
                 <p className="text-xs text-pink-700 mb-2">{gaContent.prompt}</p>
               )}
-              {imageBase64 && (
+              {isTextMode && textDiagram ? (
+                <pre className="font-mono text-xs text-slate-800 bg-white border border-pink-200 rounded p-3 whitespace-pre overflow-auto leading-5">
+                  {textDiagram}
+                </pre>
+              ) : imageBase64 ? (
                 <img
                   src={base64ToDataUri(imageBase64)}
                   alt="Graphic Abstract"
                   className="max-w-full rounded border border-pink-200"
                 />
-              )}
+              ) : null}
             </div>
           </div>
         )
