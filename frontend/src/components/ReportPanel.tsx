@@ -169,12 +169,16 @@ export function ReportPanel() {
           current_step: data.step,
           status: data.status
         } : null)
-        // Also add to message stream
+        // Also add to message stream (object format so MessageStream can detect progress=100 for checkmark icon)
         addMessage({
           id: `report-progress-${Date.now()}`,
           type: 'progress',
           agent: 'pi',
-          content: `[Report] ${data.step} (${Math.round(data.progress)}%)`,
+          content: {
+            step: `[Report] ${data.step}`,
+            progress: data.progress,
+            status: data.status
+          },
           timestamp: new Date().toISOString()
         })
       } else if (data.type === 'complete') {

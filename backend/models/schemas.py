@@ -8,6 +8,10 @@ from enum import Enum
 import uuid
 import asyncio
 
+# Sequencing data type constants
+DATA_TYPE_SCRNASEQ = "scRNA-seq"
+DATA_TYPE_BULK_RNASEQ = "bulk RNA-seq"
+
 # Module-level lock for async-safe state version increments
 _version_lock = asyncio.Lock()
 
@@ -184,9 +188,9 @@ class DataFile(BaseModel):
     # Section: which data section this belongs to
     section: Literal["pathology", "sequencing", "biochemistry"]
 
-    # Data type within the section
+    # Data type within the section (see DATA_TYPE_* constants for sequencing types)
     # pathology: "H&E", "Sirius Red", "Perls Blue", "Oil Red O", "PAS", or custom
-    # sequencing: "scRNA-seq", "loom"
+    # sequencing: DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ, "loom"
     # biochemistry: "image", "file"
     data_type: str
 
@@ -489,6 +493,14 @@ class AnalysisState(BaseModel):
     def has_sequencing_data(self) -> bool:
         """Check if any sequencing data is uploaded"""
         return any(f.section == "sequencing" for f in self.data_files)
+
+    def has_bulk_rnaseq(self) -> bool:
+        """Check if bulk RNA-seq data is available"""
+        return any(f.data_type == DATA_TYPE_BULK_RNASEQ for f in self.get_files_by_section("sequencing"))
+
+    def has_scrnaseq(self) -> bool:
+        """Check if scRNA-seq data is available"""
+        return any(f.data_type == DATA_TYPE_SCRNASEQ for f in self.get_files_by_section("sequencing"))
 
     def get_group_by_id(self, group_id: Optional[str]) -> Optional[TreatmentGroup]:
         """Lookup a treatment group by ID"""

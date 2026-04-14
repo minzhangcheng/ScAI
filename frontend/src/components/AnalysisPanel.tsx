@@ -603,6 +603,7 @@ export function AnalysisPanel() {
   const isWaitingInput = currentSession.status === 'paused' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation'
   const isRunning = currentSession.status === 'running'
   const isCompleted = currentSession.status === 'completed'
+  const isFailed = currentSession.status === 'failed'
 
   return (
     <div className="flex flex-col h-full">
@@ -714,6 +715,14 @@ export function AnalysisPanel() {
 
           {isWaitingInput && (
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowSnapshotPanel(true)}
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                title={language === 'zh' ? '快照管理' : 'Snapshots'}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                {language === 'zh' ? '快照' : 'Snapshot'}
+              </button>
               <div className={`flex items-center gap-2 px-3 py-1 rounded-lg ${
                 currentSession.status === 'waiting_annotation'
                   ? 'bg-accent-100 text-accent-700'
@@ -749,6 +758,23 @@ export function AnalysisPanel() {
               <div className="flex items-center gap-2 px-3 py-1 bg-green-100 text-green-700 rounded-lg">
                 <CheckCircle2 className="w-4 h-4" />
                 <span className="font-medium">{t('analysisComplete')}</span>
+              </div>
+            </div>
+          )}
+
+          {isFailed && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowSnapshotPanel(true)}
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                title={language === 'zh' ? '快照管理' : 'Snapshots'}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                {language === 'zh' ? '快照' : 'Snapshot'}
+              </button>
+              <div className="flex items-center gap-2 px-3 py-1 bg-red-100 text-red-700 rounded-lg">
+                <AlertCircle className="w-4 h-4" />
+                <span className="font-medium">{language === 'zh' ? '分析失败' : 'Analysis Failed'}</span>
               </div>
             </div>
           )}

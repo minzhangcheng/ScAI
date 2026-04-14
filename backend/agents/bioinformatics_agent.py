@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 from ..models.schemas import (
     AgentType, AnalysisPhase, AnalysisState, MessageRole, CodeExecution,
-    PublicationFigure, FigureReviewStatus, AnalysisStep
+    PublicationFigure, FigureReviewStatus, AnalysisStep,
+    DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall
 from ..utils.error_parsing import strip_ansi
@@ -325,6 +326,31 @@ class BioinformaticsAgent(BaseAgent):
         self.analysis_context: Dict[str, Any] = {}
         self._recent_sup_feedback: set = set()
 
+    @staticmethod
+    def _check_gate_keyword(lowered_codes, keywords, reject_count, max_rejections, gate_label):
+        """Check if any keyword appears in lowered code history.
+
+        Returns (new_reject_count, should_reject).
+        If should_reject is False, the gate passes (keyword found or escape hatch triggered).
+        """
+        code_mentions = any(any(kw in lc for kw in keywords) for lc in lowered_codes)
+        if code_mentions:
+            return reject_count, False
+
+        if reject_count >= max_rejections:
+            logger.warning(
+                f"[Bioinformatics] {gate_label}: max rejections reached, "
+                "allowing report_findings"
+            )
+            return reject_count, False
+
+        new_count = reject_count + 1
+        logger.warning(
+            f"[Bioinformatics] report_findings rejected: {gate_label} "
+            f"(rejection {new_count}/{max_rejections})"
+        )
+        return new_count, True
+
     def _validate_code(self, code: str) -> Tuple[bool, str]:
         """
         Validate code for security before execution.
@@ -409,7 +435,7 @@ class BioinformaticsAgent(BaseAgent):
                 label = f"{group_label} {sample_label}".strip()
 
                 data_parts.append(f"  {label} ({f.data_type}): {f.file_path}")
-                if f.data_type == "scRNA-seq":
+                if f.data_type == DATA_TYPE_SCRNASEQ:
                     # Generate a safe variable name for loading (deduplicate)
                     base_name = (group_label.lower().replace(" ", "_") +
                                 (f"_s{f.sample_number}" if f.sample_number else ""))
@@ -420,7 +446,7 @@ class BioinformaticsAgent(BaseAgent):
                     data_parts.append(f"    adata_{var_name}.var_names_make_unique()")
                 elif f.data_type == "loom":
                     data_parts.append(f"    Loom file for RNA velocity analysis")
-                elif f.data_type == "bulk RNA-seq":
+                elif f.data_type == DATA_TYPE_BULK_RNASEQ:
                     # Generate a safe variable name for loading (deduplicate)
                     base_name = (group_label.lower().replace(" ", "_") +
                                 (f"_s{f.sample_number}" if f.sample_number else ""))
@@ -1068,6 +1094,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         MAX_INTEGRATION_REJECTIONS = 2  # Escape hatch: allow through after N rejections
         deconv_reject_count = 0  # Track rejections for cell-type deconvolution gate
         MAX_DECONV_REJECTIONS = 2  # Escape hatch: allow through after N rejections
+        innovation_bulk_reject_count = 0
+        MAX_INNOVATION_BULK_REJECTIONS = 2
         llm_error: Optional[str] = None
         text_response_count = 0
         MAX_TEXT_RESPONSES = 2
@@ -1797,18 +1825,15 @@ except Exception as _autosave_block_err:
                         ))
                         continue
 
+                    has_scrna_data = state.has_scrnaseq()
+                    has_bulk_data = state.has_bulk_rnaseq()
+                    lowered_codes = [ce.code.lower() for ce in self.code_history if ce.code]
+
                     # Enforce mandatory analysis gates in exploration phase
                     if state.analysis_phase == AnalysisPhase.EXPLORATION:
-                        seq_files = state.get_files_by_section("sequencing")
-                        bulk_files = [f for f in seq_files if f.data_type == "bulk RNA-seq"]
-                        has_scrna_data = any(f.data_type == "scRNA-seq" for f in seq_files)
-                        has_bulk_data = len(bulk_files) > 0
-
-                        # Pre-lowercase code history once for all gate keyword checks
-                        lowered_codes = [ce.code.lower() for ce in self.code_history if ce.code]
 
                         # Gate 1: Bulk RNA-seq analysis
-                        if bulk_files:
+                        if has_bulk_data:
                             code_mentions_bulk = any(
                                 "bulk" in lc or "merged_counts" in lc
                                 or "pydeseq" in lc or "deseqdataset" in lc
@@ -1818,7 +1843,10 @@ except Exception as _autosave_block_err:
                                 logger.warning(
                                     "[Bioinformatics] report_findings rejected: bulk RNA-seq data exists but was not analyzed"
                                 )
-                                bulk_paths = ", ".join(f.file_path for f in bulk_files)
+                                bulk_paths = ", ".join(
+                                    f.file_path for f in state.get_files_by_section("sequencing")
+                                    if f.data_type == DATA_TYPE_BULK_RNASEQ
+                                )
                                 messages.append({
                                     "role": "tool",
                                     "tool_call_id": tool_call.id,
@@ -1841,94 +1869,97 @@ except Exception as _autosave_block_err:
 
                         # Gate 2: Bulk/scRNA-seq cross-validation
                         if has_scrna_data and has_bulk_data:
-                            integration_keywords = [
-                                "venn", "pseudobulk", "overlap", "intersect",
-                                "matplotlib_venn", "venn2", "venn3",
-                            ]
-                            code_mentions_integration = any(
-                                any(kw in lc for kw in integration_keywords)
-                                for lc in lowered_codes
+                            integration_reject_count, rejected = self._check_gate_keyword(
+                                lowered_codes,
+                                ["venn", "pseudobulk", "overlap", "intersect",
+                                 "matplotlib_venn", "venn2", "venn3"],
+                                integration_reject_count, MAX_INTEGRATION_REJECTIONS,
+                                "bulk/scRNA-seq cross-validation not performed",
                             )
-                            if not code_mentions_integration:
-                                if integration_reject_count >= MAX_INTEGRATION_REJECTIONS:
-                                    logger.warning(
-                                        "[Bioinformatics] Integration gate: max rejections reached, "
-                                        "allowing report_findings without cross-validation"
+                            if rejected:
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": (
+                                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                        "bulk/scRNA-seq cross-validation. "
+                                        "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
+                                        "compare their DEG results before reporting. Specifically:\n"
+                                        "(1) Aggregate scRNA-seq to pseudobulk DEGs (or use your existing "
+                                        "condition-level DEG results across all cells)\n"
+                                        "(2) Find overlapping DEGs between bulk and scRNA-seq using set intersection\n"
+                                        "(3) Visualize overlap with a Venn diagram (from matplotlib_venn import venn2)\n"
+                                        "(4) For overlapping DEGs, show cell-type-specific expression patterns\n"
+                                        "THEN call report_findings."
                                     )
-                                else:
-                                    integration_reject_count += 1
-                                    logger.warning(
-                                        "[Bioinformatics] report_findings rejected: "
-                                        "bulk/scRNA-seq cross-validation not performed "
-                                        f"(rejection {integration_reject_count}/{MAX_INTEGRATION_REJECTIONS})"
-                                    )
-                                    messages.append({
-                                        "role": "tool",
-                                        "tool_call_id": tool_call.id,
-                                        "content": (
-                                            "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                                            "bulk/scRNA-seq cross-validation. "
-                                            "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
-                                            "compare their DEG results before reporting. Specifically:\n"
-                                            "(1) Aggregate scRNA-seq to pseudobulk DEGs (or use your existing "
-                                            "condition-level DEG results across all cells)\n"
-                                            "(2) Find overlapping DEGs between bulk and scRNA-seq using set intersection\n"
-                                            "(3) Visualize overlap with a Venn diagram (from matplotlib_venn import venn2)\n"
-                                            "(4) For overlapping DEGs, show cell-type-specific expression patterns\n"
-                                            "THEN call report_findings."
-                                        )
-                                    })
-                                    analysis_log.append(AnalysisStep(
-                                        step_number=step_count, step_type="report_findings",
-                                        agent_reasoning=agent_reasoning,
-                                        findings=[],
-                                        findings_summary="REJECTED: bulk/scRNA-seq cross-validation not performed",
-                                    ))
-                                    continue
+                                })
+                                analysis_log.append(AnalysisStep(
+                                    step_number=step_count, step_type="report_findings",
+                                    agent_reasoning=agent_reasoning,
+                                    findings=[], findings_summary="REJECTED: bulk/scRNA-seq cross-validation not performed",
+                                ))
+                                continue
 
                         # Gate 3: Cell-type deconvolution
                         if has_scrna_data and has_bulk_data:
-                            deconv_keywords = [
-                                "deconvolution", "nnls", "scaden", "least_squares"
-                            ]
-                            code_mentions_deconv = any(
-                                any(kw in lc for kw in deconv_keywords)
-                                for lc in lowered_codes
+                            deconv_reject_count, rejected = self._check_gate_keyword(
+                                lowered_codes,
+                                ["deconvolution", "nnls", "scaden", "least_squares"],
+                                deconv_reject_count, MAX_DECONV_REJECTIONS,
+                                "cell-type deconvolution not performed",
                             )
-                            if not code_mentions_deconv:
-                                if deconv_reject_count >= MAX_DECONV_REJECTIONS:
-                                    logger.warning(
-                                        "[Bioinformatics] Deconvolution gate: max rejections reached, "
-                                        "allowing report_findings without deconvolution"
+                            if rejected:
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": (
+                                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                        "cell-type deconvolution. "
+                                        "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
+                                        "perform deconvolution to estimate cell-type proportions in the bulk samples.\n"
+                                        "(1) Use scRNA-seq as a reference profile\n"
+                                        "(2) Prioritize pure Python methods like scipy.optimize.nnls or sklearn Non-negative Least Squares\n"
+                                        "(3) Visualize inferred cell-type proportions across bulk conditions\n"
+                                        "THEN call report_findings."
                                     )
-                                else:
-                                    deconv_reject_count += 1
-                                    logger.warning(
-                                        "[Bioinformatics] report_findings rejected: "
-                                        "cell-type deconvolution not performed "
-                                        f"(rejection {deconv_reject_count}/{MAX_DECONV_REJECTIONS})"
-                                    )
-                                    messages.append({
-                                        "role": "tool",
-                                        "tool_call_id": tool_call.id,
-                                        "content": (
-                                            "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                                            "cell-type deconvolution. "
-                                            "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
-                                            "perform deconvolution to estimate cell-type proportions in the bulk samples.\n"
-                                            "(1) Use scRNA-seq as a reference profile\n"
-                                            "(2) Prioritize pure Python methods like scipy.optimize.nnls or sklearn Non-negative Least Squares\n"
-                                            "(3) Visualize inferred cell-type proportions across bulk conditions\n"
-                                            "THEN call report_findings."
-                                        )
-                                    })
-                                    analysis_log.append(AnalysisStep(
-                                        step_number=step_count, step_type="report_findings",
-                                        agent_reasoning=agent_reasoning,
-                                        findings=[],
-                                        findings_summary="REJECTED: cell-type deconvolution not performed",
-                                    ))
-                                    continue
+                                })
+                                analysis_log.append(AnalysisStep(
+                                    step_number=step_count, step_type="report_findings",
+                                    agent_reasoning=agent_reasoning,
+                                    findings=[], findings_summary="REJECTED: cell-type deconvolution not performed",
+                                ))
+                                continue
+
+                    # Gate 4: INNOVATION-phase bulk direction validation
+                    elif state.analysis_phase == AnalysisPhase.INNOVATION and has_bulk_data and has_scrna_data:
+                        innovation_bulk_reject_count, rejected = self._check_gate_keyword(
+                            lowered_codes,
+                            ["bulk_", "merged_counts"],
+                            innovation_bulk_reject_count, MAX_INNOVATION_BULK_REJECTIONS,
+                            "innovation-phase bulk direction validation missing",
+                        )
+                        if rejected:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                    "bulk RNA-seq direction validation. Both bulk and scRNA-seq data are "
+                                    "available — you MUST validate this direction's findings on the bulk data. "
+                                    "Reuse the bulk variables already loaded in Round 1 (see the data context "
+                                    "section for their exact names); do NOT re-run the bulk DEG pipeline from "
+                                    "scratch. Use bulk data as an independent validation layer for your new "
+                                    "findings, choosing methods appropriate to your specific results and the "
+                                    "bulk sample design. THEN call report_findings."
+                                )
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="report_findings",
+                                agent_reasoning=agent_reasoning,
+                                findings=[],
+                                findings_summary="REJECTED: innovation-phase bulk direction validation missing",
+                            ))
+                            continue
 
                     has_substantive_work = True
                     findings = args.get("findings", [])

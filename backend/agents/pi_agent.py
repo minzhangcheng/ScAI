@@ -13,16 +13,16 @@ from .base import BaseAgent
 logger = logging.getLogger(__name__)
 from ..models.schemas import (
     AgentType, AnalysisPhase, AnalysisState, MessageRole, RoundResult, ExplorationReport,
-    PublicationFigure, FigureReviewStatus, GraphicAbstract
+    PublicationFigure, FigureReviewStatus, GraphicAbstract,
+    DATA_TYPE_SCRNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient
 
 
 def _build_default_bio_tasks(state: AnalysisState, detailed: bool = False) -> list:
     """Build default bioinformatics task list based on available sequencing data types."""
-    seq_files = state.get_files_by_section("sequencing")
-    has_bulk = any(f.data_type == "bulk RNA-seq" for f in seq_files)
-    has_scrna = any(f.data_type == "scRNA-seq" for f in seq_files)
+    has_bulk = state.has_bulk_rnaseq()
+    has_scrna = state.has_scrnaseq()
     tasks = []
     if has_scrna:
         if detailed:
@@ -658,6 +658,28 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
         if notes and notes.strip():
             notes_section = f"\n## User Notes for This Direction\n{notes.strip()}\n"
 
+        # Detect data types for conditional toolkit inclusion
+        has_bulk_data = state.has_bulk_rnaseq()
+        has_scrna_data = state.has_scrnaseq()
+
+        # Conditionally add bulk-scRNA integration as the FIRST and recommended item
+        if has_bulk_data and has_scrna_data:
+            toolkit_intro = """
+- **Bulk-scRNA direction validation (RECOMMENDED — include at least ONE bulk validation task)**:
+  Use bulk RNA-seq data as an independent validation layer for this direction's new findings.
+  Reuse the bulk variables already loaded in Round 1 (see the data context section for their exact
+  names); do NOT re-run the bulk DEG pipeline from scratch.
+"""
+        elif has_bulk_data:
+            toolkit_intro = """
+- **Bulk direction validation (RECOMMENDED when bulk data exists)**:
+  Validate new findings on existing bulk data. Reuse the bulk variables already loaded in
+  Round 1 (see the data context section for their exact names); do NOT re-run the bulk DEG
+  pipeline from scratch.
+"""
+        else:
+            toolkit_intro = ""
+
         prompt = f"""
 ## Project: {state.name}
 ## Research Objective: {state.initial_instruction}
@@ -675,7 +697,7 @@ Design specific analyses to deeply investigate this direction.
 For each bioinformatics task, specify the CONCRETE analysis method and target:
 
 Available analysis toolkit (use as many as relevant):
-- **Targeted DEG**: Specify which cell populations to compare, which contrasts, and threshold strategy
+{toolkit_intro}- **Targeted DEG**: Specify which cell populations to compare, which contrasts, and threshold strategy
 - **Pathway enrichment**: GO/KEGG for broad screening; GSEA/ssGSEA for quantitative pathway scoring; MSigDB hallmark gene sets
 - **Gene signature & Metabolic scoring**: Score cells for specific biological or metabolic signatures using sc.tl.score_genes or pyscenic.aucell; choose gene sets based on data-driven findings, not prior assumptions
 - **Trajectory & RNA Velocity**: Diffusion pseudotime (DPT), PAGA for lineage inference; scvelo or cellrank for directed cell fate mapping and driver gene identification (if spliced/unspliced data available)
@@ -688,7 +710,6 @@ Available analysis toolkit (use as many as relevant):
 - **Compositional analysis**: Compare cell type proportions between conditions with statistical testing (pertpy or sccoda)
 - **Immune repertoire analysis**: scirpy for TCR/BCR clonotype expansion, diversity, and sharing analysis (use only when paired VDJ data is available)
 - **Marker gene visualization**: Dot plots, violin plots, feature plots for key genes across conditions
-- **Bulk-scRNA integration**: Cross-validate bulk DEG (with biological replicates) against scRNA-seq pseudobulk DEG; localize bulk-identified genes to specific cell types via scRNA-seq; perform cell-type deconvolution on bulk data using scRNA-seq reference to infer compositional changes.
 
 IMPORTANT:
 - Generate AT LEAST 4-6 bioinformatics tasks to ensure comprehensive analysis
@@ -696,10 +717,16 @@ IMPORTANT:
 - Include both hypothesis-confirming AND exploratory analyses
 - Do NOT repeat analyses already completed in Round 1 (basic pipeline, annotation, etc.)
 - The Jupyter kernel retains all Round 1 variables — build upon existing results
+"""
+        if has_bulk_data:
+            prompt += """- If bulk RNA-seq data is available, include AT LEAST ONE task that validates this direction's
+  findings on the bulk data. Reuse the bulk variables already loaded in Round 1 (see the data
+  context section for their exact names); do NOT re-run the bulk DEG pipeline from scratch.
+"""
 
-Reply in JSON format:
+        prompt += f"""Reply in JSON format:
 {{
-    "overview": "Innovation strategy for: {user_direction}",  # interpolated by outer f-string
+    "overview": "Innovation strategy for: {user_direction}",
     "biochemistry_tasks": [...],
     "pathology_tasks": [...],
     "bioinformatics_tasks": [...],
@@ -1746,7 +1773,7 @@ Please write in academic paper style.
             data_info.append(f"- {label} ({f.data_type}): {f.file_path}")
 
         # Determine analysis characteristics
-        seq_group_ids = set(f.group_id for f in seq_files if f.data_type == "scRNA-seq" and f.group_id)
+        seq_group_ids = set(f.group_id for f in seq_files if f.data_type == DATA_TYPE_SCRNASEQ and f.group_id)
         has_multiple_groups = len(seq_group_ids) > 1
         has_velocity = any(f.data_type == "loom" for f in seq_files)
 

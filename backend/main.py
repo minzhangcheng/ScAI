@@ -38,7 +38,8 @@ from .config import (
 )
 from .models.schemas import (
     AnalysisState, AnalysisPhase, APIRequest, APIResponse, TaskStatus,
-    WebSocketMessage, AgentType, TreatmentGroup, DataFile, BiochemistryIndicator
+    WebSocketMessage, AgentType, TreatmentGroup, DataFile, BiochemistryIndicator,
+    DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
 from .workflow import SingleCellAnalysisWorkflow
 from .utils.llm_client import OpenAICompatibleClient, LLMManager
@@ -80,7 +81,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.19.6"
+    version="0.19.7"
 )
 
 # CORS
@@ -4253,7 +4254,7 @@ async def complete_chunked_upload(
 
     # Update session state - create DataFile for all chunked uploads
     section_map = {"snrna_seq": "sequencing", "bulk_rna_seq": "sequencing", "loom": "sequencing", "pathology": "pathology", "biochemistry": "biochemistry"}
-    type_map = {"snrna_seq": "scRNA-seq", "bulk_rna_seq": "bulk RNA-seq", "loom": "loom", "pathology": "uploaded", "biochemistry": "file"}
+    type_map = {"snrna_seq": DATA_TYPE_SCRNASEQ, "bulk_rna_seq": DATA_TYPE_BULK_RNASEQ, "loom": "loom", "pathology": "uploaded", "biochemistry": "file"}
     section = section_map.get(file_type, file_type)
     data_type = type_map.get(file_type, file_type)
 

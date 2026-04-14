@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.19.6
+**Version**: 0.19.7
 
 ## Installation
 
@@ -342,222 +342,176 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 
 ## Changelog
 
+> Technical details for each release are documented in [HANDOVER.md](./HANDOVER.md).
+
+### v0.19.7 (2026-04-14)
+
+- Bulk RNA-seq validation is now mandatory in the INNOVATION phase when both bulk and scRNA-seq data are present
+- Analysis failed state now shows in the UI with a snapshot button
+- Report progress messages now display checkmark icons for completed steps
+
 ### v0.19.6 (2026-04-12)
 
-- **New: Text-mode graphic abstract fallback** — When Painter Agent fails or is disabled, the Bioinformatics Agent generates ASCII/Unicode text diagrams as a fallback; PI Agent generates prompts and reviews with multi-round revision support and best candidate selection
+- Text-mode graphic abstracts are now generated as a fallback when the Painter Agent is unavailable
 
 ### v0.19.5 (2026-04-12)
 
-- **New: Cell-type deconvolution enforcement** — Added mandatory Gate 3 for cell-type deconvolution when both bulk and scRNA-seq data exist; system now rejects `report_findings` until deconvolution is performed using scRNA-seq as reference
-- **Improvement: Library name standardization** — Unified tool naming to lowercase format: pydeseq2, scvelo, liana, pyscenic, decoupler, harmonypy, bbknn, scvi, scanpy.pp.combat, cellphonedb, scirpy, cytotrace2-py, pertpy
-- **Improvement: Code efficiency** — Pre-lowercase code history once for all gate keyword checks to improve performance
-- **Improvement: Literature agent optimization** — Use `chat_without_history()` for internal LLM calls to avoid unnecessary history accumulation and prevent prompt explosion
+- Cell-type deconvolution is now mandatory when both bulk and scRNA-seq data are present
+- Standardized bioinformatics library names across all agents
+- Improved literature search performance by reducing unnecessary context accumulation
 
 ### v0.19.4 (2026-04-12)
 
-- **New: Bulk/scRNA-seq cross-validation enforcement** — Bioinformatics agent now rejects `report_findings` if bulk and scRNA-seq data both exist but cross-validation (Venn diagram, set intersection) has not been performed; separate mandatory gate from bulk DEG analysis
-- **New: PyDESeq2 fallback** — When PyDESeq2 raises ImportError, automatically falls back to scipy.stats.ttest_ind with statsmodels FDR correction for bulk RNA-seq DEG analysis
-- **Improvement: Split bulk analysis into two mandatory gates** — Bulk DEG analysis and bulk/scRNA-seq cross-validation are now enforced as separate mandatory steps, each with its own rejection logic
+- Bulk/scRNA-seq cross-validation is now enforced as a mandatory analysis step
+- Added automatic fallback for bulk RNA-seq DEG analysis when PyDESeq2 is unavailable
 
 ### v0.19.3 (2026-04-11)
 
-- **Improvement: Prompt caching optimization** — Split bioinformatics agent system prompt into static and dynamic parts for better OpenAI prefix caching; reduced notebook history context from 10 to 5 cells
-- **Improvement: Message trimming with cache preservation** — Improved message trimming strategy preserves static prefix and dynamic context messages for improved cache hit rates
-- **New: Cache hit tracking** — Added `prompt_tokens_details.cached_tokens` support in LLM client and logger to track cache efficiency
+- Improved LLM prompt caching for faster bioinformatics analysis
+- Added cache hit tracking for monitoring API efficiency
 
 ### v0.19.2 (2026-04-11)
 
-- **Improvement: Type-safe analysis phases** — Replaced string-based phase identifiers with typed enums for improved reliability
-- **Improvement: Dynamic bioinformatics task generation** — PI Agent automatically generates appropriate analysis tasks based on detected data types
-- **Improvement: Bulk RNA-seq analysis enforcement** — System now requires bulk RNA-seq data to be analyzed before reporting findings
-- **Improvement: Expanded image format support** — Added support for GIF, BMP, WebP, and SVG formats in pathology uploads
+- PI Agent now dynamically generates analysis tasks based on detected data types
+- Bulk RNA-seq data is now required to be analyzed before reporting findings
+- Added support for GIF, BMP, WebP, and SVG image formats
 
 ### v0.19.1 (2026-04-09)
 
-- **New: Bulk RNA-seq Analysis** — Complete support for bulk RNA-seq data analysis with cross-validation against single-cell pseudobulk results
+- Added complete support for bulk RNA-seq data analysis with cross-validation against single-cell pseudobulk results
 
 ### v0.18.15 (2026-04-08)
 
-- **Improvement: PI Agent Analysis Toolkit Upgrade** — Added advanced analysis modules for gene signature scoring, trajectory analysis, transcription factor networks, cell-cell communication, stemness analysis, tumor estimation, compositional analysis, and immune repertoire profiling
-- **Fix: Frontend error display** — Errors are now shown to users via alert dialog instead of only console output
+- Added advanced analysis modules: gene signature scoring, trajectory analysis, transcription factor networks, cell-cell communication, stemness analysis, tumor estimation, compositional analysis, and immune repertoire profiling
+- Errors are now shown via alert dialog instead of only in console
 
 ### v0.18.14 (2026-04-05)
 
-- **Fix: Cluster marker data handling** — Improved handling of malformed cluster marker data from LLM outputs
-- **Improvement: Expanded literature search** — Gene sample size increased from 5 to 10 per cluster for more comprehensive literature matching
-
-### v0.18.13 (2026-04-03)
+- Improved handling of malformed cluster marker data
+- Expanded literature search gene sampling for more comprehensive results
 
 ### v0.18.12 (2026-04-03)
 
-- **Fix: Error loop prevention** — Added hard limit on code execution errors to prevent infinite error loops
-- **Improvement: Painter Agent provider support** — Improved compatibility with additional image generation providers
-- **Improvement: Selective agent activation** — PI automatically determines which agents need to run from round 2 onwards
-- **Improvement: Dev/prod mode switching** — Added development and production mode options
+- Added hard limit on code execution errors to prevent infinite loops
+- Improved Painter Agent compatibility with additional image generation providers
+- PI now automatically selects which agents run each round from round 2 onwards
+- Added development and production mode switching
 
 ### v0.18.10 (2026-04-01)
 
-- **Fix: LLM parameter handling** — Improved compatibility with various LLM provider requirements
-- **Improvement: Zhipu AI image generation** — Added support for Zhipu AI as image generation provider
-- **Improvement: LLM client caching** — Workflow caches per-agent LLM clients for better performance
+- Improved LLM provider compatibility
+- Added Zhipu AI as an image generation provider
+- Improved LLM client caching for better performance
 
 ### v0.18.6 (2026-03-30)
 
-- **Fix: Snapshot timing** — Improved snapshot creation timing for annotation workflow
-- **Fix: Legacy snapshot compatibility** — Better handling of older snapshot formats
-- **Improvement: Vision message ordering** — Improved ordering of text and images for vision models
-- **Improvement: Supervisor monitoring** — Enhanced error tracking and detection of stuck analysis
-- **Improvement: Configurable Deep Research model** — Added ability to select different Deep Research models
+- Improved snapshot timing and legacy snapshot compatibility
+- Enhanced supervisor monitoring for stuck analysis detection
+- Added configurable Deep Research model selection
 
 ### v0.18.5 (2026-03-30)
 
-- **Improvement: Shared utilities** — Consolidated duplicate code into shared utilities
-- **Improvement: Supervisor stuck detection** — Enhanced detection of analysis being stuck
-- **Improvement: WebSocket stability** — Improved reconnection handling and message synchronization
-- **Fix: Invalid data handling** — Better handling of NaN and Infinite values in biochemistry data
-- **Fix: Chat history persistence** — Proper cleanup of chat messages when session expires
+- Improved WebSocket stability and reconnection handling
+- Better handling of invalid data values in biochemistry
+- Fixed chat history cleanup on session expiry
 
 ### v0.18.4 (2026-03-30)
 
-- **Improvement: Image generation providers** — Added native DashScope image generation support
-- **Improvement: Snapshot reliability** — Full Jupyter kernel state is now preserved in snapshots
-- **Improvement: Vision failure handling** — Vision automatically disables after repeated failures
-- **Improvement: Round wait experience** — Better handling of user interactions during round transitions
-- **Improvement: Annotation context report** — Redesigned report layout with inline figures
+- Added DashScope image generation support
+- Full Jupyter kernel state now preserved in snapshots
+- Vision now automatically disables after repeated failures
+- Improved annotation context report layout
 
 ### v0.18.3 (2026-03-29)
 
-- **Improvement: PI-guided annotation** — PI Agent now guides the cell type annotation process
-- **Improvement: Supervisor review** — Enhanced supervisor figure review with issue classification
-- **Improvement: Figure revision** — Improved detection and handling of stalled figure revisions
-- **Improvement: Real-time updates** — Better WebSocket message handling during retry waits
+- PI Agent now guides the cell type annotation process
+- Enhanced supervisor figure review with issue classification
+- Improved figure revision handling
 
 ### v0.18.2 (2026-03-29)
 
-- **Improvement: Session concurrency** — Better handling of parallel session operations
-- **Improvement: Rate limit handling** — Improved retry logic for API rate limits
-- **Improvement: Security** — Enhanced sandbox security layer
-- **Improvement: Download handling** — Improved file download reliability
-- **Improvement: Upload safety** — Executable file types now blocked during upload
-
-### v0.18.1 (2026-03-27)
-
-- Version bump and documentation sync.
+- Improved session concurrency handling
+- Better API rate limit retry logic
+- Enhanced sandbox security
+- Blocked executable file uploads
 
 ### v0.18.0 (2026-03-27)
 
-- **New: Snapshot tree view** — Visual history of analysis checkpoints with parent-child relationships
-- **Improvement: Snapshot reliability** — Better state restoration from snapshots
-- **Fix: Annotation context report** — Figures now properly appear in annotation reports
-- **Fix: Error display** — Clean error messages without formatting artifacts
-
-### v0.17.5 (2026-03-26)
-
-- **Fix: Loading spinner animation** — Spinner now properly animates
-- **Improvement: Sidebar layout** — Better handling of long project descriptions
+- Added snapshot tree view for analysis checkpoint history
+- Improved snapshot state restoration reliability
 
 ### v0.17.4 (2026-03-26)
 
-- **New: Scientific Elegance UI redesign** — Complete visual refresh with new typography, colors, and animations
+- Complete UI visual redesign with new typography, colors, and animations
 
 ### v0.17.3 (2026-03-26)
 
-- **New: Auto API documentation lookup** — System automatically finds correct documentation when encountering API errors
-- **New: On-demand documentation** — Bioinformatics Agent can look up package documentation proactively
-
-### v0.17.2 (2026-03-26)
-
-- **Improvement: Docker logging** — Container logs now accessible via volume mount
+- System now automatically finds correct API documentation when encountering errors
+- Bioinformatics Agent can look up package documentation proactively
 
 ### v0.17.1 (2026-03-26)
 
-- **New: Per-agent LLM configuration** — Each agent can use different LLM providers
-- **Improvement: Image generation** — Added support for more image generation providers
+- Each agent can now use different LLM providers
+- Added support for more image generation providers
 
 ### v0.16.2 (2026-03-24)
 
-- **New: Docker packaging** — Official Docker image available
+- Official Docker image now available
 
 ### v0.16.1 (2026-03-24)
 
-- **Improvement: Figure revision fallback** — Automatic fallback when vision is not supported
-- **Improvement: Extended analysis timeout** — Sandbox timeout extended to 1.5 hours
-
-### v0.15.9 (2026-03-23)
-
-- **Fix: Figure revision errors**
-- **Improvement: Config sync** — API configuration syncs automatically on restart
+- Automatic fallback for figure revision when vision is not supported
+- Extended analysis timeout to 1.5 hours
 
 ### v0.15.8 (2026-03-23)
 
-- **Improvement: PDF companion files** — Auto-generated PDF versions of figures
-- **Improvement: Vision model guidance** — Clarified vision model requirements
+- Auto-generated PDF companions for all figures
 
 ### v0.15.7 (2026-03-22)
 
-- **New: Annotation-first workflow** — Cluster annotation required before exploration report
-- **New: Inline tables** — Tables with preview and download in reports
+- Cell type annotation now required before the exploration report
+- Inline tables with preview and download in reports
 
 ### v0.14.6 (2026-03-21)
 
-- **Improvement: Auto-detection** — Automatically detects AnnData variable names
-- **Improvement: Error recovery** — Faster and smarter error recovery
-- **Improvement: Score documentation** — Score methodology documented in reports
-
-### v0.14.5 (2026-03-20)
-
-- **Fix: Various crash and sync issues**
-- **Improvement: Per-cell-type visualizations** — Volcano plots and pathways per cell type
+- Automatic detection of AnnData variable names
+- Improved error recovery
 
 ### v0.14.4 (2026-03-17)
 
-- **Project renamed** — InteSc → ScAI
-
-### v0.14.3 (2026-03-17)
-
-- **Improvement: Publication figures** — JPG with PDF companion, larger fonts
-- **Improvement: Supervisor report** — Redesigned supervisor report format
-
-### v0.14.2 (2026-03-16)
-
-- **Improvement: Various stability improvements** — Duplicate index repair, annotation caching, WebSocket stability
-
-### v0.14.1 (2026-03-15)
-
-- **Fix: Round feedback** — Feedback now immediately resumes workflow
+- Project renamed from InteSc to ScAI
 
 ### v0.14.0 (2026-03-15)
 
-- **New: Score methodology transparency** — Detailed score computation documentation
-- **New: Richer annotation dialog** — Alternative cell types and confidence reasons
+- Detailed score computation documentation
+- Richer annotation dialog with alternative cell types and confidence reasons
 
 ### v0.13.0 – v0.13.4 (2026-03-12 – 2026-03-13)
 
-- **New: Two-phase analysis** — Exploration phase followed by focused Innovation phase
-- **New: Cell annotation confirmation** — Manual review of cluster cell types
-- **New: Multi-direction research** — Multiple research directions with correlation analysis
+- Two-phase analysis: Exploration followed by Innovation phase
+- Cell annotation confirmation with manual review
+- Multiple research directions with correlation analysis
 
 ### v0.12.0 – v0.12.4 (2026-03-10 – 2026-03-11)
 
-- **New: Supervisor Agent** — Real-time monitoring of bioinformatics analysis
-- **New: Pause/Stop controls** — Control analysis execution with optional summary
-- **New: Publication figures** — PI-reviewed figures with auto-revision
+- Supervisor Agent for real-time monitoring
+- Pause/Stop controls for analysis execution
+- PI-reviewed publication figures with auto-revision
 
 ### v0.11.0 – v0.11.1 (2026-03-09)
 
-- **Improvement: Biochemistry integration** — Biochemistry results inform other agents
+- Biochemistry results now inform other agents
 
 ### v0.10.0 – v0.10.3 (2026-03-07 – 2026-03-09)
 
-- **New: Deep Research mode** — Comprehensive literature surveys
-- **New: Analysis log** — Full chronological timeline
+- Deep Research mode for comprehensive literature surveys
+- Full chronological analysis log
 
 ### v0.9.0 (2026-03-04)
 
 - PI reviews notebooks and figures before reports
 - Reports include appendix with project info
 - Graphic abstract generation and revision
-- Session management features
 
 ### v0.3.0 – v0.8.9 (2026-02-04 – 2026-03-03)
 

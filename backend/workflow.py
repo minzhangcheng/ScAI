@@ -2314,9 +2314,8 @@ Approve if quality_score >= 7."""
         # Build comprehensive instruction for bioinformatics agent
         # Phase-aware instruction for bioinformatics agent
         # Detect data types for dynamic instruction (single pass)
-        seq_files = analysis_state.get_files_by_section("sequencing")
-        has_scrna = any(f.data_type == "scRNA-seq" for f in seq_files)
-        has_bulk = any(f.data_type == "bulk RNA-seq" for f in seq_files)
+        has_scrna = analysis_state.has_scrnaseq()
+        has_bulk = analysis_state.has_bulk_rnaseq()
 
         phase_instruction = ""
         if analysis_state.analysis_phase == AnalysisPhase.EXPLORATION:
@@ -2374,9 +2373,26 @@ ANALYSIS REQUIREMENTS:
 8. Report detailed statistical results (p-values, effect sizes, gene counts) — not just summaries
 9. Before computing any score, consult PI about scoring method and gene list source
 10. After computing any score, call register_score to document methodology for the report
+"""
+            if has_bulk:
+                phase_instruction += """
+11. **MANDATORY — Bulk RNA-seq Direction Validation** (if bulk data exists; DO NOT SKIP):
+    Bulk RNA-seq data remains available and loaded from Round 1. When this round
+    produces new gene signatures, DEG sets, or pathway conclusions, use bulk data
+    as an independent validation layer. Choose validation methods appropriate to
+    your specific findings and the bulk sample design. Reuse bulk results from
+    Round 1 (see the data context section for the exact variable names) rather than
+    re-running the pipeline.
+    NOTE: report_findings will be REJECTED if bulk direction validation is not performed.
+"""
 
+            phase_instruction += """
 You may skip irrelevant cell populations and focus on those relevant to the hypothesis.
 Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc.).
+"""
+            if has_bulk:
+                phase_instruction += """BUT: "completed steps" does NOT include bulk validation — each direction must independently
+validate its findings on bulk data, even if Round 1 already ran a bulk DEG pipeline.
 """
 
         # Build merge strategy context from PI instructions
@@ -2402,6 +2418,19 @@ Do NOT re-run completed steps from Round 1 (QC, clustering, cell annotation, etc
                           "- Perform bulk RNA-seq DEG analysis (pydeseq2) and cross-validate with scRNA-seq pseudobulk DEGs")
         else:
             goals_text = "- Perform standard scRNA-seq analysis pipeline"
+
+        # Ensure bulk direction validation appears in goals even if PI didn't assign a bulk-specific task
+        if analysis_state.analysis_phase == AnalysisPhase.INNOVATION and has_bulk and has_scrna:
+            goals_lower = goals_text.lower()
+            bulk_validation_mentioned = any(
+                kw in goals_lower for kw in ["bulk", "ssgsea", "deconvolution", "cross-validat", "pseudobulk"]
+            )
+            if not bulk_validation_mentioned:
+                goals_text += (
+                    "\n- Validate direction-level findings on bulk RNA-seq data "
+                    "(reuse the bulk variables already loaded in Round 1; see the data context section "
+                    "for their exact names)"
+                )
 
         instruction = f"""Analyze {data_desc} data for project: {analysis_state.name}
 

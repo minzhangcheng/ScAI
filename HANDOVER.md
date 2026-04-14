@@ -2,8 +2,8 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.19.6
-**Last Updated**: 2026-04-12
+**Version**: 0.19.7
+**Last Updated**: 2026-04-14
 
 ## Project Overview
 
@@ -1446,6 +1446,16 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
 ## Version History
+
+#### v0.19.7 (2026-04-14)
+
+- **INNOVATION-phase bulk direction validation** (`bioinformatics_agent.py`): Added mandatory Gate 4 that rejects `report_findings` when both bulk and scRNA-seq data exist in the INNOVATION phase but no bulk validation code (`bulk_`, `merged_counts` keywords) has been executed; uses `_check_gate_keyword()` helper with escape hatch (`MAX_INNOVATION_BULK_REJECTIONS=2`)
+- **Gate logic refactoring** (`bioinformatics_agent.py`): Extracted repeated gate keyword-check patterns into `_check_gate_keyword()` static method; unified bulk/scRNA-seq cross-validation (Gate 2) and deconvolution (Gate 3) gates to use the new helper
+- **Sequencing data type constants** (`schemas.py`, `main.py`, `bioinformatics_agent.py`, `pi_agent.py`, `workflow.py`): Introduced `DATA_TYPE_SCRNASEQ = "scRNA-seq"` and `DATA_TYPE_BULK_RNASEQ = "bulk RNA-seq"` constants; added `has_bulk_rnaseq()` and `has_scrnaseq()` methods on `AnalysisState`; replaced all hardcoded string comparisons
+- **Conditional bulk toolkit in PI Agent** (`pi_agent.py`): PI dynamically includes bulk-scRNA validation as the recommended first item in the toolkit only when bulk data exists; appends bulk validation instruction to INNOVATION goals when bulk data is available
+- **INNOVATION-phase instruction enhancement** (`workflow.py`): Appends mandatory bulk validation requirements to the bioinformatics agent's INNOVATION instruction when bulk data is available; auto-injects bulk validation goal into goals text when not mentioned by PI
+- **Failed state UI** (`AnalysisPanel.tsx`): Frontend shows "Analysis Failed" indicator with snapshot button when session status is `failed`; waiting state also gains snapshot button
+- **Report progress icon** (`ReportPanel.tsx`): Report progress messages now use object format with step/progress/status fields for checkmark icon detection in MessageStream
 
 #### v0.19.6 (2026-04-12)
 
