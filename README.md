@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.19.7
+**Version**: 0.19.8
 
 ## Installation
 
@@ -343,6 +343,13 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 ## Changelog
 
 > Technical details for each release are documented in [HANDOVER.md](./HANDOVER.md).
+
+### v0.19.8 (2026-04-15)
+
+- Bulk/scRNA-seq cross-validation is now enforced as a mandatory analysis step in the Exploration phase
+- Cell-type deconvolution is now mandatory when both bulk and scRNA-seq data are present
+- Standardized bioinformatics library names across all agents (pydeseq2, harmonypy, bbknn, scvi, decoupler)
+- Automatic fallback for bulk RNA-seq DEG analysis when PyDESeq2 is unavailable
 
 ### v0.19.7 (2026-04-14)
 

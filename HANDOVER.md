@@ -2,8 +2,77 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.19.7
-**Last Updated**: 2026-04-14
+**Version**: 0.19.8
+**Last Updated**: 2026-04-15
+
+## Changelog v0.19.8 (2026-04-15)
+
+### Backend Changes
+
+#### bioinformatics_agent.py
+- Added `_check_gate_keyword()` static method for enforcing mandatory analysis gates
+  - Returns (new_reject_count, should_reject); allows through after max_rejections
+- Added 4 mandatory gates in `execute_node()`:
+  1. **Bulk RNA-seq analysis gate** (Exploration): Rejects if bulk data exists but not analyzed
+  2. **Bulk/scRNA-seq cross-validation gate** (Exploration): Requires Venn/pseudobulk/overlap keywords
+  3. **Cell-type deconvolution gate** (Exploration): Requires deconvolution/nnls/scaden keywords
+  4. **Innovation-phase bulk validation gate**: Requires bulk_ or merged_counts in code
+- Changed data type constants: `DATA_TYPE_SCRNASEQ`, `DATA_TYPE_BULK_RNASEQ` from schemas
+- Standardized library names: PyDESeq2→pydeseq2, Harmony→harmonypy, BBKNN→bbknn, scVI→scvi, decoupleR→decoupler
+- Added fallback comment: PyDESeq2 ImportError → scipy.stats.ttest_ind + statsmodels FDR correction
+- Added `generate_text_diagram()` method for ASCII/Unicode pathway diagrams when Painter unavailable
+
+#### pi_agent.py
+- Dynamic task planning improvements with concrete method/target specification
+- Innovation phase now mandates 4-6 tasks per direction
+
+#### supervisor_agent.py
+- Enhanced figure review with issue classification
+
+#### workflow.py
+- Selective agent activation: PI decides which agents run each round from round 2+
+- Dynamic PI planning: refines downstream tasks based on completed results
+- Cross-agent context propagation: biochemistry → pathology → bioinformatics
+
+#### config.py
+- Literature config separated: google_api_key moved to literature_config
+
+#### models/schemas.py
+- Added `DATA_TYPE_SCRNASEQ`, `DATA_TYPE_BULK_RNASEQ` constants
+- Updated message/figure schemas
+
+#### utils/formatting.py
+- Added `format_revision_history()` utility function
+
+#### report_generator.py
+- Improved report compilation with analysis log support
+
+### Frontend Changes
+
+#### AboutDialog.tsx
+- Version updated to v0.19.8
+
+#### AnalysisPanel.tsx
+- Added failed state UI with snapshot button
+- Report progress checkmark icons
+
+#### ReportPanel.tsx
+- UI improvements for report generation status
+
+#### ResultsPanel.tsx
+- Enhanced results display
+
+#### GraphicAbstract.tsx
+- Improved graphic abstract revision handling
+
+#### MessageStream.tsx
+- Better message display for agent interactions
+
+#### appStore.ts
+- State management improvements
+
+#### translations.ts
+- Multi-language support updates
 
 ## Project Overview
 

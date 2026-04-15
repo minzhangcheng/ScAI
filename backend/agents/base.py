@@ -161,11 +161,17 @@ class BaseAgent(ABC):
 
         return content
 
-    async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None) -> str:
+    async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None, timeout: Optional[float] = None) -> str:
         """Send a message and get a response without using or modifying message history.
 
         Useful for isolated Q&A interactions that should not be influenced by
         or contaminate the accumulated conversation context.
+
+        Args:
+            message: User message
+            temperature: Sampling temperature (uses config default if None)
+            system_prompt: Override system prompt (uses default if None)
+            timeout: Per-request timeout in seconds (uses client default if None)
         """
         self._set_llm_context()
 
@@ -177,11 +183,15 @@ class BaseAgent(ABC):
 
         actual_temp = temperature if temperature is not None else self.config.temperature
 
-        response = await self.llm_client.chat(
-            model=self.model,
-            messages=messages,
-            temperature=actual_temp
-        )
+        kwargs: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": actual_temp,
+        }
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+
+        response = await self.llm_client.chat(**kwargs)
 
         content = response.content if response and response.content else ""
         if not content:

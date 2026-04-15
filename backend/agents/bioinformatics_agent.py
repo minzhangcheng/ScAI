@@ -2971,7 +2971,8 @@ Draw the diagram now.
 """
         response = await self.chat_without_history(
             user_message, temperature=0.3,
-            system_prompt=self._TEXT_DIAGRAM_SYSTEM_PROMPT
+            system_prompt=self._TEXT_DIAGRAM_SYSTEM_PROMPT,
+            timeout=600.0,
         )
         diagram = extract_code_from_markdown(response).strip()
         if not diagram:
@@ -3027,7 +3028,8 @@ Return the revised diagram only — no prose, no markdown fences.
 """
         response = await self.chat_without_history(
             user_message, temperature=0.3,
-            system_prompt=self._TEXT_DIAGRAM_SYSTEM_PROMPT
+            system_prompt=self._TEXT_DIAGRAM_SYSTEM_PROMPT,
+            timeout=600.0,
         )
         diagram = extract_code_from_markdown(response).strip()
         if not diagram:
