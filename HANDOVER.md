@@ -2,8 +2,42 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.19.8
-**Last Updated**: 2026-04-15
+**Version**: 0.19.9
+**Last Updated**: 2026-04-19
+
+## Changelog v0.19.9 (2026-04-19)
+
+### Backend Changes
+
+#### base.py
+- Added `max_retries` parameter to `chat_without_history()`, allowing callers to override the default retry count
+
+#### bioinformatics_agent.py
+- `generate_text_diagram()` and `_revise_text_diagram()` now pass `max_retries=3` to improve text diagram generation reliability
+
+#### llm_client.py
+- Added `max_retries_override` parameter to `_build_retry_kwargs()`
+- Added `max_retries` parameter to `chat()`, forwarded to `_build_retry_kwargs()`
+- Fixed logic: explicit `max_retries` takes priority; otherwise the original behavior (no retry for timeout > 300s) is preserved
+
+#### workflow.py
+- Added `max_rounds` field to `round_summary` messages, allowing the frontend to determine if the current round is the last
+- Improved error message format for graphic abstract failures, now showing the exception type
+
+### Frontend Changes
+
+#### AnalysisPanel.tsx
+- Added optional `maxRounds` field to `RoundSummary` interface
+- Parse `max_rounds` from `round_summary` messages
+
+#### RoundFeedbackDialog.tsx
+- Added optional `maxRounds` field to `RoundSummary` interface
+- `isLastRound` now prefers `roundSummary.maxRounds` when available, falling back to the `maxRounds` prop
+
+#### MessageStream.tsx
+- Added type guards (`typeof x === 'string'`) before rendering `message.content`, findings items, and suggestion items
+- Non-string content is now serialized via `JSON.stringify()` with appropriate formatting (compact for inline, pretty-printed for code blocks and lists)
+- Changed `findings` and `suggestions` `.map()` parameter types from `string` to `unknown` to match actual runtime data
 
 ## Changelog v0.19.8 (2026-04-15)
 
@@ -50,7 +84,7 @@ This document is intended for developers and operations personnel, providing tec
 ### Frontend Changes
 
 #### AboutDialog.tsx
-- Version updated to v0.19.8
+- Version updated to v0.19.9
 
 #### AnalysisPanel.tsx
 - Added failed state UI with snapshot button

@@ -32,6 +32,7 @@ const API_BASE = '/api'
 // Content shape from backend round_summary messages (snake_case)
 interface RoundSummaryContent {
   round?: number
+  max_rounds?: number
   summary?: string
   findings?: string[]
   data_requests?: { pathology?: string[]; biochemistry?: string[]; other?: string[] }
@@ -44,6 +45,7 @@ interface RoundSummaryContent {
 
 export interface RoundSummary {
   round: number
+  maxRounds?: number
   summary: string
   findings: string[]
   dataRequests: {
@@ -185,6 +187,7 @@ export function AnalysisPanel() {
         const content = msg.content as RoundSummaryContent
         summaries.push({
           round: content.round || summaries.length + 1,
+          maxRounds: content.max_rounds,
           summary: content.summary || '',
           findings: content.findings || [],
           dataRequests: {

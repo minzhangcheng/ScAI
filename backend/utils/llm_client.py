@@ -413,12 +413,14 @@ class OpenAICompatibleClient:
             else:
                 raise
 
-    def _build_retry_kwargs(self, request_timeout: Optional[float] = None) -> Dict[str, Any]:
+    def _build_retry_kwargs(self, request_timeout: Optional[float] = None, max_retries_override: Optional[int] = None) -> Dict[str, Any]:
         """统一构建 retry_kwargs，保持各方法逻辑一致."""
         kwargs: Dict[str, Any] = {"agent_name": self.agent_name}
         if request_timeout is not None:
             kwargs["request_timeout"] = request_timeout
-            if request_timeout > 300:
+            if max_retries_override is not None:
+                kwargs["max_retries"] = max_retries_override
+            elif request_timeout > 300:
                 kwargs["max_retries"] = 0  # Don't retry expensive long-running requests
         if self.on_retry is not None:
             kwargs["on_retry"] = self.on_retry
@@ -577,7 +579,8 @@ class OpenAICompatibleClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         stream: bool = False,
-        timeout: Optional[float] = None
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None
     ) -> LLMResponse:
         """
         Send chat request to OpenAI-compatible API with automatic retry on timeout
@@ -616,7 +619,7 @@ class OpenAICompatibleClient:
         _make_request, _make_request_no_temp = self._build_request_pair(
             base_params, model, temperature, max_tokens, request_timeout=timeout
         )
-        retry_kwargs = self._build_retry_kwargs(request_timeout=timeout)
+        retry_kwargs = self._build_retry_kwargs(request_timeout=timeout, max_retries_override=max_retries)
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat request to {model}")

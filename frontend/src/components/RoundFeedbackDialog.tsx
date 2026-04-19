@@ -25,6 +25,7 @@ import { getSection, getTypeOptions } from '../utils/dataTypes'
 
 interface RoundSummary {
   round: number
+  maxRounds?: number
   summary: string
   findings: string[]
   dataRequests: {
@@ -104,7 +105,7 @@ export function RoundFeedbackDialog({
   // Agent dropdown state (for file targeting)
   const [openDropdownIndex, setOpenDropdownIndex] = useState<number | null>(null)
 
-  const isLastRound = roundNumber >= maxRounds
+  const isLastRound = roundNumber >= (roundSummary.maxRounds ?? maxRounds)
 
   // No-wait mode: auto-skip immediately on mount.
   // Intentionally runs only once on mount — isNoWait is derived from props

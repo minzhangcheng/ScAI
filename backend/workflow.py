@@ -2985,8 +2985,10 @@ Return ONLY the JSON array, nothing else."""
             data_requests = []
         
         # Send round summary with data requests
+        effective_max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
         round_summary = {
             "round": round_result.round_number,
+            "max_rounds": effective_max_rounds,
             "summary": round_result.pi_summary,
             "pathology_findings": round_result.pathology_findings,
             "bioinformatics_findings": round_result.bioinformatics_findings,
@@ -3824,7 +3826,7 @@ Return ONLY the JSON array, nothing else."""
             )
             await self._send_message(
                 "error",
-                f"Text-mode graphic abstract failed: {e}. Continuing with detailed report...",
+                f"Text-mode graphic abstract failed: {type(e).__name__}: {e or 'see logs'}. Continuing with detailed report...",
                 AgentType.BIOINFORMATICS,
             )
             # Don't fail the workflow - graphic abstract is optional

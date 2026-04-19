@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.19.8
+**Version**: 0.19.9
 
 ## Installation
 
@@ -343,6 +343,13 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 ## Changelog
 
 > Technical details for each release are documented in [HANDOVER.md](./HANDOVER.md).
+
+### v0.19.9 (2026-04-19)
+
+- Round progress now shows the actual max rounds setting
+- Improved reliability of text-mode graphic abstract generation with automatic retries
+- Better error messages when graphic abstract generation fails
+- Improved message display robustness to gracefully handle non-text content
 
 ### v0.19.8 (2026-04-15)
 

@@ -143,7 +143,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
         return (
           <div className="flex items-center gap-2">
             <div className="px-3 py-1.5 rounded-full bg-gradient-to-r from-slate-100 to-slate-200 text-slate-700 text-sm font-medium">
-              {message.content}
+              {typeof message.content === 'string' ? message.content : JSON.stringify(message.content)}
             </div>
           </div>
         )
@@ -189,7 +189,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               <span>{language === 'zh' ? '思考中...' : 'Thinking...'}</span>
             </div>
             <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 text-sm text-purple-800 italic">
-              {message.content}
+              {typeof message.content === 'string' ? message.content : JSON.stringify(message.content)}
             </div>
           </div>
         )
@@ -233,7 +233,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                   style={oneLight}
                   customStyle={{ margin: 0, padding: '0.75rem', fontSize: '0.7rem' }}
                 >
-                  {message.content}
+                  {typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}
                 </SyntaxHighlighter>
               </div>
             )}
@@ -268,10 +268,10 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                   {language === 'zh' ? '分析发现' : 'Findings'}
                 </span>
                 <ul className="space-y-1.5">
-                  {content.findings.slice(0, 8).map((f: string, i: number) => (
+                  {content.findings.slice(0, 8).map((f: unknown, i: number) => (
                     <li key={i} className="flex items-start gap-2 text-sm text-slate-700 bg-slate-50 p-2 rounded">
                       <span className="text-green-500 font-medium">•</span>
-                      {f}
+                      {typeof f === 'string' ? f : JSON.stringify(f, null, 2)}
                     </li>
                   ))}
                 </ul>
@@ -577,7 +577,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                 <span>{language === 'zh' ? '咨询 PI Agent' : 'Consulting PI Agent'}</span>
               </div>
               <div className="bg-violet-50 border border-violet-200 rounded-lg p-3">
-                <p className="text-sm text-violet-800 font-medium">{questionData.question || message.content}</p>
+                <p className="text-sm text-violet-800 font-medium">{questionData.question || (typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2))}</p>
                 {questionData.context && (
                   <pre className="mt-2 text-xs text-violet-600 whitespace-pre-wrap">{questionData.context}</pre>
                 )}
@@ -629,10 +629,10 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                 )}
                 {findingsData.findings && findingsData.findings.length > 0 && (
                   <ul className="space-y-1">
-                    {findingsData.findings.map((f: string, i: number) => (
+                    {findingsData.findings.map((f: unknown, i: number) => (
                       <li key={i} className="flex items-start gap-2 text-xs text-green-700">
                         <span className="text-green-500">•</span>
-                        {f}
+                        {typeof f === 'string' ? f : JSON.stringify(f, null, 2)}
                       </li>
                     ))}
                   </ul>
@@ -641,8 +641,8 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                   <div className="mt-2 pt-2 border-t border-green-200">
                     <span className="text-xs text-green-600 font-medium">{language === 'zh' ? '建议:' : 'Suggestions:'}</span>
                     <ul className="mt-1 space-y-1">
-                      {findingsData.suggestions.map((s: string, i: number) => (
-                        <li key={i} className="text-xs text-green-600">→ {s}</li>
+                      {findingsData.suggestions.map((s: unknown, i: number) => (
+                        <li key={i} className="text-xs text-green-600">→ {typeof s === 'string' ? s : JSON.stringify(s, null, 2)}</li>
                       ))}
                     </ul>
                   </div>

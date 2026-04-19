@@ -161,7 +161,7 @@ class BaseAgent(ABC):
 
         return content
 
-    async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None, timeout: Optional[float] = None) -> str:
+    async def chat_without_history(self, message: str, temperature: Optional[float] = None, system_prompt: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None) -> str:
         """Send a message and get a response without using or modifying message history.
 
         Useful for isolated Q&A interactions that should not be influenced by
@@ -172,6 +172,7 @@ class BaseAgent(ABC):
             temperature: Sampling temperature (uses config default if None)
             system_prompt: Override system prompt (uses default if None)
             timeout: Per-request timeout in seconds (uses client default if None)
+            max_retries: Override retry count (uses client default if None)
         """
         self._set_llm_context()
 
@@ -190,6 +191,8 @@ class BaseAgent(ABC):
         }
         if timeout is not None:
             kwargs["timeout"] = timeout
+        if max_retries is not None:
+            kwargs["max_retries"] = max_retries
 
         response = await self.llm_client.chat(**kwargs)
 
