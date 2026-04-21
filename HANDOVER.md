@@ -2,8 +2,125 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.19.9
-**Last Updated**: 2026-04-19
+**Version**: 0.20.1
+**Last Updated**: 2026-04-21
+
+## Changelog v0.20.1 (2026-04-21)
+
+### Architecture Changes
+
+#### New Modular Directory Structure
+
+```
+backend/
+├── routes/              # API routes
+│   ├── auth.py         # Auth APIs (login, register, me)
+│   └── v1.py           # v1 API routes
+├── services/           # Business services
+│   ├── config_io.py    # Config I/O service
+│   └── upload.py       # Upload service
+├── middleware/         # Middleware
+│   └── auth.py         # Auth middleware
+├── tasks/             # Background tasks
+│   └── ttl_cleanup.py  # TTL expiration cleanup task
+├── utils/
+│   ├── auth.py         # Auth utilities (JWT, permission checks)
+│   ├── db.py           # Database utilities (SQLite)
+│   ├── files.py        # File operation utilities
+│   └── ...
+└── models/
+    ├── user.py         # User model
+    └── config_schema.py # Config schema
+```
+
+#### Authentication System
+
+- **JWT Token Authentication**: SQLite database for users and API keys
+- **AuthMiddleware**: All API requests automatically validate JWT tokens
+- **Session Ownership**: Sessions now have `user_id` field, only creator can access
+- **WebSocket Authentication**: Token passed via subprotocol, auth failure returns 4401 status code
+
+#### APP_DB_PATH
+
+New `APP_DB_PATH = DATA_BASE_DIR / "app.db"` for storing user authentication data
+
+### Backend Changes
+
+#### main.py
+- Version updated to 0.20.1
+- New `resolve_session_metadata_path()` function
+- New `_headless_workflow_runner()` for API-only mode without WebSocket
+- New `start_workflow_if_needed()` public API
+- New file path ownership validation `_validate_file_path_ownership()`
+- Auth imports: `auth_router`, `v1_router`, `AuthMiddleware`
+- Auth utilities: `get_db`, `require_auth`, `require_session_ownership`, `ws_authenticate_and_load`
+- Utility functions: `safe_filename`, `validate_session_id`, `validate_path_within` moved to `utils/files.py`
+- `_run_tasks` moved to `state.py`
+- `sessions`, `workflows` moved to `state.py`
+- `startup_event` additions: auth DB init, TTL cleanup task start, upload callback registration
+- `load_session_from_disk()`: rejects sessions with empty `user_id`
+- `list_saved_sessions()`: new `user_id` field and bio data type detection
+- `/api/session/start` and `/api/sessions` now require auth
+
+#### config.py
+- New `APP_DB_PATH`
+- New `resolve_session_metadata_path()`
+
+#### backend/state.py (new)
+- Centralized global state: `sessions`, `workflows`, `_run_tasks`
+
+### Frontend Changes
+
+#### Authentication
+- New login/register page routes (`/login`, `/register`)
+- New `ProtectedRoute` component for auth-protected routes
+- New `AuthLayout` layout component
+- New `DataConfigMenu` data config menu
+- `appStore.ts` additions: `authUser`, `login()`, `register()`, `logout()`, `loadAuthFromStorage()`
+- `useApi.ts`: `apiFetch()` auto-injects Authorization header, auto-logout on 401
+- `useWebSocket.ts`: WebSocket supports token auth, 4401 does not reconnect
+
+#### User Interface
+- Header new user menu (API Keys, email, logout)
+- Loading state shown on startup
+
+### New Files
+
+```
+backend/
+├── models/user.py           # User SQLAlchemy model
+├── models/config_schema.py  # Config schema
+├── routes/__init__.py
+├── routes/auth.py           # Auth API routes
+├── routes/v1.py             # v1 API routes
+├── services/__init__.py
+├── services/config_io.py
+├── services/upload.py
+├── middleware/__init__.py
+├── middleware/auth.py       # AuthMiddleware
+├── tasks/__init__.py
+├── tasks/ttl_cleanup.py     # TTL cleanup task
+├── utils/auth.py            # JWT utilities, permission decorators
+├── utils/db.py              # SQLite utilities
+├── utils/files.py           # File operation utilities
+├── state.py                 # Global state
+└── tests/
+    ├── conftest.py
+    ├── test_config_io.py
+    ├── test_config_schema.py
+    ├── test_db.py
+    ├── test_ownership.py
+    ├── test_upload_integrity.py
+    └── test_v1.py
+
+frontend/src/
+├── components/AuthLayout.tsx
+├── components/DataConfigMenu.tsx
+├── components/ProtectedRoute.tsx
+├── constants/auth.ts
+├── pages/                   # Login/register pages
+├── utils/authStorage.ts     # Token storage utilities
+```
 
 ## Changelog v0.19.9 (2026-04-19)
 

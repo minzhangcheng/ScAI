@@ -29,6 +29,9 @@ LOG_DIR = DATA_BASE_DIR / "logs"
 # Session-centric directory: all per-session data lives under sessions/{session_id}/
 SESSION_DIR = DATA_BASE_DIR / "sessions"
 
+# Application database for users and API keys
+APP_DB_PATH = DATA_BASE_DIR / "app.db"
+
 # Upload settings for large files
 UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024 * 1024  # 10GB maximum file size
@@ -67,6 +70,11 @@ def get_session_dir(session_id: str) -> Path:
 def get_session_metadata_path(session_id: str) -> Path:
     """Path to session.json metadata file."""
     return get_session_dir(session_id) / "session.json"
+
+
+def resolve_session_metadata_path(session_id: str) -> Path:
+    """Resolve session metadata path (new layout). Legacy paths handled by callers."""
+    return get_session_metadata_path(session_id)
 
 
 def get_session_workspace(session_id: str) -> Path:

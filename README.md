@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.19.9
+**Version**: 0.20.1
 
 ## Installation
 
@@ -343,6 +343,14 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 ## Changelog
 
 > Technical details for each release are documented in [HANDOVER.md](./HANDOVER.md).
+
+### v0.20.1 (2026-04-21)
+
+- **User Authentication**: New registration and login system, all API requests require JWT token auth
+- **Session Ownership**: Each analysis session is now tied to its creator, users can only access their own sessions
+- **WebSocket Authentication**: WebSocket connections support token auth, auth failures disconnect without retry
+- **Backend Modularization**: Refactored into modular structure with routes/, services/, middleware/, utils/, tasks/
+- **Auto Cleanup Tasks**: New TTL-based automatic expiration cleanup for upload files
 
 ### v0.19.9 (2026-04-19)
 

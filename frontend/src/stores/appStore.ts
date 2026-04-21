@@ -1,11 +1,20 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { Language, getDefaultPrompts } from '../i18n/translations'
+import { getToken, setToken, clearToken } from '../utils/authStorage'
 
 // Types
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor' | 'technique'
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'waiting_annotation' | 'generating_report'
 export type FigureReviewStatus = 'pending' | 'approved' | 'accepted_with_reservations' | 'revision_requested'
+
+
+// Auth types
+export interface AuthUser {
+  id: string
+  email: string
+}
+
 
 export interface Message {
   id: string
@@ -343,6 +352,13 @@ interface AppState {
   // Session browser callback (set by Sidebar, invoked by ConfigPanel's Read Mode)
   openSessionBrowser: (() => void) | null
   setOpenSessionBrowserCallback: (callback: (() => void) | null) => void
+
+  // Auth state
+  authUser: AuthUser | null
+  login: (email: string, password: string) => Promise<void>
+  register: (email: string, password: string) => Promise<void>
+  logout: () => void
+  loadAuthFromStorage: () => Promise<void>
 }
 
 export const useAppStore = create<AppState>()(
@@ -528,6 +544,47 @@ export const useAppStore = create<AppState>()(
       // Session browser callback
       openSessionBrowser: null,
       setOpenSessionBrowserCallback: (callback) => set({ openSessionBrowser: callback }),
+
+      // Auth state
+      authUser: null,
+      login: async (email: string, password: string) => {
+        const r = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        })
+        if (!r.ok) throw new Error('Invalid email or password')
+        const { access_token, id, email: userEmail } = await r.json()
+        setToken(access_token)
+        set({ authUser: id ? { id, email: userEmail } : null })
+      },
+      register: async (email: string, password: string) => {
+        const r = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        })
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({ detail: 'Registration failed' }))
+          throw new Error(body.detail || 'Registration failed')
+        }
+      },
+      logout: () => {
+        clearToken()
+        set({ authUser: null, currentSession: null, messages: [], chatMessages: [] })
+      },
+      loadAuthFromStorage: async () => {
+        const t = getToken()
+        if (!t) return
+        const r = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${t}` } })
+        if (r.ok) {
+          const me = await r.json()
+          set({ authUser: me })
+        } else {
+          clearToken()
+          set({ authUser: null })
+        }
+      },
     }),
     {
       name: 'scai-storage',
@@ -586,7 +643,6 @@ export const useAppStore = create<AppState>()(
           ...msg,
           figures: msg.figures?.map((f) => f ? { ...f, base64: undefined } : f)
         })),
-        // Limit persisted messages and strip ALL base64 content to prevent localStorage overflow
         messages: state.messages.slice(-200).map(msg => {
           // figure type: content is raw base64 string
           if (msg.type === 'figure') {

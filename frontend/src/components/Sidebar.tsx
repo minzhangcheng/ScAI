@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { useSession, apiFetch } from '../hooks/useApi'
+import { useSession, apiFetch, generateId } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
+import { DataConfigMenu } from './DataConfigMenu'
 import {
   Plus,
   Settings,
@@ -222,10 +223,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
     try {
       // Pre-generate import_id so we can poll even if proxy times out before response arrives
-      // crypto.randomUUID() requires secure context (HTTPS or localhost); fallback for HTTP
-      const preImportId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
+      const preImportId = generateId()
       let uploadFinished = false
 
       // Phase 1: Upload with progress tracking
@@ -717,19 +715,17 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
       {/* Bottom Actions */}
       <div className="p-3 border-t border-surface-200 space-y-1">
-        {/* Export - only when a session is open */}
-        {currentSession && (
-          <button
-            onClick={handleExport}
-            disabled={exporting}
-            className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 hover:bg-surface-100 rounded-lg disabled:opacity-50"
-          >
-            {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-            {exporting ? t('exporting') : t('exportSession')}
-          </button>
-        )}
-
-        {/* Import */}
+        <DataConfigMenu
+          sessionId={currentSession?.id}
+          onImported={(sid) => {
+            loadSession(sid).then(s => setCurrentSession(s))
+          }}
+          onExportSession={handleExport}
+          exporting={exporting}
+          onImportSession={() => fileInputRef.current?.click()}
+          importing={importing}
+        />
+        {/* Hidden file input for session import */}
         <input
           ref={fileInputRef}
           type="file"
@@ -737,14 +733,6 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
           onChange={handleImport}
           className="hidden"
         />
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={importing}
-          className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 hover:bg-surface-100 rounded-lg disabled:opacity-50"
-        >
-          {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-          {importing ? t('importing') : t('importSession')}
-        </button>
 
         <button
           onClick={onOpenConfig}

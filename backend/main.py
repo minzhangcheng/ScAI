@@ -33,7 +33,7 @@ from .config import (
     IMPORT_JOB_TTL, CLEANUP_INTERVAL,
     WS_RECEIVE_TIMEOUT, CHAT_DELEGATION_TIMEOUT,
     setup_logging,
-    get_session_dir, get_session_metadata_path, get_session_workspace,
+    get_session_dir, get_session_metadata_path, resolve_session_metadata_path, get_session_workspace,
     get_session_states, get_session_uploads, get_session_reports, ensure_session_dirs,
 )
 from .models.schemas import (
@@ -44,33 +44,38 @@ from .models.schemas import (
 from .workflow import SingleCellAnalysisWorkflow
 from .utils.llm_client import OpenAICompatibleClient, LLMManager
 from .utils.upload import ChunkedUploadManager, stream_save_file
+from .routes.auth import router as auth_router
+from .routes.v1 import router as v1_router
+from .middleware.auth import AuthMiddleware
+from .utils.auth import get_db, require_auth, require_session_ownership, ws_require_auth, ws_authenticate_and_load, WS_AUTH_FAILED_CODE
+from .utils.files import safe_filename, validate_session_id, validate_path_within
+from .state import sessions, workflows, _run_tasks
 
 # Initialize upload manager for chunked uploads (supports up to 10GB files)
 upload_manager = ChunkedUploadManager(UPLOAD_TEMP_DIR, UPLOAD_CHUNK_SIZE)
 
 
-def safe_filename(filename: str) -> str:
-    """Extract safe base filename, preventing path traversal. Returns empty string for invalid input."""
-    name = Path(filename).name
-    # Reject hidden files and names that are just dots
-    if not name or name.startswith('.'):
-        return ""
-    return name
+async def _validate_file_path_ownership(file_path: str, request: Request) -> None:
+    """Extract session_id from a file path prefix and verify ownership.
 
+    Expected path format: sessions/<session_id>/... or data/sessions/<session_id>/...
+    Uses require_session_ownership for consistent ownership checking.
+    """
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
-def validate_session_id(session_id: str) -> None:
-    """Validate session ID to prevent path traversal (whitelist approach)"""
-    if not session_id or len(session_id) > 128 or not re.match(r'^[a-zA-Z0-9_-]+$', session_id):
-        raise HTTPException(status_code=400, detail="Invalid session ID")
+    parts = Path(file_path).parts
+    sid = None
+    for i, part in enumerate(parts):
+        if part == "sessions" and i + 1 < len(parts):
+            sid = parts[i + 1]
+            break
 
+    if not sid:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-def validate_path_within(path: Path, parent: Path) -> Path:
-    """Validate that resolved path stays within expected parent directory"""
-    resolved = path.resolve()
-    parent_resolved = parent.resolve()
-    if resolved != parent_resolved and not resolved.is_relative_to(parent_resolved):
-        raise HTTPException(status_code=400, detail="Invalid path: path traversal detected")
-    return resolved
+    await require_session_ownership(session_id=sid, user_id=user_id)
 
 # Configure logging - must be called before any logging
 setup_logging()
@@ -81,10 +86,15 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.19.9"
+    version="0.20.1"
 )
 
+# Mount auth router
+app.include_router(auth_router)
+app.include_router(v1_router)
+
 # CORS
+app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -94,8 +104,6 @@ app.add_middleware(
 )
 
 # Global state with lock for thread-safe access
-sessions: Dict[str, AnalysisState] = {}
-workflows: Dict[str, SingleCellAnalysisWorkflow] = {}
 websockets: Dict[str, WebSocket] = {}
 config: Optional[SystemConfig] = None
 # Track sessions that are being initialized (prevents concurrent workflow creation)
@@ -142,6 +150,7 @@ def _get_agent_llm_client(
     )
 
 
+
 async def _update_session_cache(session_id: str, state):
     """Thread-safe update of in-memory session cache."""
     async with _state_lock:
@@ -166,8 +175,59 @@ async def _pause_and_restart_ws(session_id: str, state):
             logger.debug("WebSocket close failed during pause-and-restart", exc_info=True)
 
 
+async def start_workflow_if_needed(session_id: str) -> None:
+    """Start a headless workflow runner if not already running. Public API for v1 routes."""
+    async with _state_lock:
+        if session_id not in workflows and session_id not in _initializing_sessions:
+            _initializing_sessions.add(session_id)
+            asyncio.create_task(_headless_workflow_runner(session_id))
+
+
+async def _headless_workflow_runner(session_id: str):
+    """Run the analysis workflow without a WebSocket connection (for API usage)."""
+    from backend.workflow import SingleCellAnalysisWorkflow
+    from backend.models.schemas import TaskStatus
+
+    try:
+        state = sessions.get(session_id)
+        if state is None:
+            return
+
+        def message_callback(msg):
+            pass
+
+        async def state_callback(updated_state):
+            await _update_session_cache(session_id, updated_state)
+            await async_save_session(session_id, updated_state)
+
+        workflow = SingleCellAnalysisWorkflow(
+            config=config,
+            session_id=session_id,
+            message_callback=message_callback,
+            state_callback=state_callback,
+        )
+
+        async with _state_lock:
+            workflows[session_id] = workflow
+            _initializing_sessions.discard(session_id)
+
+        await workflow.run()
+        logger.info(f"Headless workflow completed for session {session_id}")
+
+    except Exception as e:
+        logger.exception(f"Headless workflow failed for session {session_id}")
+        state = sessions.get(session_id)
+        if state:
+            state.status = TaskStatus.FAILED
+            await _update_session_cache(session_id, state)
+            await async_save_session(session_id, state)
+    finally:
+        async with _state_lock:
+            _initializing_sessions.discard(session_id)
+            workflows.pop(session_id, None)
+
+
 # Workflow task tracking (for cancellation support)
-_run_tasks: Dict[str, asyncio.Task] = {}  # session_id -> asyncio.Task for workflow execution
 
 # Chat delegation tracking
 _chat_tasks: Dict[str, asyncio.Task] = {}  # session_id → background delegation task
@@ -304,8 +364,19 @@ async def touch_session(session_id: str):
 @app.on_event("startup")
 async def startup_event():
     """Start background tasks on application startup"""
+    # Initialize auth database
+    from backend.utils.auth import get_db
+    db = await get_db()
+    logger.info(f"Auth database initialized at {db.path}")
     asyncio.create_task(cleanup_stale_sessions())
     logger.info("Started background session cleanup task")
+    # Start TTL cleanup for expired upload sessions
+    from backend.tasks.ttl_cleanup import ttl_cleanup_task
+    asyncio.create_task(ttl_cleanup_task())
+    logger.info("Started upload TTL cleanup task")
+    # Register upload service callbacks
+    from backend.services.upload import set_session_callbacks
+    set_session_callbacks(_update_session_cache, async_save_session)
 
 
 # Session persistence helpers
@@ -384,13 +455,14 @@ async def async_save_session(session_id: str, state: AnalysisState, force: bool 
 def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
     """Load session state from disk (new path first, legacy fallback)"""
     try:
-        session_file = get_session_metadata_path(session_id)
-        if not session_file.exists():
-            # Legacy fallback
-            session_file = SESSION_DIR / f"{session_id}.json"
-        if session_file.exists():
+        session_file = resolve_session_metadata_path(session_id)
+        if session_file and session_file.exists():
             with open(session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            # Reject sessions with empty user_id (Plan A residual)
+            if not data.get("user_id"):
+                logger.warning(f"Session {session_id} has empty user_id, refusing to load")
+                return None
             state = AnalysisState(**data)
             logger.info(f"Session {session_id} loaded from disk")
             return state
@@ -448,16 +520,25 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
                 return
             seen_ids.add(sid)
             data_files = data.get("data_files", [])
+            has_pathology = has_sequencing = has_biochemistry = False
+            for f in data_files:
+                section = f.get("section")
+                if section == "pathology": has_pathology = True
+                elif section == "sequencing": has_sequencing = True
+                elif section == "biochemistry": has_biochemistry = True
+            if data.get("biochemistry_indicators"):
+                has_biochemistry = True
             sessions_list.append({
                 "id": sid,
+                "user_id": data.get("user_id", ""),
                 "name": data.get("name", "Unknown"),
                 "status": data.get("status", "unknown"),
                 "created_at": data.get("created_at", ""),
                 "updated_at": data.get("updated_at", ""),
                 "current_round": data.get("current_round", 0),
-                "has_pathology": any(f.get("section") == "pathology" for f in data_files),
-                "has_sequencing": any(f.get("section") == "sequencing" for f in data_files),
-                "has_biochemistry": any(f.get("section") == "biochemistry" for f in data_files) or len(data.get("biochemistry_indicators", [])) > 0,
+                "has_pathology": has_pathology,
+                "has_sequencing": has_sequencing,
+                "has_biochemistry": has_biochemistry,
             })
         except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning(f"Failed to read session file {session_file}: {e}")
@@ -662,19 +743,23 @@ async def validate_api_key(request: ValidateKeyRequest):
 
 
 @app.post("/api/session/start")
-async def start_session(request: StartRequest):
+async def start_session(request: Request, body: StartRequest):
     """Start a new analysis session"""
     global config
     
     if config is None:
         raise HTTPException(status_code=400, detail="API configuration not set")
     
+    # Get user_id from auth middleware
+    user_id = getattr(request.state, "user_id", "")
+    
     # Create new session
     session_id = str(uuid.uuid4())
     state = AnalysisState(
         id=session_id,
-        name=request.session_name or f"Analysis-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-        initial_instruction=request.instruction,
+        name=body.session_name or f"Analysis-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        user_id=user_id,
+        initial_instruction=body.instruction,
         status=TaskStatus.PENDING
     )
     
@@ -692,18 +777,23 @@ async def start_session(request: StartRequest):
 
 
 @app.get("/api/sessions")
-async def list_sessions():
-    """List all available sessions (from disk and memory)"""
+async def list_sessions(request: Request):
+    """List all available sessions (from disk and memory), filtered by user ownership"""
+    user_id = getattr(request.state, "user_id", None)
     # Get sessions from disk
-    disk_sessions = list_saved_sessions()
-    
-    # Also include any in-memory sessions not yet saved (snapshot keys to avoid race)
+    disk_sessions = await asyncio.to_thread(list_saved_sessions)
+
+    # Filter by ownership if user is authenticated
+    if user_id:
+        disk_sessions = [s for s in disk_sessions if s.get("user_id") == user_id]
+
+    # Merge in-memory sessions not yet on disk
     memory_session_ids = set(list(sessions.keys()))
     disk_session_ids = {s["id"] for s in disk_sessions}
 
     for session_id in memory_session_ids - disk_session_ids:
         state = sessions.get(session_id)
-        if state is None:
+        if state is None or (user_id and state.user_id != user_id):
             continue
         disk_sessions.append({
             "id": session_id,
@@ -762,20 +852,18 @@ def _strip_message_base64(msg_type: str, content) -> Any:
 
 
 @app.get("/api/session/{session_id}/load")
-async def load_session(session_id: str):
+async def load_session(session_id: str, request: Request):
     """Load a session by ID (from memory or disk)"""
-    validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
     return state.to_api_dict(strip_message_base64=_strip_message_base64)
 
 
 @app.delete("/api/session/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, request: Request):
     """Delete a session completely"""
-    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Atomically check workflow status and remove session from memory
     async with _state_lock:
@@ -841,11 +929,15 @@ async def ensure_session(session_id: str, request: StartRequest):
         )
 
     # Create new session with the provided ID
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     state = AnalysisState(
         id=session_id,
         name=request.session_name or f"Analysis-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
         initial_instruction=request.instruction,
-        status=TaskStatus.PENDING
+        status=TaskStatus.PENDING,
+        user_id=user_id,
     )
     
     await _update_session_cache(session_id, state)
@@ -861,12 +953,10 @@ async def ensure_session(session_id: str, request: StartRequest):
 
 
 @app.get("/api/session/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, request: Request):
     """Get session status"""
-    # Ensure session is loaded (from disk if necessary)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
     
     return {
         "session_id": session_id,
@@ -2353,10 +2443,8 @@ async def export_state(session_id: str):
             _add_bytes(f"{session_id}/manifest.json", manifest)
 
             # 1. session.json
-            session_file = get_session_metadata_path(session_id)
-            if not session_file.exists():
-                session_file = SESSION_DIR / f"{session_id}.json"
-            if session_file.exists():
+            session_file = resolve_session_metadata_path(session_id)
+            if session_file and session_file.exists():
                 tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
 
             # 2. states (checkpoints, notebook, pkl)
@@ -2467,10 +2555,8 @@ async def export_prepare(session_id: str):
             _add_bytes(f"{session_id}/manifest.json", manifest)
 
             # session.json
-            session_file = get_session_metadata_path(session_id)
-            if not session_file.exists():
-                session_file = SESSION_DIR / f"{session_id}.json"
-            if session_file.exists():
+            session_file = resolve_session_metadata_path(session_id)
+            if session_file and session_file.exists():
                 tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
 
             # states
@@ -2899,21 +2985,17 @@ async def get_report(session_id: str):
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """WebSocket for real-time updates during analysis"""
     global config
-    
-    await websocket.accept()
-    
-    # Ensure session is loaded (from disk if necessary)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        await websocket.send_json({"error": "Session not found"})
-        await websocket.close()
+
+    result = await ws_authenticate_and_load(websocket, session_id)
+    if result is None:
         return
-    
+    user_id, state = result
+
     if config is None:
         await websocket.send_json({"error": "API configuration not set"})
         await websocket.close()
         return
-    
+
     logger.info(f"WebSocket connected for session {session_id}, state={state.status.value}")
 
     # Check if workflow is already running BEFORE updating websocket reference
@@ -3430,9 +3512,8 @@ async def get_detailed_report(session_id: str):
             logger.exception(f"Failed to load report for {session_id}")
 
     # Only check session exists if no report found
-    session_meta = get_session_metadata_path(session_id)
-    legacy_meta = SESSION_DIR / f"{session_id}.json"
-    if not session_meta.exists() and not legacy_meta.is_file() and session_id not in sessions:
+    session_meta = resolve_session_metadata_path(session_id)
+    if not session_meta.exists() and session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
     return {"report": None}
@@ -3573,13 +3654,13 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
 
 @app.websocket("/ws/report/{session_id}")
 async def report_websocket(websocket: WebSocket, session_id: str):
-    """WebSocket for report generation progress"""
-    if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
-        await websocket.close(code=1008, reason="Invalid session ID")
+    """WebSocket for report generation progress — authenticated via scai.jwt.v1 subprotocol."""
+    result = await ws_authenticate_and_load(websocket, session_id)
+    if result is None:
         return
-    await websocket.accept()
+
     report_websockets[session_id] = websocket
-    
+
     try:
         while True:
             # Keep connection alive
@@ -3590,39 +3671,40 @@ async def report_websocket(websocket: WebSocket, session_id: str):
         if session_id in report_websockets:
             del report_websockets[session_id]
 
+_ALLOWED_DIRS = [
+    Path(SESSION_DIR).resolve(),
+    Path(REPORTS_DIR).resolve(),
+    Path(UPLOAD_DIR).resolve(),
+    Path(STATE_DIR).resolve(),
+    Path(WORKSPACE_DIR).resolve(),
+]
 
-@app.get("/api/file")
-async def get_file(path: str):
-    """Serve a file from the filesystem"""
-    # Security: only allow files in the data directory
-    # Use Path.relative_to() for proper path containment check (handles symlinks correctly)
-    allowed_dirs = [
-        Path(SESSION_DIR).resolve(),  # Covers all session subdirs (new structure)
-        Path(REPORTS_DIR).resolve(),  # Legacy
-        Path(UPLOAD_DIR).resolve(),   # Legacy
-        Path(STATE_DIR).resolve(),    # Legacy
-        Path(WORKSPACE_DIR).resolve(),  # Legacy
-    ]
 
-    # Resolve the real path to prevent traversal attacks like /../../../etc/passwd
+def _resolve_within_allowed_dirs(path: str) -> Path:
+    """Resolve a file path and verify it stays within allowed data directories.
+    Raises HTTPException if path traversal is detected or file not found.
+    """
     try:
         real_path = Path(path).resolve()
     except (ValueError, OSError):
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    # Check if the resolved path is within any allowed directory using relative_to
-    # This properly handles symlinks that might point outside allowed directories
-    is_allowed = False
-    for allowed_dir in allowed_dirs:
+    for allowed_dir in _ALLOWED_DIRS:
         try:
             real_path.relative_to(allowed_dir)
-            is_allowed = True
-            break
+            return real_path
         except ValueError:
             continue
 
-    if not is_allowed:
-        raise HTTPException(status_code=403, detail="Access denied")
+    raise HTTPException(status_code=403, detail="Access denied")
+
+
+@app.get("/api/file")
+async def get_file(path: str, request: Request):
+    """Serve a file from the filesystem — ownership-checked by session_id prefix."""
+    await _validate_file_path_ownership(path, request)
+
+    real_path = _resolve_within_allowed_dirs(path)
 
     if not real_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -3634,40 +3716,11 @@ async def get_file(path: str):
 
 
 @app.get("/api/download")
-async def download_file(path: str):
-    """Download a file"""
-    # Security: only allow files in the data directory
-    # Use Path.relative_to() for proper path containment check (handles symlinks correctly)
-    allowed_dirs = [
-        Path(SESSION_DIR).resolve(),  # Covers all session subdirs (new structure)
-        Path(REPORTS_DIR).resolve(),  # Legacy
-        Path(UPLOAD_DIR).resolve(),   # Legacy
-        Path(STATE_DIR).resolve(),    # Legacy
-        Path(WORKSPACE_DIR).resolve(),  # Legacy
-    ]
+async def download_file(path: str, request: Request):
+    """Download a file — ownership-checked by session_id prefix."""
+    await _validate_file_path_ownership(path, request)
 
-    # Resolve the real path to prevent traversal attacks
-    try:
-        real_path = Path(path).resolve()
-    except (ValueError, OSError):
-        raise HTTPException(status_code=400, detail="Invalid path")
-
-    # Check if the resolved path is within any allowed directory using relative_to
-    # This properly handles symlinks that might point outside allowed directories
-    is_allowed = False
-    for allowed_dir in allowed_dirs:
-        try:
-            real_path.relative_to(allowed_dir)
-            is_allowed = True
-            break
-        except ValueError:
-            continue
-
-    if not is_allowed:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    if not real_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
+    real_path = _resolve_within_allowed_dirs(path)
 
     if not real_path.is_file():
         raise HTTPException(status_code=400, detail="Not a file")

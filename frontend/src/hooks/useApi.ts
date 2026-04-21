@@ -2,6 +2,8 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAppStore, Message, Session, AgentType, RoundResult, FigureReviewStatus } from '../stores/appStore'
 import { devLog } from '../utils/logger'
 import { downloadBlob } from '../utils/download'
+import { getToken, setToken, clearToken } from '../utils/authStorage'
+import { WS_AUTH_SUBPROTOCOL } from '../constants/auth'
 import type {
   SessionLoadResponse,
   SessionInfoUpdateResponse,
@@ -39,24 +41,41 @@ export function generateId(): string {
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`
 }
 
-// Generic fetch wrapper (exported for direct use)
+// Get JWT token from localStorage
+function getAuthToken(): string | null {
+  return getToken()
+}
+
+// Generic fetch wrapper (exported for direct use) — auto-injects Authorization header
 export async function apiFetch<T>(
   endpoint: string,
   options?: RequestInit
 ): Promise<T> {
+  const token = getAuthToken()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string> || {}),
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
+    headers,
   })
-  
+
+  // Auto-logout on 401
+  if (response.status === 401) {
+    clearToken()
+    // Zustand authUser will become null → ProtectedRoute redirects to /login
+    throw new Error('Authentication failed. Please log in again.')
+  }
+
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Unknown error' }))
     throw new Error(error.detail || 'API request failed')
   }
-  
+
   return response.json()
 }
 
@@ -730,10 +749,12 @@ export function useWebSocket() {
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}/ws/${session.id}`
+    const token = getToken()
+    const wsProtocols = token ? [WS_AUTH_SUBPROTOCOL, token] : undefined
 
     devLog(`WebSocket: Connecting to ${wsUrl}${isReconnect ? ' (reconnect #' + reconnectCountRef.current + ')' : ''}`)
 
-    const ws = new WebSocket(wsUrl)
+    const ws = new WebSocket(wsUrl, wsProtocols)
     wsRef.current = ws
 
     // Connection timeout: close and retry if onopen doesn't fire within 10 seconds
@@ -1109,8 +1130,15 @@ export function useWebSocket() {
       setConnected(false)
       setWsConnected(false)
       wsRef.current = null
-      reconnectCountRef.current += 1  // Track reconnect for history recovery
       devLog('WebSocket: Disconnected, code:', event.code, 'reason:', event.reason)
+
+      // Don't reconnect on auth failure (4401) or if no token
+      if (event.code === 4401 || !getToken()) {
+        devLog('WebSocket: Auth failure or no token, not reconnecting')
+        return
+      }
+
+      reconnectCountRef.current += 1  // Track reconnect for history recovery
 
       // Auto-reconnect if session is still running (not manually disconnected)
       const latestSession = useAppStore.getState().currentSession

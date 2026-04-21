@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAppStore } from './stores/appStore'
 import { useConfig, useWebSocket } from './hooks/useApi'
 import { useTranslation } from './i18n/translations'
@@ -26,11 +27,16 @@ import {
   Wifi,
   WifiOff,
   GripVertical,
-  Dna
+  Dna,
+  Key,
+  LogOut,
+  User
 } from 'lucide-react'
 
 function App() {
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks } = useAppStore()
+  const navigate = useNavigate()
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, loadAuthFromStorage, authUser, logout } = useAppStore()
+  const [authReady, setAuthReady] = useState(false)
   const { checkStatus, saveConfig } = useConfig()
   const { connect, disconnect } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
@@ -81,6 +87,11 @@ function App() {
     }
   }, [isResizing, handleMouseMove, handleMouseUp])
 
+  // Load auth state from localStorage on startup
+  useEffect(() => {
+    loadAuthFromStorage().finally(() => setAuthReady(true))
+  }, [loadAuthFromStorage])
+
   // Check API config status; auto-sync from localStorage if backend lost config
   useEffect(() => {
     checkStatus().then(async (status) => {
@@ -116,6 +127,17 @@ function App() {
 
   // Note: WebSocket auto-reconnect is handled entirely by useWebSocket hook.
   // No duplicate reconnection logic here to avoid competing reconnect attempts.
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-surface-900 flex flex-col items-center justify-center gap-4">
+        <div className="p-4 bg-gradient-to-br from-accent-500 to-accent-700 rounded-2xl shadow-glow-accent">
+          <Dna className="w-8 h-8 text-white animate-spin" />
+        </div>
+        <p className="text-surface-400 text-sm font-medium tracking-wide">Loading ScAI...</p>
+      </div>
+    )
+  }
 
   if (showDisclaimer) {
     return <DisclaimerDialog onAccept={() => setShowDisclaimer(false)} />
@@ -236,6 +258,30 @@ function App() {
 
               {/* Language Selector */}
               <LanguageSelector />
+
+              {/* User Menu */}
+              {authUser && (
+                <div className="flex items-center gap-2 ml-2">
+                  <button
+                    onClick={() => navigate('/api-keys')}
+                    className="flex items-center gap-1 px-2 py-1 text-xs text-surface-500 hover:text-accent-600 rounded"
+                    title="API Keys"
+                  >
+                    <Key className="w-3.5 h-3.5" />
+                  </button>
+                  <span className="text-xs text-surface-500 flex items-center gap-1">
+                    <User className="w-3 h-3" />
+                    {authUser.email}
+                  </span>
+                  <button
+                    onClick={() => { logout(); navigate('/login') }}
+                    className="flex items-center gap-1 px-2 py-1 text-xs text-surface-500 hover:text-red-600 rounded"
+                    title="Sign out"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
 
               {/* About */}
               <AboutDialog />

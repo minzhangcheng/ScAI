@@ -355,6 +355,7 @@ class AnalysisState(BaseModel):
     """Complete state of an analysis session"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "Untitled Analysis"
+    user_id: str = Field(..., min_length=1)  # Owner user ID (required, non-empty)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -643,6 +644,7 @@ class AnalysisState(BaseModel):
 
         result = {
             "session_id": self.id,
+            "user_id": self.user_id,
             "name": self.name,
             "status": _enum(self.status),
             "current_round": self.current_round,
