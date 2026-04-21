@@ -1,12 +1,80 @@
-"""Global state for ScAI backend sessions, workflows, and tasks.
+"""Global in-memory state for backend sessions, workflows, and tasks.
 
-Extracted from main.py to break circular imports.
+Centralizes the dicts/locks that multiple modules (main, services, tasks,
+routes) must share, to avoid circular imports.
 """
-from typing import Dict, Any
+import asyncio
+import time
+from typing import Any, Dict, Optional
+
 
 # In-memory session store: session_id -> AnalysisState
 sessions: Dict[str, Any] = {}
+
+# Running workflow instances: session_id -> SingleCellAnalysisWorkflow
 workflows: Dict[str, Any] = {}
 
 # Background run tasks: session_id -> asyncio.Task
 _run_tasks: Dict[str, Any] = {}
+
+# Sessions currently being initialized (prevents concurrent workflow creation).
+initializing_sessions: set = set()
+
+# Lock for protecting concurrent access to the dicts above.
+state_lock: asyncio.Lock = asyncio.Lock()
+
+# Per-session locks for finer-grained save/evict operations.
+session_locks: Dict[str, asyncio.Lock] = {}
+
+# Last time each session was accessed, used by cache eviction.
+session_access_times: Dict[str, float] = {}
+
+# Last save time per session (save throttle).
+last_save_times: Dict[str, float] = {}
+
+
+def get_session_lock(session_id: str) -> asyncio.Lock:
+    """Return a per-session lock; caller must hold state_lock or know key exists."""
+    if session_id not in session_locks:
+        session_locks[session_id] = asyncio.Lock()
+    return session_locks[session_id]
+
+
+def touch_access_time(session_id: str) -> None:
+    """Record current time as last access (callers hold state_lock)."""
+    session_access_times[session_id] = time.time()
+
+
+# Current system config (set via /api/config).
+# Avoids circular import with backend.config.SystemConfig.
+system_config: Dict[str, Optional[Any]] = {"current": None}
+
+# WebSocket connections per session (managed by the websocket endpoint).
+# Exposed here to avoid circular imports with routes that need to check/modify.
+websockets: Dict[str, Any] = {}
+
+# Prepared exports for two-phase export: session_id -> {"path": str, "filename": str, "size": int}
+prepared_exports: Dict[str, Dict[str, Any]] = {}
+prepared_exports_lock: asyncio.Lock = asyncio.Lock()
+
+# Import jobs for background tar.gz extraction: import_id -> {"status": str, ...}
+import_jobs: Dict[str, dict] = {}
+import_jobs_lock: asyncio.Lock = asyncio.Lock()
+
+# Chat delegation tracking: session_id → background delegation task
+chat_tasks: Dict[str, asyncio.Task] = {}
+
+# Lock for protecting chat task concurrent access
+chat_task_lock: asyncio.Lock = asyncio.Lock()
+
+# Chat sandboxes: session_id → sandbox for active chat (delegation/figure gen)
+chat_sandboxes: Dict[str, Any] = {}
+
+# WebSocket monitor tasks (for cancellation on reconnect): session_id -> monitor task
+_monitor_tasks: Dict[str, asyncio.Task] = {}
+
+# WebSocket connections for report generation: session_id -> WebSocket
+report_websockets: Dict[str, Any] = {}
+
+# Detailed report generation state: session_id -> report dict
+detailed_reports: Dict[str, Any] = {}

@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.20.1
+**Version**: 0.20.2
 
 ## Installation
 
@@ -343,6 +343,16 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 ## Changelog
 
 > Technical details for each release are documented in [HANDOVER.md](./HANDOVER.md).
+
+### v0.20.2 (2026-04-21)
+
+- **Advanced Backend Modularization**: All API routes extracted from main.py into 14 dedicated route modules (root, config, sessions, session_config, indicators, upload, lifecycle, interaction, snapshots, export_import, files, chat, websockets, reports)
+- **Session Persistence Service**: New `services/session_store.py` centralizes memory cache + atomic disk writes with save throttling and per-session locks
+- **Workflow Runner Service**: New `services/workflow_runner.py` manages headless analysis workflows for API-based usage
+- **Session Cleanup Task**: New `tasks/session_cleanup.py` provides periodic TTL-based in-memory cache eviction for idle sessions
+- **Agent LLM Utility**: New `utils/agent_llm.py` provides per-agent LLM client factory and file-path ownership validation
+- **Extended State Management**: `state.py` expanded with per-session locks, access time tracking, prepared exports, import jobs tracking, chat delegation tracking, and WebSocket monitor tasks
+- **Chat Delegation**: Full agent delegation system in chat routes allowing PI Agent to coordinate bioinformatics, pathology, biochemistry, and literature agents in parallel
 
 ### v0.20.1 (2026-04-21)
 

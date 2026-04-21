@@ -2,8 +2,134 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.20.1
+**Version**: 0.20.2
 **Last Updated**: 2026-04-21
+
+## Changelog v0.20.2 (2026-04-21)
+
+### Architecture Changes
+
+#### Advanced Backend Modularization
+
+All API route handlers extracted from `main.py` into 14 dedicated route modules for improved maintainability:
+
+```
+backend/routes/
+├── root.py            # Root & API-root info endpoints
+├── config.py          # API key and LLM settings (config, validate)
+├── sessions.py        # Session and group management
+├── session_config.py  # Prompts, models, temperatures, vision, literature config
+├── indicators.py      # Biochemistry indicator management
+├── upload.py          # Data file uploads, chunked uploads
+├── lifecycle.py       # Run, pause, resume, stop, retry-node, resume-bioinformatics
+├── interaction.py      # Human-input, confirm-annotations, choose-direction
+├── snapshots.py       # Snapshot list, restore, delete
+├── export_import.py   # Session tar.gz/zip export/import
+├── files.py           # File serving with ownership validation
+├── chat.py            # PI Agent free-form chat with delegation
+├── websockets.py      # Real-time WebSocket + report generation WebSocket
+└── reports.py         # Exploration/annotation/detailed report serving
+```
+
+#### New Services
+
+```
+backend/services/
+├── session_store.py   # Memory cache + atomic disk writes, save throttling, per-session locks
+└── workflow_runner.py # Headless analysis workflow management for API-based usage
+```
+
+#### New Tasks
+
+```
+backend/tasks/
+└── session_cleanup.py # Periodic TTL-based in-memory cache eviction for idle sessions
+```
+
+#### New Utils
+
+```
+backend/utils/
+└── agent_llm.py       # Per-agent LLM client factory + file-path ownership validation
+```
+
+### Backend Changes
+
+#### main.py
+- Massive refactoring: reduced by ~5600 lines (from monolithic to modular)
+- Imports all 14 new route modules
+- Registers new services and tasks in lifespan context manager
+- State management now uses centralized state module
+
+#### backend/state.py
+Expanded with additional global state structures:
+- `session_locks`: Per-session locks for finer-grained save/evict operations
+- `session_access_times`: Last access time per session (used by cache eviction)
+- `last_save_times`: Per-session save throttling
+- `system_config`: Current system config (avoids circular import)
+- `websockets`: WebSocket connections per session
+- `prepared_exports`: Two-phase export (build tar.gz on disk, then stream)
+- `import_jobs`: Background tar.gz import job tracking
+- `chat_tasks` / `chat_task_lock` / `chat_sandboxes`: Chat delegation tracking
+- `_monitor_tasks`: WebSocket monitor tasks for cancellation on reconnect
+- `report_websockets` / `detailed_reports`: Report generation WebSocket state
+
+#### backend/routes/chat.py
+- Full agent delegation system: PI Agent can coordinate bioinformatics, pathology, biochemistry, literature agents
+- Priority-based parallel agent execution with global timeout
+- Chat figures: `[[FIGURE:name]]` references existing figures, `[[GENERATE_FIGURE:desc]]` creates new ones
+- Sandbox conflict detection with running workflow
+- Background task pattern for long-running delegations
+
+#### backend/routes/websockets.py
+- Message serialization with base64 stripping for memory efficiency
+- WebSocket closed state tracking with lock protection (prevents concurrent send attempts)
+- HITL-hold pattern for snapshot restore without workflow restart
+- Ping/heartbeat mechanism for proxy keep-alive
+- Report-only mode for interrupted analysis
+- Monitor task for client disconnect detection
+
+#### backend/routes/snapshots.py
+- Phase-aware status setting on restore (pre_direction, pre_annotation, pre_round_wait)
+- Synthesizes HITL messages into realtime_messages for frontend dialog restoration
+- Legagy snapshot backward compatibility (pre_annotation snapshots without annotation_state)
+- LangGraph checkpoint deletion on restore to prevent stale resume position
+
+#### backend/routes/export_import.py
+- Two-phase export: `POST /export/prepare` builds tar.gz on disk, `GET /export/download` streams it
+- Background tar.gz extraction to avoid proxy timeouts on large archives
+- Import job status polling
+- Path remapping for legacy session directory structures
+- Security: path traversal validation, session ID sanitization
+
+### New Files
+
+```
+backend/
+├── models/api_requests.py       # Request models (ConfigRequest, ValidateKeyRequest, etc.)
+├── routes/chat.py               # Chat routes with PI Agent delegation
+├── routes/config.py             # Config API routes
+├── routes/export_import.py      # Export/Import routes
+├── routes/files.py              # File serving routes
+├── routes/indicators.py         # Indicator management routes
+├── routes/interaction.py        # HITL interaction routes
+├── routes/lifecycle.py          # Lifecycle management routes
+├── routes/reports.py            # Report generation and serving
+├── routes/root.py               # Root endpoints
+├── routes/session_config.py     # Session config routes
+├── routes/sessions.py           # Session management routes
+├── routes/snapshots.py          # Snapshot routes
+├── routes/upload.py             # Upload routes
+├── routes/websockets.py         # WebSocket endpoints
+├── services/session_store.py    # Session persistence service
+├── services/workflow_runner.py  # Headless workflow runner
+├── tasks/session_cleanup.py      # Cache eviction task
+├── utils/agent_llm.py           # Per-agent LLM client factory
+└── tests/
+    ├── route_snapshot.json      # Snapshot of registered routes
+    ├── test_route_registry.py   # Route registry tests
+    └── test_session_store.py    # Session store tests
+```
 
 ## Changelog v0.20.1 (2026-04-21)
 

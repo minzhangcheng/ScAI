@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/v1", tags=["v1"])
 
 async def _create_pending_session(request: Request) -> str:
     """Parse ConfigV1 from request body, create pending session, return session_id."""
-    from backend.main import _update_session_cache, async_save_session
+    from backend.services.session_store import update_session_cache as _update_session_cache, async_save_session
 
     user_id = getattr(request.state, "user_id", "")
     try:
@@ -100,9 +100,10 @@ async def complete_file_upload(session_id: str, upload_id: str, request: Request
 @router.post("/analyses/{session_id}/start")
 async def start_analysis(session_id: str, request: Request):
     """Start a pending analysis. Idempotent: running/completed/failed return current status."""
-    from backend.main import (
-        config, async_save_session, _update_session_cache, start_workflow_if_needed,
-    )
+    from backend.state import system_config
+    config = system_config.get("current")
+    from backend.services.workflow_runner import start_workflow_if_needed
+    from backend.services.session_store import async_save_session, update_session_cache as _update_session_cache
     from backend.models.schemas import TaskStatus
 
     user_id = getattr(request.state, "user_id", "")
@@ -132,10 +133,8 @@ async def start_analysis(session_id: str, request: Request):
 @router.delete("/analyses/{session_id}")
 async def delete_analysis(session_id: str, request: Request):
     """Delete an analysis. Cannot delete running sessions (returns 409)."""
-    from backend.main import (
-        sessions, workflows,
-        _initializing_sessions, _state_lock, websockets,
-    )
+    from backend.state import sessions, workflows, state_lock as _state_lock, initializing_sessions as _initializing_sessions
+    from backend.state import websockets
     import shutil
 
     user_id = getattr(request.state, "user_id", "")

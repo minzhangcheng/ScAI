@@ -1,0 +1,541 @@
+"""WebSocket endpoints for real-time updates and report generation."""
+import asyncio
+import logging
+from datetime import datetime
+from typing import Any
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from backend.config import WS_RECEIVE_TIMEOUT
+from backend.models.schemas import WebSocketMessage, AnalysisState, TaskStatus
+from backend.state import (
+    websockets, workflows, _monitor_tasks,
+    _run_tasks, state_lock, initializing_sessions,
+    report_websockets, detailed_reports,
+    sessions as _sessions,
+)
+from backend.utils.auth import ws_authenticate_and_load
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["websockets"])
+
+
+def _serialize_realtime_messages(messages):
+    """Serialize a list of WebSocketMessage to JSON-safe dicts."""
+    msg_data_list = []
+    for msg in messages:
+        msg_data_list.append({
+            "type": msg.type,
+            "agent": msg.agent.value if msg.agent else None,
+            "content": msg.content,
+            "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
+            "id": msg.id
+        })
+    return msg_data_list
+
+
+@router.websocket("/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    """WebSocket for real-time updates during analysis"""
+    # Import config here to avoid circular imports
+    from backend.state import system_config
+    config = system_config.get("current")
+
+    result = await ws_authenticate_and_load(websocket, session_id)
+    if result is None:
+        return
+    user_id, state = result
+
+    if config is None:
+        await websocket.send_json({"error": "API configuration not set"})
+        await websocket.close()
+        return
+
+    logger.info(f"WebSocket connected for session {session_id}, state={state.status.value}")
+
+    # Check if workflow is already running BEFORE updating websocket reference
+    # Use lock to prevent race condition between check and set
+    async with state_lock:
+        workflow_running = session_id in workflows
+        workflow_initializing = session_id in initializing_sessions
+        if not workflow_running and not workflow_initializing:
+            # Only set websocket reference if we're the main connection (not an observer)
+            websockets[session_id] = websocket
+            # Mark as initializing to prevent concurrent workflow creation
+            initializing_sessions.add(session_id)
+
+    if workflow_running or workflow_initializing:
+        logger.info(f"Workflow already running for session {session_id}, reconnecting WebSocket...")
+
+        # Cancel old monitor task to prevent zombie background tasks
+        old_monitor = _monitor_tasks.pop(session_id, None)
+        if old_monitor and not old_monitor.done():
+            old_monitor.cancel()
+            logger.info(f"Cancelled old monitor task for session {session_id}")
+
+        # Update websocket reference so message_callback sends to new connection
+        async with state_lock:
+            websockets[session_id] = websocket
+
+        # Send current status
+        try:
+            await websocket.send_json({
+                "type": "status",
+                "agent": None,
+                "content": f"Analysis in progress (Round {state.current_round})...",
+                "timestamp": datetime.now().isoformat()
+            })
+
+        except Exception as e:
+            logger.exception("Failed to send status to observer")
+
+        # Send message history from state (same approach as completed/HITL restore)
+        if state.realtime_messages:
+            msg_data_list = _serialize_realtime_messages(state.realtime_messages)
+            logger.info(f"Sending {len(msg_data_list)} messages from history to observer")
+            try:
+                await websocket.send_json({
+                    "type": "message_history",
+                    "content": {
+                        "messages": msg_data_list,
+                        "count": len(msg_data_list)
+                    },
+                    "timestamp": datetime.now().isoformat()
+                })
+            except Exception as e:
+                logger.warning(f"Failed to send history to observer: {e}")
+
+        # Wait for existing workflow to complete or for disconnect
+        # websockets[session_id] was updated above; message_callback will auto-detect the new connection
+        try:
+            while session_id in workflows:
+                # Keep connection alive by waiting for messages
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    # Send heartbeat to keep connection alive through proxies
+                    try:
+                        await websocket.send_json({
+                            "type": "ping",
+                            "timestamp": datetime.now().isoformat()
+                        })
+                    except WebSocketDisconnect:
+                        logger.debug("Observer WebSocket disconnected during ping")
+                        break
+                    except Exception:
+                        logger.warning("Observer WebSocket ping failed, closing", exc_info=True)
+                        break
+                except WebSocketDisconnect:
+                    logger.debug("Observer WebSocket disconnected normally")
+                    break
+                except Exception:
+                    logger.warning("Observer WebSocket receive failed, closing", exc_info=True)
+                    break
+        except WebSocketDisconnect:
+            logger.info(f"WebSocket observer disconnected for session {session_id}")
+        # Don't delete websockets[session_id] - we never owned it
+        return
+
+    # Check if session is already completed - don't restart workflow
+    if state.status == TaskStatus.COMPLETED:
+        logger.info(f"Session {session_id} already completed, not restarting workflow")
+        # Don't overwrite global websockets[session_id] -- multiple clients may
+        # connect to a completed session simultaneously (read-only). Each handler
+        # uses its own local `websocket` variable instead.
+        # Remove from initializing set since we're not starting a workflow
+        async with state_lock:
+            initializing_sessions.discard(session_id)
+
+        try:
+            # Send completed message with full session data for UI restoration
+            await websocket.send_json({
+                "type": "completed",
+                "agent": None,
+                "content": {
+                    "status": "completed",
+                    "message": "Analysis already completed. View results in the Reports tab.",
+                    "final_summary": state.final_summary,
+                    "round_results": [
+                        {
+                            "round": r.round_number,
+                            "summary": r.pi_summary,
+                            "pathology_findings": r.pathology_findings,
+                            "bioinformatics_findings": r.bioinformatics_findings,
+                            "biochemistry_findings": r.biochemistry_findings,
+                            "literature_findings": r.literature_findings,
+                        }
+                        for r in state.round_results
+                    ],
+                },
+                "timestamp": datetime.now().isoformat()
+            })
+
+            # Send message_history for UI message stream restoration
+            if state.realtime_messages:
+                msg_data_list = _serialize_realtime_messages(state.realtime_messages)
+                await websocket.send_json({
+                    "type": "message_history",
+                    "content": {
+                        "messages": msg_data_list,
+                        "count": len(msg_data_list)
+                    },
+                    "timestamp": datetime.now().isoformat()
+                })
+                logger.info(f"[{session_id}] Sent {len(msg_data_list)} messages from history to reconnecting client")
+        except Exception as e:
+            logger.exception(f"[{session_id}] Failed to send completed status")
+
+        # Keep connection open for potential client requests
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    pass
+        except WebSocketDisconnect:
+            logger.info(f"WebSocket disconnected for completed session {session_id}")
+        return
+
+    # HITL-hold: after snapshot restore, hold connection without starting workflow.
+    # The frontend will show the HITL dialog from data loaded via the /load endpoint.
+    # When user confirms/chooses, the confirm/choose endpoint closes this WebSocket
+    # with code 4000, triggering auto-reconnect which creates a new workflow.
+    if state.status in (TaskStatus.WAITING_ANNOTATION, TaskStatus.WAITING_INPUT):
+        logger.info(f"[{session_id}] HITL-hold: status={state.status.value}, waiting for user action")
+        async with state_lock:
+            initializing_sessions.discard(session_id)
+        try:
+            # Send message history (includes synthesized HITL messages from restore)
+            if state.realtime_messages:
+                msg_data_list = _serialize_realtime_messages(state.realtime_messages)
+                await websocket.send_json({
+                    "type": "message_history",
+                    "content": {
+                        "messages": msg_data_list,
+                        "count": len(msg_data_list)
+                    },
+                    "timestamp": datetime.now().isoformat()
+                })
+            # Hold connection until user action triggers close
+            while True:
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    try:
+                        await websocket.send_json({
+                            "type": "ping",
+                            "timestamp": datetime.now().isoformat()
+                        })
+                    except Exception:
+                        break
+        except Exception:
+            logger.debug("WebSocket receive loop ended unexpectedly", exc_info=True)
+        finally:
+            async with state_lock:
+                # Only clean up if we're still the active websocket
+                if websockets.get(session_id) is websocket:
+                    del websockets[session_id]
+        return
+
+    # Create message callback that uses the global websockets dict
+    # This way, if the websocket reconnects, messages go to the new connection
+    # Track WebSocket closed state with lock for thread-safe access
+    ws_closed = False
+    active_ws = websocket
+    ws_lock = asyncio.Lock()
+
+    async def message_callback(msg: WebSocketMessage):
+        nonlocal ws_closed, active_ws
+
+        # Save message to state.realtime_messages for session restoration
+        # Strip base64 from figure messages before persisting to avoid memory bloat
+        if msg.type == "figure" and isinstance(msg.content, str) and len(msg.content) > 1000:
+            from copy import copy
+            stripped_msg = copy(msg)
+            stripped_msg.content = "[image]"
+            state.realtime_messages.append(stripped_msg)
+        else:
+            state.realtime_messages.append(msg)
+        # Cap realtime_messages to prevent unbounded memory growth
+        if len(state.realtime_messages) > 1000:
+            state.realtime_messages = state.realtime_messages[-1000:]
+
+        msg_data = {
+            "type": msg.type,
+            "agent": msg.agent.value if msg.agent else None,
+            "content": msg.content,
+            "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.now().isoformat(),
+            "id": msg.id  # Include message ID for deduplication on client
+        }
+
+        # Hold ws_lock for the entire check-and-send sequence to prevent concurrent
+        # coroutines from all reading ws_closed=False and then all trying to send
+        # to an already-closed connection.
+        async with ws_lock:
+            current_ws = websockets.get(session_id)
+            if ws_closed:
+                # Check if a new websocket has connected (reset ws_closed if so)
+                if current_ws and current_ws != active_ws:
+                    # New connection detected, reset closed state
+                    ws_closed = False
+                    active_ws = current_ws
+                else:
+                    return  # Still closed, skip
+            else:
+                if current_ws and current_ws != active_ws:
+                    active_ws = current_ws
+
+            if not current_ws:
+                logger.warning(f"[{session_id}] No WebSocket connection, message buffered: {msg.type}")
+                return
+            try:
+                await current_ws.send_json(msg_data)
+            except Exception as e:
+                # Mark as closed to prevent further attempts
+                ws_closed = True
+                logger.warning(f"[{session_id}] WebSocket closed during send, marking as closed: {e}", exc_info=True)
+
+    # Helper to safely send JSON
+    async def safe_send(data: dict):
+        nonlocal ws_closed, active_ws
+        # Hold ws_lock for the entire check-and-send sequence (same pattern as message_callback)
+        async with ws_lock:
+            current_ws = websockets.get(session_id)
+            if ws_closed:
+                # Check if a new websocket has connected
+                if current_ws and current_ws != active_ws:
+                    ws_closed = False
+                    active_ws = current_ws
+                else:
+                    return False
+            else:
+                if current_ws and current_ws != active_ws:
+                    active_ws = current_ws
+
+            if not current_ws:
+                return False
+            try:
+                await current_ws.send_json(data)
+                return True
+            except Exception:
+                logger.warning("WebSocket send_json failed, marking closed", exc_info=True)
+                ws_closed = True
+                return False
+
+    # Send initial connection confirmation message
+    try:
+        await websocket.send_json({
+            "type": "status",
+            "agent": None,
+            "content": "WebSocket connected, starting analysis...",
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.exception(f"[{session_id}] Failed to send initial message")
+
+    # State callback to save after each round
+    async def state_callback(state: AnalysisState):
+        from backend.services.session_store import update_session_cache as _update_session_cache, async_save_session as _async_save_session
+        await _update_session_cache(session_id, state)
+        # Use thread pool for disk I/O to avoid blocking event loop
+        await _async_save_session(session_id, state)
+
+    # Import workflow here to avoid circular imports
+    from backend.workflow import SingleCellAnalysisWorkflow
+
+    # Create workflow with session_id for state persistence
+    workflow = SingleCellAnalysisWorkflow(
+        config=config,
+        session_id=session_id,
+        message_callback=message_callback,
+        state_callback=state_callback
+    )
+    # Add workflow to tracking dict (protected by lock to prevent race conditions)
+    async with state_lock:
+        workflows[session_id] = workflow
+
+    # Background task to monitor WebSocket for client disconnect
+    async def monitor_websocket():
+        """Listen for WebSocket disconnect while workflow is running, with heartbeat"""
+        nonlocal ws_closed
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    # Send heartbeat ping to keep connection alive through proxies
+                    async with ws_lock:
+                        if ws_closed:
+                            break
+                        current_ws = websockets.get(session_id)
+                        if current_ws:
+                            try:
+                                await current_ws.send_json({
+                                    "type": "ping",
+                                    "timestamp": datetime.now().isoformat()
+                                })
+                            except Exception:
+                                logger.warning(f"[{session_id}] WebSocket ping failed, marking closed", exc_info=True)
+                                ws_closed = True
+                                break
+        except WebSocketDisconnect:
+            logger.info(f"[{session_id}] Client disconnected during workflow execution")
+            async with ws_lock:
+                ws_closed = True
+        except asyncio.CancelledError:
+            async with ws_lock:
+                ws_closed = True
+        except Exception as e:
+            logger.exception(f"[{session_id}] Unexpected WebSocket monitor error")
+            async with ws_lock:
+                ws_closed = True
+
+    monitor_task = asyncio.create_task(monitor_websocket())
+    _monitor_tasks[session_id] = monitor_task
+
+    # Detect sessions that completed analysis but were interrupted during report generation
+    effective_max_rounds = state.max_rounds if state.max_rounds > 0 else config.max_rounds
+    needs_report_only = (
+        state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
+                         TaskStatus.FAILED, TaskStatus.GENERATING_REPORT)
+        and state.current_round >= effective_max_rounds
+        and len(state.round_results) >= effective_max_rounds
+    )
+
+    try:
+        # Run workflow (or report-only if analysis was already complete)
+        if needs_report_only:
+            logger.info(f"Session {session_id} needs report generation only "
+                        f"(round {state.current_round}/{effective_max_rounds}, "
+                        f"{len(state.round_results)} round results)")
+            run_coro = workflow.generate_report(state, session_id)
+        else:
+            # Check if we should resume or start fresh
+            if state.current_round > 0 or state.status in (
+                TaskStatus.PAUSED, TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION
+            ):
+                logger.info(f"Resuming workflow for session {session_id}")
+                run_coro = workflow.resume(session_id, state)
+            else:
+                logger.info(f"Starting workflow for session {session_id}")
+                run_coro = workflow.run(state, session_id)
+
+        # Wrap in asyncio.Task for cancellation support (stop endpoint)
+        run_task = asyncio.create_task(run_coro)
+        _run_tasks[session_id] = run_task
+        try:
+            final_state = await run_task
+        except asyncio.CancelledError:
+            logger.info(f"[{session_id}] Workflow task was cancelled")
+            current_state = _sessions.get(session_id, state)
+            if current_state.status == TaskStatus.GENERATING_REPORT:
+                # Stop-and-summarize: generate report from current results
+                try:
+                    logger.info(f"[{session_id}] Starting report generation after stop-and-summarize")
+                    report_state = await workflow.generate_report(current_state, session_id)
+                    await _update_session_cache(session_id, report_state)
+                    await _async_save_session(session_id, report_state)
+                    await safe_send({
+                        "type": "completed",
+                        "content": {
+                            "status": report_state.status.value,
+                            "rounds": len(report_state.round_results),
+                            "final_summary": report_state.final_summary
+                        }
+                    })
+                    final_state = report_state
+                except Exception as e:
+                    logger.exception(f"[{session_id}] Report generation after stop failed")
+                    current_state.status = TaskStatus.FAILED
+                    await _update_session_cache(session_id, current_state)
+                    await _async_save_session(session_id, current_state)
+                    final_state = current_state
+            else:
+                # Immediate stop or unknown state - save as PAUSED
+                if current_state.status == TaskStatus.RUNNING:
+                    current_state.status = TaskStatus.PAUSED
+                await _update_session_cache(session_id, current_state)
+                await _async_save_session(session_id, current_state)
+                final_state = current_state
+        finally:
+            _run_tasks.pop(session_id, None)
+
+        from backend.services.session_store import update_session_cache as _update_session_cache, async_save_session as _async_save_session
+        await _update_session_cache(session_id, final_state)
+        logger.info(f"Workflow completed for session {session_id}")
+
+        # Save completed state to disk (use thread pool for I/O)
+        await _async_save_session(session_id, final_state)
+
+        # Send completion message (safely) - only if actually completed
+        if final_state.status == TaskStatus.COMPLETED:
+            await safe_send({
+                "type": "completed",
+                "content": {
+                    "status": final_state.status.value,
+                    "rounds": len(final_state.round_results),
+                    "final_summary": final_state.final_summary
+                }
+            })
+
+    except Exception as e:
+        # Log the full error traceback
+        logger.exception(f"Workflow error for session {session_id}")
+
+        # Try to send error, but don't fail if WebSocket is closed
+        await safe_send({
+            "type": "error",
+            "content": str(e)
+        })
+        # Get the latest state to avoid race condition
+        current_state = _sessions.get(session_id, state)
+        current_state.status = TaskStatus.FAILED
+        await _update_session_cache(session_id, current_state)
+        await _async_save_session(session_id, current_state)
+
+    finally:
+        # Clean up task tracking
+        _run_tasks.pop(session_id, None)
+
+        # Cancel the WebSocket monitor task
+        monitor_task.cancel()
+        _monitor_tasks.pop(session_id, None)
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+
+        # Clean up with lock protection
+        logger.info(f"Cleaning up session {session_id}")
+        try:
+            await workflow.close()
+        except Exception as e:
+            logger.exception("Error closing workflow")
+        async with state_lock:
+            if session_id in workflows:
+                del workflows[session_id]
+            if session_id in websockets:
+                del websockets[session_id]
+            # Remove from initializing set
+            initializing_sessions.discard(session_id)
+
+
+@router.websocket("/ws/report/{session_id}")
+async def report_websocket(websocket: WebSocket, session_id: str):
+    """WebSocket for report generation progress — authenticated via scai.jwt.v1 subprotocol."""
+    result = await ws_authenticate_and_load(websocket, session_id)
+    if result is None:
+        return
+
+    report_websockets[session_id] = websocket
+
+    try:
+        while True:
+            # Keep connection alive
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if session_id in report_websockets:
+            del report_websockets[session_id]

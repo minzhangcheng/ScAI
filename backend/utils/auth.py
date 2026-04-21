@@ -149,7 +149,7 @@ async def require_session_ownership(
     Raises 404 if not found or not owned (leak-oracle safe).
     Uses ensure_session_loaded to handle disk-only sessions.
     """
-    from backend.main import ensure_session_loaded
+    from backend.services.session_store import ensure_session_loaded
     from backend.models.schemas import AnalysisState
 
     state = await ensure_session_loaded(session_id)
@@ -193,7 +193,7 @@ async def ws_authenticate_and_load(
     """Authenticate WS connection and load session with ownership check.
     Returns (user_id, state) or None (closes websocket on failure).
     """
-    from backend.main import ensure_session_loaded
+    from backend.services.session_store import ensure_session_loaded
     from backend.utils.files import validate_session_id
 
     validate_session_id(session_id)

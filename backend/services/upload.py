@@ -6,7 +6,7 @@ callback injection for session persistence.
 import hashlib
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Callable, Awaitable, Optional
 
@@ -15,7 +15,11 @@ from fastapi import HTTPException, Request
 from backend.config import UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR, get_session_uploads
 from backend.utils.auth import get_db
 from backend.utils.files import safe_filename, validate_path_within
+from backend.utils.upload import ChunkedUploadManager
 from backend.state import sessions
+
+# Singleton upload manager (supports chunked uploads up to 10GB)
+upload_manager = ChunkedUploadManager(UPLOAD_TEMP_DIR, UPLOAD_CHUNK_SIZE)
 
 logger = logging.getLogger(__name__)
 
