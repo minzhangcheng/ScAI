@@ -17,7 +17,7 @@ async def validate_file_path_ownership(file_path: str, request: Request) -> None
     """
     user_id = getattr(request.state, "user_id", None)
     if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=403, detail="Not authenticated")
 
     parts = Path(file_path).parts
     sid = None

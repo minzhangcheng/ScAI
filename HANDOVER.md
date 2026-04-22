@@ -2,8 +2,68 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.20.3
+**Version**: 0.20.4
 **Last Updated**: 2026-04-22
+
+## Changelog v0.20.4 (2026-04-22)
+
+### Backend Changes
+
+#### backend/utils/auth.py
+- Replaced `passlib[bcrypt]` with direct `bcrypt` package
+- Added `_BCRYPT_MAX_PW_BYTES = 72` constant for password length limit
+- `hash_password()`: now uses `bcrypt.hashpw()` directly with 72-byte truncation
+- `verify_password()`: now uses `bcrypt.checkpw()` directly with 72-byte truncation
+
+#### backend/routes/auth.py
+- Login 401 response now includes `headers={"WWW-Authenticate": "Bearer"}` for proper client auth detection
+
+#### backend/routes/config.py
+- `POST /api/config/validate-key` now returns `{"valid": bool, "message": str, "uncertain"?: bool}` instead of raising HTTPException
+- Removed all HTTPException raises in favor of returning error state
+
+#### backend/routes/sessions.py
+- `POST /session/{session_id}/ensure` now accepts `Request` (for auth) and `body: StartRequest` (for session data) separately
+
+#### backend/utils/agent_llm.py
+- File path ownership validation now returns 403 (instead of 401) for unauthenticated requests
+
+#### backend/tests/test_ownership.py
+- Removed `try/except ValueError` bcrypt compatibility skips — direct bcrypt is always available
+
+### Frontend Changes
+
+#### New Components
+- `frontend/src/components/AuthInitializer.tsx`: Centralized auth loading at app startup
+- `frontend/src/components/LoadingScreen.tsx`: Loading spinner component for auth loading state
+
+#### frontend/src/hooks/useApi.ts
+- Added `authHeaders()` export: builds headers dict with Authorization Bearer token
+- `apiFetch()`: now handles FormData body correctly (skips auto Content-Type header)
+- `apiFetch()`: only triggers auto-logout on auth-related 401 (detected via `WWW-Authenticate` header)
+- Non-auth 401 errors are now thrown as regular Error objects
+
+#### frontend/src/stores/appStore.ts
+- Added `authReady: boolean` state to track auth initialization completion
+- `loadAuthFromStorage()`: now returns early if already ready; sets `authReady: true` on completion
+
+#### Updated Components
+- `frontend/src/App.tsx`: Removed local auth loading state, relies on `AuthInitializer`
+- `frontend/src/components/ProtectedRoute.tsx`: Shows `LoadingScreen` until `authReady` is true
+- `frontend/src/components/ProtectedAdminRoute.tsx`: Shows `LoadingScreen` until `authReady` is true
+- `frontend/src/components/AnalysisPanel.tsx`: Uses `apiFetch` instead of raw fetch
+- `frontend/src/components/ChatPanel.tsx`: Uses `apiFetch` instead of raw fetch
+- `frontend/src/components/ReportPanel.tsx`: Uses `apiFetch` instead of raw fetch
+- `frontend/src/components/Sidebar.tsx`: Uses `apiFetch` instead of raw fetch
+- `frontend/src/components/SnapshotPanel.tsx`: Uses `apiFetch` instead of raw fetch, removed `apiBase` prop
+- `frontend/src/components/analysis/IntegratedReport.tsx`: Uses `authHeaders()` for download fetch
+- `frontend/src/utils/download.ts`: `fetchAndDownload()` now merges `authHeaders()` into request
+
+#### frontend/src/main.tsx
+- Wrapped routes in `AuthInitializer` component
+
+### requirements.txt
+- Changed `passlib[bcrypt]>=1.7.4,<2.0` to `bcrypt>=4.0.0,<5.0`
 
 ## Changelog v0.20.3 (2026-04-22)
 

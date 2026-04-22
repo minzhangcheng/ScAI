@@ -167,7 +167,7 @@ async def delete_session(session_id: str, request: Request):
 
 
 @router.post("/session/{session_id}/ensure")
-async def ensure_session(session_id: str, request: StartRequest):
+async def ensure_session(session_id: str, request: Request, body: StartRequest):
     """Ensure session exists, create if not found"""
     cfg = system_config["current"]
     validate_session_id(session_id)
@@ -191,13 +191,13 @@ async def ensure_session(session_id: str, request: StartRequest):
 
     user_id = getattr(request.state, "user_id", None)
     if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail="Not authenticated", headers={"WWW-Authenticate": "Bearer"})
 
     from backend.models.schemas import AnalysisState
     state = AnalysisState(
         id=session_id,
-        name=request.session_name or f"Analysis-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-        initial_instruction=request.instruction,
+        name=body.session_name or f"Analysis-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        initial_instruction=body.instruction,
         status=TaskStatus.PENDING,
         user_id=user_id,
     )

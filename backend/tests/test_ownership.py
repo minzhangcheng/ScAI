@@ -17,19 +17,13 @@ from backend.utils.files import safe_filename, validate_session_id
 
 class TestPasswordAuth:
     def test_hash_and_verify(self):
-        try:
-            h = hash_password("test123")
-            assert verify_password("test123", h)
-            assert not verify_password("wrong", h)
-        except ValueError:
-            pytest.skip("bcrypt version incompatible")
+        h = hash_password("test123")
+        assert verify_password("test123", h)
+        assert not verify_password("wrong", h)
 
     def test_bcrypt_hash_format(self):
-        try:
-            h = hash_password("pass")
-            assert h.startswith("$2b$")
-        except ValueError:
-            pytest.skip("bcrypt version incompatible")
+        h = hash_password("pass")
+        assert h.startswith("$2b$")
 
 
 class TestJWT:

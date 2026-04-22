@@ -9,12 +9,14 @@ import { ApiKeys } from './pages/ApiKeys'
 import { Admin } from './pages/Admin'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { ProtectedAdminRoute } from './components/ProtectedAdminRoute'
+import { AuthInitializer } from './components/AuthInitializer'
 import './styles/globals.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>
-      <Routes>
+      <AuthInitializer>
+        <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/setup" element={<Setup />} />
@@ -22,6 +24,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <Route path="/admin" element={<ProtectedAdminRoute><Admin /></ProtectedAdminRoute>} />
         <Route path="/*" element={<ProtectedRoute><App /></ProtectedRoute>} />
       </Routes>
+      </AuthInitializer>
     </BrowserRouter>
   </React.StrictMode>,
 )

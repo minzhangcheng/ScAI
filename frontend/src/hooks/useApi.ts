@@ -46,14 +46,23 @@ function getAuthToken(): string | null {
   return getToken()
 }
 
+// Build headers with auth token (exported for raw fetch calls that need auth)
+export function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const token = getAuthToken()
+  const headers: Record<string, string> = { ...extra }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  return headers
+}
+
 // Generic fetch wrapper (exported for direct use) — auto-injects Authorization header
 export async function apiFetch<T>(
   endpoint: string,
   options?: RequestInit
 ): Promise<T> {
   const token = getAuthToken()
+  const isFormData = options?.body instanceof FormData
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...(options?.headers as Record<string, string> || {}),
   }
   if (token) {
@@ -64,11 +73,17 @@ export async function apiFetch<T>(
     headers,
   })
 
-  // Auto-logout on 401
+  // Auto-logout only on auth-related 401 (from middleware, which uses WWW-Authenticate header)
+  // Other 401s (e.g., LLM key validation) should NOT clear the user's session
   if (response.status === 401) {
-    clearToken()
-    // Zustand authUser will become null → ProtectedRoute redirects to /login
-    throw new Error('Authentication failed. Please log in again.')
+    const isAuthFailure = response.headers.has('WWW-Authenticate')
+    if (isAuthFailure) {
+      clearToken()
+      throw new Error('Authentication failed. Please log in again.')
+    }
+    // Non-auth 401 — treat as a regular error
+    const error = await response.json().catch(() => ({ detail: 'Unauthorized' }))
+    throw new Error(error.detail || 'Unauthorized')
   }
 
   if (!response.ok) {
@@ -372,33 +387,18 @@ export function useSession() {
   // Ensure session exists on server (handles server restart)
   const ensureSession = useCallback(async () => {
     if (!currentSession) throw new Error('No active session')
-    
-    try {
-      const response = await fetch(
-        `${API_BASE}/session/${currentSession.id}/ensure`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            instruction: currentSession.instruction,
-            session_name: currentSession.name,
-          }),
-        }
-      )
-      
-      if (!response.ok) {
-        throw new Error('Failed to ensure session')
-      }
-      
-      const data = await response.json()
-      if (data.data?.created) {
-        devLog('Session recreated after server restart')
-      }
-      return data
-    } catch (e) {
-      console.error('Failed to ensure session:', e)
-      throw e
+
+    const data = await apiFetch<any>(`/session/${currentSession.id}/ensure`, {
+      method: 'POST',
+      body: JSON.stringify({
+        instruction: currentSession.instruction,
+        session_name: currentSession.name,
+      }),
+    })
+    if (data.data?.created) {
+      devLog('Session recreated after server restart')
     }
+    return data
   }, [currentSession])
 
   // --- Group CRUD ---
@@ -478,15 +478,10 @@ export function useSession() {
     if (sampleNumber != null) formData.append('sample_number', String(sampleNumber))
     if (description) formData.append('description', description)
 
-    const response = await fetch(
-      `${API_BASE}/session/${session.id}/upload/data`,
+    const data = await apiFetch<any>(
+      `/session/${session.id}/upload/data`,
       { method: 'POST', body: formData, signal }
     )
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({ detail: 'Upload failed' }))
-      throw new Error(err.detail || 'Upload failed')
-    }
-    const data = await response.json()
 
     // Refresh dataFiles from server to ensure frontend state matches backend
     try {
@@ -668,7 +663,8 @@ export function useSession() {
     if (!currentSession) throw new Error('No active session')
 
     const response = await fetch(`${API_BASE}/session/${currentSession.id}/export`, {
-      method: 'GET'
+      method: 'GET',
+      headers: authHeaders(),
     })
 
     if (!response.ok) {
@@ -784,7 +780,7 @@ export function useWebSocket() {
           devLog('WebSocket: Reconnect detected, loading message history...')
           // Mark that we're loading history to prevent race conditions
           const loadingSessionId = freshSession.id
-          const response = await fetch(`${API_BASE}/session/${freshSession.id}/load`)
+          const data = await apiFetch<any>(`/session/${freshSession.id}/load`)
 
           // Verify session hasn't changed during fetch (race condition protection)
           const currentState = useAppStore.getState()
@@ -794,8 +790,7 @@ export function useWebSocket() {
             return
           }
 
-          if (response.ok) {
-            const data = await response.json()
+          if (data) {
 
             if (data.messages && Array.isArray(data.messages)) {
               // Get current local messages
@@ -865,15 +860,16 @@ export function useWebSocket() {
                 })
               }
             }
-          } else if (response.status === 404) {
-            // Session no longer exists on server - clear stale session to stop reconnect loop
+          }
+        } catch (e: any) {
+          // Session no longer exists on server - clear stale session to stop reconnect loop
+          if (e?.message?.includes('not found') || e?.message?.includes('404')) {
             console.warn('WebSocket: Session not found on server (404), clearing stale session')
             useAppStore.getState().setCurrentSession(null)
             useAppStore.getState().clearMessages()
             ws.close()
             return
           }
-        } catch (e) {
           console.error('WebSocket: Failed to restore message history:', e)
         }
       }

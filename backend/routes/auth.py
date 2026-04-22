@@ -110,7 +110,7 @@ async def login(req: LoginRequest):
     else:
         user = await db.get_user_by_email(req.identifier)
     if user is None or not verify_password(req.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Bearer"})
     if user.status == "pending":
         raise HTTPException(status_code=403, detail="Account is pending approval. Please contact the administrator to activate your account.")
     token = create_access_token(user.id, user.email)

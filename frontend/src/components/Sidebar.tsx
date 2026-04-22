@@ -173,9 +173,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
     try {
       // 等待服务端完成打包（不下载文件，只等元数据）
-      const res = await fetch(`/api/session/${currentSession.id}/export/prepare`, { method: 'POST' })
-      if (!res.ok) throw new Error(`Export prepare failed: ${res.status}`)
-      const meta = await res.json() as { status: string; size_bytes: number; filename: string }
+      const meta = await apiFetch<{ status: string; size_bytes: number; filename: string }>(`/session/${currentSession.id}/export/prepare`, { method: 'POST' })
 
       const sizeMB = (meta.size_bytes / 1024 / 1024).toFixed(1)
 

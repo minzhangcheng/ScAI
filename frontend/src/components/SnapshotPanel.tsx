@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Camera, RotateCcw, Trash2, X, GitBranch } from 'lucide-react'
 import { Language } from '../i18n/translations'
+import { apiFetch } from '../hooks/useApi'
 
 interface Snapshot {
   id: string
@@ -21,13 +22,12 @@ interface TreeNode {
 
 interface SnapshotPanelProps {
   sessionId: string
-  apiBase: string
   language: Language
   onClose: () => void
   onRestore: () => void
 }
 
-export function SnapshotPanel({ sessionId, apiBase, language, onClose, onRestore }: SnapshotPanelProps) {
+export function SnapshotPanel({ sessionId, language, onClose, onRestore }: SnapshotPanelProps) {
   const isZh = language === 'zh'
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [loading, setLoading] = useState(true)
@@ -36,27 +36,24 @@ export function SnapshotPanel({ sessionId, apiBase, language, onClose, onRestore
 
   const fetchSnapshots = useCallback(async () => {
     try {
-      const res = await fetch(`${apiBase}/session/${sessionId}/snapshots`)
-      const data = await res.json()
+      const data = await apiFetch<any>(`/session/${sessionId}/snapshots`)
       if (data.success) setSnapshots(data.data?.snapshots || [])
     } catch (e) {
       console.error('Failed to fetch snapshots:', e)
     } finally {
       setLoading(false)
     }
-  }, [sessionId, apiBase])
+  }, [sessionId])
 
   useEffect(() => { fetchSnapshots() }, [fetchSnapshots])
 
   const handleRestore = async (snapshotId: string) => {
     setRestoring(snapshotId)
     try {
-      const res = await fetch(`${apiBase}/session/${sessionId}/snapshots/${snapshotId}/restore`, {
+      await apiFetch(`/session/${sessionId}/snapshots/${snapshotId}/restore`, {
         method: 'POST',
       })
-      if (res.ok) {
-        onRestore()
-      }
+      onRestore()
     } finally {
       setRestoring(null)
       setConfirmRestore(null)
@@ -64,7 +61,7 @@ export function SnapshotPanel({ sessionId, apiBase, language, onClose, onRestore
   }
 
   const handleDelete = async (snapshotId: string) => {
-    await fetch(`${apiBase}/session/${sessionId}/snapshots/${snapshotId}`, {
+    await apiFetch(`/session/${sessionId}/snapshots/${snapshotId}`, {
       method: 'DELETE',
     })
     await fetchSnapshots()

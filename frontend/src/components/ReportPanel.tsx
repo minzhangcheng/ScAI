@@ -3,7 +3,7 @@ import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import { devLog } from '../utils/logger'
 import { fetchAndDownload } from '../utils/download'
-import { WS_CONNECT_TIMEOUT_MS } from '../hooks/useApi'
+import { WS_CONNECT_TIMEOUT_MS, apiFetch } from '../hooks/useApi'
 import ReactMarkdown from 'react-markdown'
 import {
   FileText,
@@ -244,22 +244,19 @@ export function ReportPanel() {
     setError(null)
 
     try {
-      const response = await fetch(`${API_BASE}/session/${currentSession.id}/detailed-report`)
-      if (response.ok) {
-        const data = await response.json()
-        if (data.report) {
-          setReport(data.report)
-          // Mark report as generated if it's completed
-          if (data.report.status === 'completed') {
-            setReportGenerated(true)
-          }
-          // Expand first section by default
-          if (data.report.sections?.length > 0) {
-            setExpandedSections(new Set([data.report.sections[0].id]))
-          }
-          // Also load preview
-          await loadPreview()
+      const data = await apiFetch<any>(`/session/${currentSession.id}/detailed-report`)
+      if (data?.report) {
+        setReport(data.report)
+        // Mark report as generated if it's completed
+        if (data.report.status === 'completed') {
+          setReportGenerated(true)
         }
+        // Expand first section by default
+        if (data.report.sections?.length > 0) {
+          setExpandedSections(new Set([data.report.sections[0].id]))
+        }
+        // Also load preview
+        await loadPreview()
       }
     } catch (e) {
       console.error('Failed to load report:', e)
@@ -272,9 +269,8 @@ export function ReportPanel() {
     if (!currentSession?.id) return
 
     try {
-      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/preview`)
-      if (response.ok) {
-        const data = await response.json()
+      const data = await apiFetch<any>(`/session/${currentSession.id}/report/preview`)
+      if (data) {
         setPreview(data)
       }
     } catch (e) {
@@ -314,13 +310,9 @@ export function ReportPanel() {
     })
 
     try {
-      const response = await fetch(`${API_BASE}/session/${currentSession.id}/generate-detailed-report`, {
+      await apiFetch(`/session/${currentSession.id}/generate-detailed-report`, {
         method: 'POST'
       })
-
-      if (!response.ok) {
-        throw new Error('Failed to start report generation')
-      }
     } catch (e: any) {
       setError(e.message)
       setGenerating(false)

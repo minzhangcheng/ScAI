@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useAppStore } from '../../stores/appStore'
 import { useTranslation } from '../../i18n/translations'
 import { downloadBlob } from '../../utils/download'
+import { authHeaders } from '../../hooks/useApi'
 import ReactMarkdown from 'react-markdown'
 import {
   FileText,
@@ -46,7 +47,9 @@ export function IntegratedReport({ report }: IntegratedReportProps) {
   const downloadAsHTML = async () => {
     if (!currentSession) return
     try {
-      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/html`)
+      const response = await fetch(`${API_BASE}/session/${currentSession.id}/report/html`, {
+        headers: authHeaders(),
+      })
       if (response.ok) {
         const html = await response.text()
         downloadBlob(new Blob([html], { type: 'text/html' }), `integrated_report_${currentSession.id}.html`)

@@ -357,6 +357,7 @@ interface AppState {
   setOpenSessionBrowserCallback: (callback: (() => void) | null) => void
 
   // Auth state
+  authReady: boolean
   authUser: AuthUser | null
   login: (identifier: string, password: string) => Promise<void>
   register: (email: string, password: string) => Promise<{ id: string; email: string; status: string }>
@@ -551,6 +552,7 @@ export const useAppStore = create<AppState>()(
       setOpenSessionBrowserCallback: (callback) => set({ openSessionBrowser: callback }),
 
       // Auth state
+      authReady: false,
       authUser: null,
       login: async (identifier: string, password: string) => {
         const r = await fetch('/api/auth/login', {
@@ -611,15 +613,24 @@ export const useAppStore = create<AppState>()(
         set({ authUser: null, currentSession: null, messages: [], chatMessages: [] })
       },
       loadAuthFromStorage: async () => {
+        if (get().authReady) return
         const t = getToken()
-        if (!t) return
-        const r = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${t}` } })
-        if (r.ok) {
-          const me = await r.json()
-          set({ authUser: me })
-        } else {
+        if (!t) {
+          set({ authReady: true })
+          return
+        }
+        try {
+          const r = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${t}` } })
+          if (r.ok) {
+            const me = await r.json()
+            set({ authUser: me, authReady: true })
+          } else {
+            clearToken()
+            set({ authUser: null, authReady: true })
+          }
+        } catch {
           clearToken()
-          set({ authUser: null })
+          set({ authUser: null, authReady: true })
         }
       },
     }),

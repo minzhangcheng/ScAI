@@ -29,8 +29,7 @@ import {
 } from 'lucide-react'
 
 function App() {
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, loadAuthFromStorage, authUser } = useAppStore()
-  const [authReady, setAuthReady] = useState(false)
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, authUser } = useAppStore()
   const { checkStatus, saveConfig } = useConfig()
   const { connect, disconnect } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
@@ -80,11 +79,6 @@ function App() {
     }
   }, [isResizing, handleMouseMove, handleMouseUp])
 
-  // Load auth state from localStorage on startup
-  useEffect(() => {
-    loadAuthFromStorage().finally(() => setAuthReady(true))
-  }, [loadAuthFromStorage])
-
   // Check API config status; auto-sync from localStorage if backend lost config
   useEffect(() => {
     checkStatus().then(async (status) => {
@@ -120,17 +114,6 @@ function App() {
 
   // Note: WebSocket auto-reconnect is handled entirely by useWebSocket hook.
   // No duplicate reconnection logic here to avoid competing reconnect attempts.
-
-  if (!authReady) {
-    return (
-      <div className="min-h-screen bg-surface-900 flex flex-col items-center justify-center gap-4">
-        <div className="p-4 bg-gradient-to-br from-accent-500 to-accent-700 rounded-2xl shadow-glow-accent">
-          <Dna className="w-8 h-8 text-white animate-spin" />
-        </div>
-        <p className="text-surface-400 text-sm font-medium tracking-wide">Loading ScAI...</p>
-      </div>
-    )
-  }
 
   if (configured === null) {
     return (

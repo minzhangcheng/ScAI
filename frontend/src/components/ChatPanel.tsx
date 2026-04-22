@@ -241,19 +241,11 @@ export function ChatPanel() {
       formData.append('file_types', JSON.stringify(filesToSend.map((sf) => sf.dataType || null)))
       filesToSend.forEach((sf) => formData.append('files', sf.file))
 
-      // Use raw fetch (not apiFetch) because FormData needs no Content-Type header
-      const response = await fetch(`/api/session/${currentSession.id}/chat`, {
+      const data = await apiFetch<any>(`/session/${currentSession.id}/chat`, {
         method: 'POST',
         body: formData,
         signal: abortController.signal,
       })
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ detail: 'Unknown error' }))
-        throw new Error(err.detail || 'Chat request failed')
-      }
-
-      const data = await response.json()
 
       // Guard: discard response if user switched session during the request
       if (useAppStore.getState().currentSession?.id !== sendSessionId) {
@@ -305,7 +297,7 @@ export function ChatPanel() {
     if (isDelegation) {
       // Cancel delegation via backend endpoint
       try {
-        await fetch(`/api/session/${currentSession.id}/chat/cancel`, { method: 'POST' })
+        await apiFetch(`/session/${currentSession.id}/chat/cancel`, { method: 'POST' })
       } catch (e) {
         console.error('Failed to cancel chat delegation:', e)
       }

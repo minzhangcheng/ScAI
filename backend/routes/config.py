@@ -63,14 +63,8 @@ async def validate_api_key(request: ValidateKeyRequest):
         ) as client:
             response = await client.get(models_url, headers=headers)
             if response.status_code == 200:
-                return APIResponse(success=True, message="API key is valid")
+                return {"valid": True, "message": "API key is valid"}
             else:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API key"
-                )
+                return {"valid": False, "message": f"Invalid API key (HTTP {response.status_code})"}
     except httpx.HTTPError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to connect to LLM endpoint: {str(e)}"
-        )
+        return {"valid": False, "message": f"Failed to connect to LLM endpoint: {str(e)}", "uncertain": True}

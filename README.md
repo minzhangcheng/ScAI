@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.20.3
+**Version**: 0.20.4
 
 ## Installation
 
@@ -343,6 +343,13 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 ## Changelog
 
 > Technical details for each release are documented in [HANDOVER.md](./HANDOVER.md).
+
+### v0.20.4 (2026-04-22)
+
+- **Auth Flow Reliability**: Improved frontend authentication flow with centralized auth initialization and proper loading states. API calls now correctly distinguish between auth failures and other 401 errors
+- **Direct bcrypt**: Replaced passlib with direct bcrypt for password hashing with 72-byte password limit enforced
+- **API Key Validation**: API key validation now returns structured response with validity status and error messages instead of raising HTTP exceptions
+- **Session Management**: Fixed session ensure endpoint to properly handle request body
 
 ### v0.20.3 (2026-04-22)
 

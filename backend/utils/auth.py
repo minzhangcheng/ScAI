@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from passlib.context import CryptContext
+import bcrypt
 from jose import JWTError, jwt
 
 from fastapi import Depends, HTTPException, Request, WebSocket, status
@@ -18,15 +18,15 @@ from backend.config import APP_DB_PATH
 
 # ── Password hashing ────────────────────────────────────────────────────
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_BCRYPT_MAX_PW_BYTES = 72
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode()[:_BCRYPT_MAX_PW_BYTES], bcrypt.gensalt()).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode()[:_BCRYPT_MAX_PW_BYTES], hashed.encode())
 
 
 # ── JWT ───────────────────────────────────────────────────────────────────

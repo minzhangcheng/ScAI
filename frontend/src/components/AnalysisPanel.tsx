@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
-import { useSession, useConfig, generateId } from '../hooks/useApi'
+import { useSession, useConfig, generateId, apiFetch } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
@@ -248,9 +248,8 @@ export function AnalysisPanel() {
   ) => {
     if (!currentSession) return
     try {
-      await fetch(`${API_BASE}/session/${currentSession.id}/confirm-annotations`, {
+      await apiFetch(`/session/${currentSession.id}/confirm-annotations`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ annotations }),
       })
       setShowAnnotationDialog(false)
@@ -266,9 +265,8 @@ export function AnalysisPanel() {
   const handleChooseDirections = useCallback(async (directions: Array<{ direction: string; notes: string; isCustom: boolean }>) => {
     if (!currentSession) return
     try {
-      await fetch(`${API_BASE}/session/${currentSession.id}/choose-direction`, {
+      await apiFetch(`/session/${currentSession.id}/choose-direction`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           directions: directions.map(d => ({
             direction: d.direction,
@@ -289,9 +287,8 @@ export function AnalysisPanel() {
   const handleLetPiDecide = useCallback(async () => {
     if (!currentSession) return
     try {
-      await fetch(`${API_BASE}/session/${currentSession.id}/choose-direction`, {
+      await apiFetch(`/session/${currentSession.id}/choose-direction`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ direction: '', let_pi_decide: true }),
       })
       setShowExplorationDialog(false)
@@ -307,15 +304,10 @@ export function AnalysisPanel() {
     if (!currentSession) return
     setIsSupplementaryRunning(true)
     try {
-      const response = await fetch(`${API_BASE}/session/${currentSession.id}/supplementary-analysis`, {
+      await apiFetch(`/session/${currentSession.id}/supplementary-analysis`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ request_text: requestText, target }),
       })
-      if (!response.ok) {
-        const err = await response.json()
-        console.error('Supplementary analysis error:', err.detail || err)
-      }
       // isSupplementaryRunning will be reset when new annotation_confirmation or exploration_report message arrives
     } catch (error) {
       console.error('Supplementary analysis error:', error)
@@ -434,13 +426,12 @@ export function AnalysisPanel() {
           endpoint = `${API_BASE}/session/${currentSession.id}/upload/file`
         }
 
-        const response = await fetch(endpoint, { method: 'POST', body: formData })
-        if (response.ok) {
-          const data = await response.json()
+        const response = await apiFetch<any>(endpoint.replace(API_BASE, ''), { method: 'POST', body: formData })
+        if (response) {
           uploadedData.push({
             type: file.type.startsWith('image/') ? 'image' : 'file',
             filename: file.name,
-            id: data.data?.file_id || data.data?.image_id,
+            id: response.data?.file_id || response.data?.image_id,
           })
         }
       } catch (err) {
@@ -450,9 +441,8 @@ export function AnalysisPanel() {
 
     // Send human-input with message + file references
     try {
-      await fetch(`${API_BASE}/session/${currentSession.id}/human-input`, {
+      await apiFetch(`/session/${currentSession.id}/human-input`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message,
           uploaded_files: uploadedData,
@@ -1173,7 +1163,6 @@ export function AnalysisPanel() {
       {showSnapshotPanel && currentSession && (
         <SnapshotPanel
           sessionId={currentSession.id}
-          apiBase={API_BASE}
           language={language}
           onClose={() => setShowSnapshotPanel(false)}
           onRestore={() => {
