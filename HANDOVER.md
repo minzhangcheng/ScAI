@@ -2,8 +2,90 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.20.2
-**Last Updated**: 2026-04-21
+**Version**: 0.20.3
+**Last Updated**: 2026-04-22
+
+## Changelog v0.20.3 (2026-04-22)
+
+### Architecture Changes
+
+#### New Admin Module
+
+```
+backend/routes/admin.py   # User CRUD with cascade delete
+backend/services/user_cleanup.py  # User data cleanup service
+```
+
+#### New Setup Module
+
+```
+backend/routes/setup.py   # Initial admin password setup
+```
+
+### Backend Changes
+
+#### backend/models/user.py
+- Added `username` field (optional)
+- Added `role` field (default: "user", can be "admin")
+- Added `status` field (default: "pending", can be "active" or "readonly")
+
+#### backend/utils/db.py
+- `users` table schema updated: email now nullable, added username, role, status columns
+- New `app_meta` table for storing application metadata (e.g., admin_initialized flag)
+- New methods: `get_user_by_username()`, `get_admin_user()`, `list_users()`, `set_user_status()`, `update_user_password()`, `update_user_email()`, `delete_user()`, `delete_api_keys_by_user()`, `get_meta()`, `set_meta()`
+- Legacy database detection: rejects databases where email column has NOT NULL constraint
+
+#### backend/middleware/auth.py
+- Admin role restriction: admin users can only access `/api/admin/*`, `/api/auth/profile/*`, `/api/auth/me`, `/api/auth/logout`
+- Readonly status enforcement: non-GET requests blocked for readonly accounts (except logout and password change)
+- Full user record loaded from DB per request for role/status checks
+
+#### backend/utils/auth.py
+- New `require_active_user()`: requires user.role == "user" and user.status == "active" (for write operations)
+- New `require_non_pending_user()`: requires user.status in ("active", "readonly") (for read operations)
+- New `require_admin()`: requires user.role == "admin"
+
+#### backend/routes/auth.py
+- `POST /register`: Now requires admin_initialized flag; new users created with status="pending" and empty token
+- `POST /login`: Supports identifier "admin" to login as admin user; checks pending status
+- `GET /me`: Changed to use `require_non_pending_user`
+- `GET /profile`: New endpoint returning full user info
+- `POST /profile/password`: New endpoint for password change
+- `POST /profile/email`: New endpoint for email change (requires active status)
+- `POST /logout`: New logout endpoint
+- API key endpoints: now require `require_active_user`
+
+#### backend/routes/setup.py (new)
+- `GET /api/auth/setup/status`: Check if admin is initialized
+- `POST /api/auth/setup/admin`: Set admin password (only works before initialization)
+
+#### backend/routes/admin.py (new)
+- `GET /api/admin/users`: List all users (admin only)
+- `POST /api/admin/users`: Create new user with active status (admin only)
+- `PATCH /api/admin/users/{uid}/status`: Set user status (admin only, cannot modify self)
+- `POST /api/admin/users/{uid}/password`: Change user password (admin only)
+- `DELETE /api/admin/users/{uid}`: Cascade delete user and all their data (admin only, cannot delete self or other admins)
+
+#### backend/services/user_cleanup.py (new)
+- `delete_user_data()`: Deletes session directories, state files, in-memory sessions, API keys, and user record
+
+### Frontend Changes
+
+#### New Components
+- `frontend/src/pages/Admin.tsx`: Admin panel with user list, create user, change status, change password, delete user
+- `frontend/src/pages/Setup.tsx`: Initial admin setup page
+- `frontend/src/components/UserMenu.tsx`: User dropdown menu with profile, settings, logout
+- `frontend/src/components/SettingsDialog.tsx`: Settings dialog for password/email changes
+- `frontend/src/components/ConfirmDialog.tsx`: Reusable confirmation dialog
+- `frontend/src/components/ProtectedAdminRoute.tsx`: Route guard for admin-only pages
+
+#### Updated Components
+- `frontend/src/components/Sidebar.tsx`: Shows admin menu item for admin users
+- `frontend/src/pages/Login.tsx`: Supports admin login with identifier "admin"
+- `frontend/src/pages/Register.tsx`: Shows pending status after registration
+- `frontend/src/App.tsx`: Added setup route and admin routes
+- `frontend/src/stores/appStore.ts`: Added setup status, user info, admin status
+- `frontend/src/hooks/useApi.ts`: Added profile, setup API methods
 
 ## Changelog v0.20.2 (2026-04-21)
 

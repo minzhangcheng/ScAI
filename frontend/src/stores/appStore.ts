@@ -13,6 +13,9 @@ export type FigureReviewStatus = 'pending' | 'approved' | 'accepted_with_reserva
 export interface AuthUser {
   id: string
   email: string
+  username?: string
+  role?: 'admin' | 'user'
+  status?: 'active' | 'pending' | 'readonly'
 }
 
 
@@ -355,8 +358,10 @@ interface AppState {
 
   // Auth state
   authUser: AuthUser | null
-  login: (email: string, password: string) => Promise<void>
-  register: (email: string, password: string) => Promise<void>
+  login: (identifier: string, password: string) => Promise<void>
+  register: (email: string, password: string) => Promise<{ id: string; email: string; status: string }>
+  updateProfileEmail: (currentPassword: string, newEmail: string) => Promise<void>
+  updateProfilePassword: (currentPassword: string, newPassword: string) => Promise<void>
   logout: () => void
   loadAuthFromStorage: () => Promise<void>
 }
@@ -547,16 +552,19 @@ export const useAppStore = create<AppState>()(
 
       // Auth state
       authUser: null,
-      login: async (email: string, password: string) => {
+      login: async (identifier: string, password: string) => {
         const r = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ identifier, password }),
         })
-        if (!r.ok) throw new Error('Invalid email or password')
-        const { access_token, id, email: userEmail } = await r.json()
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({ detail: 'Invalid credentials' }))
+          throw new Error(body.detail || 'Invalid credentials')
+        }
+        const { access_token, id, email, username, role, status } = await r.json()
         setToken(access_token)
-        set({ authUser: id ? { id, email: userEmail } : null })
+        set({ authUser: id ? { id, email, username, role, status } : null })
       },
       register: async (email: string, password: string) => {
         const r = await fetch('/api/auth/register', {
@@ -567,6 +575,35 @@ export const useAppStore = create<AppState>()(
         if (!r.ok) {
           const body = await r.json().catch(() => ({ detail: 'Registration failed' }))
           throw new Error(body.detail || 'Registration failed')
+        }
+        const data = await r.json()
+        return { id: data.id, email: data.email, status: data.status }
+      },
+      updateProfileEmail: async (currentPassword: string, newEmail: string) => {
+        const t = getToken()
+        if (!t) throw new Error('Not authenticated')
+        const r = await fetch('/api/auth/profile/email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
+          body: JSON.stringify({ current_password: currentPassword, new_email: newEmail }),
+        })
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({ detail: 'Update failed' }))
+          throw new Error(body.detail || 'Update failed')
+        }
+        set(state => state.authUser ? { authUser: { ...state.authUser, email: newEmail } } : {})
+      },
+      updateProfilePassword: async (currentPassword: string, newPassword: string) => {
+        const t = getToken()
+        if (!t) throw new Error('Not authenticated')
+        const r = await fetch('/api/auth/profile/password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
+          body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+        })
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({ detail: 'Update failed' }))
+          throw new Error(body.detail || 'Update failed')
         }
       },
       logout: () => {

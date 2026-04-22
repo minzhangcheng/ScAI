@@ -46,6 +46,7 @@ from .workflow import SingleCellAnalysisWorkflow
 from .utils.llm_client import OpenAICompatibleClient, LLMManager
 from .utils.upload import ChunkedUploadManager, stream_save_file
 from .routes.auth import router as auth_router
+from .routes.setup import router as setup_router
 from .routes.v1 import router as v1_router
 from .routes.root import router as root_router
 from .routes.config import router as config_router
@@ -61,6 +62,7 @@ from .routes.files import router as files_router
 from .routes.chat import router as chat_router
 from .routes.websockets import router as websockets_router
 from .routes.reports import router as reports_router
+from .routes.admin import router as admin_router
 from .middleware.auth import AuthMiddleware
 from .utils.auth import get_db, require_auth, require_session_ownership, ws_require_auth, ws_authenticate_and_load, WS_AUTH_FAILED_CODE
 from .utils.files import safe_filename, validate_session_id, validate_path_within
@@ -113,8 +115,8 @@ async def lifespan(app: FastAPI):
         cleanup_stale_sessions(
             chat_task_lock=chat_task_lock,
             chat_sandboxes=chat_sandboxes,
-            import_jobs=_import_jobs,
-            import_jobs_lock=_import_jobs_lock,
+            import_jobs=import_jobs,
+            import_jobs_lock=import_jobs_lock,
         )
     )
     from backend.tasks.ttl_cleanup import ttl_cleanup_task
@@ -131,12 +133,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.20.1",
+    version="0.20.3",
     lifespan=lifespan,
 )
 
 # Mount auth router
 app.include_router(auth_router)
+app.include_router(setup_router)
 app.include_router(v1_router)
 app.include_router(root_router)
 app.include_router(config_router)
@@ -152,6 +155,7 @@ app.include_router(files_router)
 app.include_router(chat_router)
 app.include_router(websockets_router)
 app.include_router(reports_router)
+app.include_router(admin_router)
 
 # CORS
 app.add_middleware(AuthMiddleware)

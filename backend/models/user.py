@@ -6,9 +6,12 @@ from datetime import datetime
 
 class User(BaseModel):
     id: str
-    email: str
+    email: Optional[str] = None
+    username: Optional[str] = None
     password_hash: str = ""
     created_at: str = ""
+    role: str = "user"
+    status: str = "pending"
 
 
 class ApiKey(BaseModel):

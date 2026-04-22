@@ -140,6 +140,51 @@ async def require_auth(
     )
 
 
+async def require_active_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+) -> str:
+    """Return user_id for write operations. Requires user.status=='active' and role=='user'."""
+    user_id = await require_auth(request, credentials)
+    db = await get_db()
+    user = await db.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not (user.role == "user" and user.status == "active"):
+        raise HTTPException(status_code=403, detail="Active user required for write operations")
+    return user_id
+
+
+async def require_non_pending_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+) -> str:
+    """Return user_id for read-only and profile operations. Requires user.status in ('active', 'readonly')."""
+    user_id = await require_auth(request, credentials)
+    db = await get_db()
+    user = await db.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.status not in ("active", "readonly"):
+        raise HTTPException(status_code=403, detail="Non-pending user required")
+    return user_id
+
+
+async def require_admin(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+) -> str:
+    """Return user_id for admin operations. Requires user.role=='admin'."""
+    user_id = await require_auth(request, credentials)
+    db = await get_db()
+    user = await db.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin required")
+    return user_id
+
+
 async def require_session_ownership(
     session_id: str,
     user_id: str = Depends(require_auth),

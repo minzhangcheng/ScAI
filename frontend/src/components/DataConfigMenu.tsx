@@ -1,5 +1,4 @@
 import { useState, useRef } from 'react'
-import { useAppStore } from '../stores/appStore'
 import { apiFetch } from '../hooks/useApi'
 import { Download, Upload, FolderOpen, ChevronDown, Loader2 } from 'lucide-react'
 

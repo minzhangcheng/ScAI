@@ -41,7 +41,7 @@ export function ChatPanel() {
     chatLoading, setChatLoading,
     chatDelegationActive, chatDelegationPlan,
     setChatDelegationActive, setChatDelegationPlan,
-    setChatAbortController,
+    setChatAbortController, authUser,
   } = useAppStore()
   const { t } = useTranslation(language)
   const [input, setInput] = useState('')
@@ -593,7 +593,7 @@ export function ChatPanel() {
           />
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={chatLoading}
+            disabled={chatLoading || authUser?.status === 'readonly'}
             className="shrink-0 p-3 text-slate-500 hover:text-accent-600 hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-50"
             title={t('chatAttach')}
           >
@@ -604,7 +604,7 @@ export function ChatPanel() {
           <select
             value={defaultAgent}
             onChange={(e) => setDefaultAgent(e.target.value)}
-            disabled={chatLoading}
+            disabled={chatLoading || authUser?.status === 'readonly'}
             className="shrink-0 px-2 py-3 border border-slate-300 rounded-xl text-xs text-slate-600 bg-white focus:ring-2 focus:ring-accent-500 focus:border-accent-500 disabled:opacity-50"
             title={language === 'zh' ? '新文件默认Agent' : 'Default agent for new files'}
           >
@@ -629,10 +629,10 @@ export function ChatPanel() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={t('chatPlaceholder')}
+              placeholder={authUser?.status === 'readonly' ? 'Read-only mode' : t('chatPlaceholder')}
               className="w-full resize-none px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 text-sm"
               style={{ height: textareaHeight + 'px' }}
-              disabled={chatLoading}
+              disabled={chatLoading || authUser?.status === 'readonly'}
             />
           </div>
 
@@ -648,7 +648,7 @@ export function ChatPanel() {
           ) : (
             <button
               onClick={handleSend}
-              disabled={!input.trim() && selectedFiles.length === 0}
+              disabled={(!input.trim() && selectedFiles.length === 0) || authUser?.status === 'readonly'}
               className="shrink-0 p-3 bg-accent-600 hover:bg-accent-700 text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Send className="w-5 h-5" />

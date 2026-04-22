@@ -2,14 +2,15 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAppStore } from '../stores/appStore'
 import { AuthLayout } from '../components/AuthLayout'
+import { DisclaimerContent } from '../components/DisclaimerDialog'
 
 export function Register() {
   const nav = useNavigate()
   const register = useAppStore(s => s.register)
-  const login = useAppStore(s => s.login)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  const [accepted, setAccepted] = useState(false)
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -23,9 +24,7 @@ export function Register() {
     setErr('')
     try {
       await register(email, password)
-      // Auto-login after registration
-      await login(email, password)
-      nav('/')
+      nav('/login?registered=pending', { replace: true })
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Registration failed')
     } finally {
@@ -79,9 +78,21 @@ export function Register() {
         />
       </div>
 
+      <DisclaimerContent />
+
+      <label className="flex items-start gap-2 text-sm text-surface-600">
+        <input
+          type="checkbox"
+          checked={accepted}
+          onChange={e => setAccepted(e.target.checked)}
+          className="mt-0.5 rounded border-surface-300 text-accent-600 focus:ring-accent-500"
+        />
+        <span>I have read and agree to the AI risk warning above</span>
+      </label>
+
       <button
         type="submit"
-        disabled={loading}
+        disabled={loading || !accepted || password !== confirm}
         className="w-full py-2.5 bg-accent-600 hover:bg-accent-700 text-white font-medium rounded-lg transition-colors disabled:opacity-50"
       >
         {loading ? 'Creating account...' : 'Create Account'}

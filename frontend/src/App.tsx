@@ -1,10 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useAppStore } from './stores/appStore'
 import { useConfig, useWebSocket } from './hooks/useApi'
 import { useTranslation } from './i18n/translations'
 import { ConfigPanel } from './components/ConfigPanel'
-import { DisclaimerDialog, hasAcceptedDisclaimer } from './components/DisclaimerDialog'
 import { Sidebar } from './components/Sidebar'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { DataPanel } from './components/DataPanel'
@@ -14,7 +12,6 @@ import { ReportPanel } from './components/ReportPanel'
 import { ChatPanel } from './components/ChatPanel'
 import { MessageStream } from './components/MessageStream'
 import { LanguageSelector } from './components/LanguageSelector'
-import { AboutDialog } from './components/AboutDialog'
 import {
   Beaker,
   FileText,
@@ -28,21 +25,17 @@ import {
   WifiOff,
   GripVertical,
   Dna,
-  Key,
-  LogOut,
-  User
+  AlertTriangle
 } from 'lucide-react'
 
 function App() {
-  const navigate = useNavigate()
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, loadAuthFromStorage, authUser, logout } = useAppStore()
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, loadAuthFromStorage, authUser } = useAppStore()
   const [authReady, setAuthReady] = useState(false)
   const { checkStatus, saveConfig } = useConfig()
   const { connect, disconnect } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
   const [configSkipped, setConfigSkipped] = useState(false)
-  const [showDisclaimer, setShowDisclaimer] = useState(!hasAcceptedDisclaimer())
   const { t } = useTranslation(language)
 
   // Resizable panel state
@@ -137,10 +130,6 @@ function App() {
         <p className="text-surface-400 text-sm font-medium tracking-wide">Loading ScAI...</p>
       </div>
     )
-  }
-
-  if (showDisclaimer) {
-    return <DisclaimerDialog onAccept={() => setShowDisclaimer(false)} />
   }
 
   if (configured === null) {
@@ -258,35 +247,16 @@ function App() {
 
               {/* Language Selector */}
               <LanguageSelector />
-
-              {/* User Menu */}
-              {authUser && (
-                <div className="flex items-center gap-2 ml-2">
-                  <button
-                    onClick={() => navigate('/api-keys')}
-                    className="flex items-center gap-1 px-2 py-1 text-xs text-surface-500 hover:text-accent-600 rounded"
-                    title="API Keys"
-                  >
-                    <Key className="w-3.5 h-3.5" />
-                  </button>
-                  <span className="text-xs text-surface-500 flex items-center gap-1">
-                    <User className="w-3 h-3" />
-                    {authUser.email}
-                  </span>
-                  <button
-                    onClick={() => { logout(); navigate('/login') }}
-                    className="flex items-center gap-1 px-2 py-1 text-xs text-surface-500 hover:text-red-600 rounded"
-                    title="Sign out"
-                  >
-                    <LogOut className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              )}
-
-              {/* About */}
-              <AboutDialog />
             </div>
           </header>
+
+          {/* Read-only banner */}
+          {authUser?.status === 'readonly' && (
+            <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4" />
+              Read-only mode — you can view analysis results but cannot create or modify sessions.
+            </div>
+          )}
 
           {/* Content Area */}
           <div ref={containerRef} className="flex-1 flex overflow-hidden bg-science-grid">

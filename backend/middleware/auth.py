@@ -1,26 +1,25 @@
 """Authentication middleware for ScAI backend.
 
-Enforces JWT/API-Key authentication on protected paths:
-- /api/session/*
-- /api/v1/*
-- /api/file/*
-- /api/download/*
+Enforces JWT/API-Key authentication and role/status-based access control.
 
-Allows unauthenticated access to:
-- /api/auth/* (login, register)
-- /api/config/* (initial setup)
-- / (root)
-- /docs, /openapi.json (FastAPI built-in)
+Access rules:
+- admin role: only /api/admin/*, /api/auth/profile/*, /api/auth/me, /api/auth/logout
+- readonly status (pending/active but not user+active): non-GET blocked except
+  /api/auth/logout, /api/auth/profile/password
+
+All protected paths require authentication; user is loaded from DB per request.
 """
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from backend.utils.auth import authenticate_token
+from backend.utils.auth import authenticate_token, get_db
 
 # Paths that do NOT require authentication
 PUBLIC_PREFIXES = (
-    "/api/auth/",
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/setup",
     "/api/config",
     "/docs",
     "/openapi",
@@ -33,6 +32,8 @@ PROTECTED_PREFIXES = (
     "/api/v1/",
     "/api/file/",
     "/api/download/",
+    "/api/auth/",
+    "/api/admin/",
 )
 
 # Exact public paths
@@ -76,6 +77,40 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Not authenticated"},
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+        # Load full user record from DB per request
+        db = await get_db()
+        user = await db.get_user_by_id(user_id)
+
+        if user is None:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "User not found"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Admin role: restrict to specific paths
+        if user.role == "admin":
+            allowed = (
+                path.startswith("/api/admin/") or
+                path.startswith("/api/auth/profile/") or
+                path == "/api/auth/me" or
+                path == "/api/auth/logout"
+            )
+            if not allowed:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Admin access limited to specific paths"},
+                )
+
+        # Readonly status: block non-GET mutations (except logout)
+        if user.status == "readonly":
+            if request.method != "GET":
+                if path not in ("/api/auth/logout", "/api/auth/profile/password"):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Readonly account cannot perform write operations"},
+                    )
 
         # Attach user_id to request state for downstream use
         request.state.user_id = user_id

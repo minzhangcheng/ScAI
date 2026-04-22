@@ -11,9 +11,12 @@ from backend.models.user import User, ApiKey
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
-    email TEXT UNIQUE NOT NULL,
+    email TEXT,
+    username TEXT,
     password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    status TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY,
@@ -43,6 +46,11 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_uploads_expires ON upload_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_uploads_session ON upload_sessions(session_id);
+
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # Throttle API key last_used_at updates (seconds)
@@ -60,17 +68,32 @@ class AppDB:
         async with aiosqlite.connect(self.path, timeout=30) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("PRAGMA synchronous=NORMAL")
+            # Check for legacy database: if email column exists and has NOT NULL constraint
+            try:
+                cur = await db.execute("PRAGMA table_info(users)")
+                cols = await cur.fetchall()
+                col_names = [c[1] for c in cols]
+                if "email" in col_names:
+                    # Check if email is NOT NULL (flag 2 in PRAGMA table_info)
+                    for c in cols:
+                        if c[1] == "email" and c[5] == 2:
+                            raise RuntimeError(
+                                "Legacy database detected: email column has NOT NULL constraint. "
+                                "Please migrate data manually before upgrading."
+                            )
+            except RuntimeError:
+                raise
             await db.executescript(SCHEMA)
             await db.commit()
 
     # ── Users ──────────────────────────────────────────────────────────
 
-    async def create_user(self, email: str, password_hash: str) -> str:
+    async def create_user(self, email: str, password_hash: str, username: Optional[str] = None, role: str = "user", status: str = "pending") -> str:
         uid = str(uuid.uuid4())
         async with aiosqlite.connect(self.path, timeout=30) as db:
             await db.execute(
-                "INSERT INTO users(id,email,password_hash,created_at) VALUES(?,?,?,?)",
-                (uid, email, password_hash, datetime.now(timezone.utc).isoformat()),
+                "INSERT INTO users(id,email,username,password_hash,created_at,role,status) VALUES(?,?,?,?,?,?,?)",
+                (uid, email, username, password_hash, datetime.now(timezone.utc).isoformat(), role, status),
             )
             await db.commit()
         return uid
@@ -83,8 +106,11 @@ class AppDB:
             if row is None:
                 return None
             return User(id=row["id"], email=row["email"],
+                        username=row["username"],
                         password_hash=row["password_hash"],
-                        created_at=row["created_at"])
+                        created_at=row["created_at"],
+                        role=row["role"],
+                        status=row["status"])
 
     async def get_user_by_id(self, uid: str) -> Optional[User]:
         async with aiosqlite.connect(self.path, timeout=30) as db:
@@ -94,8 +120,139 @@ class AppDB:
             if row is None:
                 return None
             return User(id=row["id"], email=row["email"],
+                        username=row["username"],
                         password_hash=row["password_hash"],
-                        created_at=row["created_at"])
+                        created_at=row["created_at"],
+                        role=row["role"],
+                        status=row["status"])
+
+    async def get_user_by_username(self, username: str) -> Optional[User]:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM users WHERE username=?", (username,))
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return User(id=row["id"], email=row["email"],
+                        username=row["username"],
+                        password_hash=row["password_hash"],
+                        created_at=row["created_at"],
+                        role=row["role"],
+                        status=row["status"])
+
+    async def get_admin_user(self) -> Optional[User]:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM users WHERE role='admin' LIMIT 1")
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return User(id=row["id"], email=row["email"],
+                        username=row["username"],
+                        password_hash=row["password_hash"],
+                        created_at=row["created_at"],
+                        role=row["role"],
+                        status=row["status"])
+
+    async def list_users(self) -> List[User]:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM users ORDER BY created_at DESC")
+            rows = await cur.fetchall()
+            return [
+                User(id=r["id"], email=r["email"],
+                     username=r["username"],
+                     password_hash=r["password_hash"],
+                     created_at=r["created_at"],
+                     role=r["role"],
+                     status=r["status"])
+                for r in rows
+            ]
+
+    async def update_user_password(self, uid: str, password_hash: str) -> bool:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            cur = await db.execute(
+                "UPDATE users SET password_hash=? WHERE id=?",
+                (password_hash, uid),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def update_user_email(self, uid: str, email: str) -> bool:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            cur = await db.execute(
+                "UPDATE users SET email=? WHERE id=?",
+                (email, uid),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def set_user_status(self, uid: str, status: str) -> bool:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            cur = await db.execute(
+                "UPDATE users SET status=? WHERE id=?",
+                (status, uid),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def delete_user(self, uid: str) -> bool:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            cur = await db.execute("DELETE FROM users WHERE id=?", (uid,))
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def delete_api_keys_by_user(self, uid: str) -> None:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            await db.execute("DELETE FROM api_keys WHERE user_id=?", (uid,))
+            await db.commit()
+
+    async def count_admins(self) -> int:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT COUNT(*) as cnt FROM users WHERE role='admin'"
+            )
+            row = await cur.fetchone()
+            return row["cnt"] if row else 0
+
+    async def create_admin_if_missing(self, email: str, password_hash: str) -> str:
+        """
+        Get existing admin or create new one if not exists.
+
+        Note: If admin already exists, this function returns the existing admin's id
+        and does NOT update the password. Use update_user_password() separately if needed.
+        """
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id FROM users WHERE role='admin' LIMIT 1"
+            )
+            row = await cur.fetchone()
+            if row is not None:
+                return row["id"]
+            uid = str(uuid.uuid4())
+            await db.execute(
+                "INSERT INTO users(id,email,username,password_hash,created_at,role,status) VALUES(?,?,?,?,?,?,?)",
+                (uid, email, "admin", password_hash, datetime.now(timezone.utc).isoformat(), "admin", "active"),
+            )
+            await db.commit()
+            return uid
+
+    async def get_meta(self, key: str) -> Optional[str]:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT value FROM app_meta WHERE key=?", (key,))
+            row = await cur.fetchone()
+            return row["value"] if row else None
+
+    async def set_meta(self, key: str, value: str) -> None:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO app_meta(key,value) VALUES(?,?)",
+                (key, value),
+            )
+            await db.commit()
 
     # ── API Keys ─────────────────────────────────────────────────────────
 

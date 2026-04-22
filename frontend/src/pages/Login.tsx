@@ -1,25 +1,43 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useState, useEffect } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAppStore } from '../stores/appStore'
 import { AuthLayout } from '../components/AuthLayout'
 
 export function Login() {
   const nav = useNavigate()
   const login = useAppStore(s => s.login)
-  const [email, setEmail] = useState('')
+  const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
+  const [searchParams] = useSearchParams()
+  const registered = searchParams.get('registered')
+
+  useEffect(() => {
+    fetch('/api/auth/setup/status')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data?.initialized) {
+          nav('/setup', { replace: true })
+        }
+      })
+      .catch(() => {})
+  }, [nav])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
     setErr('')
     try {
-      await login(email, password)
-      nav('/')
-    } catch {
-      setErr('Invalid email or password')
+      await login(identifier, password)
+      const authUser = useAppStore.getState().authUser
+      if (authUser?.role === 'admin') {
+        nav('/admin')
+      } else {
+        nav('/')
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Invalid credentials')
     } finally {
       setLoading(false)
     }
@@ -33,12 +51,19 @@ export function Login() {
         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">{err}</div>
       )}
 
+      {registered === 'pending' && (
+        <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm">
+          Account created successfully. Please sign in.
+        </div>
+      )}
+
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">Email</label>
+        <label className="block text-sm font-medium text-surface-600 mb-1">Email or admin</label>
         <input
-          type="email"
-          value={email}
-          onChange={e => setEmail(e.target.value)}
+          type="text"
+          name="identifier"
+          value={identifier}
+          onChange={e => setIdentifier(e.target.value)}
           required
           className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
           placeholder="you@example.com"

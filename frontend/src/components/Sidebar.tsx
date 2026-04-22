@@ -3,6 +3,8 @@ import { useSession, apiFetch, generateId } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import { DataConfigMenu } from './DataConfigMenu'
+import { UserMenu } from './UserMenu'
+import { AboutDialog } from './AboutDialog'
 import {
   Plus,
   Settings,
@@ -12,8 +14,6 @@ import {
   FolderOpen,
   Clock,
   X,
-  Download,
-  Upload,
   Loader2,
   CheckCircle,
   AlertCircle,
@@ -26,8 +26,9 @@ interface SidebarProps {
 }
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
-  const { currentSession, setCurrentSession, clearMessages, language, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback } = useAppStore()
+  const { currentSession, setCurrentSession, clearMessages, language, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback, authUser } = useAppStore()
   const { createSession, loadSession, listSessions, deleteSession, updateSessionInfo } = useSession()
+  const isReadOnly = authUser?.status === 'readonly'
   const { t } = useTranslation(language)
   const [showNewSession, setShowNewSession] = useState(false)
   const [showSessionBrowser, setShowSessionBrowser] = useState(false)
@@ -421,23 +422,25 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       </div>
 
       {/* New Session Button */}
-      <div className="p-3 space-y-2">
-        <button
-          onClick={() => setShowNewSession(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-accent-500 to-accent-600 text-white rounded-xl font-medium hover:from-accent-600 hover:to-accent-700 transition-all duration-200 shadow-lg shadow-accent-500/25 hover:shadow-accent-500/40 hover:-translate-y-0.5 active:translate-y-0"
-        >
-          <Plus className="w-5 h-5" />
-          {t('newAnalysis')}
-        </button>
-        
-        <button
-          onClick={() => setShowSessionBrowser(true)}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-100 text-surface-800 rounded-xl font-medium hover:bg-surface-200 transition-all"
-        >
-          <FolderOpen className="w-4 h-4" />
-          {language === 'zh' ? '打开已有会话' : 'Open Saved Session'}
-        </button>
-      </div>
+      {!isReadOnly && (
+        <div className="p-3 space-y-2">
+          <button
+            onClick={() => setShowNewSession(true)}
+            className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-accent-500 to-accent-600 text-white rounded-xl font-medium hover:from-accent-600 hover:to-accent-700 transition-all duration-200 shadow-lg shadow-accent-500/25 hover:shadow-accent-500/40 hover:-translate-y-0.5 active:translate-y-0"
+          >
+            <Plus className="w-5 h-5" />
+            {t('newAnalysis')}
+          </button>
+
+          <button
+            onClick={() => setShowSessionBrowser(true)}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-100 text-surface-800 rounded-xl font-medium hover:bg-surface-200 transition-all"
+          >
+            <FolderOpen className="w-4 h-4" />
+            {language === 'zh' ? '打开已有会话' : 'Open Saved Session'}
+          </button>
+        </div>
+      )}
 
       {/* Session Browser Modal */}
       {showSessionBrowser && (
@@ -715,16 +718,18 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
       {/* Bottom Actions */}
       <div className="p-3 border-t border-surface-200 space-y-1">
-        <DataConfigMenu
-          sessionId={currentSession?.id}
-          onImported={(sid) => {
-            loadSession(sid).then(s => setCurrentSession(s))
-          }}
-          onExportSession={handleExport}
-          exporting={exporting}
-          onImportSession={() => fileInputRef.current?.click()}
-          importing={importing}
-        />
+        {!isReadOnly && (
+          <DataConfigMenu
+            sessionId={currentSession?.id}
+            onImported={(sid) => {
+              loadSession(sid).then(s => setCurrentSession(s))
+            }}
+            onExportSession={handleExport}
+            exporting={exporting}
+            onImportSession={() => fileInputRef.current?.click()}
+            importing={importing}
+          />
+        )}
         {/* Hidden file input for session import */}
         <input
           ref={fileInputRef}
@@ -742,6 +747,12 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
           <Settings className="w-4 h-4" aria-hidden="true" />
           {t('apiSettings')}
         </button>
+
+        {/* UserMenu + About stacked */}
+        <div className="flex flex-col gap-1 pt-1">
+          {authUser && <UserMenu />}
+          <AboutDialog />
+        </div>
       </div>
     </div>
   )

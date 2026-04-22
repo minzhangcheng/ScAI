@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.20.2
+**Version**: 0.20.3
 
 ## Installation
 
@@ -343,6 +343,14 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 ## Changelog
 
 > Technical details for each release are documented in [HANDOVER.md](./HANDOVER.md).
+
+### v0.20.3 (2026-04-22)
+
+- **Admin Management System**: New dedicated admin panel for user management. Administrators can view all users, create new users, change passwords, and delete users with cascade cleanup of all associated data
+- **Initial Setup Flow**: First-time installations now require admin password setup before the system can be used. New users must be approved by an administrator before they can log in
+- **User Status Management**: Users can have different statuses: `pending` (awaiting admin approval), `readonly` (can view but not modify), or `active` (full access). Readonly accounts cannot perform write operations
+- **User Profile Management**: Users can now change their own password and email address through the settings dialog
+- **Admin Login**: Administrators can log in using the special identifier `admin` instead of an email address
 
 ### v0.20.2 (2026-04-21)
 

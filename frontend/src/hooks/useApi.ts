@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAppStore, Message, Session, AgentType, RoundResult, FigureReviewStatus } from '../stores/appStore'
 import { devLog } from '../utils/logger'
 import { downloadBlob } from '../utils/download'
-import { getToken, setToken, clearToken } from '../utils/authStorage'
+import { getToken, clearToken } from '../utils/authStorage'
 import { WS_AUTH_SUBPROTOCOL } from '../constants/auth'
 import type {
   SessionLoadResponse,
@@ -75,6 +75,8 @@ export async function apiFetch<T>(
     const error = await response.json().catch(() => ({ detail: 'Unknown error' }))
     throw new Error(error.detail || 'API request failed')
   }
+
+  if (response.status === 204) return undefined as T
 
   return response.json()
 }
