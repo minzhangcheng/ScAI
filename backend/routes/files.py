@@ -5,7 +5,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from backend.config import SESSION_DIR, REPORTS_DIR, UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR
-from backend.utils.agent_llm import validate_file_path_ownership as _validate_file_path_ownership
 
 router = APIRouter(prefix="/api", tags=["files"])
 
@@ -40,6 +39,7 @@ def _resolve_within_allowed_dirs(path: str) -> Path:
 @router.get("/file")
 async def get_file(path: str, request: Request):
     """Serve a file from the filesystem — ownership-checked by session_id prefix."""
+    from backend.utils.agent_llm import validate_file_path_ownership as _validate_file_path_ownership
     await _validate_file_path_ownership(path, request)
 
     real_path = _resolve_within_allowed_dirs(path)
@@ -56,6 +56,7 @@ async def get_file(path: str, request: Request):
 @router.get("/download")
 async def download_file(path: str, request: Request):
     """Download a file — ownership-checked by session_id prefix."""
+    from backend.utils.agent_llm import validate_file_path_ownership as _validate_file_path_ownership
     await _validate_file_path_ownership(path, request)
 
     real_path = _resolve_within_allowed_dirs(path)

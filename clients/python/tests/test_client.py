@@ -8,6 +8,21 @@ from scai_client import Client, Job
 from scai_client.errors import FileIntegrityError, JobFailed
 
 
+def test_top_level_exports_auth_and_scai_errors():
+    """AuthError and ScaiError must be importable from top-level package."""
+    from scai_client import AuthError, ScaiError
+
+    assert issubclass(AuthError, ScaiError)
+
+
+def test_client_init_without_credentials_raises_auth_error():
+    """Client() with neither api_key nor jwt must raise AuthError (not bare Exception)."""
+    from scai_client import Client, AuthError
+
+    with pytest.raises(AuthError):
+        Client(base_url="http://localhost:8000")
+
+
 def test_client_init():
     """Client should accept base_url and api_key."""
     c = Client(base_url="http://localhost:8000", api_key="scai_test")

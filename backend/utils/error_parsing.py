@@ -7,6 +7,20 @@ API_ERROR_TYPES: FrozenSet[str] = frozenset({
     "AttributeError", "TypeError", "ImportError", "ModuleNotFoundError",
 })
 
+# Error types that indicate purely technical failures (no PI guidance needed)
+_TECHNICAL_ERROR_TYPES: FrozenSet[str] = frozenset({
+    "KeyError", "TypeError", "IndexError", "ValueError",
+    "ModuleNotFoundError", "AttributeError", "NameError",
+    "SyntaxError", "ImportError", "FileNotFoundError",
+    "ZeroDivisionError", "RuntimeError", "OSError",
+    "IOError", "PermissionError", "StopIteration",
+    "UnicodeDecodeError", "UnicodeEncodeError",
+    "RecursionError", "OverflowError", "NotImplementedError",
+    "UnboundLocalError",
+    # Library-specific technical errors
+    "InvalidIndexError", "AnnDataReadError", "SparseDataError",
+})
+
 # Regex to strip ANSI escape sequences (e.g. \x1b[31m) from Jupyter tracebacks
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 

@@ -28,22 +28,8 @@ logger = logging.getLogger(__name__)
 from openai import APIConnectionError
 
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep
-from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type
+from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type, _TECHNICAL_ERROR_TYPES
 from ..services.report import get_agent_stats_html
-
-# Python exception types that are purely technical (no PI guidance needed)
-_TECHNICAL_ERROR_TYPES = frozenset({
-    "KeyError", "TypeError", "IndexError", "ValueError",
-    "ModuleNotFoundError", "AttributeError", "NameError",
-    "SyntaxError", "ImportError", "FileNotFoundError",
-    "ZeroDivisionError", "RuntimeError", "OSError",
-    "IOError", "PermissionError", "StopIteration",
-    "UnicodeDecodeError", "UnicodeEncodeError",
-    "RecursionError", "OverflowError", "NotImplementedError",
-    "UnboundLocalError",
-    # Library-specific technical errors (no PI guidance needed)
-    "InvalidIndexError", "AnnDataReadError", "SparseDataError",
-})
 from ..utils.llm_client import OpenAICompatibleClient
 
 # Section IDs that represent specific/targeted analysis

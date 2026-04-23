@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.config import (
@@ -24,6 +24,7 @@ from backend.models.schemas import AnalysisState
 from backend.services.session_store import ensure_session_loaded
 from backend.state import detailed_reports, report_websockets
 from backend.utils.files import safe_filename, validate_path_within, validate_session_id
+from backend.utils.auth import require_session_ownership
 
 logger = logging.getLogger(__name__)
 
@@ -276,23 +277,23 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
 # ============================================
 
 @router.post("/{session_id}/report/download-all-figures")
-async def download_all_figures(session_id: str):
+async def download_all_figures(session_id: str, state: AnalysisState = Depends(require_session_ownership)):
     """Download all figures as a ZIP file"""
     validate_session_id(session_id)
     figures_dir = get_session_reports(session_id) / "figures"
-    
+
     if not figures_dir.exists():
         raise HTTPException(status_code=404, detail="No figures found")
-    
+
     # Create ZIP in memory
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for file_path in figures_dir.glob("*"):
             if file_path.is_file():
                 zf.write(file_path, file_path.name)
-    
+
     zip_buffer.seek(0)
-    
+
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
@@ -301,23 +302,23 @@ async def download_all_figures(session_id: str):
 
 
 @router.post("/{session_id}/report/download-all-tables")
-async def download_all_tables(session_id: str):
+async def download_all_tables(session_id: str, state: AnalysisState = Depends(require_session_ownership)):
     """Download all tables as a ZIP file"""
     validate_session_id(session_id)
     tables_dir = get_session_reports(session_id) / "tables"
-    
+
     if not tables_dir.exists():
         raise HTTPException(status_code=404, detail="No tables found")
-    
+
     # Create ZIP in memory
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for file_path in tables_dir.glob("*.csv"):
             if file_path.is_file():
                 zf.write(file_path, file_path.name)
-    
+
     zip_buffer.seek(0)
-    
+
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
@@ -326,7 +327,7 @@ async def download_all_tables(session_id: str):
 
 
 @router.post("/{session_id}/report/download-full")
-async def download_full_report(session_id: str):
+async def download_full_report(session_id: str, state: AnalysisState = Depends(require_session_ownership)):
     """Download full report including figures, tables, and report JSON"""
     validate_session_id(session_id)
     report_dir = get_session_reports(session_id)
@@ -437,7 +438,7 @@ async def preview_report(session_id: str):
 
 
 @router.get("/{session_id}/report/figure/{filename}")
-async def get_report_figure(session_id: str, filename: str):
+async def get_report_figure(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
     """Get a specific figure from the report"""
     safe_name = safe_filename(filename)
     figure_parent = get_session_reports(session_id) / "figures"
@@ -465,13 +466,13 @@ async def get_report_figure(session_id: str, filename: str):
 
 
 @router.get("/{session_id}/report/figures/{filename}")
-async def get_report_figure_alt(session_id: str, filename: str):
+async def get_report_figure_alt(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
     """Get a specific figure from the report (alternative path for HTML relative URLs)"""
     return await get_report_figure(session_id, filename)
 
 
 @router.get("/{session_id}/report/table/{filename}")
-async def get_report_table(session_id: str, filename: str):
+async def get_report_table(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
     """Get a specific table from the report"""
     safe_name = safe_filename(filename)
     table_parent = get_session_reports(session_id) / "tables"
@@ -489,13 +490,13 @@ async def get_report_table(session_id: str, filename: str):
 
 
 @router.get("/{session_id}/report/tables/{filename}")
-async def get_report_table_alt(session_id: str, filename: str):
+async def get_report_table_alt(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
     """Get a specific table from the report (alternative path for HTML relative URLs)"""
     return await get_report_table(session_id, filename)
 
 
 @router.get("/{session_id}/report/{filename:path}")
-async def get_report_file(session_id: str, filename: str):
+async def get_report_file(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
     """Catch-all: serve any file from the report directory (notebook, sub-reports, etc.)"""
     validate_session_id(session_id)
     safe_name = safe_filename(filename)
@@ -626,13 +627,9 @@ def _find_workspace_figure(state: AnalysisState, session_id: str, figure_id: str
 
 
 @router.get("/{session_id}/figure/{figure_id}/pdf")
-async def download_publication_figure_pdf(session_id: str, figure_id: str):
+async def download_publication_figure_pdf(session_id: str, figure_id: str, state: AnalysisState = Depends(require_session_ownership)):
     """Download a specific publication figure as PDF"""
     from backend.config import SESSION_DIR as _SESSION_DIR, REPORTS_DIR as _REPORTS_DIR
-    
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
 
     figure = next((f for f in state.publication_figures if f.id == figure_id), None)
 
@@ -671,13 +668,9 @@ async def download_publication_figure_pdf(session_id: str, figure_id: str):
 
 
 @router.get("/{session_id}/figure/{figure_id}/png")
-async def download_publication_figure_png(session_id: str, figure_id: str):
+async def download_publication_figure_png(session_id: str, figure_id: str, state: AnalysisState = Depends(require_session_ownership)):
     """Download a specific publication figure as PNG/JPG"""
     from backend.config import SESSION_DIR as _SESSION_DIR, REPORTS_DIR as _REPORTS_DIR
-    
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
 
     figure = next((f for f in state.publication_figures if f.id == figure_id), None)
 

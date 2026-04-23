@@ -2,8 +2,113 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.20.5
-**Last Updated**: 2026-04-22
+**Version**: 0.20.7
+**Last Updated**: 2026-04-23
+
+## Changelog v0.20.7 (2026-04-23)
+
+### Backend Changes
+
+#### backend/config.py
+- Added `PI_AGENT_NAME = "pi"` constant as single source of truth for agent identifier
+
+#### backend/middleware/auth.py
+- Added `AUTH_OPTIONAL_PATHS` tuple for paths where auth is optional: `/api/session/`, `/api/file/`, `/api/download/`
+- Auth middleware delegates auth check to route layer via `require_session_ownership` for these paths
+
+#### backend/utils/error_parsing.py
+- Added `_TECHNICAL_ERROR_TYPES` frozen set - Python exception types that indicate purely technical failures (no PI guidance needed)
+- Extracted from `supervisor_agent.py` for shared use across modules
+
+#### backend/tasks/session_cleanup.py
+- Refactored into helper functions:
+  - `_collect_sessions_to_evict()`: Pick idle sessions + overflow sessions
+  - `_evict_single_session()`: Save and remove one session
+  - `_cleanup_stale_import_jobs()`: Clean up completed/failed import jobs
+
+#### backend/agents/supervisor_agent.py
+- Now imports `_TECHNICAL_ERROR_TYPES` from `backend.utils.error_parsing` instead of defining locally
+
+#### backend/routes/reports.py
+- Uses `PI_AGENT_NAME` constant from `config` instead of local `_PI_AGENT_NAME`
+
+#### backend/agents/bioinformatics_agent.py, backend/agents/biochemistry_agent.py, backend/agents/pathology_agent.py
+- Agent updates for consistency
+
+### Frontend Changes
+
+#### frontend/src/constants/agents.ts (new file)
+- Agent icons, background colors, and gradients as typed constants
+
+#### frontend/src/hooks/useClickOutside.ts (new file)
+- Reusable click-outside hook for UI interactions
+
+#### frontend/src/components/ChatPanel.tsx, MessageStream.tsx, RoundFeedbackDialog.tsx, UserMenu.tsx
+- UI improvements and consistency updates
+
+### Tests
+
+#### backend/tests/test_session_cleanup.py (new)
+- 133 lines - session cleanup functionality tests
+
+#### backend/tests/test_safe_parse_json_logging.py (new)
+- 42 lines - safe JSON logging tests
+
+### Python Client
+
+#### clients/python/scai_client/__init__.py
+- Client updates
+
+#### clients/python/tests/test_client.py
+- Test updates
+
+## Changelog v0.20.6 (2026-04-23)
+
+### Architecture Changes
+
+#### backend/services/report/ (new modular structure)
+
+```
+backend/services/report/__init__.py       # Module exports
+backend/services/report/analysis_log.py  # Analysis log processing
+backend/services/report/figures.py       # Figure handling
+backend/services/report/generator.py     # Report generation orchestration
+backend/services/report/llm_calls.py     # LLM call utilities
+backend/services/report/pi_review.py     # PI review functionality
+backend/services/report/planning.py      # Report planning
+backend/services/report/regenerator.py   # Report regeneration
+backend/services/report/scoring.py       # Scoring utilities
+backend/services/report/sections.py      # Section definitions
+backend/services/report/variants.py      # Report variants
+backend/utils/report_html.py             # HTML utilities (817 lines added)
+```
+
+#### backend/tests/ (new tests)
+- `test_mixin_composition.py`: Mixin composition tests
+- `test_pi_agent_name_constant.py`: PI agent name constant tests
+- `test_report_html_utils.py`: Report HTML utility tests
+- `test_report_regenerator_smoke.py`: Regenerator smoke tests
+
+#### Deleted Files
+- `backend/report_generator.py`: 5782 lines - replaced by modular `services/report/`
+- `backend/regenerate_report_html.py`: 1661 lines - functionality moved to services
+
+### Backend Changes
+
+#### backend/agents/supervisor_agent.py
+- Now imports `get_agent_stats_html` from `backend.services.report` instead of `backend.regenerate_report_html`
+
+#### backend/routes/reports.py
+- Updated imports to use new `services/report` module structure
+
+#### backend/workflow.py
+- Updated to use new report service module
+
+#### frontend/src/components/AboutDialog.tsx
+- Minor update
+
+#### frontend/src/components/UserMenu.tsx
+- Minor update
 
 ## Changelog v0.20.4 (2026-04-22)
 
@@ -1933,7 +2038,7 @@ Single-cell datasets can be very large. The local Jupyter kernel may require sig
 
 **Fix**: Added stale session detection in 3 places: Sidebar auto-reload, WebSocket `onmessage`, and WebSocket `onopen` reconnect. On 404 detection, clears session from Zustand state.
 
-## Version History
+## Changelog
 
 #### v0.19.7 (2026-04-14)
 

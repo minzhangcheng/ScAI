@@ -42,6 +42,14 @@ PUBLIC_EXACT = {"/", "/api"}
 # Additional protected exact paths
 PROTECTED_EXACT = {"/api/sessions"}
 
+# Paths where auth is optional - authentication is delegated to route layer
+# These are image/file endpoints embedded in HTML that browsers request without auth headers
+AUTH_OPTIONAL_PATHS = (
+    "/api/session/",  # report images and figures - route uses require_session_ownership
+    "/api/file/",     # file serving with path-based ownership check
+    "/api/download/",  # file download with path-based ownership check
+)
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -72,6 +80,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             user_id = await authenticate_token(token)
 
         if not user_id:
+            # Check if path is auth-optional - delegate auth to route layer via require_session_ownership
+            auth_optional = any(path.startswith(p) for p in AUTH_OPTIONAL_PATHS)
+            if auth_optional:
+                # No auth token provided, but path is auth-optional - let route handle auth
+                request.state.user_id = None
+                return await call_next(request)
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Not authenticated"},

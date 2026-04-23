@@ -34,7 +34,7 @@ from ..models.schemas import (
     DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall
-from ..utils.error_parsing import strip_ansi
+from ..utils.error_parsing import strip_ansi, extract_error_type, _TECHNICAL_ERROR_TYPES
 
 # Pre-compiled pattern for detecting manual cell_type assignment in code
 _DYNAMIC_CONTEXT_PREFIX = "[Analysis Context]"
@@ -2605,13 +2605,27 @@ except Exception as _save_err:
                 else:
                     result.error = strip_ansi(result.error) if result.error else result.error
                     logger.warning(f"[Bioinformatics] Revision failed: {result.error}")
-                    # Auto-retry: feed error back to LLM for a single fix attempt
                     error_msg = str(result.error)[:1000]
+
+                    # Technique Agent documentation lookup for technical errors
+                    extra_context = ""
+                    if self.technique_agent:
+                        err_type = extract_error_type(error_msg)
+                        if err_type in _TECHNICAL_ERROR_TYPES:
+                            logger.info(f"[Bioinformatics] Looking up docs for {err_type} error")
+                            doc_hint = await self.technique_agent.lookup_from_error(
+                                self.sandbox, error_msg, revised_code
+                            )
+                            if doc_hint:
+                                extra_context = f"\n\n[API Documentation]\n{doc_hint}"
+                                logger.info(f"[Bioinformatics] Got documentation hint for {err_type}")
+
+                    # Auto-retry: feed error + docs back to LLM
                     logger.info(f"[Bioinformatics] Auto-retrying revision with error context")
                     try:
                         retry_code = await self._revise_figure_code(
                             revised_code,
-                            f"The previous code revision caused a runtime error:\n{error_msg}\nFix this error while keeping ALL the style improvements from the revision.",
+                            f"The previous code revision caused a runtime error:\n{error_msg}\nFix this error while keeping ALL the style improvements from the revision.{extra_context}",
                             [f"Fix the runtime error: {error_msg}"],
                             ["The code must execute without errors"],
                             figure_type, state, figure.png_base64,

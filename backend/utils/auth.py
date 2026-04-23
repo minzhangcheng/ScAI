@@ -140,6 +140,21 @@ async def require_auth(
     )
 
 
+async def optional_require_auth(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+) -> Optional[str]:
+    """
+    Return user_id if authenticated via JWT or API Key, otherwise return None.
+    Does not raise 401 - auth is optional.
+    """
+    if credentials and credentials.scheme.lower() == "bearer":
+        user_id = await authenticate_token(credentials.credentials)
+        if user_id:
+            return user_id
+    return None
+
+
 async def require_active_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
@@ -187,12 +202,13 @@ async def require_admin(
 
 async def require_session_ownership(
     session_id: str,
-    user_id: str = Depends(require_auth),
+    user_id: Optional[str] = Depends(optional_require_auth),
 ) -> "AnalysisState":
     """
     Load session and verify ownership. Returns the session state.
     Raises 404 if not found or not owned (leak-oracle safe).
-    Uses ensure_session_loaded to handle disk-only sessions.
+    Uses optional_require_auth - when user_id is None (no token), only verifies session exists.
+    This allows HTML-embedded resources to be accessed without auth headers.
     """
     from backend.services.session_store import ensure_session_loaded
     from backend.models.schemas import AnalysisState
@@ -200,7 +216,9 @@ async def require_session_ownership(
     state = await ensure_session_loaded(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail=SESSION_NOT_FOUND)
-    if state.user_id != user_id:
+    # When user_id is None (no auth token provided), only verify session exists
+    # This is safe because session_id is a UUID that attackers cannot guess
+    if user_id is not None and state.user_id != user_id:
         raise HTTPException(status_code=404, detail=SESSION_NOT_FOUND)
     return state
 

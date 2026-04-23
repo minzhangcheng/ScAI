@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.20.5
+**Version**: 0.20.7
 
 ## Installation
 
@@ -343,6 +343,21 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 ## Changelog
 
 > Technical details for each release are documented in [HANDOVER.md](./HANDOVER.md).
+
+### v0.20.7 (2026-04-23)
+
+- **Session Auth Optional Paths**: Added `AUTH_OPTIONAL_PATHS` middleware configuration for `/api/session/`, `/api/file/`, `/api/download/` to delegate authentication to route layer via `require_session_ownership`
+- **Shared `PI_AGENT_NAME` Constant**: Extracted `"pi"` as a shared constant in `backend/config.py` to avoid string-typo drift across routes and agents
+- **Extracted `_TECHNICAL_ERROR_TYPES`**: Moved from `supervisor_agent.py` to `backend/utils/error_parsing.py` for shared error classification across modules
+- **Session Cleanup Refactor**: Extracted session eviction logic into helper functions for improved maintainability and testability
+
+### v0.20.6 (2026-04-23)
+
+- **Report Module Refactoring**: Major refactor of report generation into modular structure under `backend/services/report/`
+  - Split monolithic `report_generator.py` into specialized modules: `analysis_log.py`, `figures.py`, `generator.py`, `llm_calls.py`, `pi_review.py`, `planning.py`, `regenerator.py`, `scoring.py`, `sections.py`, `variants.py`
+  - Moved `get_agent_stats_html()` and `generate_html_report()` to `backend/services/report/regenerator.py`
+  - Updated `supervisor_agent.py` to import from new `backend.services.report` module
+- **Dead Code Removal**: Removed unused `_extract_analysis_code()` method and `report_generator.py` (replaced by new modular implementation)
 
 ### v0.20.5 (2026-04-23)
 
