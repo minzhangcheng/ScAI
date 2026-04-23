@@ -2,7 +2,7 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.20.4
+**Version**: 0.20.5
 **Last Updated**: 2026-04-22
 
 ## Changelog v0.20.4 (2026-04-22)
@@ -1163,7 +1163,7 @@ class DetailedReportGenerator:
 - `_prepare_figure_images()`: Loads up to 20 figures for vision API, prioritized by type (annotation > umap > clustering > heatmap > volcano)
 - `_prepare_table_summaries()`: Reads CSV tables with shape, columns, data previews; for DE tables: counts significant genes (|logFC|>1, padj<0.05)
 - `_pi_comprehensive_review()`: Single comprehensive PI review of the entire analysis — reads full code digest and all figures together, returns structured JSON (methodology_overview, workflow_summary, key_results, figure_descriptions, parameters_used)
-- `_extract_analysis_code()`: Classifies code cells into canonical phases (qc, normalization, integration, clustering, annotation, differential_expression, pathway, trajectory, communication, visualization)
+- `_extract_analysis_code()`: (removed — dead code, no callers)
 
 **Report Appendix (v0.9.0):**
 - `_build_appendix_html()`: Generates HTML appendix with no LLM calls, containing:

@@ -1,0 +1,412 @@
+"""Sections mixin for DetailedReportGenerator."""
+from typing import Dict, Any, List, Optional
+
+
+class SectionsMixin:
+    """Provides abstract, conclusions, and appendix methods for report generation."""
+
+    async def _generate_abstract(
+        self,
+        state: "AnalysisState",
+        sections: List[Dict],
+        findings: Dict[str, Any],
+        language: str,
+        analysis_summary: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """PI Agent generates the report abstract"""
+        import json
+        import re
+
+        analysis_summary = analysis_summary or {}
+
+        section_summaries = "\n".join([
+            f"- {s['title']}: {len(s.get('figures', []))} figures, {len(s.get('tables', []))} tables"
+            for s in sections
+        ])
+
+        # Include methodology from analysis review
+        methodology = analysis_summary.get("methodology_overview", "")
+        key_results = analysis_summary.get("key_results", "")
+        methodology_section = ""
+        if methodology or key_results:
+            methodology_section = f"""
+## Analysis Methodology
+{methodology[:1000] if methodology else ""}
+
+## Key Quantitative Results
+{key_results[:1000] if key_results else ""}
+"""
+
+        abstract_instruction = (
+            "Write abstract in English, 150-250 words, including background, methods "
+            "(specific analysis methods and parameters), main findings and conclusions. "
+            "IMPORTANT: Output the abstract text directly. Do NOT start with a title like "
+            "'**Abstract**' or '## Abstract' - the section heading is already provided by the report template."
+        )
+
+        prompt = f"""Write an abstract for this research report.
+
+## Research Project
+Title: {state.name}
+Objective: {state.initial_instruction}
+
+## Report Sections:
+{section_summaries}
+{methodology_section}
+
+## Key Findings:
+{json.dumps(findings['bioinformatics'][:15], ensure_ascii=False)}
+
+## Final Summary:
+{findings['summary'][:1500] if findings['summary'] else 'Not available'}
+
+{abstract_instruction}
+"""
+
+        abstract = await self._pi_chat(prompt, temperature=0.3)
+        # Strip redundant leading title that LLM may have added
+        abstract = re.sub(r'^\*{0,2}Abstract\*{0,2}\s*\n*', '', abstract, flags=re.IGNORECASE).strip()
+        abstract = re.sub(r'^#{1,4}\s+.*?Abstract.*?\n+', '', abstract, flags=re.IGNORECASE).strip()
+        return abstract
+
+    async def _generate_conclusions(
+        self,
+        state: "AnalysisState",
+        sections: List[Dict],
+        findings: Dict[str, Any],
+        language: str,
+        analysis_summary: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """PI Agent generates the final conclusions"""
+        import json
+        import re
+
+        analysis_summary = analysis_summary or {}
+
+        # Include key results from analysis review
+        key_results = analysis_summary.get("key_results", "")
+        results_section = ""
+        if key_results:
+            results_section = f"""
+## Key Quantitative Results (from analysis review)
+{key_results[:1500]}
+"""
+
+        conclusions_instruction = (
+            "Write conclusions in English including: 1) Summary of main findings (cite specific numbers) "
+            "2) Biological significance 3) Limitations 4) Future directions. 250-400 words. "
+            "IMPORTANT: Output the conclusions text directly. Do NOT start with a header like "
+            "'### Conclusions' - the section heading is already provided by the report template. "
+            "Use **bold text** for subtopic labels (e.g., '**Summary of Findings**'), followed by paragraph text."
+        )
+
+        prompt = f"""Write the final conclusions for this research report.
+
+## Research Objective:
+{state.initial_instruction}
+
+## Report Sections Generated:
+{json.dumps([s['title'] for s in sections], ensure_ascii=False)}
+
+## All Key Findings:
+Bioinformatics: {json.dumps(findings['bioinformatics'][:10], ensure_ascii=False)}
+Pathology: {json.dumps(findings['pathology'][:5], ensure_ascii=False)}
+Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
+{results_section}
+
+## Final Summary from Analysis:
+{findings['summary'][:2000] if findings['summary'] else 'Not available'}
+
+{conclusions_instruction}
+"""
+
+        conclusions = await self._pi_chat(prompt, temperature=0.3)
+        # Strip redundant leading title that LLM may have added
+        conclusions = re.sub(r'^#{1,4}\s+[\d.]*\s*Conclusions?.*?\n+', '', conclusions, flags=re.IGNORECASE).strip()
+        return conclusions
+
+    def _build_appendix_html(
+        self,
+        state: "AnalysisState",
+        report: Dict[str, Any],
+        language: str,
+    ) -> str:
+        """
+        Build the Appendix HTML section containing analysis settings and records.
+        Pure data extraction — no LLM calls.
+        """
+        import html as html_module
+        from backend.config import ModelConfig, AgentTemperatures
+
+        esc = html_module.escape
+        default_models = ModelConfig()
+        default_temps = AgentTemperatures()
+
+        appendix_title = "Appendix: Analysis Settings & Records"
+
+        # ── 1. Project Information ──────────────────────────────────
+        proj_title = "Project Information"
+        lbl_name = "Project Name"
+        lbl_desc = "Project Description"
+        lbl_created = "Created At"
+        lbl_report_time = "Report Generated At"
+
+        created_str = state.created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(state.created_at, 'strftime') else str(state.created_at)
+        report_time = report.get("generated_at", "")
+
+        project_html = f"""
+        <h3>{proj_title}</h3>
+        <table>
+            <tbody>
+                <tr><td><strong>{lbl_name}</strong></td><td>{esc(state.name)}</td></tr>
+                <tr><td><strong>{lbl_desc}</strong></td><td>{esc(state.initial_instruction[:500]) if state.initial_instruction else '-'}</td></tr>
+                <tr><td><strong>{lbl_created}</strong></td><td>{esc(created_str)}</td></tr>
+                <tr><td><strong>{lbl_report_time}</strong></td><td>{esc(report_time)}</td></tr>
+            </tbody>
+        </table>
+        """
+
+        # ── 2. Agent Configuration ──────────────────────────────────
+        agent_title = "Agent Configuration"
+        lbl_agent = "Agent"
+        lbl_model = "Model"
+        lbl_temp = "Temperature"
+
+        agent_keys = [
+            ("PI", "pi", "pi_model"),
+            ("Pathology", "pathology", "pathology_model"),
+            ("Bioinformatics", "bioinformatics", "bioinformatics_model"),
+            ("Biochemistry", "biochemistry", "biochemistry_model"),
+            ("Literature", "literature", "literature_model"),
+            ("Painter", "painter", "painter_model"),
+        ]
+
+        agent_rows = ""
+        for display_name, key, model_attr in agent_keys:
+            model = state.custom_models.get(key, getattr(default_models, model_attr, "-"))
+            temp = state.custom_temperatures.get(key, getattr(default_temps, key, "-"))
+            agent_rows += f"<tr><td>{esc(display_name)}</td><td>{esc(str(model))}</td><td>{temp}</td></tr>\n"
+
+        agent_html = f"""
+        <h3>{agent_title}</h3>
+        <table>
+            <thead><tr><th>{lbl_agent}</th><th>{lbl_model}</th><th>{lbl_temp}</th></tr></thead>
+            <tbody>{agent_rows}</tbody>
+        </table>
+        """
+
+        # ── 3. Uploaded Data ────────────────────────────────────────
+        data_title = "Uploaded Data"
+
+        # Treatment groups
+        groups_html = ""
+        if state.treatment_groups:
+            lbl_group = "Treatment Groups"
+            lbl_gname = "Group"
+            lbl_gdesc = "Description"
+            lbl_samples = "Samples"
+
+            group_rows = ""
+            for g in sorted(state.treatment_groups, key=lambda x: x.order):
+                group_rows += f"<tr><td>{esc(g.name)}</td><td>{esc(g.description or '-')}</td><td>{g.sample_count}</td></tr>\n"
+            groups_html = f"""
+            <p><strong>{lbl_group}</strong></p>
+            <table>
+                <thead><tr><th>{lbl_gname}</th><th>{lbl_gdesc}</th><th>{lbl_samples}</th></tr></thead>
+                <tbody>{group_rows}</tbody>
+            </table>
+            """
+
+        # Data files
+        files_html = ""
+        if state.data_files:
+            lbl_files = "Data Files"
+            lbl_filename = "Filename"
+            lbl_section = "Section"
+            lbl_type = "Type"
+            lbl_fgroup = "Group"
+
+            file_rows = ""
+            for f in state.data_files:
+                group = state.get_group_by_id(f.group_id)
+                group_name = group.name if group else ("-" if not f.group_id else f.group_id)
+                file_rows += (
+                    f"<tr><td>{esc(f.filename)}</td><td>{esc(f.section)}</td>"
+                    f"<td>{esc(f.data_type)}</td><td>{esc(group_name)}</td></tr>\n"
+                )
+            files_html = f"""
+            <p><strong>{lbl_files}</strong></p>
+            <table>
+                <thead><tr><th>{lbl_filename}</th><th>{lbl_section}</th><th>{lbl_type}</th><th>{lbl_fgroup}</th></tr></thead>
+                <tbody>{file_rows}</tbody>
+            </table>
+            """
+
+        # Biochemistry indicators
+        biochem_html = ""
+        if state.biochemistry_indicators:
+            count = len(state.biochemistry_indicators)
+            lbl_biochem = "Biochemistry Indicators"
+            lbl_count = f"{count} manually entered indicator(s)"
+            biochem_html = f"<p><strong>{lbl_biochem}:</strong> {lbl_count}</p>"
+
+        data_html = f"""
+        <h3>{data_title}</h3>
+        {groups_html}
+        {files_html}
+        {biochem_html}
+        """
+
+        # ── 4. Analysis Rounds ──────────────────────────────────────
+        rounds_title = "Analysis Rounds"
+
+        rounds_html = ""
+        if state.round_results:
+            lbl_round = "Round"
+            lbl_time = "Time"
+            lbl_patho = "Pathology"
+            lbl_bio = "Bioinformatics"
+            lbl_chem = "Biochemistry"
+            lbl_lit = "Literature"
+            lbl_total_rounds = (
+                f"Total: {len(state.round_results)} round(s) (max {state.max_rounds})"
+            )
+
+            round_rows = ""
+            for r in state.round_results:
+                ts = r.timestamp.strftime("%Y-%m-%d %H:%M") if hasattr(r.timestamp, 'strftime') else str(r.timestamp)
+                round_rows += (
+                    f"<tr><td>{r.round_number}</td><td>{ts}</td>"
+                    f"<td>{len(r.pathology_findings)}</td>"
+                    f"<td>{len(r.bioinformatics_findings)}</td>"
+                    f"<td>{len(r.biochemistry_findings)}</td>"
+                    f"<td>{len(r.literature_findings)}</td></tr>\n"
+                )
+
+            rounds_html = f"""
+            <h3>{rounds_title}</h3>
+            <p>{lbl_total_rounds}</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>{lbl_round}</th><th>{lbl_time}</th>
+                        <th>{lbl_patho}</th><th>{lbl_bio}</th><th>{lbl_chem}</th><th>{lbl_lit}</th>
+                    </tr>
+                </thead>
+                <tbody>{round_rows}</tbody>
+            </table>
+            """
+        else:
+            lbl_no_rounds = "No analysis round records"
+            rounds_html = f"<h3>{rounds_title}</h3><p>{lbl_no_rounds}</p>"
+
+        # ── 5. User Inputs Between Rounds ───────────────────────────
+        human_title = "User Inputs Between Rounds"
+
+        human_html = ""
+        if state.human_messages:
+            items = ""
+            for hm in state.human_messages:
+                msg = hm.get("message", "")
+                files = hm.get("files", [])
+                ts = hm.get("timestamp", "")
+                rn = hm.get("round_number", "?")
+                round_label = f"Round {rn}"
+                ts_str = ts if isinstance(ts, str) else (ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, 'strftime') else str(ts))
+
+                files_info = ""
+                if files:
+                    file_names = ", ".join(
+                        esc(f.get("filename", f.get("name", "file"))) for f in files
+                    )
+                    files_label = "Attached files"
+                    files_info = f'<div class="files">{files_label}: {file_names}</div>'
+
+                items += f"""
+                <div class="human-input-item">
+                    <span class="round-tag">{esc(round_label)}</span>
+                    <span class="timestamp">{esc(ts_str)}</span>
+                    <div class="message">{esc(msg)}</div>
+                    {files_info}
+                </div>
+                """
+            human_html = f"<h3>{human_title}</h3>{items}"
+        else:
+            lbl_no_input = "No user inputs recorded"
+            human_html = f"<h3>{human_title}</h3><p>{lbl_no_input}</p>"
+
+        # ── 6. User Interaction History ─────────────────────────────
+        interaction_html = ""
+        annotation_items = ""
+        if state.annotation_state and state.annotation_state.cluster_annotations:
+            ann_title = "Cell Annotation Decisions"
+            lbl_cluster = "Cluster"
+            lbl_ct = "Cell Type"
+            lbl_override = "User Override"
+            lbl_confirmed = "Confirmed"
+            lbl_conf = "Confidence"
+            ann_rows = ""
+            for ca in state.annotation_state.cluster_annotations:
+                override = esc(ca.user_override or "-") if ca.user_override else "-"
+                confirmed = "✓" if ca.user_confirmed else "-"
+                ann_rows += (
+                    f"<tr><td>{esc(ca.cluster_id)}</td><td>{esc(ca.cell_type)}</td>"
+                    f"<td>{override}</td><td>{confirmed}</td><td>{esc(ca.confidence)}</td></tr>\n"
+                )
+            annotation_items = f"""
+            <h4>{ann_title}</h4>
+            <table>
+                <thead><tr><th>{lbl_cluster}</th><th>{lbl_ct}</th><th>{lbl_override}</th><th>{lbl_confirmed}</th><th>{lbl_conf}</th></tr></thead>
+                <tbody>{ann_rows}</tbody>
+            </table>
+            """
+
+        direction_items = ""
+        if state.user_chosen_directions:
+            dir_title = "Research Direction Selections"
+            lbl_dir = "Direction"
+            lbl_notes = "User Notes"
+            dir_rows = ""
+            for d in state.user_chosen_directions:
+                dir_rows += f"<tr><td>{esc(d.get('direction', '-'))}</td><td>{esc(d.get('notes', '-') or '-')}</td></tr>\n"
+            direction_items = f"""
+            <h4>{dir_title}</h4>
+            <table>
+                <thead><tr><th>{lbl_dir}</th><th>{lbl_notes}</th></tr></thead>
+                <tbody>{dir_rows}</tbody>
+            </table>
+            """
+
+        if annotation_items or direction_items:
+            interaction_title = "User Interaction History"
+            interaction_html = f"<h3>{interaction_title}</h3>{annotation_items}{direction_items}"
+
+        # ── 7. Related Reports & Downloads ─────────────────────────
+        downloads_html = ""
+        dl_items = []
+        # Exploration report
+        exploration_label = "Exploration Report"
+        dl_items.append(f'<li><a href="exploration_report.html" download style="color:#4f46e5;">{exploration_label}</a></li>')
+        # Annotation context report
+        annotation_label = "Annotation Context Report"
+        dl_items.append(f'<li><a href="annotation_context_report.html" download style="color:#4f46e5;">{annotation_label}</a></li>')
+        # Notebook
+        notebook_label = "Analysis Notebook (.ipynb)"
+        dl_items.append(f'<li><a href="{esc(state.id)}.ipynb" download style="color:#4f46e5;">{notebook_label}</a></li>')
+
+        dl_title = "Related Reports & Downloads"
+        downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'
+
+        # ── Assemble ────────────────────────────────────────────────
+        return f"""
+        <div class="appendix" id="appendix">
+            <h2>{appendix_title}</h2>
+            {project_html}
+            {agent_html}
+            {data_html}
+            {rounds_html}
+            {human_html}
+            {interaction_html}
+            {downloads_html}
+        </div>
+        """

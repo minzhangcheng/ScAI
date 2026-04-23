@@ -44,7 +44,7 @@ from .agents.base import AgentConfig
 from .utils.llm_client import LLMManager, OpenAICompatibleClient
 from .utils.sandbox import LocalJupyterSandbox
 from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR, get_session_reports, get_session_workspace, get_session_states
-from .report_generator import DetailedReportGenerator, compress_image_to_base64
+from .services.report import DetailedReportGenerator, compress_image_to_base64
 
 
 def _normalize_tasks(tasks: list) -> List[str]:
@@ -767,7 +767,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         round_result=None,
     ) -> DetailedReportSegment:
         """Build a detailed report segment and save the combined HTML."""
-        from .report_generator import (
+        from .services.report import (
             generate_detailed_report_segment_html,
             generate_combined_detailed_report_html,
         )
@@ -1187,7 +1187,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 analysis_summary = self._build_annotation_context_report(state, self._current_graph_state)
 
                 # Generate downloadable HTML annotation context report
-                from .report_generator import generate_annotation_context_report_html
+                from .services.report import generate_annotation_context_report_html
                 try:
                     html_path = generate_annotation_context_report_html(state, self._current_graph_state, cluster_anns)
                     state.annotation_report_html_path = html_path
@@ -2885,7 +2885,7 @@ Return ONLY the JSON array, nothing else."""
 
                 # Generate exploration report HTML
                 try:
-                    from .report_generator import generate_exploration_report_html
+                    from .services.report import generate_exploration_report_html
                     html_path = generate_exploration_report_html(
                         analysis_state, exploration_report, round_result
                     )
@@ -3118,7 +3118,7 @@ Return ONLY the JSON array, nothing else."""
                             )
                             analysis_state.exploration_report = exploration_report
 
-                            from .report_generator import generate_exploration_report_html
+                            from .services.report import generate_exploration_report_html
                             html_path = generate_exploration_report_html(
                                 analysis_state, exploration_report, last_round
                             )

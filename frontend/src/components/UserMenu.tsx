@@ -57,7 +57,7 @@ export function UserMenu() {
           <div className="w-7 h-7 rounded-full bg-accent-100 flex items-center justify-center">
             <User className="w-4 h-4 text-accent-600" />
           </div>
-          <span className="hidden sm:inline text-xs font-medium truncate max-w-[120px]">{authUser.email}</span>
+          <span className="hidden sm:inline text-xs font-medium truncate flex-1 min-w-0">{authUser.email}</span>
           <ChevronDown className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} />
         </button>
 

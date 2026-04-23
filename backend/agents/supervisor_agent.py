@@ -29,7 +29,7 @@ from openai import APIConnectionError
 
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep
 from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type
-from ..regenerate_report_html import get_agent_stats_html
+from ..services.report import get_agent_stats_html
 
 # Python exception types that are purely technical (no PI guidance needed)
 _TECHNICAL_ERROR_TYPES = frozenset({
