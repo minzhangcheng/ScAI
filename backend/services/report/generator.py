@@ -31,7 +31,7 @@ from backend.utils.image_utils import compress_image_to_base64, categorize_figur
 from backend.config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir
 from .regenerator import get_agent_stats_html
 from .variants import _build_score_definitions_html_section
-from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, _make_figure_block, _safe_parse_json, _build_figure_description_map
+from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, _make_figure_block, _safe_parse_json, _build_figure_description_map, render_report_html
 from .analysis_log import AnalysisLogMixin
 from .figures import FiguresMixin
 from .scoring import ScoringMixin
@@ -844,24 +844,24 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
 
         # Build full HTML — protect against unescaped braces in dynamic content
         try:
-            html_content = HTML_TEMPLATE.format(
-                language="en",
-                title=_safe_format_value(report.get("title", "Analysis Report")),
-                generated_at=("Generated: ") + report.get("generated_at", ""),
-                toc_title="Table of Contents",
-                toc_items=_safe_format_value("\n".join(toc_items)),
-                graphic_abstract_html=_safe_format_value(ga_html),
-                abstract_title="Abstract",
-                abstract=_safe_format_value(abstract_html),
-                cluster_annotations_html=_safe_format_value(ca_html),
-                sections_html=_safe_format_value("\n".join(sections_html)),
-                conclusions_title="Conclusions",
-                conclusions=_safe_format_value(conclusions_html),
-                analysis_log_html=_safe_format_value(analysis_log_html),
-                score_definitions_html=_safe_format_value(score_definitions_html),
-                agent_stats_html=_safe_format_value(agent_stats_html),
-                appendix_html=_safe_format_value(appendix_html)
-            )
+            html_content = render_report_html({
+                "language": "en",
+                "title": _safe_format_value(report.get("title", "Analysis Report")),
+                "generated_at": ("Generated: ") + report.get("generated_at", ""),
+                "toc_title": "Table of Contents",
+                "toc_items": _safe_format_value("\n".join(toc_items)),
+                "graphic_abstract_html": _safe_format_value(ga_html),
+                "abstract_title": "Abstract",
+                "abstract": _safe_format_value(abstract_html),
+                "cluster_annotations_html": _safe_format_value(ca_html),
+                "sections_html": _safe_format_value("\n".join(sections_html)),
+                "conclusions_title": "Conclusions",
+                "conclusions": _safe_format_value(conclusions_html),
+                "analysis_log_html": _safe_format_value(analysis_log_html),
+                "score_definitions_html": _safe_format_value(score_definitions_html),
+                "agent_stats_html": _safe_format_value(agent_stats_html),
+                "appendix_html": _safe_format_value(appendix_html),
+            })
         except (KeyError, ValueError, IndexError) as e:
             logger.error(f"HTML template formatting failed: {e}, falling back to plain report")
             # Fallback: produce a minimal valid HTML page with the report content

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 
-from backend.config import get_session_workspace, get_session_reports, get_session_uploads, get_session_states
+from backend.config import get_session_workspace, get_session_reports, get_session_uploads, get_session_states, PI_AGENT_NAME
 from backend.models.schemas import WebSocketMessage, AgentType, DataFile
 from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
 from backend.state import (
@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/session", tags=["chat"])
 
-_PI_AGENT_NAME = "pi"
 
 
 def _build_chat_context(state: Any) -> tuple:
@@ -417,8 +416,8 @@ async def _execute_chat_agent(
         lit_model = state.custom_models.get("literature", config.models.literature_model)
         lit_prompt = state.custom_prompts.get("literature", config.prompts.literature_prompt)
         lit_config = state.literature_config or {}
-        pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
-        pi_llm_client = get_agent_llm_client(state, config, _PI_AGENT_NAME, session_id)
+        pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
+        pi_llm_client = get_agent_llm_client(state, config, PI_AGENT_NAME, session_id)
         extra_clients.append(pi_llm_client)
 
         from backend.agents.literature_agent import LiteratureAgent
@@ -445,7 +444,7 @@ async def _execute_chat_agent(
 
         async def pi_callback(question: str, context: str) -> str:
             await _send_agent_msg("pi_question", f"Question: {question}\nContext: {context}", AgentType.BIOINFORMATICS)
-            pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
+            pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
             prompt = (
                 f"The bioinformatics analyst is asking for your guidance:\n\n"
                 f"QUESTION: {question}\n\nCONTEXT: {context}\n\n"
@@ -454,7 +453,7 @@ async def _execute_chat_agent(
             resp = await llm_client.chat(
                 model=pi_model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=state.custom_temperatures.get(_PI_AGENT_NAME, 0.5),
+                temperature=state.custom_temperatures.get(PI_AGENT_NAME, 0.5),
                 max_tokens=2048
             )
             answer = resp.content or "Proceed with standard bioinformatics practices."
@@ -531,8 +530,8 @@ async def _execute_chat_agent(
     elif agent_name == "literature":
         from backend.agents.literature_agent import LiteratureAgent
         lit_config = state.literature_config or {}
-        pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
-        pi_llm_client = get_agent_llm_client(state, config, _PI_AGENT_NAME, session_id)
+        pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
+        pi_llm_client = get_agent_llm_client(state, config, PI_AGENT_NAME, session_id)
         extra_clients.append(pi_llm_client)
 
         lit_agent = LiteratureAgent(
@@ -720,8 +719,8 @@ async def _run_chat_delegation(
         })
 
         synthesis_prompt = _build_synthesis_prompt(user_message, delegation, agent_results)
-        pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
-        pi_temp = state.custom_temperatures.get(_PI_AGENT_NAME, 0.5)
+        pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
+        pi_temp = state.custom_temperatures.get(PI_AGENT_NAME, 0.5)
 
         pi_response = await llm_manager.openrouter.chat(
             model=pi_model,
@@ -918,7 +917,7 @@ async def chat_with_pi(
         ext = dest.suffix.lower()
         is_image = ext in IMAGE_EXTS
         file_type = "image" if is_image else "file"
-        file_agent = per_file_agents[idx] if idx < len(per_file_agents) else _PI_AGENT_NAME
+        file_agent = per_file_agents[idx] if idx < len(per_file_agents) else PI_AGENT_NAME
 
         file_group = per_file_groups[idx] if idx < len(per_file_groups) else None
         file_sample = per_file_samples[idx] if idx < len(per_file_samples) else None
@@ -965,8 +964,8 @@ async def chat_with_pi(
 
     # --- Build context & prompt ---
     context, figure_inventory = _build_chat_context(state)
-    pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
-    pi_temp = state.custom_temperatures.get(_PI_AGENT_NAME, 0.5)
+    pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
+    pi_temp = state.custom_temperatures.get(PI_AGENT_NAME, 0.5)
 
     system_prompt = (
         "You are the PI (Principal Investigator) Agent of a biomedical research analysis system. "
@@ -1040,7 +1039,7 @@ async def chat_with_pi(
             agent_files.setdefault(sf["target_agent"], []).append(sf["filename"])
         file_parts = []
         for agent, fnames in agent_files.items():
-            label = agent.upper() if agent != _PI_AGENT_NAME else "PI"
+            label = agent.upper() if agent != PI_AGENT_NAME else "PI"
             file_parts.append(f"{label} Agent: {', '.join(fnames)}")
         user_content += f"\n\n[Attached {len(saved_files)} file(s) — {'; '.join(file_parts)}]"
     if data_file_contents:
@@ -1058,7 +1057,7 @@ async def chat_with_pi(
 
     # --- Call LLM ---
     try:
-        llm_client = get_agent_llm_client(state, config, _PI_AGENT_NAME, session_id)
+        llm_client = get_agent_llm_client(state, config, PI_AGENT_NAME, session_id)
 
         if image_b64_list:
             # Vision API for images

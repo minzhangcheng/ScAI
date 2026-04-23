@@ -18,7 +18,7 @@ from typing import Dict, Any
 logger = logging.getLogger(__name__)
 
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
-from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html
+from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, render_report_html
 from backend.config import get_session_logs
 
 
@@ -893,24 +893,24 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         agent_stats_html = get_agent_stats_html(session_id)
 
     # Build full HTML
-    html_content = HTML_TEMPLATE.format(
-        language=language,
-        title=_safe_format_value(report.get("title", "Analysis Report")),
-        generated_at="Generated: " + report.get("generated_at", datetime.now().isoformat()),
-        toc_title="Table of Contents",
-        toc_items=_safe_format_value("\n".join(toc_items)),
-        graphic_abstract_html="",
-        abstract_title="Abstract",
-        abstract=_safe_format_value(abstract_html),
-        cluster_annotations_html="",
-        sections_html=_safe_format_value("\n".join(sections_html)),
-        conclusions_title="Conclusions",
-        conclusions=_safe_format_value(conclusions_html),
-        analysis_log_html=_safe_format_value(analysis_log_html),
-        score_definitions_html=_safe_format_value(score_definitions_html),
-        agent_stats_html=_safe_format_value(agent_stats_html),
-        appendix_html=_safe_format_value(appendix_html)
-    )
+    html_content = render_report_html({
+        "language": language,
+        "title": _safe_format_value(report.get("title", "Analysis Report")),
+        "generated_at": "Generated: " + report.get("generated_at", datetime.now().isoformat()),
+        "toc_title": "Table of Contents",
+        "toc_items": _safe_format_value("\n".join(toc_items)),
+        "graphic_abstract_html": "",
+        "abstract_title": "Abstract",
+        "abstract": _safe_format_value(abstract_html),
+        "cluster_annotations_html": "",
+        "sections_html": _safe_format_value("\n".join(sections_html)),
+        "conclusions_title": "Conclusions",
+        "conclusions": _safe_format_value(conclusions_html),
+        "analysis_log_html": _safe_format_value(analysis_log_html),
+        "score_definitions_html": _safe_format_value(score_definitions_html),
+        "agent_stats_html": _safe_format_value(agent_stats_html),
+        "appendix_html": _safe_format_value(appendix_html),
+    })
 
     # Save HTML file
     html_path = report_dir / "report_embedded.html"

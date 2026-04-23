@@ -191,7 +191,7 @@ Reply in JSON format:
 """
 
         response = await self.chat(prompt, temperature=0.3)
-        data = self._parse_json_response(response)
+        data = self._safe_parse_json(response, agent_label="BiochemistryAgent")
 
         return {
             "findings": data.get("findings", []),
@@ -270,7 +270,7 @@ Focus on:
 """
 
         response = await self.chat(prompt, temperature=0.3)
-        data = self._parse_json_response(response)
+        data = self._safe_parse_json(response, agent_label="BiochemistryAgent")
 
         return {
             "image_findings": data.get("image_findings", []),
@@ -457,7 +457,7 @@ Requirements:
 """
 
         response = await self.chat(prompt, temperature=0.3)
-        data = self._parse_json_response(response)
+        data = self._safe_parse_json(response, agent_label="BiochemistryAgent")
 
         # Build the final result
         all_findings = data.get("findings", [])
@@ -524,7 +524,7 @@ Reply in JSON format:
 """
 
         response = await self.chat(prompt, temperature=0.3)
-        data = self._parse_json_response(response)
+        data = self._safe_parse_json(response, agent_label="BiochemistryAgent")
 
         return {
             "status": "no_data",
@@ -649,7 +649,7 @@ Extract EVERY biochemistry-related numerical value. Ignore metadata like dates o
 """
 
         response = await self.chat(prompt, temperature=0.1)
-        result = self._parse_json_response(response)
+        result = self._safe_parse_json(response, agent_label="BiochemistryAgent")
         logger.info(f"Extracted {len(result.get('results', []))} values from file {filename}")
         return result
 
@@ -706,7 +706,7 @@ Notes:
 
         results = []
         try:
-            data = self._safe_parse_json(response)
+            data = self._safe_parse_json(response, agent_label="BiochemistryAgent")
             if data:
                 for item in data.get("results", []):
                     indicator = item.get("indicator")
@@ -762,7 +762,7 @@ Reply in JSON format.
 """
 
         response = await self.chat(prompt, temperature=0.3)
-        return self._parse_json_response(response)
+        return self._safe_parse_json(response, agent_label="BiochemistryAgent")
 
     def _suggest_initial_experiments(self) -> List[str]:
         """Suggest initial experiments when no data is available - generic suggestions"""
@@ -775,11 +775,3 @@ Reply in JSON format.
             "Tissue-specific functional markers based on the research context",
         ]
 
-    def _parse_json_response(self, response: str) -> Dict[str, Any]:
-        """Parse JSON from response using safe balanced bracket matching from base class"""
-        data = self._safe_parse_json(response)
-        if "raw_response" in data:
-            logger.warning(
-                f"[BiochemistryAgent] JSON parse failed, raw response: {response[:200]}..."
-            )
-        return data

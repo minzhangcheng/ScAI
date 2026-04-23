@@ -53,8 +53,12 @@ class BaseAgent(ABC):
         self.config = config or AgentConfig()
         self.has_vision: bool = True
     
-    def _safe_parse_json(self, response: str, default: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Safely parse JSON from LLM response. Delegates to shared implementation."""
+    def _safe_parse_json(self, response: str, default: Dict[str, Any] = None, agent_label: str = None) -> Dict[str, Any]:
+        """Safely parse JSON from LLM response. Delegates to shared implementation.
+
+        When agent_label is provided, a warning is logged on parse failure
+        (replaces former per-agent _parse_json_response wrappers).
+        """
         if default is None:
             default = {"raw_response": "", "error": "Empty response from LLM"}
 
@@ -65,6 +69,10 @@ class BaseAgent(ABC):
         if result is not None:
             return result
 
+        if agent_label:
+            logger.warning(
+                f"[{agent_label}] JSON parse failed, raw response: {response[:200]}..."
+            )
         return {"raw_response": response, "parse_error": "Failed to extract valid JSON from response"}
     
     def _set_llm_context(self):

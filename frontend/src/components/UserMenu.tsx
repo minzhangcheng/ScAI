@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Settings, Key, LogOut, ChevronDown, User } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { SettingsDialog } from './SettingsDialog'
+import { useClickOutside } from '../hooks/useClickOutside'
 
 export function UserMenu() {
   const { authUser, logout, language } = useAppStore()
@@ -15,17 +16,7 @@ export function UserMenu() {
   const isReadOnly = authUser?.status === 'readonly'
   const zh = language === 'zh'
 
-  // Close menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (open && menuRef.current && !menuRef.current.contains(e.target as Node) &&
-          buttonRef.current && !buttonRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [open])
+  useClickOutside([menuRef, buttonRef], () => setOpen(false), { enabled: open })
 
   const handleSignOut = () => {
     setOpen(false)

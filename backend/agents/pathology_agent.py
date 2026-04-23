@@ -203,7 +203,7 @@ Please reply in JSON format:
             
             # Parse overview result (handle None)
             overview_content = overview_result.content if overview_result else ""
-            overview_data = self._parse_json_response(overview_content)
+            overview_data = self._safe_parse_json(overview_content, default={"raw_response": overview_content}, agent_label="PathologyAgent")
             logger.info(f"[PathologyAgent] Overview analysis complete")
             
             # Analyze tiles in batches
@@ -257,7 +257,7 @@ Be concise but thorough for each tile.
                 # Parse batch results (handle None)
                 batch_content = batch_result.content if batch_result else ""
                 try:
-                    batch_data = self._parse_json_response(batch_content)
+                    batch_data = self._safe_parse_json(batch_content, default={"raw_response": batch_content}, agent_label="PathologyAgent")
                     if "tile_findings" in batch_data:
                         tile_findings.extend(batch_data["tile_findings"])
                     else:
@@ -304,7 +304,7 @@ Reply in JSON format:
 """
             
             combined_result = await self.chat(combined_prompt, temperature=0.3)
-            final_data = self._parse_json_response(combined_result)
+            final_data = self._safe_parse_json(combined_result, default={"raw_response": combined_result}, agent_label="PathologyAgent")
             
             logger.info(f"[PathologyAgent] Image analysis complete: {len(final_data.get('findings', []))} findings")
             
@@ -371,7 +371,7 @@ Please provide comprehensive analysis and reply in JSON format:
 """
         
         response = await self.chat(prompt, temperature=0.3)
-        return self._parse_json_response(response)
+        return self._safe_parse_json(response, default={"raw_response": response}, agent_label="PathologyAgent")
     
     async def targeted_analysis(
         self,
@@ -445,16 +445,3 @@ Please reply in structured format.
                 "image_id": image_info.id,
                 "error": str(e)
             }
-    
-    def _parse_json_response(self, response: str) -> Dict[str, Any]:
-        """Parse JSON from response using safe balanced bracket matching from base class"""
-        # Handle None or empty response
-        if not response:
-            return {"raw_response": "", "error": "Empty response from LLM"}
-
-        result = self._safe_parse_json(response, default={"raw_response": response})
-        if "raw_response" in result:
-            logger.warning(
-                f"[PathologyAgent] JSON parse failed, raw response: {response[:200]}..."
-            )
-        return result

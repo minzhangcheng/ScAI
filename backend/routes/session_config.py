@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.config import AgentTemperatures
+from backend.config import AgentTemperatures, PI_AGENT_NAME
 from backend.models.api_requests import (
     PromptUpdateRequest, ModelUpdateRequest, TemperatureUpdateRequest,
     VisionSettingUpdateRequest, LiteratureConfigRequest, AgentServerConfigRequest,
@@ -13,8 +13,6 @@ from backend.state import system_config
 from backend.utils.files import validate_session_id
 
 router = APIRouter(prefix="/api", tags=["session-config"])
-
-_PI_AGENT_NAME = "pi"
 
 
 class MaxRoundsRequest(BaseModel):
@@ -47,7 +45,7 @@ async def get_prompts(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     prompts = {
-        _PI_AGENT_NAME: state.custom_prompts.get(_PI_AGENT_NAME, cfg.prompts.pi_prompt if cfg else ""),
+        PI_AGENT_NAME: state.custom_prompts.get(PI_AGENT_NAME, cfg.prompts.pi_prompt if cfg else ""),
         "pathology": state.custom_prompts.get("pathology", cfg.prompts.pathology_prompt if cfg else ""),
         "bioinformatics": state.custom_prompts.get("bioinformatics", cfg.prompts.bioinformatics_prompt if cfg else ""),
         "biochemistry": state.custom_prompts.get("biochemistry", cfg.prompts.biochemistry_prompt if cfg else ""),
@@ -81,7 +79,7 @@ async def get_models(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     models = {
-        _PI_AGENT_NAME: state.custom_models.get(_PI_AGENT_NAME, cfg.models.pi_model if cfg else ""),
+        PI_AGENT_NAME: state.custom_models.get(PI_AGENT_NAME, cfg.models.pi_model if cfg else ""),
         "pathology": state.custom_models.get("pathology", cfg.models.pathology_model if cfg else ""),
         "bioinformatics": state.custom_models.get("bioinformatics", cfg.models.bioinformatics_model if cfg else ""),
         "biochemistry": state.custom_models.get("biochemistry", cfg.models.biochemistry_model if cfg else ""),

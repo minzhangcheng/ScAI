@@ -5,13 +5,7 @@ import { apiFetch } from '../hooks/useApi'
 import ReactMarkdown from 'react-markdown'
 import { Send, Loader2, User, Bot, AlertCircle, Paperclip, X, FileText, Image as ImageIcon, Download, Square } from 'lucide-react'
 import { base64ToDataUri } from '../utils/image'
-
-const AGENT_OPTIONS = [
-  { value: 'pi', labelKey: 'chatTargetPi' as const },
-  { value: 'pathology', labelKey: 'chatTargetPathology' as const },
-  { value: 'bioinformatics', labelKey: 'chatTargetBioinformatics' as const },
-  { value: 'biochemistry', labelKey: 'chatTargetBiochemistry' as const },
-]
+import { AGENT_OPTIONS } from '../constants/agents'
 
 // Section-specific data type options
 import { getSection, getTypeOptions } from '../utils/dataTypes'

@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.config import (
     SESSION_DIR, REPORTS_DIR, WORKSPACE_DIR, UPLOAD_DIR,
-    get_session_dir, get_session_reports, get_session_workspace,
+    get_session_dir, get_session_reports, get_session_workspace, PI_AGENT_NAME,
 )
 from backend.models.schemas import AnalysisState
 from backend.services.session_store import ensure_session_loaded
@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/session", tags=["reports"])
 
-_PI_AGENT_NAME = "pi"
 
 
 def _sanitize_nan(obj):
@@ -208,10 +207,10 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                 logger.warning(f"Failed to send error to WebSocket for session {session_id}: {e}", exc_info=True)
         return
     
-    llm_client = _get_agent_llm_client(state, config, _PI_AGENT_NAME, session_id)
+    llm_client = _get_agent_llm_client(state, config, PI_AGENT_NAME, session_id)
 
     # Get models from state or use defaults
-    pi_model = state.custom_models.get(_PI_AGENT_NAME, config.models.pi_model)
+    pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
     bio_model = state.custom_models.get("bioinformatics", config.models.bioinformatics_model)
 
     try:

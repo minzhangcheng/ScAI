@@ -6,9 +6,6 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import {
   Users,
-  Microscope,
-  Code2,
-  FlaskConical,
   BookOpen,
   ChevronDown,
   ChevronRight,
@@ -16,14 +13,12 @@ import {
   AlertCircle,
   CheckCircle2,
   MessageSquare,
-  Bot,
   Sparkles,
   Terminal,
   Send,
   Reply,
   Wrench,
   HelpCircle,
-  Palette,
   FileText,
   Clock,
   Loader2,
@@ -31,6 +26,7 @@ import {
   TrendingUp
 } from 'lucide-react'
 import { base64ToDataUri } from '../utils/image'
+import { agentIcons, agentBgColors, agentGradients, FALLBACK_AGENT_ICON } from '../constants/agents'
 
 // Type interfaces for message content
 interface ResultContent {
@@ -76,39 +72,6 @@ function TruncatedText({ text, limit, className, language }: { text: string; lim
   )
 }
 
-const agentIcons: Record<AgentType, typeof Users> = {
-  pi: Users,
-  pathology: Microscope,
-  bioinformatics: Code2,
-  biochemistry: FlaskConical,
-  literature: BookOpen,
-  painter: Palette,
-  supervisor: Eye,
-  technique: Wrench,
-}
-
-const agentBgColors: Record<AgentType, string> = {
-  pi: 'bg-violet-50 border-violet-200',
-  pathology: 'bg-rose-50 border-rose-200',
-  bioinformatics: 'bg-emerald-50 border-emerald-200',
-  biochemistry: 'bg-amber-50 border-amber-200',
-  literature: 'bg-blue-50 border-blue-200',
-  painter: 'bg-pink-50 border-pink-200',
-  supervisor: 'bg-cyan-50 border-cyan-200',
-  technique: 'bg-teal-50 border-teal-200',
-}
-
-const agentGradients: Record<AgentType, string> = {
-  pi: 'from-violet-500 to-violet-600',
-  pathology: 'from-rose-500 to-rose-600',
-  bioinformatics: 'from-emerald-500 to-emerald-600',
-  biochemistry: 'from-amber-500 to-amber-600',
-  literature: 'from-blue-500 to-blue-600',
-  painter: 'from-pink-500 to-pink-600',
-  supervisor: 'from-cyan-500 to-cyan-600',
-  technique: 'from-teal-500 to-teal-600',
-}
-
 const MessageItem = memo(function MessageItem({ message, language }: { message: Message; language: 'zh' | 'en' }) {
   const [expanded, setExpanded] = useState(true)
   const { t } = useTranslation(language)
@@ -125,7 +88,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
   }
 
   const agent = message.agent
-  const Icon = agent ? agentIcons[agent] : Bot
+  const Icon = agent ? agentIcons[agent] : FALLBACK_AGENT_ICON
   const bgColor = agent ? agentBgColors[agent] : 'bg-slate-50 border-slate-200'
   const name = agent ? agentNames[agent] : (language === 'zh' ? '系统' : 'System')
 

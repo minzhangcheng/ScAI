@@ -376,3 +376,7 @@ class SystemConfig(BaseModel):
 
 # Default configuration instance
 default_config = SystemConfig()
+
+# Shared agent identifier — single source of truth.
+# Used across routes/agents to avoid string-typo drift.
+PI_AGENT_NAME = "pi"

@@ -8,7 +8,8 @@ from pathlib import Path
 # Ensure backend is importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from backend.utils.report_html import markdown_to_html, HTML_TEMPLATE, _make_figure_block
+from backend.utils.report_html import markdown_to_html, HTML_TEMPLATE, _make_figure_block, render_report_html, _HEAD_PRE_CSS, _HEAD_POST_CSS_BODY
+from backend.utils.report_css import REPORT_CSS
 
 
 class TestMarkdownToHtml:
@@ -97,3 +98,30 @@ class TestMakeFigureBlock:
 
         assert css_class in result
         assert caption in result
+
+
+class TestSingleSourceCss:
+    """CSS must come from a single source (report_css.REPORT_CSS)."""
+
+    def test_html_template_is_built_from_report_css(self):
+        # HTML_TEMPLATE (back-compat shim) must be derived from REPORT_CSS,
+        # not an independent copy.
+        expected = _HEAD_PRE_CSS + REPORT_CSS.replace("{", "{{").replace("}", "}}") + _HEAD_POST_CSS_BODY
+        assert HTML_TEMPLATE == expected, (
+            "HTML_TEMPLATE is not derived from REPORT_CSS; "
+            "it may contain an independently written CSS copy"
+        )
+
+    def test_render_includes_report_css(self):
+        html = render_report_html(_minimal_render_kwargs())
+        # A unique CSS rule from REPORT_CSS must appear in the rendered output.
+        assert "--primary-color" in html
+        # And that block must be exactly the canonical REPORT_CSS body.
+        assert REPORT_CSS.strip() in html
+
+
+def _minimal_render_kwargs():
+    """Build the minimum kwargs dict accepted by render_report_html()."""
+    import re
+    fields = set(re.findall(r"(?<!{)\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!})", _HEAD_PRE_CSS + _HEAD_POST_CSS_BODY))
+    return {f: "" for f in fields}

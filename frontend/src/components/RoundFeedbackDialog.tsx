@@ -19,6 +19,8 @@ import {
 } from 'lucide-react'
 import { useTranslation, Language } from '../i18n/translations'
 import { TreatmentGroup } from '../stores/appStore'
+import { AGENT_OPTIONS } from '../constants/agents'
+import { useClickOutside } from '../hooks/useClickOutside'
 
 // Section-specific data type options (shared with DataPanel)
 import { getSection, getTypeOptions } from '../utils/dataTypes'
@@ -62,13 +64,6 @@ interface RoundFeedbackDialogProps {
   onStopSummarize?: () => void
 }
 
-const AGENT_OPTIONS = [
-  { value: 'pi', label: 'PI Agent', labelZh: 'PI Agent' },
-  { value: 'pathology', label: 'Pathology', labelZh: '病理' },
-  { value: 'bioinformatics', label: 'Bioinformatics', labelZh: '生信' },
-  { value: 'biochemistry', label: 'Biochemistry', labelZh: '生化' },
-]
-
 export function RoundFeedbackDialog({
   roundNumber,
   maxRounds,
@@ -104,6 +99,7 @@ export function RoundFeedbackDialog({
 
   // Agent dropdown state (for file targeting)
   const [openDropdownIndex, setOpenDropdownIndex] = useState<number | null>(null)
+  const dropdownRef = useRef<HTMLDivElement>(null)
 
   const isLastRound = roundNumber >= (roundSummary.maxRounds ?? maxRounds)
 
@@ -243,13 +239,11 @@ export function RoundFeedbackDialog({
   }, [])
 
   // Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = () => setOpenDropdownIndex(null)
-    if (openDropdownIndex !== null) {
-      document.addEventListener('click', handleClickOutside)
-      return () => document.removeEventListener('click', handleClickOutside)
-    }
-  }, [openDropdownIndex])
+  useClickOutside(
+    [dropdownRef],
+    () => setOpenDropdownIndex(null),
+    { enabled: openDropdownIndex !== null, eventType: 'click' },
+  )
 
   // Format timer display
   const minutes = Math.floor(timeRemaining / 60)
@@ -464,11 +458,11 @@ export function RoundFeedbackDialog({
                           onClick={(e) => { e.stopPropagation(); setOpenDropdownIndex(openDropdownIndex === index ? null : index) }}
                           className="flex items-center gap-0.5 text-blue-600 hover:text-blue-800 font-medium"
                         >
-                          {AGENT_OPTIONS.find(a => a.value === f.targetAgent)?.[language === 'zh' ? 'labelZh' : 'label'] || f.targetAgent}
+                          {t(AGENT_OPTIONS.find(a => a.value === f.targetAgent)?.labelKey ?? 'chatTargetPi')}
                           <ChevronDown className="w-3 h-3" />
                         </button>
                         {openDropdownIndex === index && (
-                          <div className="absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-10 py-1 min-w-[120px]">
+                          <div ref={dropdownRef} className="absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-10 py-1 min-w-[120px]">
                             {AGENT_OPTIONS.map(agent => (
                               <button
                                 key={agent.value}
@@ -477,7 +471,7 @@ export function RoundFeedbackDialog({
                                   f.targetAgent === agent.value ? 'text-blue-600 font-medium' : 'text-slate-700'
                                 }`}
                               >
-                                {language === 'zh' ? agent.labelZh : agent.label}
+                                {t(agent.labelKey)}
                               </button>
                             ))}
                           </div>
