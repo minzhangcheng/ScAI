@@ -15,7 +15,7 @@ from backend.models.api_requests import RetryNodeRequest, StopAnalysisRequest
 from backend.models.schemas import (
     AnalysisPhase, APIResponse, TaskStatus,
 )
-from backend.services.session_store import async_save_session, ensure_session_loaded
+from backend.services.session_store import async_save_session, ensure_session_loaded, pause_and_restart_ws as _pause_and_restart_ws_impl
 from backend.state import (
     _run_tasks,
     state_lock as _state_lock,
@@ -26,6 +26,11 @@ from backend.state import (
 from backend.services.session_store import update_session_cache as _update_session_cache
 
 logger = logging.getLogger(__name__)
+
+
+async def _pause_and_restart_ws(session_id: str, state):
+    await _pause_and_restart_ws_impl(session_id, state, websockets)
+
 
 router = APIRouter(prefix="/api/session", tags=["lifecycle"])
 
@@ -129,14 +134,11 @@ async def resume_analysis(session_id: str):
                 message="Continuing analysis"
             )
         else:
-            # No workflow in memory (e.g. after server restart).
-            # Keep status as WAITING_INPUT so the WebSocket endpoint's resume
-            # logic detects the correct state when the client reconnects.
-            await async_save_session(session_id, state)
+            await _pause_and_restart_ws(session_id, state)
             return APIResponse(
                 success=True,
                 message="Continuing analysis",
-                data={"needs_reconnect": True}
+                data={"needs_reconnect": True},
             )
     elif state.status == TaskStatus.WAITING_ANNOTATION:
         # Continue from annotation confirmation wait
@@ -152,10 +154,11 @@ async def resume_analysis(session_id: str):
                 message="Annotation confirmed, continuing analysis"
             )
         else:
+            await _pause_and_restart_ws(session_id, state)
             return APIResponse(
                 success=True,
                 message="Annotation confirmed, continuing analysis",
-                data={"needs_reconnect": True}
+                data={"needs_reconnect": True},
             )
     elif state.status == TaskStatus.PAUSED:
         state.status = TaskStatus.RUNNING

@@ -621,8 +621,12 @@ export function useSession() {
   const continueRound = useCallback(async () => {
     const session = useAppStore.getState().currentSession
     if (!session) throw new Error('No active session')
-    await apiFetch(`/session/${session.id}/resume`, { method: 'POST' })
+    const resp = await apiFetch<any>(`/session/${session.id}/resume`, { method: 'POST' })
     useAppStore.getState().updateSession({ status: 'running' })
+    if (resp?.data?.needs_reconnect) {
+      const { wsConnect: connectWs } = useAppStore.getState()
+      if (connectWs) setTimeout(() => connectWs(), 100)
+    }
   }, [])
 
   const stopAnalysis = useCallback(async (action: 'immediate' | 'summarize') => {

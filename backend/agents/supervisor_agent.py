@@ -752,6 +752,21 @@ class SupervisorAgent:
                     elif "InvalidIndexError" in pat.pattern:
                         issues.append("InvalidIndexError — likely caused by duplicate obs_names")
 
+        # Cell-type annotation is a mandatory biological checkpoint. If the
+        # annotate_clusters tool returned an error summary, surface it as a
+        # high-severity issue so the agent is redirected to retry instead of
+        # silently pivoting to other work.
+        if step.step_type == "annotate_clusters":
+            summary = step.annotation_result_summary or ""
+            if summary.lstrip().lower().startswith("error"):
+                issues.append(
+                    "annotate_clusters failed — user-facing cell type review was not "
+                    "triggered. You MUST fix the underlying cause (ensure a clustering "
+                    "column and rank_genes_groups exist, or pass cluster_key/rank_key "
+                    "explicitly) and call annotate_clusters again before any "
+                    "report_findings or downstream analysis."
+                )
+
         return issues
 
     def _should_trigger_technique(self, step: AnalysisStep) -> bool:

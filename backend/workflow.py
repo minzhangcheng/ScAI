@@ -41,7 +41,7 @@ from .agents.painter_agent import PainterAgent
 from .agents.supervisor_agent import SupervisorAgent
 from .agents.technique_agent import TechniqueAgent
 from .agents.base import AgentConfig
-from .utils.llm_client import LLMManager, OpenAICompatibleClient
+from .utils.llm_client import LLMManager, OpenAICompatibleClient, UpstreamExhaustedError
 from .utils.sandbox import LocalJupyterSandbox
 from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR, get_session_reports, get_session_workspace, get_session_states
 from .services.report import DetailedReportGenerator, compress_image_to_base64
@@ -2459,13 +2459,22 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         if self.supervisor_agent:
             self.supervisor_agent.reset_for_round()
 
-        result = await self.bioinformatics_agent.run_autonomous_analysis(
-            analysis_state,
-            instruction,
-            max_steps=200,  # Allow sufficient steps for full analysis + figure review loops
-            figure_review_callback=self._figure_review_callback,
-            supervisor_callback=self._supervisor_callback,
-        )
+        try:
+            result = await self.bioinformatics_agent.run_autonomous_analysis(
+                analysis_state,
+                instruction,
+                max_steps=200,  # Allow sufficient steps for full analysis + figure review loops
+                figure_review_callback=self._figure_review_callback,
+                supervisor_callback=self._supervisor_callback,
+            )
+        except UpstreamExhaustedError as e:
+            logger.error(f"[{self.session_id}] Bioinformatics analysis halted: upstream exhausted: {e}")
+            await self._send_message(
+                "session_halted",
+                "LLM upstream unavailable. Session checkpointed; you can resume from the dashboard.",
+                AgentType.BIOINFORMATICS,
+            )
+            return
 
         # Collect supervisor stats
         if self.supervisor_agent:

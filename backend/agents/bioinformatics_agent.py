@@ -33,12 +33,14 @@ from ..models.schemas import (
     PublicationFigure, FigureReviewStatus, AnalysisStep,
     DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
-from ..utils.llm_client import OpenAICompatibleClient, ToolCall
+from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError
 from ..utils.error_parsing import strip_ansi, extract_error_type, _TECHNICAL_ERROR_TYPES
 
 # Pre-compiled pattern for detecting manual cell_type assignment in code
 _DYNAMIC_CONTEXT_PREFIX = "[Analysis Context]"
-_CELL_TYPE_ASSIGN_RE = re.compile(r"""\.obs\[['"]cell_type['"]\]\s*=""")
+_CELL_TYPE_ASSIGN_RE = re.compile(
+    r"""\.obs\[\s*['"](?:cell_?type|cluster_identity|cell_identity|cell_annotation|annotation)['"]\s*\]\s*=(?!=)"""
+)
 
 # Reusable sandbox template snippet: safely close all matplotlib figures
 _TPL_SAFE_CLOSE_ALL = """\
@@ -198,6 +200,14 @@ TOOLS = [
                     "organism": {
                         "type": "string",
                         "description": "Organism (e.g., 'mouse', 'human'). Extract from the research context or data metadata."
+                    },
+                    "cluster_key": {
+                        "type": "string",
+                        "description": "Optional. Name of the adata.obs column holding cluster assignments (e.g., 'leiden_broad'). If omitted, the backend will try 'leiden', 'louvain', 'cluster' and any column starting with 'leiden'/'louvain'."
+                    },
+                    "rank_key": {
+                        "type": "string",
+                        "description": "Optional. Name of the adata.uns key holding rank_genes_groups results (e.g., 'rank_genes_broad'). If omitted, defaults to 'rank_genes_groups'."
                     }
                 },
                 "required": ["tissue", "organism"]
@@ -858,11 +868,16 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
         return valid
 
-    async def _discover_adata_in_sandbox(self) -> Tuple[Optional[str], Optional[str]]:
+    async def _discover_adata_in_sandbox(
+        self,
+        cluster_key_hint: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
         """Discover the active AnnData variable name and clustering key in the sandbox.
 
-        Iterates over sandbox globals to find an AnnData object with a known clustering
-        column (leiden, louvain, cluster).
+        Resolution order for cluster key:
+          1. cluster_key_hint (from LLM tool args), if the column exists.
+          2. Default names 'leiden', 'louvain', 'cluster'.
+          3. First column whose name starts with 'leiden' or 'louvain'.
 
         Returns:
             Tuple of (variable_name, clustering_key), or (None, None) on failure.
@@ -870,17 +885,29 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         if not self.sandbox:
             return (None, None)
 
+        hint_repr = repr(cluster_key_hint)
         discover_code = (
             "import json as _json, anndata as _ad\n"
+            f"_hint = {hint_repr}\n"
             "_result = {}\n"
             "for _name, _obj in list(globals().items()):\n"
-            "    if isinstance(_obj, _ad.AnnData) and not _name.startswith('_'):\n"
-            "        for _key in ['leiden', 'louvain', 'cluster']:\n"
-            "            if _key in _obj.obs.columns:\n"
-            "                _result = {'var': _name, 'cluster_key': _key}\n"
-            "                break\n"
-            "        if _result:\n"
-            "            break\n"
+            "    if not isinstance(_obj, _ad.AnnData) or _name.startswith('_'):\n"
+            "        continue\n"
+            "    _cols = list(_obj.obs.columns)\n"
+            "    _key = None\n"
+            "    if _hint and _hint in _cols:\n"
+            "        _key = _hint\n"
+            "    if _key is None:\n"
+            "        for _k in ['leiden', 'louvain', 'cluster']:\n"
+            "            if _k in _cols:\n"
+            "                _key = _k; break\n"
+            "    if _key is None:\n"
+            "        for _c in _cols:\n"
+            "            if _c.startswith('leiden') or _c.startswith('louvain'):\n"
+            "                _key = _c; break\n"
+            "    if _key is not None:\n"
+            "        _result = {'var': _name, 'cluster_key': _key}\n"
+            "        break\n"
             "print(_json.dumps(_result))\n"
         )
         try:
@@ -890,7 +917,10 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 var_name = parsed.get("var")
                 cluster_key = parsed.get("cluster_key")
                 if var_name and cluster_key:
-                    logger.info(f"[Bioinformatics] Discovered AnnData var={var_name}, cluster_key={cluster_key}")
+                    logger.info(
+                        f"[Bioinformatics] Discovered AnnData var={var_name}, "
+                        f"cluster_key={cluster_key} (hint={cluster_key_hint!r})"
+                    )
                     return (var_name, cluster_key)
         except Exception as e:
             logger.warning(f"[Bioinformatics] AnnData discovery failed: {e}")
@@ -1090,6 +1120,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
         completed = False
         annotation_completed = False  # Mandatory step tracker for exploration phase
+        annotation_retry_required = False
+        annotation_retry_attempts = 0
         integration_reject_count = 0  # Track rejections for bulk/scRNA-seq integration gate
         MAX_INTEGRATION_REJECTIONS = 2  # Escape hatch: allow through after N rejections
         deconv_reject_count = 0  # Track rejections for cell-type deconvolution gate
@@ -1173,6 +1205,36 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     messages = [system_msg, summary_msg] + messages[cut:]
                 logger.info(f"Trimmed message history: dropped {len(dropped)} messages, {len(messages)} remaining")
 
+            # If the previous annotate_clusters call failed, prepend a high-priority
+            # reminder to force the agent back to the annotation workflow.
+            if annotation_retry_required and annotation_retry_attempts <= 3:
+                nudge = (
+                    f"[System] annotate_clusters has not completed (attempt "
+                    f"{annotation_retry_attempts}). Your next action MUST be to either "
+                    f"(a) run execute_code that prepares the sandbox (e.g., assign "
+                    f"adata.obs['leiden'] from your actual clustering column, ensure "
+                    f"sc.tl.rank_genes_groups has populated adata.uns), or (b) call "
+                    f"annotate_clusters again with the correct cluster_key/rank_key "
+                    f"arguments. Do NOT call report_findings, consult_pi about other "
+                    f"topics, or generate_publication_figure until annotation completes."
+                )
+                nudge_key = f"__annot_retry_nudge_{annotation_retry_attempts}"
+                if nudge_key not in self._recent_sup_feedback:
+                    messages.append({"role": "user", "content": nudge})
+                    self._recent_sup_feedback.add(nudge_key)
+
+            if annotation_retry_required and annotation_retry_attempts > 3:
+                logger.warning(
+                    f"[Bioinformatics] annotate_clusters retries exhausted "
+                    f"({annotation_retry_attempts}); halting loop for human review."
+                )
+                await self._notify(
+                    "status",
+                    "Cell type annotation could not be completed automatically. "
+                    "Please review the session and resume manually.",
+                )
+                break
+
             try:
                 response = await self.llm_client.chat_with_tools(
                     model=self.model,
@@ -1181,6 +1243,14 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     temperature=self.config.temperature,  # Use configured temperature
                     max_tokens=32768
                 )
+            except UpstreamExhaustedError as e:
+                logger.error(f"[Bioinformatics] Upstream exhausted: {e}")
+                await self._notify(
+                    "status",
+                    "LLM upstream is currently unavailable. The session has been "
+                    "checkpointed and can be resumed when service returns."
+                )
+                break
             except Exception as e:
                 llm_error = str(e)
                 await self._notify("error", f"LLM call failed: {llm_error}")
@@ -1280,11 +1350,12 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                         and _CELL_TYPE_ASSIGN_RE.search(code)
                     ):
                         guard_msg = (
-                            "Manual assignment to adata.obs['cell_type'] is not allowed "
-                            "before cell type annotations have been confirmed through "
+                            "Manual assignment to cell-type-like adata.obs columns "
+                            "(cell_type, celltype, cluster_identity, cell_identity, cell_annotation, annotation) "
+                            "is not allowed before cell type annotations have been confirmed through "
                             "the annotate_clusters workflow. Please call annotate_clusters first."
                         )
-                        logger.warning(f"[Bioinformatics] Blocked manual cell_type assignment: annotation not confirmed")
+                        logger.warning(f"[Bioinformatics] Blocked manual cell-type-like assignment: annotation not confirmed")
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -1607,6 +1678,8 @@ except Exception as _autosave_block_err:
                     cluster_markers = args.get("cluster_markers", {})
                     tissue = args.get("tissue", "")
                     organism = args.get("organism", "mouse")
+                    cluster_key_hint = args.get("cluster_key") or None
+                    rank_key_hint = args.get("rank_key") or "rank_genes_groups"
 
                     # Sanitize LLM-provided cluster_markers (handles malformed dict/string formats)
                     cluster_markers = self._sanitize_cluster_markers(cluster_markers)
@@ -1614,15 +1687,18 @@ except Exception as _autosave_block_err:
                     n_clusters = len(cluster_markers)
 
                     # Discover the active AnnData variable and clustering key in sandbox
-                    adata_var, cluster_key = await self._discover_adata_in_sandbox()
+                    adata_var, cluster_key = await self._discover_adata_in_sandbox(cluster_key_hint)
 
                     if adata_var is None:
                         tool_result = (
                             "Error: Could not find an AnnData object with a clustering column "
-                            "(leiden/louvain/cluster) in the sandbox. Before calling annotate_clusters, "
+                            "(leiden/louvain/cluster, or any column starting with 'leiden'/'louvain') "
+                            "in the sandbox. Before calling annotate_clusters, "
                             "you must: (1) load data into an AnnData variable, (2) run clustering "
                             "(e.g., sc.tl.leiden(adata)), and (3) run differential expression "
-                            "(sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon'))."
+                            "(sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')). "
+                            "If using non-default column names (e.g., 'leiden_broad'), pass "
+                            "cluster_key explicitly."
                         )
                         logger.warning("[Bioinformatics] annotate_clusters called but no AnnData with clustering found")
                         messages.append({
@@ -1630,18 +1706,20 @@ except Exception as _autosave_block_err:
                             "tool_call_id": tool_call.id,
                             "content": tool_result
                         })
+                        annotation_retry_required = True
+                        annotation_retry_attempts += 1
                         continue
 
                     # Auto-extract markers from kernel adata if LLM didn't provide them
                     if n_clusters == 0 and self.sandbox:
-                        logger.info(f"[Bioinformatics] cluster_markers empty, auto-extracting from {adata_var}.uns['rank_genes_groups']")
+                        logger.info(f"[Bioinformatics] cluster_markers empty, auto-extracting from {adata_var}.uns[{rank_key_hint!r}]")
                         extract_code = (
                             "import json as _json\n"
                             "_markers = {}\n"
                             "try:\n"
                             "    import scanpy as sc\n"
                             f"    for _cl in {adata_var}.obs['{cluster_key}'].cat.categories:\n"
-                            f"        _df = sc.get.rank_genes_groups_df({adata_var}, group=str(_cl))\n"
+                            f"        _df = sc.get.rank_genes_groups_df({adata_var}, group=str(_cl), key={rank_key_hint!r})\n"
                             "        _df = _df[_df['pvals_adj'] < 0.05]\n"
                             "        _markers[str(_cl)] = _df.head(15)['names'].tolist()\n"
                             "except Exception as _e:\n"
@@ -1669,16 +1747,18 @@ except Exception as _autosave_block_err:
                     if n_clusters == 0:
                         tool_result = (
                             f"Error: cluster_markers is empty and auto-extraction from "
-                            f"{adata_var}.uns['rank_genes_groups'] failed. You must first run "
-                            f"sc.tl.rank_genes_groups({adata_var}, '{cluster_key}', method='wilcoxon') "
-                            f"and ensure it completes successfully before calling "
-                            f"annotate_clusters."
+                            f"{adata_var}.uns[{rank_key_hint!r}] failed. You must first run "
+                            f"sc.tl.rank_genes_groups({adata_var}, '{cluster_key}', method='wilcoxon', "
+                            f"key={rank_key_hint!r}) and ensure it completes successfully before "
+                            f"calling annotate_clusters."
                         )
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "content": tool_result
                         })
+                        annotation_retry_required = True
+                        annotation_retry_attempts += 1
                         continue
 
                     await self._notify("status", f"Annotating {n_clusters} clusters using literature evidence ({organism} {tissue})...")
@@ -1809,6 +1889,8 @@ except Exception as _autosave_block_err:
                         annotation_organism=organism, annotation_result_summary=(tool_result or ""),
                     ))
                     annotation_completed = True
+                    annotation_retry_required = False
+                    annotation_retry_attempts = 0
 
                 elif tool_name == "report_findings":
                     # Enforce mandatory pipeline in exploration phase

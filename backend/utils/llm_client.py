@@ -66,6 +66,7 @@ def _detect_image_mime_type(img_b64: str) -> str:
 
 # Retry configuration
 MAX_RETRIES = 4
+MAX_RETRIES_UPSTREAM_5XX = 8  # Dedicated for flaky upstream (e.g., Cloudflare 524)
 RETRY_DELAY_BASE = 2.0  # Base delay in seconds, will be multiplied by attempt number
 # Rate limit (429) uses fixed escalating delays to handle TPM limits
 RATE_LIMIT_DELAYS = [5, 10, 20, 40]  # seconds between retries
@@ -82,6 +83,10 @@ RETRYABLE_EXCEPTIONS = (
 # JSONDecodeError gets fewer retries (max 2) since repeated bad JSON likely indicates
 # a persistent issue rather than a transient network problem.
 MAX_JSON_RETRIES = 2
+
+
+class UpstreamExhaustedError(RuntimeError):
+    """Raised when retries are exhausted against a flaky upstream (5xx/timeouts)."""
 
 # OpenAI reasoning models that do NOT support the temperature parameter at all.
 # Matched by exact model name segment (e.g., "openai/o4-mini" -> "o4-mini").
@@ -174,6 +179,7 @@ async def retry_with_backoff(
         The last exception if all retries fail
     """
     last_exception = None
+    effective_max = max_retries
 
     json_error_count = 0
 
@@ -185,7 +191,7 @@ async def retry_with_backoff(
             except Exception:
                 pass  # Never let notification failure break retry logic
 
-    for attempt in range(max_retries + 1):
+    for attempt in range(effective_max + 1):
         try:
             return await asyncio.wait_for(func(), timeout=request_timeout)
         except json.JSONDecodeError as e:
@@ -221,20 +227,28 @@ async def retry_with_backoff(
                 logger.error(f"[{agent_name}] Rate limit exceeded after {rate_limit_max + 1} attempts")
         except RETRYABLE_EXCEPTIONS as e:
             last_exception = e
-            if attempt < max_retries:
+            is_5xx = isinstance(e, InternalServerError)
+            if is_5xx:
+                effective_max = max(effective_max, MAX_RETRIES_UPSTREAM_5XX)
+            current_max = effective_max
+            if attempt < current_max:
                 delay = retry_delay_base * (attempt + 1)
+                error_label = "InternalServerError(5xx)" if is_5xx else type(e).__name__
                 logger.warning(
-                    f"[{agent_name}] Request failed (attempt {attempt + 1}/{max_retries + 1}): {type(e).__name__}: {str(e)[:100]}. "
+                    f"[{agent_name}] Request failed (attempt {attempt + 1}/{current_max + 1}): {error_label}: {str(e)[:100]}. "
                     f"Retrying in {delay:.1f}s..."
                 )
-                await _notify_retry(attempt, delay, type(e).__name__)
+                await _notify_retry(attempt, delay, error_label)
                 await asyncio.sleep(delay)
             else:
                 logger.error(
-                    f"[{agent_name}] Request failed after {max_retries + 1} attempts: {type(e).__name__}: {str(e)}"
+                    f"[{agent_name}] Request failed after {current_max + 1} attempts: {type(e).__name__}: {str(e)}"
                 )
 
-    raise last_exception
+    raise UpstreamExhaustedError(
+        f"[{agent_name}] Upstream LLM exhausted after {effective_max + 1} attempts. "
+        f"Last error: {type(last_exception).__name__}: {last_exception}"
+    ) from last_exception
 
 
 @dataclass
