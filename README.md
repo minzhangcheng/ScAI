@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for comprehensive biomedical research data analysis. It brings together pathology image analysis, single-cell sequencing data, biochemical indicators, and literature research into a unified, iterative workflow — powered by eight specialized AI agents that collaborate like a research team.
 
-**Version**: 0.20.7
+**Version**: 0.20.8
 
 ## Installation
 
@@ -343,6 +343,17 @@ Reports include high-resolution PNG/PDF figures, data tables, and a cell cluster
 ## Changelog
 
 > Technical details for each release are documented in [HANDOVER.md](./HANDOVER.md).
+
+### v0.20.8 (2026-04-24)
+
+- **Config Package Refactor**: Split `backend/config.py` into a `backend/config/` package — `_config.py` (core logic), `__init__.py` (backward-compatible re-exports), and `agent_prompts.py` (new `AgentPrompts` class with all agent prompt constants)
+- **StopDialog** (new): Modal dialog offering "Terminate Immediately" or "Terminate and Summarize" options, bilingual zh/en
+- **ValidationDialog** (new): Modal for API key validation errors with "Ignore" and "Reconfigure" actions
+- **Frontend refactors**: `AnalysisPanel`, `ExplorationReportDialog`, `RoundFeedbackDialog` simplified; new `useCountdownTimer` hook (wall-clock deadline-based countdown with pause/resume) and `messageTransform` utility (shared message/error transformation logic)
+- **Auth middleware fix**: `AUTH_OPTIONAL_PATHS` middleware now passes through even when DB user is missing — ownership checking delegated to route layer via `require_session_ownership`
+- **Dead code removal**: `BioinformaticsCheckpoint` model removed from `schemas.py` (never used); confirmed removed via `test_schema_imports.py`
+- **Report utilities**: `backend/utils/report_html.py` adds `render_table_html()` helper; `regenerator.py` and `variants.py` refactored to use it for score definitions tables
+- **Tests**: New `app_db` pytest fixture in `conftest.py`; `test_ownership.py` updated for new middleware behavior; `test_v1.py`, `test_upload_integrity.py` refactored to use shared fixture; route snapshot updated
 
 ### v0.20.7 (2026-04-23)
 

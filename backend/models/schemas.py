@@ -146,31 +146,6 @@ class ScoreDefinition(BaseModel):
     round_number: int = 0
     timestamp: datetime = Field(default_factory=datetime.now)
 
-class BioinformaticsCheckpoint(BaseModel):
-    """Checkpoint for bioinformatics analysis progress - enables step-level recovery"""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    session_id: str
-    step_number: int
-    total_steps: int = 80
-
-    # Conversation state for LLM context restoration
-    messages: List[Dict[str, Any]] = Field(default_factory=list)
-
-    # Analysis progress
-    findings: List[str] = Field(default_factory=list)
-    figures: List[str] = Field(default_factory=list)  # Figure IDs or paths
-    code_history: List[Dict[str, Any]] = Field(default_factory=list)
-    analysis_log: List[Dict[str, Any]] = Field(default_factory=list)  # Serialized AnalysisStep dicts via model_dump()
-    analysis_context: Dict[str, Any] = Field(default_factory=dict)
-
-    # Resumption info
-    last_tool_call: Optional[Dict[str, Any]] = None
-    completed: bool = False
-
-    # Timestamps
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
-
 class TreatmentGroup(BaseModel):
     """A treatment/experimental group definition"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

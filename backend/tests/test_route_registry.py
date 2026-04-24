@@ -18,10 +18,11 @@ def _current_routes():
 
 def test_route_registry_matches_snapshot():
     expected = json.loads(SNAPSHOT_PATH.read_text())
-    expected = [(p, m) for p, m in expected]
-    actual = _current_routes()
-    assert actual == expected, (
-        f"Route registry drift. "
-        f"Missing: {set(map(tuple, expected)) - set(map(tuple, actual))}. "
-        f"Added: {set(map(tuple, actual)) - set(map(tuple, expected))}."
+    # JSON deserializes methods as lists; convert to tuples for set operations
+    expected_set = {(p, tuple(m)) for p, m in expected}
+    actual_set = {(p, tuple(m)) for p, m in _current_routes()}
+    missing = expected_set - actual_set
+    added = actual_set - expected_set
+    assert not missing and not added, (
+        f"Route registry drift. Missing: {missing}. Added: {added}."
     )

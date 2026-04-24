@@ -19,29 +19,13 @@ import {
 } from 'lucide-react'
 import { useTranslation, Language } from '../i18n/translations'
 import { TreatmentGroup } from '../stores/appStore'
+import type { RoundSummary } from '../types'
 import { AGENT_OPTIONS } from '../constants/agents'
 import { useClickOutside } from '../hooks/useClickOutside'
+import { useCountdownTimer } from '../hooks/useCountdownTimer'
 
 // Section-specific data type options (shared with DataPanel)
 import { getSection, getTypeOptions } from '../utils/dataTypes'
-
-interface RoundSummary {
-  round: number
-  maxRounds?: number
-  summary: string
-  findings: string[]
-  dataRequests: {
-    pathology: string[]
-    biochemistry: string[]
-    other: string[]
-  }
-  status: 'analyzing' | 'waiting_input' | 'completed'
-  // Per-agent findings (from round_summary WebSocket message)
-  pathologyFindings?: string[]
-  bioinformaticsFindings?: string[]
-  biochemistryFindings?: string[]
-  literatureFindings?: string[]
-}
 
 export interface UploadedFileWithAgent {
   file: File
@@ -81,21 +65,20 @@ export function RoundFeedbackDialog({
   // Derived mode flags
   const isManualMode = countdownSeconds === -1
   const isNoWait = countdownSeconds === 0
-  const hasCountdown = countdownSeconds > 0
 
   // Input state
   const [userInput, setUserInput] = useState('')
   const [files, setFiles] = useState<UploadedFileWithAgent[]>([])
   const [sending, setSending] = useState(false)
 
-  // Timer state — uses wall-clock time so background tabs don't freeze the countdown
-  const [timeRemaining, setTimeRemaining] = useState(hasCountdown ? countdownSeconds : 0)
+  // Timer state
   const [timerPaused, setTimerPaused] = useState(false)
   const hasTypedRef = useRef(false)
-  const deadlineRef = useRef(hasCountdown ? Date.now() + countdownSeconds * 1000 : 0)
-  const pausedAtRef = useRef<number | null>(null) // timestamp when paused, null if running
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const { timeRemaining, isPaused, pause, resume, hasCountdown } = useCountdownTimer({
+    countdownSeconds,
+  })
 
   // Agent dropdown state (for file targeting)
   const [openDropdownIndex, setOpenDropdownIndex] = useState<number | null>(null)
@@ -114,43 +97,20 @@ export function RoundFeedbackDialog({
     }
   }, [isNoWait, sending])
 
-  // Handle pause/resume: shift deadline when pausing/resuming
+  // Sync local paused state with hook
+  useEffect(() => {
+    setTimerPaused(isPaused)
+  }, [isPaused])
+
+  // Handle pause/resume: delegate to hook
   useEffect(() => {
     if (!hasCountdown) return
     if (timerPaused) {
-      // Record when we paused
-      pausedAtRef.current = Date.now()
-    } else if (pausedAtRef.current !== null) {
-      // Resuming: shift deadline forward by the time spent paused
-      const pausedDuration = Date.now() - pausedAtRef.current
-      deadlineRef.current += pausedDuration
-      pausedAtRef.current = null
+      pause()
+    } else {
+      resume()
     }
-  }, [timerPaused, hasCountdown])
-
-  // Countdown timer — uses wall-clock diff so background tabs catch up correctly
-  useEffect(() => {
-    if (!hasCountdown) return
-    intervalRef.current = setInterval(() => {
-      if (pausedAtRef.current !== null) return // paused, don't update
-      const remaining = Math.max(0, Math.ceil((deadlineRef.current - Date.now()) / 1000))
-      setTimeRemaining(remaining)
-      if (remaining <= 0) {
-        if (intervalRef.current) clearInterval(intervalRef.current)
-      }
-    }, 500) // 500ms for snappier updates when returning from background
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-    }
-  }, [hasCountdown])
-
-  // Auto-proceed when timer reaches 0 (only in countdown mode)
-  useEffect(() => {
-    if (hasCountdown && timeRemaining === 0 && !sending) {
-      onSkip()
-    }
-  }, [timeRemaining, sending, onSkip, hasCountdown])
+  }, [timerPaused, hasCountdown, pause, resume])
 
   // Auto-pause when user starts typing
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -166,7 +126,6 @@ export function RoundFeedbackDialog({
   }, [])
 
   const handleSkip = useCallback(async () => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
     await onSkip()
   }, [onSkip])
 
@@ -175,8 +134,6 @@ export function RoundFeedbackDialog({
     if (!userInput.trim() && files.length === 0) return
 
     setSending(true)
-    // Pause timer during send
-    if (intervalRef.current) clearInterval(intervalRef.current)
 
     try {
       await onSend(userInput.trim(), files)

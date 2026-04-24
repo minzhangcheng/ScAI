@@ -7,7 +7,6 @@ import pytest_asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from backend.utils.db import AppDB
 from backend.services.upload import upload_chunk, complete_upload, cleanup_session_uploads
 from backend.state import sessions
 from backend.models.schemas import AnalysisState, DataFile, TaskStatus
@@ -28,21 +27,18 @@ def _make_state(user_id="u1", session_id="sid1"):
 
 class TestSHA256Rollback:
     @pytest.mark.asyncio
-    async def test_integrity_fail_cleans_final_and_chunks(self, tmp_path):
+    async def test_integrity_fail_cleans_final_and_chunks(self, tmp_path, app_db):
         """SHA256 mismatch: final file + all chunks must be cleaned up."""
         content = b"hello world"
 
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-
-        uid = await db.create_upload_session(
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="test.h5ad", expected_sha256="wrong_sha256",
             total_chunks=1, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
         chunk_path = tmp_path / f"{uid}.chunk.0"
         chunk_path.write_bytes(content)
-        await db.mark_chunk_received(uid, 0)
+        await app_db.mark_chunk_received(uid, 0)
 
         state = _make_state()
         sessions["sid1"] = state
@@ -50,7 +46,7 @@ class TestSHA256Rollback:
         upload_dir = tmp_path / "uploads"
         upload_dir.mkdir()
 
-        with patch("backend.services.upload.get_db", return_value=db), \
+        with patch("backend.services.upload.get_db", return_value=app_db), \
              patch("backend.services.upload.get_session_uploads", return_value=upload_dir), \
              patch("backend.services.upload.UPLOAD_TEMP_DIR", tmp_path), \
              patch("backend.services.upload._on_session_update", None), \
@@ -66,22 +62,19 @@ class TestSHA256Rollback:
         sessions.pop("sid1", None)
 
     @pytest.mark.asyncio
-    async def test_successful_upload_cleans_chunks(self, tmp_path):
+    async def test_successful_upload_cleans_chunks(self, tmp_path, app_db):
         """Successful complete cleans up chunk files."""
         content = b"hello world"
         expected = hashlib.sha256(content).hexdigest()
 
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-
-        uid = await db.create_upload_session(
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="test.h5ad", expected_sha256=expected,
             total_chunks=1, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
         chunk_path = tmp_path / f"{uid}.chunk.0"
         chunk_path.write_bytes(content)
-        await db.mark_chunk_received(uid, 0)
+        await app_db.mark_chunk_received(uid, 0)
 
         state = _make_state()
         sessions["sid1"] = state
@@ -89,7 +82,7 @@ class TestSHA256Rollback:
         upload_dir = tmp_path / "uploads"
         upload_dir.mkdir()
 
-        with patch("backend.services.upload.get_db", return_value=db), \
+        with patch("backend.services.upload.get_db", return_value=app_db), \
              patch("backend.services.upload.get_session_uploads", return_value=upload_dir), \
              patch("backend.services.upload.UPLOAD_TEMP_DIR", tmp_path), \
              patch("backend.services.upload._on_session_update", AsyncMock()) as mock_update, \
@@ -104,29 +97,26 @@ class TestSHA256Rollback:
         sessions.pop("sid1", None)
 
     @pytest.mark.asyncio
-    async def test_idempotent_complete_returns_stored_path(self, tmp_path):
+    async def test_idempotent_complete_returns_stored_path(self, tmp_path, app_db):
         """Calling complete twice returns the stored path from first call."""
         content = b"hello world"
         expected = hashlib.sha256(content).hexdigest()
 
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-
-        uid = await db.create_upload_session(
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="test.h5ad", expected_sha256=expected,
             total_chunks=1, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
         chunk_path = tmp_path / f"{uid}.chunk.0"
         chunk_path.write_bytes(content)
-        await db.mark_chunk_received(uid, 0)
-        await db.complete_upload_session(uid)
+        await app_db.mark_chunk_received(uid, 0)
+        await app_db.complete_upload_session(uid)
 
         state = _make_state()
         state.data_files[0].file_path = "/some/stored/path"
         sessions["sid1"] = state
 
-        with patch("backend.services.upload.get_db", return_value=db), \
+        with patch("backend.services.upload.get_db", return_value=app_db), \
              patch("backend.services.upload._on_session_update", None), \
              patch("backend.services.upload._on_session_save", None):
             result = await complete_upload("sid1", uid)
@@ -139,32 +129,26 @@ class TestSHA256Rollback:
 
 class TestMarkChunkIdempotency:
     @pytest.mark.asyncio
-    async def test_duplicate_chunk_returns_false(self, tmp_path):
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-
-        uid = await db.create_upload_session(
+    async def test_duplicate_chunk_returns_false(self, app_db):
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
             total_chunks=3, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
         )
 
-        r1 = await db.mark_chunk_received(uid, 0)
+        r1 = await app_db.mark_chunk_received(uid, 0)
         assert r1["is_new"] is True
-        r2 = await db.mark_chunk_received(uid, 0)
+        r2 = await app_db.mark_chunk_received(uid, 0)
         assert r2["is_new"] is False
-        r3 = await db.mark_chunk_received(uid, 1)
+        r3 = await app_db.mark_chunk_received(uid, 1)
         assert r3["is_new"] is True
 
-        upload = await db.get_upload_session(uid)
+        upload = await app_db.get_upload_session(uid)
         assert upload["received_chunks"] == 2
 
     @pytest.mark.asyncio
-    async def test_concurrent_mark_chunk_no_double_count(self, tmp_path):
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-
-        uid = await db.create_upload_session(
+    async def test_concurrent_mark_chunk_no_double_count(self, app_db):
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
             total_chunks=3, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
@@ -172,24 +156,21 @@ class TestMarkChunkIdempotency:
 
         import asyncio
         results = await asyncio.gather(
-            db.mark_chunk_received(uid, 0),
-            db.mark_chunk_received(uid, 0),
+            app_db.mark_chunk_received(uid, 0),
+            app_db.mark_chunk_received(uid, 0),
         )
         is_new_values = [r["is_new"] for r in results]
         assert is_new_values.count(True) == 1
         assert is_new_values.count(False) == 1
 
-        upload = await db.get_upload_session(uid)
+        upload = await app_db.get_upload_session(uid)
         assert upload["received_chunks"] == 1
 
 
 class TestCleanupSessionUploads:
     @pytest.mark.asyncio
-    async def test_cleanup_deletes_chunks_and_db(self, tmp_path):
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-
-        uid = await db.create_upload_session(
+    async def test_cleanup_deletes_chunks_and_db(self, tmp_path, app_db):
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
             total_chunks=2, chunk_size=1024, expires_at_iso="2025-12-01T00:00:00",
             placeholder_file_id="pf1",
@@ -198,12 +179,12 @@ class TestCleanupSessionUploads:
         (tmp_path / f"{uid}.chunk.0").write_bytes(b"a")
         (tmp_path / f"{uid}.chunk.1").write_bytes(b"b")
 
-        with patch("backend.services.upload.get_db", return_value=db), \
+        with patch("backend.services.upload.get_db", return_value=app_db), \
              patch("backend.services.upload.UPLOAD_TEMP_DIR", tmp_path):
             await cleanup_session_uploads("sid1")
 
         assert not (tmp_path / f"{uid}.chunk.0").exists()
         assert not (tmp_path / f"{uid}.chunk.1").exists()
 
-        uploads = await db.list_uploads_for_session("sid1")
+        uploads = await app_db.list_uploads_for_session("sid1")
         assert len(uploads) == 0

@@ -9,6 +9,7 @@ from backend.utils.report_html import (
     markdown_to_html,
     _make_figure_block,
     _build_figure_description_map,
+    render_table_html,
 )
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
 from backend.models.schemas import AnalysisState
@@ -20,7 +21,7 @@ def _build_score_definitions_html_section(state: AnalysisState, section_number: 
     """Build an HTML section for score definitions. Returns empty string if no scores."""
     if not state.score_definitions:
         return ""
-    score_rows = ""
+    rows = []
     for sd in state.score_definitions:
         genes = html_module.escape(", ".join(sd.gene_list[:10]))
         if len(sd.gene_list) > 10:
@@ -28,14 +29,19 @@ def _build_score_definitions_html_section(state: AnalysisState, section_number: 
         params_str = html_module.escape(
             ", ".join(f"{k}={v}" for k, v in sd.parameters.items()) if sd.parameters else "default"
         )
-        score_rows += f"""<tr>
-            <td>{html_module.escape(sd.score_name)}</td>
-            <td><code>{html_module.escape(sd.method)}</code></td>
-            <td>{html_module.escape(sd.description)}</td>
-            <td style="font-size:0.85em">{params_str}</td>
-            <td style="font-size:0.85em">{genes}</td>
-            <td style="font-size:0.85em">{html_module.escape(sd.gene_list_source or "N/A")}</td>
-        </tr>"""
+        rows.append([
+            html_module.escape(sd.score_name),
+            f"<code>{html_module.escape(sd.method)}</code>",
+            html_module.escape(sd.description),
+            params_str,
+            genes,
+            html_module.escape(sd.gene_list_source or "N/A"),
+        ])
+    table_html = render_table_html(
+        headers=["Score Name", "Method", "Description", "Parameters", "Gene List", "Source"],
+        rows=rows,
+        style="font-size:0.9em",
+    )
     prefix = f"{section_number}. " if section_number else ""
     return f"""
         <div class="section" id="score-definitions">
@@ -44,21 +50,7 @@ def _build_score_definitions_html_section(state: AnalysisState, section_number: 
             </div>
             <div class="section-content">
                 <p>The following scores were computed during the analysis. Each score's methodology is documented for transparency and reproducibility.</p>
-                <table class="direction-table" style="font-size:0.9em">
-                    <thead>
-                        <tr>
-                            <th>Score Name</th>
-                            <th>Method</th>
-                            <th>Description</th>
-                            <th>Parameters</th>
-                            <th>Gene List</th>
-                            <th>Source</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {score_rows}
-                    </tbody>
-                </table>
+                {table_html}
             </div>
         </div>"""
 

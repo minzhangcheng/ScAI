@@ -2,10 +2,13 @@ import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useSession, useConfig, generateId, apiFetch } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
+import type { RoundSummary } from '../types'
 import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
 import { AnnotationConfirmationDialog } from './AnnotationConfirmationDialog'
 import { ExplorationReportDialog } from './ExplorationReportDialog'
+import { ValidationDialog } from './ValidationDialog'
+import { StopDialog } from './StopDialog'
 import { SnapshotPanel } from './SnapshotPanel'
 import {
   Play,
@@ -41,23 +44,6 @@ interface RoundSummaryContent {
   bioinformatics_findings?: string[]
   biochemistry_findings?: string[]
   literature_findings?: string[]
-}
-
-export interface RoundSummary {
-  round: number
-  maxRounds?: number
-  summary: string
-  findings: string[]
-  dataRequests: {
-    pathology: string[]
-    biochemistry: string[]
-    other: string[]
-  }
-  status: 'analyzing' | 'waiting_input' | 'completed'
-  pathologyFindings?: string[]
-  bioinformaticsFindings?: string[]
-  biochemistryFindings?: string[]
-  literatureFindings?: string[]
 }
 
 export function AnalysisPanel() {
@@ -614,42 +600,13 @@ export function AnalysisPanel() {
 
       {/* Validation failure dialog */}
       {showValidationDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
-            <div className="p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 bg-red-100 rounded-full">
-                  <AlertCircle className="w-6 h-6 text-red-600" />
-                </div>
-                <h3 className="text-lg font-semibold text-slate-900">
-                  {validationUncertain ? t('apiKeyValidationUncertain') : t('apiKeyInvalid')}
-                </h3>
-              </div>
-              <p className="text-sm text-slate-600 mb-2">
-                {validationMessage}
-              </p>
-              <p className="text-xs text-slate-400">
-                {validationUncertain
-                  ? t('apiKeyValidationUncertainDesc')
-                  : t('apiKeyInvalidDesc')}
-              </p>
-            </div>
-            <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-              <button
-                onClick={handleIgnoreValidationError}
-                className="px-4 py-2 text-slate-600 hover:bg-slate-200 rounded-lg font-medium transition-colors text-sm"
-              >
-                {t('ignoreError')}
-              </button>
-              <button
-                onClick={handleReconfigureFromValidation}
-                className="px-4 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-lg font-medium transition-colors text-sm"
-              >
-                {t('reconfigureApiKey')}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ValidationDialog
+          message={validationMessage}
+          uncertain={validationUncertain}
+          onIgnore={handleIgnoreValidationError}
+          onReconfigure={handleReconfigureFromValidation}
+          language={language}
+        />
       )}
 
       {/* Header - Compact */}
@@ -1091,72 +1048,13 @@ export function AnalysisPanel() {
 
       {/* Stop Confirmation Dialog */}
       {showStopDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4">
-            <div className="p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 bg-red-100 rounded-full">
-                  <Square className="w-5 h-5 text-red-600" />
-                </div>
-                <h3 className="text-lg font-semibold text-slate-900">
-                  {language === 'zh' ? '停止分析' : 'Stop Analysis'}
-                </h3>
-              </div>
-              <p className="text-sm text-slate-600 mb-4">
-                {language === 'zh' ? '请选择停止方式：' : 'Choose how to stop:'}
-              </p>
-            </div>
-            <div className="px-6 pb-6 space-y-2">
-              <button
-                onClick={() => handleStop('immediate')}
-                disabled={stopping}
-                className="w-full flex items-center gap-3 px-4 py-3 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl text-left transition-colors disabled:opacity-50"
-              >
-                <Square className="w-5 h-5 text-red-600 flex-shrink-0" />
-                <div>
-                  <div className="font-medium text-red-800">
-                    {language === 'zh' ? '立即终止' : 'Terminate Immediately'}
-                  </div>
-                  <div className="text-xs text-red-600">
-                    {language === 'zh'
-                      ? '完全终止分析，保存状态，稍后可恢复继续'
-                      : 'Stop analysis, save state, resume later'}
-                  </div>
-                </div>
-              </button>
-              <button
-                onClick={() => handleStop('summarize')}
-                disabled={stopping}
-                className="w-full flex items-center gap-3 px-4 py-3 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-xl text-left transition-colors disabled:opacity-50"
-              >
-                <CheckCircle2 className="w-5 h-5 text-amber-600 flex-shrink-0" />
-                <div>
-                  <div className="font-medium text-amber-800">
-                    {language === 'zh' ? '终止分析并总结结果' : 'Terminate and Summarize'}
-                  </div>
-                  <div className="text-xs text-amber-600">
-                    {language === 'zh'
-                      ? '停止分析轮次，根据已有结果生成报告'
-                      : 'Stop rounds, generate report from current results'}
-                  </div>
-                </div>
-              </button>
-              <button
-                onClick={() => setShowStopDialog(false)}
-                disabled={stopping}
-                className="w-full px-4 py-3 text-slate-600 hover:bg-slate-100 rounded-xl font-medium transition-colors text-center disabled:opacity-50"
-              >
-                {language === 'zh' ? '按错了，继续' : 'Cancel, Continue'}
-              </button>
-              {stopping && (
-                <div className="flex items-center gap-2 text-sm text-blue-600 pt-2">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  {language === 'zh' ? '正在停止...' : 'Stopping...'}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+        <StopDialog
+          onStopImmediate={() => handleStop('immediate')}
+          onStopSummarize={() => handleStop('summarize')}
+          onClose={() => setShowStopDialog(false)}
+          stopping={stopping}
+          language={language}
+        />
       )}
 
       {/* Snapshot Panel */}

@@ -12,6 +12,36 @@
     ]
   ],
   [
+    "/api/admin/users",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/admin/users",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/admin/users/{uid}",
+    [
+      "DELETE"
+    ]
+  ],
+  [
+    "/api/admin/users/{uid}/password",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/admin/users/{uid}/status",
+    [
+      "PATCH"
+    ]
+  ],
+  [
     "/api/auth/api-keys",
     [
       "GET"
@@ -36,15 +66,51 @@
     ]
   ],
   [
+    "/api/auth/logout",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/auth/me",
     [
       "GET"
     ]
   ],
   [
+    "/api/auth/profile",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/auth/profile/email",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/auth/profile/password",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/auth/register",
     [
       "POST"
+    ]
+  ],
+  [
+    "/api/auth/setup/admin",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/auth/setup/status",
+    [
+      "GET"
     ]
   ],
   [

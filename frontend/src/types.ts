@@ -258,3 +258,25 @@ export type TranslationFn = (key: TranslationKey, params?: Record<string, string
 
 /** Lucide icon component type */
 export type LucideIconComponent = React.ComponentType<{ className?: string }>
+
+// ============================================================
+// Shared component types
+// ============================================================
+
+export interface RoundSummary {
+  round: number
+  maxRounds?: number
+  summary: string
+  findings: string[]
+  dataRequests: {
+    pathology: string[]
+    biochemistry: string[]
+    other: string[]
+  }
+  status: 'analyzing' | 'waiting_input' | 'completed'
+  // Per-agent findings (from round_summary WebSocket message)
+  pathologyFindings?: string[]
+  bioinformaticsFindings?: string[]
+  biochemistryFindings?: string[]
+  literatureFindings?: string[]
+}

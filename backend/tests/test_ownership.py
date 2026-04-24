@@ -102,104 +102,92 @@ class TestOwnership:
         resp = client.get("/api/auth/login")
         assert resp.status_code == 200
 
-    def test_middleware_ownership_check_blocks_wrong_user(self):
-        """Middleware returns 404 when accessing another user's session."""
+    def test_middleware_passes_through_auth_optional_with_token(self):
+        """Middleware passes through auth-optional paths even if DB user missing.
+
+        Ownership is enforced by route-layer require_session_ownership,
+        not by the middleware itself.
+        """
         from backend.middleware.auth import AuthMiddleware
-        from backend.state import sessions
         from starlette.testclient import TestClient
         from starlette.applications import Starlette
         from starlette.responses import PlainTextResponse
         from starlette.routing import Route
 
-        mock_state = MagicMock()
-        mock_state.user_id = "user_a"
-        sessions["sess1"] = mock_state
+        async def session_route(request):
+            return PlainTextResponse("ok")
 
-        try:
-            async def session_route(request):
-                return PlainTextResponse("ok")
+        app = Starlette(
+            routes=[Route("/api/session/sess1/detail", session_route)],
+            middleware=[(AuthMiddleware, [], {})],
+        )
+        client = TestClient(app)
 
-            app = Starlette(
-                routes=[Route("/api/session/sess1/detail", session_route)],
-                middleware=[(AuthMiddleware, [], {})],
-            )
-            client = TestClient(app)
+        # Token for a user that doesn't exist in DB
+        token = create_access_token("unknown_user", "x@x.com")
+        resp = client.get(
+            "/api/session/sess1/detail",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        # Middleware passes through; route would check ownership
+        assert resp.status_code == 200
 
-            token_b = create_access_token("user_b", "b@b.com")
-            resp = client.get(
-                "/api/session/sess1/detail",
-                headers={"Authorization": f"Bearer {token_b}"},
-            )
-            assert resp.status_code == 404
-        finally:
-            sessions.pop("sess1", None)
-
-    def test_middleware_allows_owner(self):
-        """Middleware passes when owner accesses their session."""
+    def test_middleware_passes_through_auth_optional_with_valid_token(self):
+        """Middleware passes through auth-optional paths with a valid token."""
         from backend.middleware.auth import AuthMiddleware
-        from backend.state import sessions
         from starlette.testclient import TestClient
         from starlette.applications import Starlette
         from starlette.responses import PlainTextResponse
         from starlette.routing import Route
 
-        mock_state = MagicMock()
-        mock_state.user_id = "user_a"
-        sessions["sess1"] = mock_state
+        async def session_route(request):
+            return PlainTextResponse("ok")
 
-        try:
-            async def session_route(request):
-                return PlainTextResponse("ok")
+        app = Starlette(
+            routes=[Route("/api/session/sess1/detail", session_route)],
+            middleware=[(AuthMiddleware, [], {})],
+        )
+        client = TestClient(app)
 
-            app = Starlette(
-                routes=[Route("/api/session/sess1/detail", session_route)],
-                middleware=[(AuthMiddleware, [], {})],
-            )
-            client = TestClient(app)
+        token = create_access_token("user_a", "a@a.com")
+        resp = client.get(
+            "/api/session/sess1/detail",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
 
-            token_a = create_access_token("user_a", "a@a.com")
-            resp = client.get(
-                "/api/session/sess1/detail",
-                headers={"Authorization": f"Bearer {token_a}"},
-            )
-            assert resp.status_code == 200
-        finally:
-            sessions.pop("sess1", None)
+    def test_middleware_passes_through_file_path_with_token(self):
+        """Middleware passes through /api/file/ paths with a valid token.
 
-    def test_file_path_ownership_check(self):
-        """Middleware checks ownership for /api/file/ paths."""
+        Ownership is enforced by route-layer require_session_ownership.
+        """
         from backend.middleware.auth import AuthMiddleware
-        from backend.state import sessions
         from starlette.testclient import TestClient
         from starlette.applications import Starlette
         from starlette.responses import PlainTextResponse
         from starlette.routing import Route
 
-        mock_state = MagicMock()
-        mock_state.user_id = "user_a"
-        sessions["sess2"] = mock_state
+        async def file_route(request):
+            return PlainTextResponse("ok")
 
-        try:
-            async def file_route(request):
-                return PlainTextResponse("ok")
+        app = Starlette(
+            routes=[Route("/api/file/sess2/data/test.h5ad", file_route)],
+            middleware=[(AuthMiddleware, [], {})],
+        )
+        client = TestClient(app)
 
-            app = Starlette(
-                routes=[Route("/api/file/sess2/data/test.h5ad", file_route)],
-                middleware=[(AuthMiddleware, [], {})],
-            )
-            client = TestClient(app)
+        token = create_access_token("user_b", "b@b.com")
+        resp = client.get(
+            "/api/file/sess2/data/test.h5ad",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
 
-            token_b = create_access_token("user_b", "b@b.com")
-            resp = client.get(
-                "/api/file/sess2/data/test.h5ad",
-                headers={"Authorization": f"Bearer {token_b}"},
-            )
-            assert resp.status_code == 404
-        finally:
-            sessions.pop("sess2", None)
+    def test_middleware_passes_through_session_with_empty_owner(self):
+        """Middleware passes through auth-optional path even when session has empty user_id.
 
-    def test_empty_userid_not_owner(self):
-        """Session with empty user_id is not owned by anyone."""
+        Ownership check (empty user_id means no owner) is the route's job.
+        """
         from backend.middleware.auth import AuthMiddleware
         from backend.state import sessions
         from starlette.testclient import TestClient
@@ -226,7 +214,7 @@ class TestOwnership:
                 "/api/session/sess3/detail",
                 headers={"Authorization": f"Bearer {token}"},
             )
-            assert resp.status_code == 404
+            assert resp.status_code == 200
         finally:
             sessions.pop("sess3", None)
 

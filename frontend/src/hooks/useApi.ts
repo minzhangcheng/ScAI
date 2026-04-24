@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useAppStore, Message, Session, AgentType, RoundResult, FigureReviewStatus } from '../stores/appStore'
+import { transformRawMessage, restoreAgentErrors } from '../utils/messageTransform'
 import { devLog } from '../utils/logger'
 import { downloadBlob } from '../utils/download'
 import { getToken, clearToken } from '../utils/authStorage'
@@ -13,7 +14,6 @@ import type {
   RawDataFile,
   RawPublicationFigure,
   RawPublicationTable,
-  RawMessage,
   RawTreatmentGroup,
   RawBiochemistryIndicator,
   ChatMessage,
@@ -307,34 +307,13 @@ export function useSession() {
       useAppStore.getState().setStateVersion(data.state_version ?? 0)
 
       // Restore agent errors
-      useAppStore.getState().clearAgentErrors()
       if (data.agent_errors && Array.isArray(data.agent_errors)) {
-        for (const err of data.agent_errors) {
-          if (!err.resolved) {
-            useAppStore.getState().addAgentError({
-              id: err.id,
-              agent: err.agent as AgentType,
-              errorType: err.error_type,
-              message: err.message,
-              details: err.details,
-              round: err.round_number,
-              timestamp: err.timestamp,
-              resolved: false
-            })
-          }
-        }
+        restoreAgentErrors(data.agent_errors)
       }
       
       // Load realtime messages history (WebSocket messages)
       if (data.messages && Array.isArray(data.messages)) {
-        const messages: Message[] = data.messages.map((msg: RawMessage) => ({
-          id: msg.id || generateId(),
-          type: (msg.type || 'message') as Message['type'],
-          agent: msg.agent as AgentType | undefined,
-          content: msg.content,
-          timestamp: msg.timestamp || new Date().toISOString(),
-        }))
-        setMessages(messages)
+        setMessages(data.messages.map(transformRawMessage))
       } else {
         clearMessages()
       }
@@ -797,13 +776,7 @@ export function useWebSocket() {
               const localMessages = currentState.messages
 
               // Convert server messages to frontend format
-              const serverMessages: Message[] = data.messages.map((msg: RawMessage) => ({
-                id: msg.id || generateId(),
-                type: (msg.type || 'message') as Message['type'],
-                agent: msg.agent as AgentType | undefined,
-                content: msg.content,
-                timestamp: msg.timestamp || new Date().toISOString(),
-              }))
+              const serverMessages: Message[] = data.messages.map(transformRawMessage)
 
               // Deduplicate using server-assigned unique IDs
               const serverMsgIdSet = new Set(serverMessages.map(m => m.id))
@@ -819,7 +792,7 @@ export function useWebSocket() {
               const latestMsgIdSet = new Set(latestMessages.map((m: Message) => m.id))
 
               // Find server messages not already present locally
-              const newFromServer = serverMessages.filter((m: Message) =>
+              const newFromServer = serverMessages.filter((m) =>
                 !latestMsgIdSet.has(m.id)
               )
 
@@ -833,21 +806,7 @@ export function useWebSocket() {
 
             // Also restore agent errors if present
             if (data.agent_errors && Array.isArray(data.agent_errors)) {
-              useAppStore.getState().clearAgentErrors()
-              for (const err of data.agent_errors) {
-                if (!err.resolved) {
-                  useAppStore.getState().addAgentError({
-                    id: err.id,
-                    agent: err.agent,
-                    errorType: err.error_type,
-                    message: err.message,
-                    details: err.details,
-                    round: err.round_number,
-                    timestamp: err.timestamp,
-                    resolved: false
-                  })
-                }
-              }
+              restoreAgentErrors(data.agent_errors)
             }
             // Restore session status and analysis phase from server
             if (data.status) {
@@ -943,13 +902,7 @@ export function useWebSocket() {
         // Handle message_history - batch restore messages (e.g. reconnect to completed session)
         if (data.type === 'message_history') {
           if (data.content?.messages && Array.isArray(data.content.messages)) {
-            const serverMessages: Message[] = data.content.messages.map((msg: RawMessage) => ({
-              id: msg.id || generateId(),
-              type: (msg.type || 'message') as Message['type'],
-              agent: msg.agent as AgentType | undefined,
-              content: msg.content,
-              timestamp: msg.timestamp || new Date().toISOString(),
-            }))
+            const serverMessages = data.content.messages.map(transformRawMessage)
             setMessages(serverMessages)
             devLog(`WebSocket: Restored ${serverMessages.length} messages from history`)
           }

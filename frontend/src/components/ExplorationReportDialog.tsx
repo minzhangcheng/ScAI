@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import { SupplementaryAnalysisModal } from './SupplementaryAnalysisModal'
 import {
   X,
@@ -17,6 +17,7 @@ import {
   Square,
 } from 'lucide-react'
 import { Language } from '../i18n/translations'
+import { useCountdownTimer } from '../hooks/useCountdownTimer'
 
 interface ExplorationReport {
   cluster_overview: string
@@ -106,30 +107,19 @@ export function ExplorationReportDialog({
   const [showFullReport, setShowFullReport] = useState(false)
   const [showSupplementaryInput, setShowSupplementaryInput] = useState(false)
 
-  // Timer state — wall-clock based (same pattern as RoundFeedbackDialog)
-  const hasCountdown = countdownSeconds > 0
-  const [timeRemaining, setTimeRemaining] = useState(hasCountdown ? countdownSeconds : 0)
-  const deadlineRef = useRef(hasCountdown ? Date.now() + countdownSeconds * 1000 : 0)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  // Countdown timer
-  useEffect(() => {
-    if (!hasCountdown) return
-    intervalRef.current = setInterval(() => {
-      const remaining = Math.max(0, Math.ceil((deadlineRef.current - Date.now()) / 1000))
-      setTimeRemaining(remaining)
-    }, 250)
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
+  const handlePiDecide = useCallback(async () => {
+    setSubmitting(true)
+    try {
+      await onLetPiDecide()
+    } finally {
+      setSubmitting(false)
     }
-  }, [hasCountdown])
+  }, [onLetPiDecide])
 
-  // Auto-trigger PI decide when countdown reaches 0
-  useEffect(() => {
-    if (hasCountdown && timeRemaining === 0 && !submitting) {
-      handlePiDecide()
-    }
-  }, [hasCountdown, timeRemaining, submitting])
+  const { timeRemaining, hasCountdown } = useCountdownTimer({
+    countdownSeconds,
+    onExpire: handlePiDecide,
+  })
 
   const toggleCandidate = (index: number) => {
     setSelectedIndices(prev => {
@@ -197,15 +187,6 @@ export function ExplorationReportDialog({
       setSubmitting(false)
     }
   }, [selectedIndices, candidateNotes, customDirections, report, onChooseDirections])
-
-  const handlePiDecide = useCallback(async () => {
-    setSubmitting(true)
-    try {
-      await onLetPiDecide()
-    } finally {
-      setSubmitting(false)
-    }
-  }, [onLetPiDecide])
 
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60)

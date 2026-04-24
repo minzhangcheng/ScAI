@@ -7,8 +7,6 @@ import pytest_asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from backend.utils.db import AppDB
-
 
 @pytest.fixture
 def config_dict():
@@ -30,89 +28,77 @@ def config_dict():
 
 class TestUploadDB:
     @pytest.mark.asyncio
-    async def test_create_upload_session(self, tmp_path):
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-        uid = await db.create_upload_session(
+    async def test_create_upload_session(self, app_db):
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="test.h5ad", expected_sha256="abc",
             total_chunks=2, chunk_size=1024, expires_at_iso="2025-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
-        upload = await db.get_upload_session(uid)
+        upload = await app_db.get_upload_session(uid)
         assert upload is not None
         assert upload["session_id"] == "sid1"
         assert upload["filename"] == "test.h5ad"
         assert upload["received_chunks"] == 0
 
     @pytest.mark.asyncio
-    async def test_mark_chunk_received(self, tmp_path):
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-        uid = await db.create_upload_session(
+    async def test_mark_chunk_received(self, app_db):
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
             total_chunks=3, chunk_size=1024, expires_at_iso="2025-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
-        r1 = await db.mark_chunk_received(uid, 0)
+        r1 = await app_db.mark_chunk_received(uid, 0)
         assert r1["is_new"] is True
-        r2 = await db.mark_chunk_received(uid, 1)
+        r2 = await app_db.mark_chunk_received(uid, 1)
         assert r2["is_new"] is True
         # Duplicate
-        r3 = await db.mark_chunk_received(uid, 0)
+        r3 = await app_db.mark_chunk_received(uid, 0)
         assert r3["is_new"] is False
 
-        upload = await db.get_upload_session(uid)
+        upload = await app_db.get_upload_session(uid)
         assert upload["received_chunks"] == 2
 
     @pytest.mark.asyncio
-    async def test_complete_upload_session(self, tmp_path):
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-        uid = await db.create_upload_session(
+    async def test_complete_upload_session(self, app_db):
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
             total_chunks=1, chunk_size=1024, expires_at_iso="2025-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
-        await db.complete_upload_session(uid)
-        upload = await db.get_upload_session(uid)
+        await app_db.complete_upload_session(uid)
+        upload = await app_db.get_upload_session(uid)
         assert upload["completed"] == 1
 
     @pytest.mark.asyncio
-    async def test_list_expired_uploads(self, tmp_path):
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
+    async def test_list_expired_uploads(self, app_db):
         # Create an expired upload
-        uid = await db.create_upload_session(
+        uid = await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
             total_chunks=1, chunk_size=1024, expires_at_iso="2020-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
-        expired = await db.list_expired_uploads("2025-01-01T00:00:00")
+        expired = await app_db.list_expired_uploads("2025-01-01T00:00:00")
         assert len(expired) == 1
         assert expired[0]["id"] == uid
 
     @pytest.mark.asyncio
-    async def test_delete_session_record(self, tmp_path):
+    async def test_delete_session_record(self, app_db):
         """delete_session_record cleans up uploads for a session."""
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-        await db.create_upload_session(
+        await app_db.create_upload_session(
             session_id="sid1", filename="f.h5ad", expected_sha256="abc",
             total_chunks=1, chunk_size=1024, expires_at_iso="2025-01-01T00:00:00",
             placeholder_file_id="pf1",
         )
-        uploads_before = await db.list_uploads_for_session("sid1")
+        uploads_before = await app_db.list_uploads_for_session("sid1")
         assert len(uploads_before) == 1
 
-        await db.delete_session_record("sid1")
-        uploads_after = await db.list_uploads_for_session("sid1")
+        await app_db.delete_session_record("sid1")
+        uploads_after = await app_db.list_uploads_for_session("sid1")
         assert len(uploads_after) == 0
 
     @pytest.mark.asyncio
-    async def test_nonexistent_upload_returns_none(self, tmp_path):
-        db = AppDB(tmp_path / "app.db")
-        await db.init()
-        result = await db.get_upload_session("nope")
+    async def test_nonexistent_upload_returns_none(self, app_db):
+        result = await app_db.get_upload_session("nope")
         assert result is None
 
 

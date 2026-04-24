@@ -3,7 +3,7 @@
 Extracted verbatim from backend/main.py to decouple route handlers from
 the FastAPI app module.
 """
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -63,6 +63,17 @@ class AgentServerConfigRequest(BaseModel):
     agent: Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor", "technique"]
     llm_base_url: str = ""
     api_key: str = ""
+
+
+class AgentConfigUpdateRequest(BaseModel):
+    """Unified request for updating a single agent config field.
+
+    Only one value field should be provided per request.
+    The `field` parameter specifies which field to update.
+    """
+    agent: VALID_AGENTS
+    field: Literal["prompt", "model", "temperature", "vision_enabled"]
+    value: Union[str, float, bool]
 
 
 class BiochemistryInput(BaseModel):

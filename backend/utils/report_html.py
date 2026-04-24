@@ -35,6 +35,32 @@ def _make_figure_block(src: str, caption: str, css_class: str = "step-figure") -
     )
 
 
+def render_table_html(
+    headers: list[str],
+    rows: list[list[str]],
+    *,
+    table_class: str = "direction-table",
+    style: str = "font-size:0.9em",
+) -> str:
+    """Render an HTML table from headers and row data.
+
+    Args:
+        headers: List of column header strings.
+        rows: List of rows, each row a list of HTML cell strings (already escaped).
+        table_class: CSS class for the <table> element.
+        style: Inline style for the <table> element.
+
+    Returns:
+        HTML string for the complete <table> element.
+    """
+    thead = "<thead><tr>" + "".join(f"<th>{h}</th>" for h in headers) + "</tr></thead>"
+    tbody_rows = []
+    for row in rows:
+        tbody_rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>")
+    tbody = "<tbody>" + "".join(tbody_rows) + "</tbody>"
+    return f'<table class="{table_class}" style="{style}">{thead}{tbody}</table>'
+
+
 def _safe_parse_json(response: str) -> Optional[dict]:
     """Parse JSON from LLM response. Delegates to shared implementation."""
     from .formatting import safe_parse_json

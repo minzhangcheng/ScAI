@@ -97,6 +97,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         user = await db.get_user_by_id(user_id)
 
         if user is None:
+            # Auth-optional paths: pass through with token user_id,
+            # let route layer handle ownership checking
+            auth_optional = any(path.startswith(p) for p in AUTH_OPTIONAL_PATHS)
+            if auth_optional:
+                request.state.user_id = user_id
+                return await call_next(request)
             return JSONResponse(
                 status_code=401,
                 content={"detail": "User not found"},

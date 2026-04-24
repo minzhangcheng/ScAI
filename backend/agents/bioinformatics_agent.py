@@ -23,7 +23,7 @@ from ..utils.sandbox import (
     LocalJupyterSandbox, CodeExecutionResult,
 )
 from ..utils.checkpoint import CheckpointManager
-from ..utils.formatting import format_revision_history
+from ..utils.formatting import format_revision_history, truncate_for_llm
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -1433,6 +1433,14 @@ except Exception as _autosave_block_err:
                     # Strip ANSI escape codes from Jupyter traceback
                     if result.error:
                         result.error = strip_ansi(result.error)
+
+                    # Cap output/error at source so all downstream consumers
+                    # (code_history, LLM tool message, analysis_log, notify)
+                    # share one truncated string — prevents prompt-too-long errors.
+                    if result.output:
+                        result.output = truncate_for_llm(result.output)
+                    if result.error:
+                        result.error = truncate_for_llm(result.error)
 
                     code_exec = CodeExecution(
                         code=code,

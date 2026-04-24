@@ -2,8 +2,89 @@
 
 This document is intended for developers and operations personnel, providing technical details, architecture design, development guides, and operations instructions.
 
-**Version**: 0.20.7
-**Last Updated**: 2026-04-23
+**Version**: 0.20.8
+**Last Updated**: 2026-04-24
+
+## Changelog v0.20.8 (2026-04-24)
+
+### Backend Changes
+
+#### backend/config/ Package (Refactor)
+- Split single `backend/config.py` into modular package:
+  - `backend/config/_config.py` (238 lines): Core config logic
+  - `backend/config/__init__.py` (17 lines): Re-exports for backward compatibility (all public symbols from `_config` + `AgentPrompts`)
+  - `backend/config/agent_prompts.py` (148 lines, new): `AgentPrompts` Pydantic model with all agent system prompts (PI, Pathology, Bioinformatics, Biochemistry, Literature)
+- Centralizes prompt configuration previously embedded in config or scattered
+
+#### backend/models/api_requests.py
+- Added `AgentConfigUpdateRequest` model for unified agent config updates (prompt, model, temperature, vision_enabled)
+
+#### backend/models/schemas.py
+- Removed `BioinformaticsCheckpoint` — confirmed dead code, never instantiated anywhere
+
+#### backend/middleware/auth.py
+- Fixed: auth-optional paths (`/api/session/`, `/api/file/`, `/api/download/`) now pass through even when DB user is missing
+- Ownership checking delegated to route layer via `require_session_ownership`
+
+#### backend/services/report/regenerator.py, variants.py
+- Refactored to use new `render_table_html()` helper for score definitions tables
+
+#### backend/utils/report_html.py
+- Added `render_table_html()` helper function for consistent table rendering across report modules
+
+#### backend/main.py
+- Version bumped to 0.20.8
+
+### Frontend Changes
+
+#### frontend/src/components/StopDialog.tsx (new)
+- Modal dialog for stopping analysis with two modes: "Terminate Immediately" and "Terminate and Summarize"
+- Bilingual zh/en labels, loading state indicator, disabled state handling
+
+#### frontend/src/components/ValidationDialog.tsx (new)
+- Modal for API key validation errors with "Ignore" and "Reconfigure" actions
+- Uses i18n translation keys for localization
+
+#### frontend/src/components/AnalysisPanel.tsx
+- Extracted StopDialog and ValidationDialog as standalone components
+- Reduced inline JSX complexity
+
+#### frontend/src/components/ExplorationReportDialog.tsx, RoundFeedbackDialog.tsx
+- Refactored — simplified UI logic, reduced complexity
+
+#### frontend/src/hooks/useCountdownTimer.ts (new)
+- Wall-clock deadline-based countdown timer with pause/resume support
+- Uses `deadlineRef` (absolute timestamp) so background tabs catch up correctly
+
+#### frontend/src/utils/messageTransform.ts (new)
+- `transformRawMessage()`: transforms RawMessage API response to frontend Message type
+- `restoreAgentErrors()`: restores agent errors from API response data into app store
+- Deduplicated from 3 inline copies previously in `useApi.ts`
+
+#### frontend/src/types.ts
+- Added `RoundSummary` type (moved from inline definition in AnalysisPanel.tsx)
+
+#### frontend/src/hooks/useApi.ts
+- Uses `transformRawMessage` and `restoreAgentErrors` from `messageTransform`
+- Removed duplicate inline message/error transformation logic
+
+### Tests
+
+#### backend/tests/conftest.py
+- Added `app_db` pytest fixture providing initialized `AppDB` instance
+
+#### backend/tests/test_schema_imports.py (new)
+- Smoke tests confirming `BioinformaticsCheckpoint` is removed and `CheckpointManager` still exists
+
+#### backend/tests/test_ownership.py
+- Updated tests: middleware now passes through auth-optional paths regardless of DB user existence
+- Removed tests for old middleware behavior (blocking non-owners at middleware level)
+
+#### backend/tests/route_snapshot.json
+- Updated to reflect current route registry
+
+#### backend/tests/test_db.py, test_v1.py, test_upload_integrity.py
+- Refactored to use shared `app_db` fixture instead of creating `AppDB` per test
 
 ## Changelog v0.20.7 (2026-04-23)
 

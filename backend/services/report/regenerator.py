@@ -18,7 +18,7 @@ from typing import Dict, Any
 logger = logging.getLogger(__name__)
 
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
-from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, render_report_html
+from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, render_report_html, render_table_html
 from backend.config import get_session_logs
 
 
@@ -261,7 +261,7 @@ def _build_score_definitions_from_report(report: dict, language: str) -> str:
     if not score_defs:
         return ""
     esc = html_module.escape
-    score_rows = ""
+    rows = []
     for sd in score_defs:
         gene_list = sd.get("gene_list", [])
         genes = esc(", ".join(gene_list[:10]))
@@ -269,14 +269,19 @@ def _build_score_definitions_from_report(report: dict, language: str) -> str:
             genes += f" ... ({len(gene_list)} total)"
         params = sd.get("parameters", {})
         params_str = esc(", ".join(f"{k}={v}" for k, v in params.items()) if params else "default")
-        score_rows += f"""<tr>
-            <td>{esc(sd.get("score_name", ""))}</td>
-            <td><code>{esc(sd.get("method", ""))}</code></td>
-            <td>{esc(sd.get("description", ""))}</td>
-            <td style="font-size:0.85em">{params_str}</td>
-            <td style="font-size:0.85em">{genes}</td>
-            <td style="font-size:0.85em">{esc(sd.get("gene_list_source", "") or "N/A")}</td>
-        </tr>"""
+        rows.append([
+            esc(sd.get("score_name", "")),
+            f"<code>{esc(sd.get('method', ''))}</code>",
+            esc(sd.get("description", "")),
+            params_str,
+            genes,
+            esc(sd.get("gene_list_source", "") or "N/A"),
+        ])
+    table_html = render_table_html(
+        headers=["Score Name", "Method", "Description", "Parameters", "Gene List", "Source"],
+        rows=rows,
+        style="font-size:0.9em",
+    )
     return f"""
         <div class="section" id="score-definitions">
             <div class="section-header">
@@ -284,21 +289,7 @@ def _build_score_definitions_from_report(report: dict, language: str) -> str:
             </div>
             <div class="section-content">
                 <p>The following scores were computed during the analysis. Each score's methodology is documented for transparency and reproducibility.</p>
-                <table class="direction-table" style="font-size:0.9em">
-                    <thead>
-                        <tr>
-                            <th>Score Name</th>
-                            <th>Method</th>
-                            <th>Description</th>
-                            <th>Parameters</th>
-                            <th>Gene List</th>
-                            <th>Source</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {score_rows}
-                    </tbody>
-                </table>
+                {table_html}
             </div>
         </div>"""
 

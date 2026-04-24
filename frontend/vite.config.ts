@@ -3,17 +3,12 @@ import react from '@vitejs/plugin-react'
 
 const backendPort = /^\d+$/.test(process.env.SCAI_BACKPORT || '') ? process.env.SCAI_BACKPORT! : '8000'
 const backendHost = /^[\w.\-]+$/.test(process.env.SCAI_HOST || '') ? process.env.SCAI_HOST! : 'localhost'
-const extraHosts = (process.env.SCAI_ALLOWED_HOSTS || '').split(',').filter(Boolean)
 
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 3000,
-    allowedHosts: [
-      'scai.cmz.ac.cn',
-      'scai.organoids.org.cn',
-      ...extraHosts
-    ],
+    allowedHosts: true,
     proxy: {
       '/api': {
         target: `http://${backendHost}:${backendPort}`,
@@ -24,5 +19,9 @@ export default defineConfig({
         ws: true
       }
     }
+  },
+  preview: {
+    port: 3000,
+    allowedHosts: true,
   }
 })

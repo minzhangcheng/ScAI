@@ -97,6 +97,24 @@ def safe_parse_json(response: str, default: Optional[Dict[str, Any]] = None) -> 
     return default
 
 
+def truncate_for_llm(text: str, max_chars: int = 128 * 1024) -> str:
+    """Truncate sandbox output for LLM consumption, keeping head and tail halves.
+
+    When text exceeds max_chars, retains the first and last (max_chars // 2)
+    characters with an omission marker in between so the LLM sees both the
+    start (context/imports/setup) and the end (errors/results).
+    """
+    if not text or len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    omitted = len(text) - max_chars
+    return (
+        text[:half]
+        + f"\n\n[... truncated {omitted} chars from sandbox output ...]\n\n"
+        + text[-half:]
+    )
+
+
 def format_revision_history(entries: List[Dict[str, Any]], include_reviewer: bool = True) -> str:
     """Format revision history entries as a human-readable text block.
 
