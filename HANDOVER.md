@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [docs/user-guide.md](docs/user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.20.9 · **Last updated**: 2026-04-25
+**Version**: 0.20.10 · **Last updated**: 2026-04-26
 
 ## 1. Runtime Architecture
 
@@ -81,7 +81,7 @@ scai/
 | `admin.py`         | `/api/admin/*` — user management, cascade cleanup.                                        |
 | `config.py`        | `/api/config/*` — LLM API key / proxy / PubMed email, with validation.                    |
 | `sessions.py`      | `/api/sessions/*` — session CRUD, listing, load.                                          |
-| `session_config.py`| Per-session agent configs (models, temperatures, prompts, vision flags).                  |
+| `session_config.py`| Per-session agent configs (models, temperatures, prompts, vision flags) and round-wait setting. |
 | `indicators.py`    | Biochemistry indicator create/update/delete.                                              |
 | `upload.py`        | Chunked upload endpoints with integrity verification.                                     |
 | `files.py`         | File serving (uploaded data, generated figures).                                          |
@@ -194,8 +194,9 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.20.x — auth, modularization, and admin (2026-04-21 → 2026-04-24)**
+**0.20.x — auth, modularization, and admin (2026-04-21 → 2026-04-26)**
 
+- `0.20.10` — session import now requires authentication and stamps `user_id` on imported sessions (tar.gz / zip / JSON paths); per-session round-wait setting editable from session panel via new `/session/{id}/round-wait` endpoint; round-wait options extracted to shared `constants/roundWait.ts`; `loadSession` syncs `round_wait_seconds` from server.
 - `0.20.9` — annotate_clusters robustness (cluster_key/rank_key hints, expanded cell-type guard regex, retry loop with supervisor nudge); upstream LLM exhaustion handling (`UpstreamExhaustedError`, extended 5xx retries); WebSocket reconnect on resume; HANDOVER/README rewrite.
 - `0.20.8` — `backend/config/` package split; new `AgentPrompts` model; `StopDialog` / `ValidationDialog` components; `useCountdownTimer` and `messageTransform` utilities; auth-optional paths now pass through missing DB users (ownership enforced at route layer); dead `BioinformaticsCheckpoint` removed.
 - `0.20.7` — `AUTH_OPTIONAL_PATHS` middleware; shared `PI_AGENT_NAME` constant; `_TECHNICAL_ERROR_TYPES` extracted to `utils/error_parsing`; session-cleanup refactor.

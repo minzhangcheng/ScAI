@@ -34,6 +34,7 @@ export interface SessionLoadResponse {
   integrated_report?: string
   exploration_report_url?: string
   state_version?: number
+  round_wait_seconds?: number
   agent_errors?: RawAgentError[]
   messages?: RawMessage[]
 }

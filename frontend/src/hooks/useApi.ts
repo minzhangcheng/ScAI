@@ -303,6 +303,11 @@ export function useSession() {
 
       setCurrentSession(session)
 
+      // Sync round_wait_seconds from server to store
+      if (typeof data.round_wait_seconds === 'number') {
+        useAppStore.getState().setRoundWaitSeconds(data.round_wait_seconds)
+      }
+
       // Restore state version (always reset to avoid cross-session version collision)
       useAppStore.getState().setStateVersion(data.state_version ?? 0)
 
@@ -361,6 +366,16 @@ export function useSession() {
       instruction: response.data.instruction,
     })
     return response
+  }, [])
+
+  const updateRoundWait = useCallback(async (seconds: number) => {
+    const session = useAppStore.getState().currentSession
+    if (!session) throw new Error('No active session')
+    await apiFetch(`/session/${session.id}/round-wait`, {
+      method: 'POST',
+      body: JSON.stringify({ round_wait_seconds: seconds }),
+    })
+    useAppStore.getState().setRoundWaitSeconds(seconds)
   }, [])
   
   // Ensure session exists on server (handles server restart)
@@ -674,6 +689,7 @@ export function useSession() {
     deleteSession,
     saveSession,
     updateSessionInfo,
+    updateRoundWait,
     addGroup,
     updateGroup,
     deleteGroup,

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { useSession, apiFetch, generateId } from '../hooks/useApi'
+import { useSession, apiFetch, generateId, authHeaders } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
+import { ROUND_WAIT_OPTIONS } from '../constants/roundWait'
 import { DataConfigMenu } from './DataConfigMenu'
 import { UserMenu } from './UserMenu'
 import { AboutDialog } from './AboutDialog'
@@ -27,7 +28,7 @@ interface SidebarProps {
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   const { currentSession, setCurrentSession, clearMessages, language, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback, authUser } = useAppStore()
-  const { createSession, loadSession, listSessions, deleteSession, updateSessionInfo } = useSession()
+  const { createSession, loadSession, listSessions, deleteSession, updateSessionInfo, updateRoundWait } = useSession()
   const isReadOnly = authUser?.status === 'readonly'
   const { t } = useTranslation(language)
   const [showNewSession, setShowNewSession] = useState(false)
@@ -231,6 +232,11 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
         data = await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest()
           xhr.open('POST', '/api/session/import')
+          // Inject Authorization header — XHR doesn't go through apiFetch's auto-injection.
+          // Without this, /api/session/ middleware treats request as unauth and the route returns 401.
+          for (const [k, v] of Object.entries(authHeaders())) {
+            xhr.setRequestHeader(k, v)
+          }
 
           xhr.upload.onprogress = (ev) => {
             if (ev.lengthComputable) {
@@ -593,11 +599,11 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                 onChange={(e) => setRoundWaitSeconds(parseInt(e.target.value))}
                 className="w-full text-sm font-mono text-surface-700 bg-white px-3 py-1.5 rounded border border-surface-200 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
               >
-                <option value={0}>{language === 'zh' ? '不等待' : 'No wait'}</option>
-                <option value={300}>{language === 'zh' ? '5 分钟' : '5 minutes'}</option>
-                <option value={900}>{language === 'zh' ? '15 分钟' : '15 minutes'}</option>
-                <option value={3600}>{language === 'zh' ? '60 分钟' : '60 minutes'}</option>
-                <option value={-1}>{language === 'zh' ? '手动跳过' : 'Manual skip'}</option>
+                {ROUND_WAIT_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>
+                    {language === 'zh' ? opt.labelZh : opt.labelEn}
+                  </option>
+                ))}
               </select>
               <p className="text-xs text-surface-500 mt-2 leading-relaxed">
                 {language === 'zh'
@@ -651,6 +657,27 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                     className="w-full px-2 py-1 border border-surface-200 rounded text-xs bg-white text-surface-800 resize-y"
                     rows={8}
                   />
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-accent-600 shrink-0" />
+                    <select
+                      value={roundWaitSeconds}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value)
+                        setRoundWaitSeconds(v)
+                        updateRoundWait(v).catch(err => {
+                          console.error('Failed to update round wait', err)
+                          loadSession(currentSession.id)
+                        })
+                      }}
+                      className="flex-1 text-xs font-mono text-surface-700 bg-white px-2 py-1 rounded border border-surface-200 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+                    >
+                      {ROUND_WAIT_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>
+                          {language === 'zh' ? opt.labelZh : opt.labelEn}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                   <button
                     onClick={() => setEditingSession(false)}
                     className="text-xs text-accent-600 hover:underline"

@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 
 from backend.config import (
     DATA_BASE_DIR, REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR,
@@ -289,7 +289,7 @@ async def export_download(session_id: str):
 
 
 @router.post("/api/session/import")
-async def import_state(background_tasks: BackgroundTasks, file: UploadFile = File(...), import_id: Optional[str] = Form(None)):
+async def import_state(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...), import_id: Optional[str] = Form(None)):
     """Import session from tar.gz/zip/json archive, restoring all files to their directories.
 
     For tar.gz: streams upload to temp file, then extracts in a background task and returns
@@ -298,6 +298,10 @@ async def import_state(background_tasks: BackgroundTasks, file: UploadFile = Fil
     response from reaching the client, it can still poll for status.
     For zip/json: processed inline (small files).
     """
+    user_id = getattr(request.state, "user_id", "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required to import sessions")
+
     filename = file.filename or ""
 
     if filename.endswith(('.tar.gz', '.tgz')):
@@ -318,7 +322,7 @@ async def import_state(background_tasks: BackgroundTasks, file: UploadFile = Fil
 
         async with _import_jobs_lock:
             _import_jobs[import_job_id] = {"status": "pending"}
-        background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id)
+        background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id, user_id)
 
         return APIResponse(
             success=True,
@@ -329,12 +333,13 @@ async def import_state(background_tasks: BackgroundTasks, file: UploadFile = Fil
     elif filename.endswith('.zip'):
         # ---- Legacy zip import (typically small) ----
         content = await file.read()
-        state = _import_zip(content)
+        state = _import_zip(content, user_id)
 
     else:
         # ---- Plain JSON (backward compatibility) ----
         content = await file.read()
         state_data = json.loads(content.decode('utf-8'))
+        state_data["user_id"] = user_id
         state = AnalysisState(**state_data)
 
     # Validate imported session ID (zip/json path)
@@ -353,10 +358,10 @@ async def import_state(background_tasks: BackgroundTasks, file: UploadFile = Fil
     )
 
 
-async def _process_import_job(tmp_path_str: str, import_job_id: str):
+async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: str):
     """Background task: extract tar.gz archive and load session."""
     try:
-        state = await asyncio.to_thread(_import_tar_gz, tmp_path_str)
+        state = await asyncio.to_thread(_import_tar_gz, tmp_path_str, user_id)
 
         if not state.id or '/' in state.id or '\\' in state.id or '..' in state.id:
             async with _import_jobs_lock:
@@ -391,7 +396,7 @@ async def get_import_status(import_id: str):
 # Import helper functions
 # ---------------------------------------------------------------------------
 
-def _import_tar_gz(file_path: str) -> AnalysisState:
+def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
     """Import from tar.gz archive file on disk with path remapping"""
     data_base_str = str(DATA_BASE_DIR)
 
@@ -518,6 +523,7 @@ def _import_tar_gz(file_path: str) -> AnalysisState:
         str(REPORTS_DIR / session_id), str(get_session_reports(session_id)))
 
     state_data = json.loads(state_json_str)
+    state_data["user_id"] = user_id
     state = AnalysisState(**state_data)
 
     # Write session file to new location
@@ -528,7 +534,7 @@ def _import_tar_gz(file_path: str) -> AnalysisState:
     return state
 
 
-def _import_zip(content: bytes) -> AnalysisState:
+def _import_zip(content: bytes, user_id: str) -> AnalysisState:
     """Legacy zip import (backward compatibility)"""
     zip_buffer = io.BytesIO(content)
 
@@ -547,6 +553,7 @@ def _import_zip(content: bytes) -> AnalysisState:
             raise HTTPException(status_code=400, detail="state.json not found in archive")
 
         state_data = json.loads(zf.read(state_json_path).decode('utf-8'))
+        state_data["user_id"] = user_id
         state = AnalysisState(**state_data)
 
         # Extract notebook if exists
