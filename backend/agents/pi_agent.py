@@ -680,6 +680,11 @@ PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]
         else:
             toolkit_intro = ""
 
+        # Append additional targeted-analysis methods (Round 2+ enrichments)
+        toolkit_intro += """- **Gene Expression Programs (Lightweight)**: For continuous cell states, prefer `sklearn.decomposition.NMF` on highly variable genes; for large datasets consider subsampling (e.g., ~3000 cells) to keep runtime tractable. Avoid full cNMF bootstraps unless explicitly requested.
+- **Biomarker Discovery (Conditional)**: When the target population has clear binary/multiclass metadata (e.g., `len(adata.obs['Condition'].unique()) >= 2`), use `sklearn.ensemble.RandomForestClassifier` to extract top feature genes (~20 by default).
+"""
+
         prompt = f"""
 ## Project: {state.name}
 ## Research Objective: {state.initial_instruction}
@@ -712,16 +717,16 @@ Available analysis toolkit (use as many as relevant):
 - **Marker gene visualization**: Dot plots, violin plots, feature plots for key genes across conditions
 
 IMPORTANT:
-- Generate AT LEAST 4-6 bioinformatics tasks to ensure comprehensive analysis
-- Each task should specify: what to analyze, which method to use, and which cell types to focus on
-- Include both hypothesis-confirming AND exploratory analyses
-- Do NOT repeat analyses already completed in Round 1 (basic pipeline, annotation, etc.)
-- The Jupyter kernel retains all Round 1 variables — build upon existing results
-"""
-        if has_bulk_data:
-            prompt += """- If bulk RNA-seq data is available, include AT LEAST ONE task that validates this direction's
-  findings on the bulk data. Reuse the bulk variables already loaded in Round 1 (see the data
-  context section for their exact names); do NOT re-run the bulk DEG pipeline from scratch.
+- Generate AT LEAST 4-6 bioinformatics tasks that form a LOGICAL, CASCADING analytical storyline.
+- Design tasks so Task N builds upon the findings of Task N-1 where possible, rather than as isolated probes.
+- For each bioinformatics task, you MUST specify three fields:
+  1. Task & Method: what to analyze, the concrete method/library to use, and the target cell types.
+  2. Rationale: WHY this is biologically relevant to the chosen direction (state the underlying hypothesis).
+  3. Expected Outcome: what specific patterns or values would confirm OR reject the hypothesis.
+- Include both hypothesis-confirming AND exploratory analyses.
+- Do NOT repeat analyses already completed in Round 1 (basic pipeline, annotation, etc.).
+- The Jupyter kernel retains all Round 1 variables — build upon existing results.
+- **Literature Verification Loop**: in `literature_topics`, explicitly ask the Literature Agent to search PubMed for recent evidence that SUPPORTS or REFUTES each bioinformatics task's hypothesis, and to flag any contradictory evidence prominently in its summary.
 """
 
         prompt += f"""Reply in JSON format:

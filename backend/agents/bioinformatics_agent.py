@@ -535,6 +535,20 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
    - No grid lines unless explicitly needed for the figure type
    - Always call ax.set_xticks() BEFORE ax.set_xticklabels() to ensure label count matches tick count
 
+   **PLOT RULES & MULTI-MODAL FALLBACK (CRITICAL):**
+   - Figures must have precise titles, readable (rotated when needed) labels, and colorblind-friendly palettes (e.g. 'viridis').
+   - Downstream review nodes cannot read image pixels. AFTER saving any plot, you MUST `print()` the raw data backing the plot's core conclusion so that subsequent agents can interpret it from text.
+     * Volcano plot → `print(top_5_up_genes, top_5_down_genes)` (with logFC and adj-p columns).
+     * UMAP / clustering → `print(adata.obs['leiden'].value_counts())`.
+     * Heatmap → `print(matrix.head())` or top differentially scored rows.
+   - All biological interpretations and report claims MUST cite values from this printed text, not from the figure alone.
+
+   **CODE-LEVEL SELF-REPAIR (CRITICAL):**
+   - Wrap analysis steps in `try / except` and use adaptive thresholds before giving up.
+     * If `sc.tl.rank_genes_groups`-style DEG returns < 5 hits, retry once within the same cell with a relaxed logFC/p-value threshold and `print()` both the original and relaxed results.
+     * If cell-cell communication output is overwhelmingly large, automatically filter (e.g. p < 0.01 plus a relevance constraint) and `print()` the filter applied.
+   - Always log the recovery action so the PI agent can see what was retried and why.
+
    **COMPOSITION / PROPORTION BARPLOT RULES:**
    - When plotting cell type proportions across conditions (e.g., WT vs DKO):
      1. The cell type categories on the y-axis must be CONDITION-INDEPENDENT (e.g., 'Hepatocyte', not 'Hepatocyte_WT')
@@ -557,6 +571,7 @@ SECURITY RESTRICTIONS:
 
 WORKFLOW GUIDELINES:
 - Technical steps can be done autonomously: data loading, QC, normalization, PCA, clustering, UMAP, basic DE
+- **Serendipity Check (Variance Partitioning)**: Before executing a highly targeted task, run a quick global variance check (e.g. correlate top PCs with each metadata column). If an unmentioned covariate (batch, technical artifact, unexpected cell state) drives variance far exceeding the chosen hypothesis, `print()` it and flag it as a "Counter-intuitive Finding" in the same cell.
 - **MEMORY MANAGEMENT (CRITICAL to avoid OOM crashes)**:
   The adata object persists in the Jupyter kernel between code cells. Do NOT reload adata from .h5ad files unless absolutely necessary (e.g., after a kernel restart). Reuse the in-memory adata object. When you no longer need a large intermediate object (e.g., a subset), delete it with `del variable_name` and call `import gc; gc.collect()`.
   When saving checkpoints with adata.write(), keep at most 1-2 checkpoint files — do NOT accumulate many large .h5ad files.
