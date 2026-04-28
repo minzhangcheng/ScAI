@@ -34,3 +34,12 @@ class JobFailed(ScaiError):
         self.job_id = job_id
         self.error = error
         super().__init__(f"Job {job_id} failed: {error}")
+
+
+class ImportFailed(ScaiError):
+    """Raised when a session import job ends in 'failed' state."""
+
+    def __init__(self, import_id: str, error: str = "unknown"):
+        self.import_id = import_id
+        self.error = error
+        super().__init__(f"Import {import_id} failed: {error}")

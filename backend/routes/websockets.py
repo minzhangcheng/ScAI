@@ -15,6 +15,10 @@ from backend.state import (
     sessions as _sessions,
 )
 from backend.utils.auth import ws_authenticate_and_load
+from backend.services.session_store import (
+    update_session_cache as _update_session_cache,
+    async_save_session as _async_save_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +340,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     # State callback to save after each round
     async def state_callback(state: AnalysisState):
-        from backend.services.session_store import update_session_cache as _update_session_cache, async_save_session as _async_save_session
         await _update_session_cache(session_id, state)
         # Use thread pool for disk I/O to avoid blocking event loop
         await _async_save_session(session_id, state)
@@ -461,7 +464,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         finally:
             _run_tasks.pop(session_id, None)
 
-        from backend.services.session_store import update_session_cache as _update_session_cache, async_save_session as _async_save_session
         await _update_session_cache(session_id, final_state)
         logger.info(f"Workflow completed for session {session_id}")
 

@@ -9,6 +9,7 @@ Usage:
     job.download_export("results.zip")
 """
 import json
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +17,7 @@ import httpx
 
 from .job import Job
 from .upload import upload_file
-from .errors import ScaiError, AuthError
+from .errors import ScaiError, AuthError, ImportFailed
 
 
 class Client:
@@ -102,3 +103,107 @@ class Client:
     def get_job(self, job_id: str) -> Job:
         """Get a Job object for an existing analysis."""
         return Job(self._http, job_id)
+
+    def list_sessions(self) -> list[dict]:
+        """List all analysis sessions belonging to the authenticated user.
+
+        Returns:
+            A list of session dicts. Each dict contains at least:
+            ``id``, ``name``, ``status``, ``current_round``, ``created_at``,
+            ``updated_at``. ``status`` is one of TaskStatus values such as
+            ``"pending"``, ``"running"``, ``"waiting_input"``,
+            ``"waiting_annotation"``, ``"generating_report"``, ``"completed"``,
+            ``"failed"``, ``"paused"``.
+        """
+        r = self._http.get("/api/sessions")
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        r.raise_for_status()
+        return r.json().get("sessions", [])
+
+    def import_session(
+        self,
+        archive_path: str | Path,
+        *,
+        wait: bool = True,
+        poll_interval: float = 2.0,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """Import a session from a local archive (.tar.gz / .tgz / .zip / .json).
+
+        The server processes ``.tar.gz``/``.tgz`` archives asynchronously; this
+        method polls the import-status endpoint until completion when
+        ``wait=True`` (default). ``.zip`` and plain JSON files are processed
+        synchronously by the server and return the new ``session_id``
+        immediately.
+
+        Args:
+            archive_path: Local path to the archive file.
+            wait: If True (default), block until the import completes. Only
+                relevant for tar.gz archives. When False on a tar.gz upload,
+                returns the ``import_id`` instead of a ``session_id``.
+            poll_interval: Seconds between import-status polls.
+            timeout: Maximum seconds to wait. ``None`` means no limit.
+
+        Returns:
+            The newly created ``session_id`` (or ``import_id`` if
+            ``wait=False`` for an async tar.gz upload).
+
+        Raises:
+            FileNotFoundError: If ``archive_path`` does not exist.
+            AuthError: If authentication fails.
+            ImportFailed: If the server reports a failed import.
+            TimeoutError: If ``timeout`` is exceeded while polling.
+        """
+        archive_path = Path(archive_path)
+        if not archive_path.is_file():
+            raise FileNotFoundError(str(archive_path))
+
+        with open(archive_path, "rb") as fh:
+            files = {"file": (archive_path.name, fh, "application/octet-stream")}
+            r = self._http.post("/api/session/import", files=files)
+
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        if r.status_code >= 400:
+            raise ScaiError(f"Import failed: HTTP {r.status_code}: {r.text}")
+        body = r.json()
+
+        if body.get("session_id"):
+            return body["session_id"]
+
+        import_id = body.get("data", {}).get("import_id")
+        if not import_id:
+            raise ScaiError(f"Unexpected import response: {body}")
+
+        if not wait:
+            return import_id
+
+        return self._wait_for_import(import_id, poll_interval, timeout)
+
+    def _wait_for_import(
+        self,
+        import_id: str,
+        poll_interval: float,
+        timeout: Optional[int],
+    ) -> str:
+        start = time.time()
+        while True:
+            r = self._http.get(f"/api/session/import/{import_id}")
+            if r.status_code == 401:
+                raise AuthError("Authentication failed")
+            r.raise_for_status()
+            info = r.json()
+            st = info.get("status")
+            if st == "completed":
+                session_id = info.get("session_id")
+                if not session_id:
+                    raise ScaiError(f"Import completed but no session_id: {info}")
+                return session_id
+            if st == "failed":
+                raise ImportFailed(import_id, info.get("error", "unknown"))
+            if timeout is not None and (time.time() - start) > timeout:
+                raise TimeoutError(
+                    f"Import {import_id} did not complete within {timeout}s"
+                )
+            time.sleep(poll_interval)

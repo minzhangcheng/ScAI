@@ -1,15 +1,42 @@
-"""ScAI Python SDK — submit batch analyses via the v1 API."""
+"""ScAI Python SDK — submit batch analyses via the v1 API.
+
+Usage:
+    from scai_client import Client
+
+    client = Client(base_url="http://localhost:8000", api_key="scai_xxx")
+
+    # Submit and wait:
+    job = client.submit("config.json")
+    job.wait(timeout=3600)
+    job.download_export("results.tar.gz")
+
+    # List existing sessions and their status:
+    for s in client.list_sessions():
+        print(s["id"], s["status"], s.get("current_round"))
+
+    # Import a previously exported archive:
+    session_id = client.import_session("session-export.tar.gz")
+    job = client.get_job(session_id)
+"""
 from .client import Client
 from .job import Job
-from .errors import AuthError, FileIntegrityError, JobFailed, ScaiError, UploadError
+from .errors import (
+    AuthError,
+    FileIntegrityError,
+    ImportFailed,
+    JobFailed,
+    ScaiError,
+    UploadError,
+)
 
 __all__ = [
     "Client",
     "Job",
     "AuthError",
     "FileIntegrityError",
+    "ImportFailed",
     "JobFailed",
     "ScaiError",
     "UploadError",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

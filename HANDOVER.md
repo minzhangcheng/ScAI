@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [docs/user-guide.md](docs/user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.20.11 · **Last updated**: 2026-04-27
+**Version**: 0.20.12 · **Last updated**: 2026-04-28
 
 ## 1. Runtime Architecture
 
@@ -194,8 +194,9 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.20.x — auth, modularization, and admin (2026-04-21 → 2026-04-26)**
+**0.20.x — auth, modularization, and admin (2026-04-21 → 2026-04-28)**
 
+- `0.20.12` — Python client: added `list_sessions()` to list all analysis sessions and `import_session()` to import session archives with polling support; added `ImportFailed` exception class; version bumped to 0.2.0. Backend: refactored WebSocket route imports to top-level.
 - `0.20.11` — Bioinformatics Agent: multi-modal fallback rules requiring `print()` of raw data backing every plot for downstream agents; code-level self-repair with try/except and adaptive DEG thresholds; serendipity check (variance partitioning) before targeted analyses to flag hidden covariates. PI Agent: added lightweight NMF gene-expression programs and RandomForest biomarker discovery to Round-2+ toolkit; task-generation prompt restructured to require cascading storyline with Task/Rationale/Expected Outcome fields; literature verification loop for each bioinformatics hypothesis.
 - `0.20.10` — session import now requires authentication and stamps `user_id` on imported sessions (tar.gz / zip / JSON paths); per-session round-wait setting editable from session panel via new `/session/{id}/round-wait` endpoint; round-wait options extracted to shared `constants/roundWait.ts`; `loadSession` syncs `round_wait_seconds` from server.
 - `0.20.9` — annotate_clusters robustness (cluster_key/rank_key hints, expanded cell-type guard regex, retry loop with supervisor nudge); upstream LLM exhaustion handling (`UpstreamExhaustedError`, extended 5xx retries); WebSocket reconnect on resume; HANDOVER/README rewrite.
