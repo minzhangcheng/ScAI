@@ -1,6 +1,7 @@
 """Setup routes: initial admin initialization."""
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
+from typing import Optional
 
 from backend.utils.auth import get_db, hash_password
 
@@ -13,6 +14,7 @@ class SetupStatusResponse(BaseModel):
 
 class SetupAdminRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
+    email: Optional[EmailStr] = None
 
 
 class SetupAdminResponse(BaseModel):
@@ -37,10 +39,9 @@ async def setup_admin(req: SetupAdminRequest):
             status_code=status.HTTP_409_CONFLICT,
             detail="Admin already initialized",
         )
-    # Create admin if not exists, then ensure password and status are set correctly
     pw_hash = hash_password(req.password)
-    admin_id = await db.create_admin_if_missing("admin@scai.local", pw_hash)
-    await db.update_user_password(admin_id, pw_hash)
-    await db.set_user_status(admin_id, "active")
+    admin_id, created = await db.create_admin_if_missing(password_hash=pw_hash, email=req.email)
+    if not created:
+        await db.update_user_password(admin_id, pw_hash)
     await db.set_meta("admin_initialized", "1")
     return SetupAdminResponse(message="Admin password set successfully")

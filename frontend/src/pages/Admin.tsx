@@ -8,8 +8,8 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 
 interface AdminUser {
   id: string
-  email: string
-  username?: string
+  username: string
+  email?: string
   role: 'admin' | 'user'
   status: 'active' | 'pending' | 'readonly'
   created_at: string
@@ -28,7 +28,7 @@ function PasswordPrompt({ open, onClose, onConfirm }: PasswordPromptProps) {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const { language } = useAppStore()
+  const language = useAppStore(s => s.language)
   const zh = language === 'zh'
 
   const reset = () => {
@@ -151,18 +151,20 @@ function PasswordPrompt({ open, onClose, onConfirm }: PasswordPromptProps) {
 interface CreateUserPromptProps {
   open: boolean
   onClose: () => void
-  onConfirm: (data: { email: string; password: string }) => Promise<void>
+  onConfirm: (data: { username: string; password: string; email?: string }) => Promise<void>
 }
 
 function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
+  const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const { language } = useAppStore()
+  const language = useAppStore(s => s.language)
   const zh = language === 'zh'
 
   const reset = () => {
+    setUsername('')
     setEmail('')
     setPassword('')
     setError('')
@@ -174,8 +176,8 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
   }
 
   const handleConfirm = async () => {
-    if (!email.trim()) {
-      setError(zh ? '请输入邮箱' : 'Email is required')
+    if (!username.trim()) {
+      setError(zh ? '请输入用户名' : 'Username is required')
       return
     }
     if (!password || password.length < 8) {
@@ -185,7 +187,7 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
     setLoading(true)
     setError('')
     try {
-      await onConfirm({ email: email.trim(), password })
+      await onConfirm({ username: username.trim(), password, email: email.trim() || undefined })
       handleClose()
     } catch (e: any) {
       setError(e.message || (zh ? '创建失败' : 'Create failed'))
@@ -213,7 +215,19 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
         <div className="px-6 py-5 space-y-4">
           <div>
             <label className="block text-sm font-medium text-surface-700 mb-1.5">
-              Email
+              {zh ? '用户名' : 'Username'}
+            </label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder={zh ? '输入用户名' : 'Enter username'}
+              className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-surface-700 mb-1.5">
+              {zh ? '邮箱（可选）' : 'Email (optional)'}
             </label>
             <input
               type="email"
@@ -248,7 +262,7 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
           </button>
           <button
             onClick={handleConfirm}
-            disabled={loading || !email.trim() || !password}
+            disabled={loading || !username.trim() || !password}
             className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-accent-600 hover:bg-accent-700 rounded-lg transition-colors disabled:opacity-50"
           >
             {loading && <Loader2 className="w-4 h-4 animate-spin" />}
@@ -262,7 +276,8 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
 }
 
 export function Admin() {
-  const { logout, language } = useAppStore()
+  const logout = useAppStore(s => s.logout)
+  const language = useAppStore(s => s.language)
   const navigate = useNavigate()
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
@@ -302,10 +317,12 @@ export function Admin() {
     })
   }
 
-  const handleCreateUser = async (data: { email: string; password: string }) => {
+  const handleCreateUser = async (data: { username: string; password: string; email?: string }) => {
+    const body: Record<string, string> = { username: data.username, password: data.password }
+    if (data.email) body.email = data.email
     await apiFetch('/admin/users', {
       method: 'POST',
-      body: JSON.stringify({ email: data.email, password: data.password }),
+      body: JSON.stringify(body),
     })
     await fetchUsers()
   }
@@ -402,7 +419,7 @@ export function Admin() {
             <thead>
               <tr className="bg-surface-50 border-b border-surface-200">
                 <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 uppercase tracking-wider">
-                  Email / Username
+                  {zh ? '用户名' : 'Username'}
                 </th>
                 <th className="text-left px-6 py-3 text-xs font-semibold text-surface-500 uppercase tracking-wider">
                   Role
@@ -439,9 +456,9 @@ export function Admin() {
                     <tr key={user.id} className="hover:bg-surface-50 transition-colors">
                       <td className="px-6 py-4">
                         <div>
-                          <p className="text-sm font-medium text-surface-900">{user.email}</p>
-                          {user.username && (
-                            <p className="text-xs text-surface-500">{user.username}</p>
+                          <p className="text-sm font-medium text-surface-900">{user.username}</p>
+                          {user.email && (
+                            <p className="text-xs text-surface-500">{user.email}</p>
                           )}
                         </div>
                       </td>
@@ -521,7 +538,7 @@ export function Admin() {
       <ConfirmDialog
         open={deleteTarget !== null}
         title={zh ? '确认删除' : 'Confirm Delete'}
-        message={deleteTarget ? `${zh ? '确定要删除用户' : 'Are you sure you want to delete user'} "${deleteTarget.email}"?` : ''}
+        message={deleteTarget ? `${zh ? '确定要删除用户' : 'Are you sure you want to delete user'} "${deleteTarget.username}"?` : ''}
         confirmLabel={zh ? '删除' : 'Delete'}
         variant="danger"
         onConfirm={handleDeleteUser}
@@ -551,7 +568,7 @@ function AdminPasswordPrompt({ open, user, onClose, onConfirm }: AdminPasswordPr
   const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const { language } = useAppStore()
+  const language = useAppStore(s => s.language)
   const zh = language === 'zh'
 
   const reset = () => {
@@ -597,7 +614,7 @@ function AdminPasswordPrompt({ open, user, onClose, onConfirm }: AdminPasswordPr
       <div className="bg-white rounded-2xl shadow-modal w-full max-w-sm mx-4 overflow-hidden animate-scale-in">
         <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200">
           <h2 className="text-lg font-display font-semibold text-surface-900">
-            {zh ? `修改 ${user.email} 的密码` : `Change Password for ${user.email}`}
+            {zh ? `修改 ${user.username} 的密码` : `Change Password for ${user.username}`}
           </h2>
           <button onClick={handleClose} className="p-1 hover:bg-surface-100 rounded-lg transition-colors">
             <X className="w-5 h-5 text-surface-400" />

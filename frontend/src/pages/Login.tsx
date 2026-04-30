@@ -6,7 +6,9 @@ import { AuthLayout } from '../components/AuthLayout'
 export function Login() {
   const nav = useNavigate()
   const login = useAppStore(s => s.login)
-  const [identifier, setIdentifier] = useState('')
+  const language = useAppStore(s => s.language)
+  const zh = language === 'zh'
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
@@ -29,7 +31,7 @@ export function Login() {
     setLoading(true)
     setErr('')
     try {
-      await login(identifier, password)
+      await login(username, password)
       const authUser = useAppStore.getState().authUser
       if (authUser?.role === 'admin') {
         nav('/admin')
@@ -45,7 +47,7 @@ export function Login() {
 
   return (
     <AuthLayout subtitle="Single Cell Sequencing Analysis Driven by AI" onSubmit={handleSubmit}>
-      <h2 className="text-lg font-semibold text-surface-700">Sign In</h2>
+      <h2 className="text-lg font-semibold text-surface-700">{zh ? '登录' : 'Sign In'}</h2>
 
       {err && (
         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">{err}</div>
@@ -53,25 +55,25 @@ export function Login() {
 
       {registered === 'pending' && (
         <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm">
-          Account created successfully. Please sign in.
+          {zh ? '账号创建成功，请登录。' : 'Account created successfully. Please sign in.'}
         </div>
       )}
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">Email or admin</label>
+        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '用户名' : 'Username'}</label>
         <input
           type="text"
-          name="identifier"
-          value={identifier}
-          onChange={e => setIdentifier(e.target.value)}
+          name="username"
+          value={username}
+          onChange={e => setUsername(e.target.value)}
           required
           className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
-          placeholder="you@example.com"
+          placeholder={zh ? '输入用户名' : 'Enter your username'}
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-surface-600 mb-1">Password</label>
+        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '密码' : 'Password'}</label>
         <input
           type="password"
           value={password}
@@ -88,13 +90,13 @@ export function Login() {
         disabled={loading}
         className="w-full py-2.5 bg-accent-600 hover:bg-accent-700 text-white font-medium rounded-lg transition-colors disabled:opacity-50"
       >
-        {loading ? 'Signing in...' : 'Sign In'}
+        {loading ? (zh ? '登录中...' : 'Signing in...') : (zh ? '登录' : 'Sign In')}
       </button>
 
       <p className="text-center text-sm text-surface-500">
-        Don't have an account?{' '}
+        {zh ? '没有账号？' : "Don't have an account?"}{' '}
         <Link to="/register" className="text-accent-600 hover:text-accent-700 font-medium">
-          Register
+          {zh ? '注册' : 'Register'}
         </Link>
       </p>
     </AuthLayout>

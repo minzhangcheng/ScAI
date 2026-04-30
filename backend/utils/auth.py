@@ -16,6 +16,17 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from backend.utils.db import AppDB
 from backend.config import APP_DB_PATH
 
+
+async def check_user_uniqueness(db: AppDB, username: str, email: Optional[str] = None):
+    """Raise 409 if username or email is already taken."""
+    existing = await db.get_user_by_username(username)
+    if existing:
+        raise HTTPException(status_code=409, detail="Username already taken")
+    if email:
+        existing_email = await db.get_user_by_email(email)
+        if existing_email:
+            raise HTTPException(status_code=409, detail="Email already registered")
+
 # ── Password hashing ────────────────────────────────────────────────────
 
 _BCRYPT_MAX_PW_BYTES = 72
@@ -48,9 +59,9 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 72  # 3 days
 
 
-def create_access_token(user_id: str, email: str) -> str:
+def create_access_token(user_id: str, username: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS)
-    payload = {"sub": user_id, "email": email, "exp": expire}
+    payload = {"sub": user_id, "username": username, "exp": expire}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 

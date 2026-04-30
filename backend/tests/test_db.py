@@ -9,24 +9,24 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_create_user_and_lookup(app_db):
-    uid = await app_db.create_user(email="a@b.com", password_hash="h")
-    user = await app_db.get_user_by_email("a@b.com")
+    uid = await app_db.create_user(username="testuser", password_hash="h")
+    user = await app_db.get_user_by_username("testuser")
     assert user is not None
     assert user.id == uid
-    assert user.email == "a@b.com"
+    assert user.username == "testuser"
 
 
 @pytest.mark.asyncio
 async def test_get_user_by_id(app_db):
-    uid = await app_db.create_user(email="x@y.com", password_hash="h2")
+    uid = await app_db.create_user(username="testuser2", password_hash="h2")
     user = await app_db.get_user_by_id(uid)
     assert user is not None
-    assert user.email == "x@y.com"
+    assert user.username == "testuser2"
 
 
 @pytest.mark.asyncio
 async def test_create_api_key_and_lookup(app_db):
-    uid = await app_db.create_user(email="a@b.com", password_hash="h")
+    uid = await app_db.create_user(username="testuser3", password_hash="h")
     kid = await app_db.create_api_key(user_id=uid, hashed_key="hk", label="test")
     user_id = await app_db.lookup_user_by_hashed_key("hk")
     assert user_id == uid
@@ -34,7 +34,7 @@ async def test_create_api_key_and_lookup(app_db):
 
 @pytest.mark.asyncio
 async def test_list_and_delete_api_keys(app_db):
-    uid = await app_db.create_user(email="a@b.com", password_hash="h")
+    uid = await app_db.create_user(username="testuser4", password_hash="h")
     await app_db.create_api_key(user_id=uid, hashed_key="hk1", label="k1")
     await app_db.create_api_key(user_id=uid, hashed_key="hk2", label="k2")
     keys = await app_db.list_api_keys(uid)

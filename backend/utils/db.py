@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(hashed_key);
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS upload_sessions (
     id TEXT PRIMARY KEY,
@@ -68,27 +70,12 @@ class AppDB:
         async with aiosqlite.connect(self.path, timeout=30) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("PRAGMA synchronous=NORMAL")
-            # Check for legacy database: if email column exists and has NOT NULL constraint
-            try:
-                cur = await db.execute("PRAGMA table_info(users)")
-                cols = await cur.fetchall()
-                col_names = [c[1] for c in cols]
-                if "email" in col_names:
-                    # Check if email is NOT NULL (flag 2 in PRAGMA table_info)
-                    for c in cols:
-                        if c[1] == "email" and c[5] == 2:
-                            raise RuntimeError(
-                                "Legacy database detected: email column has NOT NULL constraint. "
-                                "Please migrate data manually before upgrading."
-                            )
-            except RuntimeError:
-                raise
             await db.executescript(SCHEMA)
             await db.commit()
 
     # ── Users ──────────────────────────────────────────────────────────
 
-    async def create_user(self, email: str, password_hash: str, username: Optional[str] = None, role: str = "user", status: str = "pending") -> str:
+    async def create_user(self, username: str, password_hash: str, email: Optional[str] = None, role: str = "user", status: str = "pending") -> str:
         uid = str(uuid.uuid4())
         async with aiosqlite.connect(self.path, timeout=30) as db:
             await db.execute(
@@ -130,20 +117,6 @@ class AppDB:
         async with aiosqlite.connect(self.path, timeout=30) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT * FROM users WHERE username=?", (username,))
-            row = await cur.fetchone()
-            if row is None:
-                return None
-            return User(id=row["id"], email=row["email"],
-                        username=row["username"],
-                        password_hash=row["password_hash"],
-                        created_at=row["created_at"],
-                        role=row["role"],
-                        status=row["status"])
-
-    async def get_admin_user(self) -> Optional[User]:
-        async with aiosqlite.connect(self.path, timeout=30) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute("SELECT * FROM users WHERE role='admin' LIMIT 1")
             row = await cur.fetchone()
             if row is None:
                 return None
@@ -216,12 +189,12 @@ class AppDB:
             row = await cur.fetchone()
             return row["cnt"] if row else 0
 
-    async def create_admin_if_missing(self, email: str, password_hash: str) -> str:
+    async def create_admin_if_missing(self, *, password_hash: str, email: Optional[str] = None) -> tuple[str, bool]:
         """
         Get existing admin or create new one if not exists.
 
-        Note: If admin already exists, this function returns the existing admin's id
-        and does NOT update the password. Use update_user_password() separately if needed.
+        Returns (admin_id, created) where created is True if a new admin was inserted.
+        If admin already exists and email is provided, updates the admin's email.
         """
         async with aiosqlite.connect(self.path, timeout=30) as db:
             db.row_factory = aiosqlite.Row
@@ -230,14 +203,17 @@ class AppDB:
             )
             row = await cur.fetchone()
             if row is not None:
-                return row["id"]
+                if email:
+                    await db.execute("UPDATE users SET email=? WHERE id=?", (email, row["id"]))
+                    await db.commit()
+                return row["id"], False
             uid = str(uuid.uuid4())
             await db.execute(
                 "INSERT INTO users(id,email,username,password_hash,created_at,role,status) VALUES(?,?,?,?,?,?,?)",
                 (uid, email, "admin", password_hash, datetime.now(timezone.utc).isoformat(), "admin", "active"),
             )
             await db.commit()
-            return uid
+            return uid, True
 
     async def get_meta(self, key: str) -> Optional[str]:
         async with aiosqlite.connect(self.path, timeout=30) as db:

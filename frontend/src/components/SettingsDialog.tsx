@@ -9,13 +9,15 @@ interface SettingsDialogProps {
 }
 
 export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
-  const { authUser, updateProfileEmail, updateProfilePassword, language } = useAppStore()
+  const authUser = useAppStore(s => s.authUser)
+  const updateProfileEmail = useAppStore(s => s.updateProfileEmail)
+  const updateProfilePassword = useAppStore(s => s.updateProfilePassword)
+  const language = useAppStore(s => s.language)
   const [tab, setTab] = useState<'email' | 'password'>('email')
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   // Email tab state
-  const [email, setEmail] = useState(authUser?.email ?? '')
   const [newEmail, setNewEmail] = useState('')
   const [currentEmailPassword, setCurrentEmailPassword] = useState('')
 
@@ -28,7 +30,6 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const zh = language === 'zh'
 
   const resetForms = () => {
-    setEmail(authUser?.email ?? '')
     setNewEmail('')
     setCurrentEmailPassword('')
     setCurrentPassword('')
@@ -135,75 +136,66 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
         {/* Content */}
         <div className="px-6 py-5 space-y-4 overflow-y-auto">
           {/* Email Tab */}
-          {tab === 'email' && !isReadOnly && (
+          {tab === 'email' && (
             <>
+              {isReadOnly && (
+                <p className="text-sm text-surface-500 mb-2">
+                  {zh ? 'readonly 用户请通过管理员修改邮箱。' : 'readonly users please contact admin to change email.'}
+                </p>
+              )}
               <div>
                 <label className="block text-sm font-medium text-surface-700 mb-1.5">
-                  {zh ? '当前邮箱' : 'Current Email'}
+                  {zh ? '当前用户名' : 'Current Username'}
                 </label>
                 <input
-                  type="email"
-                  value={email}
+                  type="text"
+                  value={authUser?.username ?? ''}
                   readOnly
                   className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-surface-50 text-surface-500"
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-surface-700 mb-1.5">
-                  {zh ? '当前密码' : 'Current Password'}
-                </label>
-                <input
-                  type="password"
-                  value={currentEmailPassword}
-                  onChange={(e) => setCurrentEmailPassword(e.target.value)}
-                  placeholder={zh ? '输入当前密码' : 'Enter current password'}
-                  className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-surface-700 mb-1.5">
-                  {zh ? '新邮箱' : 'New Email'}
-                </label>
-                <input
-                  type="email"
-                  value={newEmail}
-                  onChange={(e) => setNewEmail(e.target.value)}
-                  placeholder={zh ? '输入新邮箱地址' : 'Enter new email address'}
-                  className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
-                />
-              </div>
-              <button
-                onClick={handleUpdateEmail}
-                disabled={loading || !newEmail.trim() || !currentEmailPassword}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-600 text-white text-sm font-medium rounded-lg hover:bg-accent-700 disabled:opacity-50 transition-colors"
-              >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-                {zh ? '更新邮箱' : 'Update Email'}
-              </button>
+              {!isReadOnly && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-surface-700 mb-1.5">
+                      {zh ? '当前密码' : 'Current Password'}
+                    </label>
+                    <input
+                      type="password"
+                      value={currentEmailPassword}
+                      onChange={(e) => setCurrentEmailPassword(e.target.value)}
+                      placeholder={zh ? '输入当前密码' : 'Enter current password'}
+                      className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-surface-700 mb-1.5">
+                      {zh ? '新邮箱' : 'New Email'}
+                    </label>
+                    <input
+                      type="email"
+                      value={newEmail}
+                      onChange={(e) => setNewEmail(e.target.value)}
+                      placeholder={zh ? '输入新邮箱地址' : 'Enter new email address'}
+                      className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-white text-surface-800 placeholder:text-surface-400 focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+                    />
+                  </div>
+                  <button
+                    onClick={handleUpdateEmail}
+                    disabled={loading || !newEmail.trim() || !currentEmailPassword}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-600 text-white text-sm font-medium rounded-lg hover:bg-accent-700 disabled:opacity-50 transition-colors"
+                  >
+                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                    {zh ? '更新邮箱' : 'Update Email'}
+                  </button>
+                </>
+              )}
             </>
           )}
 
           {/* Password Tab */}
           {tab === 'password' && (
             <>
-              {!isReadOnly && (
-                <div>
-                  <label className="block text-sm font-medium text-surface-700 mb-1.5">
-                    {zh ? '当前邮箱' : 'Current Email'}
-                  </label>
-                  <input
-                    type="email"
-                    value={email}
-                    readOnly
-                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg bg-surface-50 text-surface-500"
-                  />
-                </div>
-              )}
-              {isReadOnly && (
-                <p className="text-sm text-surface-500 mb-2">
-                  {zh ? 'readonly 用户请通过管理员修改邮箱。' : 'readonly users please contact admin to change email.'}
-                </p>
-              )}
               <div>
                 <label className="block text-sm font-medium text-surface-700 mb-1.5">
                   {zh ? '当前密码' : 'Current Password'}

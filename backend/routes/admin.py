@@ -1,9 +1,11 @@
 """Admin management routes: user CRUD with cascade delete."""
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
+from typing import Optional
 
+from backend.models.user import UsernameStr, PasswordStr
 from backend.utils.db import AppDB
-from backend.utils.auth import get_db, hash_password, require_admin
+from backend.utils.auth import get_db, hash_password, require_admin, check_user_uniqueness
 from backend.services.user_cleanup import delete_user_data
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -13,17 +15,17 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 class AdminUserResponse(BaseModel):
     id: str
-    email: str
-    username: str | None
+    username: str
+    email: Optional[str] = None
     role: str
     status: str
     created_at: str
 
 
 class CreateUserRequest(BaseModel):
-    email: EmailStr
-    password: str
-    username: str | None = None
+    username: UsernameStr
+    password: PasswordStr
+    email: Optional[EmailStr] = None
 
 
 class SetStatusRequest(BaseModel):
@@ -43,7 +45,7 @@ async def list_users(_: str = Depends(require_admin)):
     users = await db.list_users()
     return [
         AdminUserResponse(
-            id=u.id, email=u.email, username=u.username,
+            id=u.id, username=u.username, email=u.email,
             role=u.role, status=u.status, created_at=u.created_at,
         )
         for u in users
@@ -54,14 +56,12 @@ async def list_users(_: str = Depends(require_admin)):
 async def create_user(req: CreateUserRequest, _: str = Depends(require_admin)):
     """Create a new user with status='active'. Requires admin."""
     db: AppDB = await get_db()
-    existing = await db.get_user_by_email(req.email)
-    if existing:
-        raise HTTPException(status_code=409, detail="Email already registered")
+    await check_user_uniqueness(db, req.username, req.email)
     pw_hash = hash_password(req.password)
     uid = await db.create_user(
-        email=req.email,
-        password_hash=pw_hash,
         username=req.username,
+        password_hash=pw_hash,
+        email=req.email,
         role="user",  # Always 'user' — admin creation not allowed via this endpoint
         status="active",
     )
@@ -69,7 +69,7 @@ async def create_user(req: CreateUserRequest, _: str = Depends(require_admin)):
     if user is None:
         raise HTTPException(status_code=500, detail="User creation failed")
     return AdminUserResponse(
-        id=user.id, email=user.email, username=user.username,
+        id=user.id, username=user.username, email=user.email,
         role=user.role, status=user.status, created_at=user.created_at,
     )
 

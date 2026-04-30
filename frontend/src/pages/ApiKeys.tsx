@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { apiFetch } from '../hooks/useApi'
-import { Key, Plus, Trash2, Copy, Check } from 'lucide-react'
+import { Key, Plus, Trash2 } from 'lucide-react'
 
 interface ApiKeyItem {
   id: string
@@ -13,12 +13,13 @@ interface ApiKeyItem {
 export function ApiKeys() {
   const logout = useAppStore(s => s.logout)
   const authUser = useAppStore(s => s.authUser)
+  const language = useAppStore(s => s.language)
+  const zh = language === 'zh'
   const [keys, setKeys] = useState<ApiKeyItem[]>([])
   const [loading, setLoading] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const [newLabel, setNewLabel] = useState('')
   const [newKey, setNewKey] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
   const loadKeys = async () => {
@@ -64,40 +65,31 @@ export function ApiKeys() {
     }
   }
 
-  const copyKey = (key: string) => {
-    navigator.clipboard.writeText(key)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-
   return (
     <div className="min-h-screen bg-surface-50 p-6">
       <div className="max-w-2xl mx-auto">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-2xl font-bold text-surface-800">API Keys</h1>
-            <p className="text-surface-500 mt-1">Manage API keys for programmatic access</p>
-            <p className="text-surface-400 text-sm">Logged in as {authUser?.email}</p>
+            <h1 className="text-2xl font-bold text-surface-800">{zh ? 'API 密钥' : 'API Keys'}</h1>
+            <p className="text-surface-500 mt-1">{zh ? '管理用于程序化访问的 API 密钥' : 'Manage API keys for programmatic access'}</p>
+            <p className="text-surface-400 text-sm">{zh ? '登录用户：' : 'Logged in as '}{authUser?.username}</p>
           </div>
           <button
             onClick={() => (window.location.href = '/')}
             className="px-4 py-2 text-sm text-surface-600 hover:text-surface-800"
           >
-            Back to App
+            {zh ? '返回应用' : 'Back to App'}
           </button>
         </div>
 
         {newKey && (
           <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
-            <p className="text-amber-800 font-medium mb-1">⚠️ Copy your API key now — it will not be shown again!</p>
+            <p className="text-amber-800 font-medium mb-1">{zh ? '⚠️ 请立即复制您的 API 密钥 — 之后将不再显示！' : '⚠️ Copy your API key now — it will not be shown again!'}</p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 p-2 bg-white rounded border text-sm font-mono break-all">{newKey}</code>
-              <button onClick={() => copyKey(newKey)} className="p-2 hover:bg-amber-100 rounded">
-                {copied ? <Check className="w-4 h-4 text-green-600" /> : <Copy className="w-4 h-4" />}
-              </button>
+              <code className="flex-1 p-2 bg-white rounded border text-sm font-mono break-all select-all">{newKey}</code>
             </div>
             <button onClick={() => setNewKey(null)} className="mt-2 text-sm text-amber-700 hover:text-amber-900">
-              I've saved my key
+              {zh ? '我已保存密钥' : "I've saved my key"}
             </button>
           </div>
         )}
@@ -135,7 +127,7 @@ export function ApiKeys() {
           {loading ? (
             <p className="text-surface-400">Loading...</p>
           ) : keys.length === 0 ? (
-            <p className="text-surface-400 text-center py-8">No API keys yet. Create one to get started.</p>
+            <p className="text-surface-400 text-center py-8">{zh ? '暂无 API 密钥' : 'No API keys yet. Create one to get started.'}</p>
           ) : (
             <div className="divide-y divide-surface-100">
               {keys.map(k => (
@@ -162,7 +154,7 @@ export function ApiKeys() {
 
         <div className="mt-4">
           <button onClick={logout} className="text-sm text-surface-500 hover:text-red-600">
-            Sign out
+            {zh ? '退出登录' : 'Sign out'}
           </button>
         </div>
       </div>

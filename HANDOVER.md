@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [docs/user-guide.md](docs/user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.21.1 · **Last updated**: 2026-04-30
+**Version**: 0.21.2 · **Last updated**: 2026-04-30
 
 ## 1. Runtime Architecture
 
@@ -194,8 +194,9 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.21.x — reproducibility bundle (2026-04-30)**
+**0.21.x — reproducibility bundle, username-based auth (2026-04-30)**
 
+- `0.21.2` — Username-based authentication: login and registration now require a username (3–64 chars, alphanumeric/underscore/hyphen); email is optional. New `UsernameStr` / `PasswordStr` Pydantic types; `check_user_uniqueness` validation; unique indexes on `users.username` and `users.email` (where not null). Admin setup accepts optional email. JWT payload stores `username` instead of `email`. Frontend: Login, Register, Setup, Admin, Settings, ApiKeys, UserMenu all updated; i18n (zh/en) for auth pages. Removed legacy `get_admin_user`; `create_admin_if_missing` returns `(id, created)`.
 - `0.21.1` — Reproducibility bundle generation for analysis sessions: `ReproducibilityBundle` service captures environment info (Python version, platform, CPU, memory, ScAI version), frozen pip requirements, SHA256 checksums for all session files, executable Python commands, and agent decision logs; bundle included in session export/import and report generation; download-reproducibility API endpoint; Reproducibility appendix section in HTML report with environment summary, key packages, checksum table, and download button; `import_snapshot.py` utility script.
 
 **0.20.x — auth, modularization, and admin (2026-04-21 → 2026-04-28)**

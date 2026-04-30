@@ -12,8 +12,8 @@ export type FigureReviewStatus = 'pending' | 'approved' | 'accepted_with_reserva
 // Auth types
 export interface AuthUser {
   id: string
-  email: string
-  username?: string
+  username: string
+  email?: string
   role?: 'admin' | 'user'
   status?: 'active' | 'pending' | 'readonly'
 }
@@ -359,8 +359,8 @@ interface AppState {
   // Auth state
   authReady: boolean
   authUser: AuthUser | null
-  login: (identifier: string, password: string) => Promise<void>
-  register: (email: string, password: string) => Promise<{ id: string; email: string; status: string }>
+  login: (username: string, password: string) => Promise<void>
+  register: (username: string, password: string, email?: string) => Promise<{ id: string; username: string; status: string }>
   updateProfileEmail: (currentPassword: string, newEmail: string) => Promise<void>
   updateProfilePassword: (currentPassword: string, newPassword: string) => Promise<void>
   logout: () => void
@@ -554,32 +554,32 @@ export const useAppStore = create<AppState>()(
       // Auth state
       authReady: false,
       authUser: null,
-      login: async (identifier: string, password: string) => {
+      login: async (username: string, password: string) => {
         const r = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ identifier, password }),
+          body: JSON.stringify({ username, password }),
         })
         if (!r.ok) {
           const body = await r.json().catch(() => ({ detail: 'Invalid credentials' }))
           throw new Error(body.detail || 'Invalid credentials')
         }
-        const { access_token, id, email, username, role, status } = await r.json()
+        const { access_token, id, username: uname, email, role, status } = await r.json()
         setToken(access_token)
-        set({ authUser: id ? { id, email, username, role, status } : null })
+        set({ authUser: id ? { id, username: uname, email, role, status } : null })
       },
-      register: async (email: string, password: string) => {
+      register: async (username: string, password: string, email?: string) => {
         const r = await fetch('/api/auth/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ username, password, email }),
         })
         if (!r.ok) {
           const body = await r.json().catch(() => ({ detail: 'Registration failed' }))
           throw new Error(body.detail || 'Registration failed')
         }
         const data = await r.json()
-        return { id: data.id, email: data.email, status: data.status }
+        return { id: data.id, username: data.username, status: data.status }
       },
       updateProfileEmail: async (currentPassword: string, newEmail: string) => {
         const t = getToken()

@@ -43,19 +43,22 @@ export function UserMenu() {
           ref={buttonRef}
           onClick={() => setOpen(!open)}
           className="flex items-center gap-2 px-3 py-2 text-sm text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
-          title={authUser.email}
+          title={authUser.username}
         >
           <div className="w-7 h-7 rounded-full bg-accent-100 flex items-center justify-center">
             <User className="w-4 h-4 text-accent-600" />
           </div>
-          <span className="hidden sm:inline text-xs font-medium truncate flex-1 min-w-0">{authUser.email}</span>
+          <span className="hidden sm:inline text-xs font-medium truncate flex-1 min-w-0">{authUser.username}</span>
           <ChevronDown className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} />
         </button>
 
         {open && (
           <div className="absolute bottom-full right-0 mb-1 w-48 bg-white rounded-lg shadow-lg border border-surface-200 py-1 z-50">
             <div className="px-3 py-2 border-b border-surface-100">
-              <p className="text-xs text-surface-500 truncate">{authUser.email}</p>
+              <p className="text-xs text-surface-500 truncate">{authUser.username}</p>
+              {authUser.email && (
+                <p className="text-[10px] text-surface-400 truncate">{authUser.email}</p>
+              )}
               {authUser.role && (
                 <p className="text-[10px] text-surface-400 uppercase tracking-wide mt-0.5">{authUser.role}</p>
               )}

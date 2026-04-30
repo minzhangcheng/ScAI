@@ -1,7 +1,9 @@
 """Authentication routes: register, login, me, API key CRUD."""
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, EmailStr, Field
+from typing import Optional
 
+from backend.models.user import UsernameStr, PasswordStr
 from backend.utils.db import AppDB
 from backend.utils.auth import (
     get_db,
@@ -10,6 +12,7 @@ from backend.utils.auth import (
     create_access_token,
     generate_api_key,
     hash_api_key,
+    check_user_uniqueness,
     require_auth,
     require_active_user,
     require_non_pending_user,
@@ -22,12 +25,13 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 # ── Request / Response models ────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    username: UsernameStr
+    password: PasswordStr
+    email: Optional[EmailStr] = None
 
 
 class LoginRequest(BaseModel):
-    identifier: str  # email or "admin"
+    username: str
     password: str
 
 
@@ -35,16 +39,16 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     id: str
-    email: str
-    username: str | None
+    username: str
+    email: Optional[str] = None
     role: str
     status: str
 
 
 class UserInfoResponse(BaseModel):
     id: str
-    email: str
-    username: str | None
+    username: str
+    email: Optional[str] = None
     role: str
     status: str
 
@@ -86,17 +90,14 @@ async def register(req: RegisterRequest):
     meta = await db.get_meta("admin_initialized")
     if meta != "1":
         raise HTTPException(status_code=403, detail="Admin not initialized yet")
-    existing = await db.get_user_by_email(req.email)
-    if existing:
-        raise HTTPException(status_code=409, detail="Email already registered")
+    await check_user_uniqueness(db, req.username, req.email)
     pw_hash = hash_password(req.password)
-    uid = await db.create_user(email=req.email, password_hash=pw_hash, status="pending")
-    # Intentionally return empty token: pending users must be approved by admin before receiving a valid session
+    uid = await db.create_user(username=req.username, password_hash=pw_hash, email=req.email, status="pending")
     return TokenResponse(
         access_token="",
         id=uid,
+        username=req.username,
         email=req.email,
-        username=None,
         role="user",
         status="pending",
     )
@@ -105,20 +106,17 @@ async def register(req: RegisterRequest):
 @router.post("/login", response_model=TokenResponse)
 async def login(req: LoginRequest):
     db: AppDB = await get_db()
-    if req.identifier == "admin":
-        user = await db.get_admin_user()
-    else:
-        user = await db.get_user_by_email(req.identifier)
+    user = await db.get_user_by_username(req.username)
     if user is None or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Bearer"})
     if user.status == "pending":
         raise HTTPException(status_code=403, detail="Account is pending approval. Please contact the administrator to activate your account.")
-    token = create_access_token(user.id, user.email)
+    token = create_access_token(user.id, user.username)
     return TokenResponse(
         access_token=token,
         id=user.id,
-        email=user.email,
         username=user.username,
+        email=user.email,
         role=user.role,
         status=user.status,
     )

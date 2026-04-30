@@ -28,11 +28,11 @@ class TestPasswordAuth:
 
 class TestJWT:
     def test_create_and_decode(self):
-        token = create_access_token("user1", "a@b.com")
+        token = create_access_token("user1", "testuser")
         payload = decode_access_token(token)
         assert payload is not None
         assert payload["sub"] == "user1"
-        assert payload["email"] == "a@b.com"
+        assert payload["username"] == "testuser"
 
     def test_invalid_token_returns_none(self):
         result = decode_access_token("invalid.token.here")
@@ -41,7 +41,7 @@ class TestJWT:
     def test_expired_token(self):
         from jose import jwt as jose_jwt
         from datetime import datetime
-        payload = {"sub": "u1", "email": "a@b.com", "exp": datetime(2000, 1, 1)}
+        payload = {"sub": "u1", "username": "testuser", "exp": datetime(2000, 1, 1)}
         token = jose_jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
         result = decode_access_token(token)
         assert result is None
@@ -124,7 +124,7 @@ class TestOwnership:
         client = TestClient(app)
 
         # Token for a user that doesn't exist in DB
-        token = create_access_token("unknown_user", "x@x.com")
+        token = create_access_token("unknown_user", "unknown_user")
         resp = client.get(
             "/api/session/sess1/detail",
             headers={"Authorization": f"Bearer {token}"},
@@ -149,7 +149,7 @@ class TestOwnership:
         )
         client = TestClient(app)
 
-        token = create_access_token("user_a", "a@a.com")
+        token = create_access_token("user_a", "user_a")
         resp = client.get(
             "/api/session/sess1/detail",
             headers={"Authorization": f"Bearer {token}"},
@@ -176,7 +176,7 @@ class TestOwnership:
         )
         client = TestClient(app)
 
-        token = create_access_token("user_b", "b@b.com")
+        token = create_access_token("user_b", "user_b")
         resp = client.get(
             "/api/file/sess2/data/test.h5ad",
             headers={"Authorization": f"Bearer {token}"},
@@ -209,7 +209,7 @@ class TestOwnership:
             )
             client = TestClient(app)
 
-            token = create_access_token("user_a", "a@a.com")
+            token = create_access_token("user_a", "user_a")
             resp = client.get(
                 "/api/session/sess3/detail",
                 headers={"Authorization": f"Bearer {token}"},
