@@ -1,4 +1,9 @@
 """Sections mixin for DetailedReportGenerator."""
+import html as html_module
+import json
+
+from backend.config import get_session_workspace
+from backend.services.reproducibility import KEY_PACKAGES, REPRODUCIBILITY_DIR_NAME
 from typing import Dict, Any, List, Optional
 
 
@@ -14,7 +19,6 @@ class SectionsMixin:
         analysis_summary: Optional[Dict[str, Any]] = None
     ) -> str:
         """PI Agent generates the report abstract"""
-        import json
         import re
 
         analysis_summary = analysis_summary or {}
@@ -78,7 +82,6 @@ Objective: {state.initial_instruction}
         analysis_summary: Optional[Dict[str, Any]] = None
     ) -> str:
         """PI Agent generates the final conclusions"""
-        import json
         import re
 
         analysis_summary = analysis_summary or {}
@@ -125,6 +128,113 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         conclusions = re.sub(r'^#{1,4}\s+[\d.]*\s*Conclusions?.*?\n+', '', conclusions, flags=re.IGNORECASE).strip()
         return conclusions
 
+    def _build_reproducibility_section_html(
+        self,
+        state: "AnalysisState",
+    ) -> str:
+        """Build the Reproducibility appendix section from on-disk bundle."""
+        esc = html_module.escape
+        workspace = get_session_workspace(state.id)
+        repro_dir = workspace / REPRODUCIBILITY_DIR_NAME
+
+        if not repro_dir.exists():
+            return ""
+
+        # Environment summary from system_info.json
+        env_html = ""
+        sysinfo_path = repro_dir / "system_info.json"
+        if sysinfo_path.exists():
+            try:
+                info = json.loads(sysinfo_path.read_text(encoding="utf-8"))
+                env_html = f"""
+                <p><strong>Environment Summary</strong></p>
+                <table>
+                    <tbody>
+                        <tr><td>Python</td><td><code>{esc(str(info.get('python_version', 'N/A'))[:120])}</code></td></tr>
+                        <tr><td>Platform</td><td>{esc(info.get('platform', 'N/A'))}</td></tr>
+                        <tr><td>ScAI Version</td><td>{esc(info.get('scai_version', 'N/A'))}</td></tr>
+                        <tr><td>CPU Cores</td><td>{info.get('cpu_count', 'N/A')}</td></tr>
+                        <tr><td>Memory</td><td>{info.get('memory_gb', 'N/A')} GB</td></tr>
+                    </tbody>
+                </table>
+                """
+            except Exception:
+                pass
+
+        # Key packages from frozen requirements
+        key_pkgs_html = ""
+        env_txt_path = repro_dir / "environment_frozen.txt"
+        if env_txt_path.exists():
+            try:
+                pkg_lines = env_txt_path.read_text(encoding="utf-8").strip().split("\n")
+                key_pkgs = [
+                    ln for ln in pkg_lines
+                    if any(pkg in ln.lower() for pkg in KEY_PACKAGES)
+                ]
+                if key_pkgs:
+                    items = "".join(
+                        f"<li><code>{esc(pkg)}</code></li>" for pkg in key_pkgs[:20]
+                    )
+                    key_pkgs_html = f"<p><strong>Key Packages</strong></p><ul>{items}</ul>"
+            except Exception:
+                pass
+
+        # Checksum summary (first 8 entries)
+        checksum_html = ""
+        checksum_path = repro_dir / "checksums.sha256"
+        if checksum_path.exists():
+            try:
+                chk_lines = [
+                    ln.strip() for ln in checksum_path.read_text(encoding="utf-8").split("\n")
+                    if ln.strip()
+                ]
+                if chk_lines:
+                    rows = ""
+                    for line in chk_lines[:8]:
+                        parts = line.split("  ", 1)
+                        sha_short = parts[0][:16] + "..." if len(parts) == 2 else line[:16] + "..."
+                        fname = parts[1] if len(parts) == 2 else line
+                        rows += f"<tr><td><code>{esc(sha_short)}</code></td><td>{esc(fname)}</td></tr>"
+                    suffix = ""
+                    if len(chk_lines) > 8:
+                        suffix = f"<p>... and {len(chk_lines) - 8} more files</p>"
+                    checksum_html = f"""
+                    <p><strong>File Integrity</strong> ({len(chk_lines)} files verified)</p>
+                    <table>
+                        <thead><tr><th>SHA256 (first 16 chars)</th><th>File</th></tr></thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                    {suffix}
+                    """
+            except Exception:
+                pass
+
+        # Download button
+        dl_url = f"/api/session/{state.id}/report/download-reproducibility"
+        download_btn = f"""
+        <p>
+            <a href="{esc(dl_url)}" download
+               style="display:inline-block;padding:8px 16px;background:#4f46e5;color:#fff;
+                      border-radius:6px;text-decoration:none;font-weight:500;">
+                &#x1F5DC; Download Reproducibility Bundle (.zip)
+            </a>
+        </p>
+        """
+
+        return f"""
+        <h3>Reproducibility</h3>
+        <p>The following information ensures this analysis can be independently reproduced:</p>
+        {download_btn}
+        {env_html}
+        {key_pkgs_html}
+        {checksum_html}
+        <p style="font-size:0.85em;color:#888;">
+            The downloaded bundle contains the complete environment specification,
+            SHA256 checksums for all files, executable Python commands, and agent
+            decision logs for full computational reproducibility.
+        </p>
+        """
+
     def _build_appendix_html(
         self,
         state: "AnalysisState",
@@ -135,7 +245,6 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         Build the Appendix HTML section containing analysis settings and records.
         Pure data extraction — no LLM calls.
         """
-        import html as html_module
         from backend.config import ModelConfig, AgentTemperatures
 
         esc = html_module.escape
@@ -397,6 +506,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         dl_title = "Related Reports & Downloads"
         downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'
 
+        # ── 8. Reproducibility ────────────────────────────────────────
+        repro_html = self._build_reproducibility_section_html(state)
+
         # ── Assemble ────────────────────────────────────────────────
         return f"""
         <div class="appendix" id="appendix">
@@ -408,5 +520,6 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             {human_html}
             {interaction_html}
             {downloads_html}
+            {repro_html}
         </div>
         """

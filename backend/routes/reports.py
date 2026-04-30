@@ -326,6 +326,33 @@ async def download_all_tables(session_id: str, state: AnalysisState = Depends(re
     )
 
 
+@router.post("/{session_id}/report/download-reproducibility")
+async def download_reproducibility_bundle(
+    session_id: str,
+    state: AnalysisState = Depends(require_session_ownership),
+):
+    """Download reproducibility bundle as a ZIP file"""
+    validate_session_id(session_id)
+    from backend.config import get_session_workspace
+    from backend.services.reproducibility import ReproducibilityBundle, REPRODUCIBILITY_DIR_NAME
+
+    repro_dir = get_session_workspace(session_id) / REPRODUCIBILITY_DIR_NAME
+    if not repro_dir.exists():
+        raise HTTPException(status_code=404, detail="Reproducibility bundle not found")
+
+    zip_buffer = ReproducibilityBundle.create_zip_bytes(str(repro_dir))
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename={session_id}_reproducibility.zip"
+            ),
+        },
+    )
+
+
 @router.post("/{session_id}/report/download-full")
 async def download_full_report(session_id: str, state: AnalysisState = Depends(require_session_ownership)):
     """Download full report including figures, tables, and report JSON"""

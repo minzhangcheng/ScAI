@@ -21,6 +21,7 @@ from backend.config import (
     get_session_states, get_session_uploads, get_session_workspace, resolve_session_metadata_path,
 )
 from backend.models.schemas import AnalysisState, APIResponse
+from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -52,6 +53,21 @@ def _add_snapshots_to_tar(tf, session_id: str):
         for snap_file in snapshots_dir.iterdir():
             if snap_file.is_file():
                 tf.add(str(snap_file), arcname=f"{session_id}/snapshots/{snap_file.name}")
+
+
+def _add_reproducibility_to_tar(tf, session_id: str):
+    """Add reproducibility bundle files to tar archive."""
+    ws_dir = get_session_workspace(session_id)
+    if not ws_dir.exists():
+        ws_dir = WORKSPACE_DIR / session_id
+    repro_dir = ws_dir / REPRODUCIBILITY_DIR_NAME
+    if repro_dir.exists():
+        for file_path in sorted(repro_dir.iterdir()):
+            if file_path.is_file():
+                tf.add(
+                    str(file_path),
+                    arcname=f"{session_id}/{REPRODUCIBILITY_DIR_NAME}/{file_path.name}",
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +155,10 @@ async def export_state(session_id: str):
                         rel = file_path.relative_to(reports_dir)
                         tf.add(str(file_path), arcname=f"{session_id}/reports/{session_id}/{rel}")
 
-            # 6. snapshots (JSON state files + session pkl backups)
+            # 6. reproducibility bundle
+            _add_reproducibility_to_tar(tf, session_id)
+
+            # 7. snapshots (JSON state files + session pkl backups)
             _add_snapshots_to_tar(tf, session_id)
 
     await asyncio.to_thread(_build_tar)
@@ -244,6 +263,9 @@ async def export_prepare(session_id: str):
                             continue
                         rel = file_path.relative_to(rpts_dir)
                         tf.add(str(file_path), arcname=f"{session_id}/reports/{session_id}/{rel}")
+
+            # reproducibility bundle
+            _add_reproducibility_to_tar(tf, session_id)
 
             # snapshots (JSON state files + session pkl backups)
             _add_snapshots_to_tar(tf, session_id)

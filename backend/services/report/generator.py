@@ -28,7 +28,7 @@ from backend.models.schemas import AnalysisState, AgentType, CodeExecution
 from backend.utils.llm_client import OpenAICompatibleClient
 from backend.utils.checkpoint import CheckpointManager
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
-from backend.config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir
+from backend.config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir, get_session_workspace, get_session_uploads
 from .regenerator import get_agent_stats_html
 from .variants import _build_score_definitions_html_section
 from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, _make_figure_block, _safe_parse_json, _build_figure_description_map, render_report_html
@@ -39,6 +39,7 @@ from .llm_calls import LLMCallsMixin, REPORT_TOOLS
 from .pi_review import PIReviewMixin
 from .planning import PlanningMixin
 from .sections import SectionsMixin
+from backend.services.reproducibility import ReproducibilityBundle
 
 logger = logging.getLogger(__name__)
 
@@ -428,6 +429,34 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 _shutil.copy2(str(notebook_src), str(self.output_dir / f"{state.id}.ipynb"))
             except Exception as e:
                 logger.warning(f"Could not copy notebook: {e}")
+
+        # Generate reproducibility bundle (no sandbox — uses subprocess)
+        try:
+            bundle = ReproducibilityBundle()
+            workspace_dir = str(get_session_workspace(state.id))
+            notebook_path = str(notebook_src)
+
+            # Collect upload paths from ALL data sections (not just sequencing)
+            upload_paths = []
+            for f in state.data_files:
+                up = get_session_uploads(state.id) / f.filename
+                if up.exists():
+                    upload_paths.append(str(up))
+
+            bundle_path = bundle.generate(
+                session_id=state.id,
+                workspace_path=workspace_dir,
+                ipynb_path=notebook_path,
+                round_results=state.round_results,
+                upload_paths=upload_paths,
+            )
+            report["reproducibility_path"] = bundle_path
+            logger.info(f"Reproducibility bundle generated at {bundle_path}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to generate reproducibility bundle: {e}", exc_info=True
+            )
+            report["reproducibility_path"] = None
 
         # Generate HTML report
         await self._report_progress(95, "Generating HTML report...")
