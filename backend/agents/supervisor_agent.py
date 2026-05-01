@@ -31,6 +31,7 @@ from ..models.schemas import AgentType, AnalysisState, AnalysisStep
 from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type, _TECHNICAL_ERROR_TYPES
 from ..services.report import get_agent_stats_html
 from ..utils.llm_client import OpenAICompatibleClient
+from ..utils.settings_provider import AgentSettingsProvider
 
 # Section IDs that represent specific/targeted analysis
 _SPECIFIC_SECTION_IDS = frozenset({
@@ -158,25 +159,19 @@ class SupervisorAgent:
 
     def __init__(
         self,
-        llm_client: OpenAICompatibleClient,
-        model: str,
+        settings_provider: 'AgentSettingsProvider',
         pi_callback: Optional[Callable[[str, str], Awaitable[str]]] = None,
         message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
         session_id: str = "default",
-        temperature: float = 0.1,
-        system_prompt: str = "",
         technique_agent=None,
     ):
-        self.llm_client = llm_client
-        self.model = model
+        self._provider = settings_provider
+        self.session_id = session_id
         self.pi_callback = pi_callback
         self.message_callback = message_callback
-        self.session_id = session_id
-        self.temperature = temperature
-        # Use custom system_prompt if provided, otherwise fall back to built-in default
-        self.system_prompt = system_prompt.strip() if system_prompt else ""
         self.technique_agent = technique_agent
-        self._sandbox = None  # Set by workflow when sandbox is available
+        self._sandbox = None
+        self._vision_disabled_runtime: bool = False
 
         # Current round state
         self.supervision_log: List[SupervisorRecord] = []
@@ -187,6 +182,34 @@ class SupervisorAgent:
 
         # All rounds archive
         self.all_rounds_log: List[List[SupervisorRecord]] = []
+
+    # --- Properties (hot-reloadable via settings provider) ---
+
+    @property
+    def model(self) -> str:
+        return self._provider.get_model("supervisor")
+
+    @property
+    def llm_client(self) -> OpenAICompatibleClient:
+        return self._provider.get_llm_client("supervisor")
+
+    @property
+    def temperature(self) -> float:
+        return self._provider.get_temperature("supervisor")
+
+    @property
+    def system_prompt(self) -> str:
+        return self._provider.get_system_prompt("supervisor")
+
+    @property
+    def has_vision(self) -> bool:
+        if self._vision_disabled_runtime:
+            return False
+        return self._provider.get_vision_setting("supervisor")
+
+    @has_vision.setter
+    def has_vision(self, value: bool):
+        self._vision_disabled_runtime = not value
 
     def set_sandbox(self, sandbox):
         """Set the sandbox reference for Technique Agent doc lookups."""

@@ -133,7 +133,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
     
     try {
       clearMessages()
-      await createSession(instruction, sessionName || undefined)
+      await createSession(instruction, sessionName || undefined, roundWaitSeconds)
       setShowNewSession(false)
       // Reset to defaults for next time
       setInstruction(DEFAULT_PROJECT_DESCRIPTION)

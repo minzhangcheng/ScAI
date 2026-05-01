@@ -21,6 +21,7 @@ from backend.state import (
 )
 from backend.utils.files import safe_filename, validate_session_id
 from backend.utils.upload import stream_save_file
+from backend.utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,8 @@ async def _generate_figures_in_chat(
             )
 
             llm_client = get_agent_llm_client(state, config, "bioinformatics", session_id)
-            bio_model = state.custom_models.get("bioinformatics", "google/gemini-3.1-pro-preview")
+            _fig_provider = AgentSettingsProvider(state, config, global_client=llm_client, session_id=session_id)
+            bio_model = _fig_provider.get_model("bioinformatics") or "google/gemini-3.1-pro-preview"
             code_resp = await llm_client.chat(
                 model=bio_model,
                 messages=[{"role": "user", "content": code_prompt}],
@@ -387,11 +389,14 @@ async def _execute_chat_agent(
     """Execute a single agent in chat delegation context."""
     from backend.state import system_config
     config = system_config.get("current")
-    from backend.agents.base import AgentConfig
     from backend.utils.sandbox import LocalJupyterSandbox
     from backend.utils.agent_llm import get_agent_llm_client
 
     extra_clients: List[Any] = []
+
+    # Provider for hot-reloadable settings; global_client is the per-agent client
+    # already resolved by the caller via get_agent_llm_client.
+    provider = AgentSettingsProvider(state, config, global_client=llm_client, session_id=session_id)
 
     async def _send_agent_msg(msg_type: str, content: Any, agent_type: AgentType):
         msg = WebSocketMessage(type=msg_type, agent=agent_type, content=content)
@@ -413,19 +418,11 @@ async def _execute_chat_agent(
         chat_sandboxes[session_id] = sandbox
 
         # Create literature agent for callbacks
-        lit_model = state.custom_models.get("literature", config.models.literature_model)
-        lit_prompt = state.custom_prompts.get("literature", config.prompts.literature_prompt)
         lit_config = state.literature_config or {}
-        pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
-        pi_llm_client = get_agent_llm_client(state, config, PI_AGENT_NAME, session_id)
-        extra_clients.append(pi_llm_client)
 
         from backend.agents.literature_agent import LiteratureAgent
         literature_agent = LiteratureAgent(
-            llm_client=llm_client,
-            model=lit_model,
-            system_prompt=lit_prompt,
-            config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
+            settings_provider=provider,
             literature_mode=lit_config.get("mode", "deep_research"),
             deep_research_model=lit_config.get("deep_research_model", ""),
             deep_research_llm_base_url=lit_config.get("deep_research_llm_base_url", ""),
@@ -434,8 +431,6 @@ async def _execute_chat_agent(
             pubmed_email=lit_config.get("pubmed_email", ""),
             max_search_rounds=lit_config.get("max_search_rounds", 5),
             proxy_url=config.api.proxy_url if config.api else None,
-            fallback_model=pi_model,
-            fallback_llm_client=pi_llm_client,
         )
 
         async def lit_callback(topic: str) -> str:
@@ -444,7 +439,7 @@ async def _execute_chat_agent(
 
         async def pi_callback(question: str, context: str) -> str:
             await _send_agent_msg("pi_question", f"Question: {question}\nContext: {context}", AgentType.BIOINFORMATICS)
-            pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
+            pi_model = provider.get_model(PI_AGENT_NAME)
             prompt = (
                 f"The bioinformatics analyst is asking for your guidance:\n\n"
                 f"QUESTION: {question}\n\nCONTEXT: {context}\n\n"
@@ -453,7 +448,7 @@ async def _execute_chat_agent(
             resp = await llm_client.chat(
                 model=pi_model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=state.custom_temperatures.get(PI_AGENT_NAME, 0.5),
+                temperature=provider.get_temperature(PI_AGENT_NAME),
                 max_tokens=2048
             )
             answer = resp.content or "Proceed with standard bioinformatics practices."
@@ -474,15 +469,12 @@ async def _execute_chat_agent(
             await _send_agent_msg(msg_type, content, AgentType.BIOINFORMATICS)
 
         bio_agent = BioinformaticsAgent(
-            llm_client=llm_client,
-            model=state.custom_models.get("bioinformatics", config.models.bioinformatics_model),
-            system_prompt=state.custom_prompts.get("bioinformatics", config.prompts.bioinformatics_prompt),
+            settings_provider=provider,
             sandbox=sandbox,
             literature_callback=lit_callback,
             pi_callback=pi_callback,
             annotate_clusters_callback=annotate_callback,
             message_callback=agent_msg_callback,
-            config=AgentConfig(temperature=state.custom_temperatures.get("bioinformatics", 0.1)),
         )
 
         try:
@@ -505,12 +497,9 @@ async def _execute_chat_agent(
         from backend.agents.pathology_agent import PathologyAgent
 
         pathology_agent = PathologyAgent(
-            llm_client=llm_client,
-            model=state.custom_models.get("pathology", config.models.pathology_model),
-            system_prompt=state.custom_prompts.get("pathology", config.prompts.pathology_prompt),
+            settings_provider=provider,
             tile_size=config.image_tile_size if hasattr(config, 'image_tile_size') else 1024,
             max_tiles=50,
-            config=AgentConfig(temperature=state.custom_temperatures.get("pathology", 0.2)),
         )
         result = await pathology_agent.process(state, instruction)
         return result, extra_clients
@@ -519,10 +508,7 @@ async def _execute_chat_agent(
         from backend.agents.biochemistry_agent import BiochemistryAgent
 
         biochem_agent = BiochemistryAgent(
-            llm_client=llm_client,
-            model=state.custom_models.get("biochemistry", config.models.biochemistry_model),
-            system_prompt=state.custom_prompts.get("biochemistry", config.prompts.biochemistry_prompt),
-            config=AgentConfig(temperature=state.custom_temperatures.get("biochemistry", 0.2)),
+            settings_provider=provider,
         )
         result = await biochem_agent.process(state, instruction)
         return result, extra_clients
@@ -530,15 +516,9 @@ async def _execute_chat_agent(
     elif agent_name == "literature":
         from backend.agents.literature_agent import LiteratureAgent
         lit_config = state.literature_config or {}
-        pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
-        pi_llm_client = get_agent_llm_client(state, config, PI_AGENT_NAME, session_id)
-        extra_clients.append(pi_llm_client)
 
         lit_agent = LiteratureAgent(
-            llm_client=llm_client,
-            model=state.custom_models.get("literature", config.models.literature_model),
-            system_prompt=state.custom_prompts.get("literature", config.prompts.literature_prompt),
-            config=AgentConfig(temperature=state.custom_temperatures.get("literature", 0.6)),
+            settings_provider=provider,
             literature_mode=lit_config.get("mode", "deep_research"),
             deep_research_model=lit_config.get("deep_research_model", ""),
             deep_research_llm_base_url=lit_config.get("deep_research_llm_base_url", ""),
@@ -547,8 +527,6 @@ async def _execute_chat_agent(
             pubmed_email=lit_config.get("pubmed_email", ""),
             max_search_rounds=lit_config.get("max_search_rounds", 5),
             proxy_url=config.api.proxy_url if config.api else None,
-            fallback_model=pi_model,
-            fallback_llm_client=pi_llm_client,
         )
         result = await lit_agent.process(state, instruction)
         return result, extra_clients
@@ -719,8 +697,9 @@ async def _run_chat_delegation(
         })
 
         synthesis_prompt = _build_synthesis_prompt(user_message, delegation, agent_results)
-        pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
-        pi_temp = state.custom_temperatures.get(PI_AGENT_NAME, 0.5)
+        delegation_provider = AgentSettingsProvider(state, config, global_client=llm_manager.openrouter, session_id=session_id)
+        pi_model = delegation_provider.get_model(PI_AGENT_NAME)
+        pi_temp = delegation_provider.get_temperature(PI_AGENT_NAME)
 
         pi_response = await llm_manager.openrouter.chat(
             model=pi_model,
@@ -964,8 +943,9 @@ async def chat_with_pi(
 
     # --- Build context & prompt ---
     context, figure_inventory = _build_chat_context(state)
-    pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
-    pi_temp = state.custom_temperatures.get(PI_AGENT_NAME, 0.5)
+    _pi_provider = AgentSettingsProvider(state, config, global_client=None, session_id=session_id)
+    pi_model = _pi_provider.get_model(PI_AGENT_NAME)
+    pi_temp = _pi_provider.get_temperature(PI_AGENT_NAME)
 
     system_prompt = (
         "You are the PI (Principal Investigator) Agent of a biomedical research analysis system. "

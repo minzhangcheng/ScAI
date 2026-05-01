@@ -16,42 +16,56 @@ from ..models.schemas import (
 )
 from ..utils.llm_client import OpenAICompatibleClient, LLMResponse
 from ..utils.formatting import safe_parse_json as _safe_parse_json_impl
+from ..utils.settings_provider import AgentSettingsProvider
 
 
 @dataclass
 class AgentConfig:
-    """Runtime configuration for an agent - allows centralized temperature management"""
+    """Runtime configuration for an agent."""
     temperature: float = 0.5
     max_tokens: int = 32768
 
-    @classmethod
-    def from_temperatures(cls, agent_type: str, temperatures: Dict[str, float]) -> 'AgentConfig':
-        """Create config from a temperatures dict (e.g., from AgentTemperatures)"""
-        return cls(
-            temperature=temperatures.get(agent_type, 0.5)
-        )
-
 
 class BaseAgent(ABC):
-    """Base class for all agents"""
+    """Base class for all agents."""
 
     def __init__(
         self,
         agent_type: AgentType,
-        llm_client: OpenAICompatibleClient,
-        model: str,
-        system_prompt: str,
+        settings_provider: AgentSettingsProvider,
         session_id: str = "default",
-        config: Optional[AgentConfig] = None
     ):
         self.agent_type = agent_type
-        self.llm_client = llm_client
-        self.model = model
-        self.system_prompt = system_prompt
+        self._provider = settings_provider
         self.message_history: List[Dict[str, Any]] = []
         self.session_id = session_id
-        self.config = config or AgentConfig()
-        self.has_vision: bool = True
+        self._vision_disabled_runtime: bool = False
+
+    @property
+    def model(self) -> str:
+        return self._provider.get_model(self.agent_type.value)
+
+    @property
+    def system_prompt(self) -> str:
+        return self._provider.get_system_prompt(self.agent_type.value)
+
+    @property
+    def llm_client(self) -> OpenAICompatibleClient:
+        return self._provider.get_llm_client(self.agent_type.value)
+
+    @property
+    def config(self) -> AgentConfig:
+        return AgentConfig(temperature=self._provider.get_temperature(self.agent_type.value))
+
+    @property
+    def has_vision(self) -> bool:
+        if self._vision_disabled_runtime:
+            return False
+        return self._provider.get_vision_setting(self.agent_type.value)
+
+    @has_vision.setter
+    def has_vision(self, value: bool):
+        self._vision_disabled_runtime = not value
     
     def _safe_parse_json(self, response: str, default: Dict[str, Any] = None, agent_label: str = None) -> Dict[str, Any]:
         """Safely parse JSON from LLM response. Delegates to shared implementation.

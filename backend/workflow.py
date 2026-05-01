@@ -42,6 +42,7 @@ from .agents.supervisor_agent import SupervisorAgent
 from .agents.technique_agent import TechniqueAgent
 from .agents.base import AgentConfig
 from .utils.llm_client import LLMManager, OpenAICompatibleClient, UpstreamExhaustedError
+from .utils.settings_provider import AgentSettingsProvider
 from .utils.sandbox import LocalJupyterSandbox
 from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR, get_session_reports, get_session_workspace, get_session_states
 from .services.report import DetailedReportGenerator, compress_image_to_base64
@@ -240,6 +241,9 @@ class SingleCellAnalysisWorkflow:
         self._supplementary_request: Optional[str] = None
         self._supplementary_target: Optional[str] = None  # "annotation" or "direction"
 
+        # Settings provider — set in initialize(), provides hot-reloadable settings
+        self._settings_provider: Optional[AgentSettingsProvider] = None
+
     def signal_continue(self):
         """Signal the workflow to continue from wait_for_user_input"""
         self._continue_event.set()
@@ -257,40 +261,13 @@ class SingleCellAnalysisWorkflow:
         elif target == "direction":
             self._continue_event.set()
 
-    def _get_agent_llm_client(self, agent_name: str) -> OpenAICompatibleClient:
-        """Get LLM client for an agent, using per-agent override if different from global.
-
-        Results are cached per agent_name so repeated calls reuse the same client
-        (and its underlying connection pool) instead of creating duplicates.
-        """
-        # Return cached client if available
-        cache = getattr(self, '_agent_client_cache', None)
-        if cache is None:
-            self._agent_client_cache: Dict[str, OpenAICompatibleClient] = {}
-            cache = self._agent_client_cache
-        if agent_name in cache:
-            return cache[agent_name]
-
-        agent_server_configs = getattr(self, '_agent_server_configs', {})
-        agent_cfg = agent_server_configs.get(agent_name, {})
-        agent_url = agent_cfg.get("llm_base_url", "")
-        agent_key = agent_cfg.get("api_key", "")
-        # If same as global config, share the default client
-        if (not agent_url or agent_url == self.config.api.llm_base_url) and \
-           (not agent_key or agent_key == self.config.api.api_key):
-            client = self.llm_manager.openrouter
-        else:
-            # Otherwise create a separate client
-            client = OpenAICompatibleClient(
-                api_key=agent_key or self.config.api.api_key,
-                base_url=agent_url or self.config.api.llm_base_url,
-                proxy_url=self.config.api.proxy_url,
-                session_id=self.session_id,
-                agent_name=agent_name,
-            )
-            self._extra_llm_clients.append(client)
-        cache[agent_name] = client
-        return client
+    @property
+    def _vision_settings(self) -> Dict[str, bool]:
+        """Vision settings — read from Provider so changes are always fresh."""
+        return {
+            t.value: self._settings_provider.get_vision_setting(t.value)
+            for t in AgentType
+        }
 
     @staticmethod
     def _build_fallback_annotations(
@@ -315,14 +292,10 @@ class SingleCellAnalysisWorkflow:
     async def initialize(self):
         """Initialize all components"""
         logger.info(f"[{self.session_id}] Initializing workflow components")
-        # Close any leftover per-agent clients from a previous initialize() call (e.g. resume)
-        for old_client in getattr(self, '_extra_llm_clients', []):
-            try:
-                await old_client.close()
-            except Exception as e:
-                logger.debug(f"Failed to close old LLM client: {e}")
-        self._extra_llm_clients: list = []
-        
+        # Close leftover provider from previous initialize() call (e.g. resume)
+        if hasattr(self, '_settings_provider') and self._settings_provider:
+            await self._settings_provider.cleanup()
+
         # Initialize checkpointer if not exists
         if self._db_conn is None:
             states_dir = get_session_states(self.session_id)
@@ -340,7 +313,7 @@ class SingleCellAnalysisWorkflow:
             self.checkpointer = AsyncSqliteSaver(self._db_conn, serde=serde)
             # Make sure tables are created
             await self.checkpointer.setup()
-            
+
         # Initialize LLM manager with session context
         self.llm_manager = LLMManager(
             api_key=self.config.api.api_key,
@@ -349,7 +322,7 @@ class SingleCellAnalysisWorkflow:
             session_id=self.session_id,
             agent_name="workflow",
         )
-        
+
         # Initialize local Jupyter sandbox with session-specific paths
         self.sandbox = LocalJupyterSandbox(
             session_id=self.session_id,
@@ -357,45 +330,20 @@ class SingleCellAnalysisWorkflow:
             working_dir=str(get_session_workspace(self.session_id)),
             timeout=self.config.sandbox_timeout
         )
-        
-        # Get custom models, prompts, and temperatures from initial state if provided
-        custom_models = getattr(self, '_custom_models', {})
-        custom_prompts = getattr(self, '_custom_prompts', {})
-        custom_temperatures = getattr(self, '_custom_temperatures', {})
-        custom_vision_settings = getattr(self, '_agent_vision_settings', {})
 
-        # Store vision settings for use in callbacks
-        self._vision_settings = {
-            t.value: custom_vision_settings.get(t.value, True)
-            for t in AgentType
-        }
-
-        # Merge custom temperatures with defaults from centralized config
-        self.temperatures = self.config.temperatures.merge_custom(custom_temperatures)
-
-        # Determine models to use (custom takes precedence)
-        # PI and Bioinformatics are always required — fallback to config defaults if empty
-        pi_model = custom_models.get('pi', self.config.models.pi_model) or self.config.models.pi_model
-        bioinformatics_model = custom_models.get('bioinformatics', self.config.models.bioinformatics_model) or self.config.models.bioinformatics_model
-        # Optional agents — empty model means disabled
-        pathology_model = custom_models.get('pathology', self.config.models.pathology_model)
-        biochemistry_model = custom_models.get('biochemistry', self.config.models.biochemistry_model)
-        literature_model = custom_models.get('literature', self.config.models.literature_model)
-
-        # Determine prompts to use (custom takes precedence)
-        pi_prompt = custom_prompts.get('pi', self.config.prompts.pi_prompt)
-        pathology_prompt = custom_prompts.get('pathology', self.config.prompts.pathology_prompt)
-        bioinformatics_prompt = custom_prompts.get('bioinformatics', self.config.prompts.bioinformatics_prompt)
-        biochemistry_prompt = custom_prompts.get('biochemistry', self.config.prompts.biochemistry_prompt)
-        literature_prompt = custom_prompts.get('literature', self.config.prompts.literature_prompt)
+        # Create the settings provider — all agents read model/temp/prompt/client from it
+        self._settings_provider = AgentSettingsProvider(
+            state=self._state,
+            config=self.config,
+            global_client=self.llm_manager.openrouter,
+            session_id=self.session_id,
+        )
 
         # Technique Agent (lightweight doc lookup, used by Supervisor and Bioinformatics)
-        technique_model = custom_models.get('technique', self.config.models.technique_model)
+        technique_model = self._settings_provider.get_model("technique")
         if technique_model and technique_model.strip():
             self.technique_agent = TechniqueAgent(
-                llm_client=self._get_agent_llm_client('technique'),
-                model=technique_model,
-                temperature=self.temperatures.get('technique', 0.1),
+                settings_provider=self._settings_provider,
                 message_callback=self._technique_message_callback,
             )
             self.technique_agent.set_session(self.session_id)
@@ -404,18 +352,12 @@ class SingleCellAnalysisWorkflow:
 
         # Initialize required agents (PI and Bioinformatics — always active)
         self.pi_agent = PIAgent(
-            llm_client=self._get_agent_llm_client('pi'),
-            model=pi_model,
-            system_prompt=pi_prompt,
-            config=AgentConfig(temperature=self.temperatures.get('pi', 0.5))
+            settings_provider=self._settings_provider,
         )
-        self.pi_agent.has_vision = self._vision_settings.get('pi', True)
         self.pi_agent.set_session(self.session_id)
 
         self.bioinformatics_agent = BioinformaticsAgent(
-            llm_client=self._get_agent_llm_client('bioinformatics'),
-            model=bioinformatics_model,
-            system_prompt=bioinformatics_prompt,
+            settings_provider=self._settings_provider,
             sandbox=self.sandbox,
             literature_callback=self._literature_callback,
             pi_callback=self._pi_callback,
@@ -423,47 +365,36 @@ class SingleCellAnalysisWorkflow:
             message_callback=self._agent_message_callback,
             supervisor_callback=self._supervisor_callback,
             technique_agent=self.technique_agent,
-            config=AgentConfig(temperature=self.temperatures.get('bioinformatics', 0.1))
         )
-        self.bioinformatics_agent.has_vision = self._vision_settings.get('bioinformatics', True)
         self.bioinformatics_agent.set_session(self.session_id)
 
         # Initialize optional agents — disabled if model is empty
+        pathology_model = self._settings_provider.get_model("pathology")
         if pathology_model and pathology_model.strip():
             self.pathology_agent = PathologyAgent(
-                llm_client=self._get_agent_llm_client('pathology'),
-                model=pathology_model,
-                system_prompt=pathology_prompt,
+                settings_provider=self._settings_provider,
                 tile_size=self.config.image_tile_size,
                 max_tiles=50,
-                config=AgentConfig(temperature=self.temperatures.get('pathology', 0.2))
             )
-            self.pathology_agent.has_vision = self._vision_settings.get('pathology', True)
             self.pathology_agent.set_session(self.session_id)
         else:
             self.pathology_agent = None
             logger.info(f"[{self.session_id}] Pathology agent disabled (empty model)")
 
+        biochemistry_model = self._settings_provider.get_model("biochemistry")
         if biochemistry_model and biochemistry_model.strip():
             self.biochemistry_agent = BiochemistryAgent(
-                llm_client=self._get_agent_llm_client('biochemistry'),
-                model=biochemistry_model,
-                system_prompt=biochemistry_prompt,
-                config=AgentConfig(temperature=self.temperatures.get('biochemistry', 0.2))
+                settings_provider=self._settings_provider,
             )
-            self.biochemistry_agent.has_vision = self._vision_settings.get('biochemistry', True)
             self.biochemistry_agent.set_session(self.session_id)
         else:
             self.biochemistry_agent = None
             logger.info(f"[{self.session_id}] Biochemistry agent disabled (empty model)")
 
         # Literature agent with mode-specific configuration
-        literature_config = getattr(self, '_literature_config', {})
+        literature_config = self._settings_provider.get_literature_config()
         self.literature_agent = LiteratureAgent(
-            llm_client=self._get_agent_llm_client('literature'),
-            model=literature_model,
-            system_prompt=literature_prompt,
-            config=AgentConfig(temperature=self.temperatures.get('literature', 0.6)),
+            settings_provider=self._settings_provider,
             literature_mode=literature_config.get('mode', 'deep_research'),
             deep_research_model=literature_config.get('deep_research_model', ''),
             deep_research_llm_base_url=literature_config.get('deep_research_llm_base_url', ''),
@@ -472,49 +403,46 @@ class SingleCellAnalysisWorkflow:
             pubmed_email=literature_config.get('pubmed_email', ''),
             max_search_rounds=literature_config.get('max_search_rounds', 5),
             proxy_url=self.config.api.proxy_url,
-            fallback_model=pi_model,
-            fallback_llm_client=self._get_agent_llm_client('pi'),
         )
         self.literature_agent.set_session(self.session_id)
 
         # Register deep research LLM client for cleanup (if literature agent created one)
         if hasattr(self.literature_agent, '_deep_research_llm_client') and self.literature_agent._deep_research_llm_client:
-            self._extra_llm_clients.append(self.literature_agent._deep_research_llm_client)
+            self._settings_provider.register_client(
+                ('deep_research', 'deep_research'),
+                self.literature_agent._deep_research_llm_client,
+            )
 
         # Initialize Painter Agent for graphic abstract generation (optional)
-        painter_model = custom_models.get('painter', self.config.models.painter_model)
+        painter_model = self._settings_provider.get_model("painter")
         if painter_model and painter_model.strip():
             self.painter_agent = PainterAgent(
-                llm_client=self._get_agent_llm_client('painter'),
-                model=painter_model,
-                config=AgentConfig(temperature=self.temperatures.get('painter', 0.7))
+                settings_provider=self._settings_provider,
             )
             self.painter_agent.set_session(self.session_id)
-            self.painter_agent.has_vision = self._vision_settings.get('painter', True)
         else:
             self.painter_agent = None
             logger.info(f"[{self.session_id}] Painter agent disabled (empty model)")
 
         # Initialize Supervisor Agent for real-time analysis monitoring (optional)
-        supervisor_model = custom_models.get('supervisor', self.config.models.supervisor_model)
-        supervisor_prompt = custom_prompts.get('supervisor', getattr(self.config.prompts, 'supervisor_prompt', ''))
+        supervisor_model = self._settings_provider.get_model("supervisor")
         if supervisor_model and supervisor_model.strip():
             self.supervisor_agent = SupervisorAgent(
-                llm_client=self._get_agent_llm_client('supervisor'),
-                model=supervisor_model,
+                settings_provider=self._settings_provider,
                 pi_callback=self._pi_callback,
                 message_callback=self._supervisor_message_callback,
                 session_id=self.session_id,
-                temperature=self.temperatures.get('supervisor', 0.1),
-                system_prompt=supervisor_prompt,
                 technique_agent=self.technique_agent,
             )
-            self.supervisor_agent.has_vision = self._vision_settings.get('supervisor', True)
             self.supervisor_agent.set_sandbox(self.sandbox)
         else:
             self.supervisor_agent = None
             logger.info(f"[{self.session_id}] Supervisor agent disabled (empty model)")
 
+        # Log which agents are active
+        pi_model = self._settings_provider.get_model("pi")
+        bioinformatics_model = self._settings_provider.get_model("bioinformatics")
+        literature_model = self._settings_provider.get_model("literature")
         logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model or 'DISABLED'}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model or 'DISABLED'}, Literature={literature_model}, Painter={painter_model or 'DISABLED'}, Supervisor={supervisor_model or 'DISABLED'}")
 
         # Wire on_retry callback into every agent's LLM client so that
@@ -544,19 +472,13 @@ class SingleCellAnalysisWorkflow:
             except Exception:
                 pass  # Best-effort; never break retry logic
 
-        agents = [
-            self.pi_agent,
-            self.bioinformatics_agent,
-            getattr(self, 'pathology_agent', None),
-            getattr(self, 'biochemistry_agent', None),
-            getattr(self, 'literature_agent', None),
-            getattr(self, 'painter_agent', None),
-            getattr(self, 'supervisor_agent', None),
-            getattr(self, 'technique_agent', None),
-        ]
-        for agent in agents:
-            if agent is not None and hasattr(agent, 'llm_client') and agent.llm_client is not None:
-                agent.llm_client.on_retry = _on_retry
+        # Set on the global client
+        self.llm_manager.openrouter.on_retry = _on_retry
+        # Set on the provider so all future lazy-created clients also get it
+        self._settings_provider.set_retry_callback(_on_retry)
+        # Also set on any already-cached clients
+        for client in self._settings_provider.cached_clients():
+            client.on_retry = _on_retry
 
     def _build_graph(self):
         """Build the LangGraph workflow with sequential execution for analysis nodes"""
@@ -708,7 +630,7 @@ Be specific and actionable in your response.
 IMPORTANT: Respond in English only. Do not use any other language."""
 
         try:
-            response = await self.pi_agent.chat_without_history(prompt, temperature=self.temperatures.get('pi', 0.5))
+            response = await self.pi_agent.chat_without_history(prompt, temperature=self._settings_provider.get_temperature('pi'))
             await self._send_message("pi_response", response, AgentType.PI)
             return response
         except Exception as e:
@@ -3867,11 +3789,11 @@ Return ONLY the JSON array, nothing else."""
                 )
 
             # Create LLM client (use PI agent's server config for report generation)
-            llm_client = self._get_agent_llm_client('pi')
+            llm_client = self._settings_provider.get_llm_client('pi')
 
             # Get models from state or use defaults
-            pi_model = analysis_state.custom_models.get("pi", self.config.models.pi_model)
-            bio_model = analysis_state.custom_models.get("bioinformatics", self.config.models.bioinformatics_model)
+            pi_model = self._settings_provider.get_model("pi")
+            bio_model = self._settings_provider.get_model("bioinformatics")
 
             workspace_dir = str(get_session_workspace(self.session_id))
 
@@ -3885,13 +3807,11 @@ Return ONLY the JSON array, nothing else."""
                     output_dir=output_dir,
                     workspace_dir=str(get_session_workspace(self.session_id)),
                     progress_callback=progress_callback,
-                    report_llm_client=self._get_agent_llm_client('pi'),
+                    report_llm_client=self._settings_provider.get_llm_client('pi'),
                 )
             else:
                 # Fallback: use original DetailedReportGenerator
-                supervisor_model = analysis_state.custom_models.get(
-                    "supervisor", self.config.models.supervisor_model
-                )
+                supervisor_model = self._settings_provider.get_model("supervisor")
                 generator = DetailedReportGenerator(
                     llm_client=llm_client,
                     pi_model=pi_model,
@@ -3960,13 +3880,8 @@ Return ONLY the JSON array, nothing else."""
         Returns:
             Final analysis state
         """
-        # Store custom models, prompts, temperatures, and literature config for initialization
-        self._custom_models = initial_state.custom_models
-        self._custom_prompts = initial_state.custom_prompts
-        self._custom_temperatures = initial_state.custom_temperatures
-        self._agent_vision_settings = initial_state.agent_vision_settings
-        self._literature_config = initial_state.literature_config
-        self._agent_server_configs = initial_state.agent_server_configs
+        # Store state for settings provider initialization
+        self._state = initial_state
 
         try:
             await self._send_message("status", "Initializing analysis system...")
@@ -4024,12 +3939,8 @@ Return ONLY the JSON array, nothing else."""
         Used when a session completed all analysis rounds but was interrupted
         before report generation finished.
         """
-        self._custom_models = initial_state.custom_models
-        self._custom_prompts = initial_state.custom_prompts
-        self._custom_temperatures = initial_state.custom_temperatures
-        self._agent_vision_settings = initial_state.agent_vision_settings
-        self._literature_config = initial_state.literature_config
-        self._agent_server_configs = initial_state.agent_server_configs
+        # Store state for settings provider initialization
+        self._state = initial_state
 
         try:
             await self._send_message("status", "Resuming report generation (analysis already complete)...")
@@ -4103,14 +4014,9 @@ Return ONLY the JSON array, nothing else."""
 
         # Re-initialize agents and components if not already initialized
         if self.compiled_graph is None:
-            # Restore custom models/prompts/temperatures from analysis state
+            # Restore state for settings provider initialization
             if analysis_state:
-                self._custom_models = analysis_state.custom_models
-                self._custom_prompts = analysis_state.custom_prompts
-                self._custom_temperatures = analysis_state.custom_temperatures
-                self._agent_vision_settings = analysis_state.agent_vision_settings
-                self._literature_config = analysis_state.literature_config
-                self._agent_server_configs = analysis_state.agent_server_configs
+                self._state = analysis_state
             logger.info(f"[{self.session_id}] Re-initializing workflow components for resume")
             await self.initialize()
 
@@ -4218,12 +4124,9 @@ Return ONLY the JSON array, nothing else."""
             except Exception as e:
                 logger.exception(f"[{self.session_id}] Error closing LLM manager")
 
-        # Close per-agent LLM clients that differ from the shared manager
-        for client in getattr(self, '_extra_llm_clients', []):
-            try:
-                await client.close()
-            except Exception as e:
-                logger.debug(f"Failed to close extra LLM client: {e}")
+        # Close per-agent LLM clients managed by the settings provider
+        if hasattr(self, '_settings_provider') and self._settings_provider:
+            await self._settings_provider.cleanup()
     
     def get_notebook_path(self) -> Optional[str]:
         """Get path to the saved Jupyter notebook"""

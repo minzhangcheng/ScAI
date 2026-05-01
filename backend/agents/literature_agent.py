@@ -22,6 +22,7 @@ import httpx
 from openai import APIConnectionError as OpenAIConnectionError
 
 from .base import BaseAgent
+from ..utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
 from ..models.schemas import (
@@ -52,10 +53,7 @@ class LiteratureAgent(BaseAgent):
 
     def __init__(
         self,
-        llm_client: OpenAICompatibleClient,
-        model: str,
-        system_prompt: str,
-        config: Optional['AgentConfig'] = None,
+        settings_provider: 'AgentSettingsProvider',
         # Literature-specific parameters
         literature_mode: str = "deep_research",
         deep_research_model: str = "",
@@ -65,16 +63,11 @@ class LiteratureAgent(BaseAgent):
         pubmed_email: str = "",
         max_search_rounds: int = 5,
         proxy_url: Optional[str] = None,
-        fallback_model: str = "",
-        fallback_llm_client: Optional["OpenAICompatibleClient"] = None,
     ):
-        from .base import AgentConfig
+        from ..utils.settings_provider import AgentSettingsProvider
         super().__init__(
             agent_type=AgentType.LITERATURE,
-            llm_client=llm_client,
-            model=model,
-            system_prompt=system_prompt,
-            config=config or AgentConfig()
+            settings_provider=settings_provider,
         )
         self.reports: List[LiteratureReport] = []
 
@@ -84,8 +77,6 @@ class LiteratureAgent(BaseAgent):
         self.pubmed_email = pubmed_email
         self.max_search_rounds = max(1, min(20, max_search_rounds))
         self.proxy_url = proxy_url
-        self.fallback_model = fallback_model
-        self.fallback_llm_client = fallback_llm_client
 
         # Separate LLM client for deep research mode (optional)
         self._deep_research_llm_client: Optional[OpenAICompatibleClient] = None
@@ -113,6 +104,14 @@ class LiteratureAgent(BaseAgent):
         if self.literature_mode not in ("gemini_deep_research", "deep_research"):
             return False
         return self._deep_research is not None or bool(self.deep_research_model)
+
+    @property
+    def fallback_model(self) -> str:
+        return self._provider.get_model("pi")
+
+    @property
+    def fallback_llm_client(self) -> OpenAICompatibleClient:
+        return self._provider.get_llm_client("pi")
 
     async def process(
         self,

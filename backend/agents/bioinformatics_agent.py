@@ -18,6 +18,7 @@ from datetime import datetime
 import aiofiles
 
 from .base import BaseAgent, AgentConfig
+from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.sandbox import (
     validate_code_safety, DANGEROUS_PATTERNS, extract_code_from_markdown,
     LocalJupyterSandbox, CodeExecutionResult,
@@ -301,9 +302,7 @@ class BioinformaticsAgent(BaseAgent):
     
     def __init__(
         self,
-        llm_client: OpenAICompatibleClient,
-        model: str,
-        system_prompt: str,
+        settings_provider: 'AgentSettingsProvider',
         sandbox: LocalJupyterSandbox,
         literature_callback: Optional[Callable[[str], Awaitable[str]]] = None,
         pi_callback: Optional[Callable[[str, str], Awaitable[str]]] = None,
@@ -312,14 +311,10 @@ class BioinformaticsAgent(BaseAgent):
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
         supervisor_callback: Optional[Callable[['AnalysisStep', List[str]], Awaitable[Optional[str]]]] = None,
         technique_agent=None,
-        config: Optional[AgentConfig] = None
     ):
         super().__init__(
             agent_type=AgentType.BIOINFORMATICS,
-            llm_client=llm_client,
-            model=model,
-            system_prompt=system_prompt,
-            config=config
+            settings_provider=settings_provider,
         )
         self.sandbox = sandbox
         self.literature_callback = literature_callback
@@ -498,15 +493,16 @@ class BioinformaticsAgent(BaseAgent):
                 parts.append(f"{key}: {value}")
         return "\n".join(parts)
 
-    @functools.cached_property
+    @property
     def _static_system_prompt(self) -> str:
         """Build the static portion of the system prompt.
 
-        This content is constant across all LLM calls within a session and across
-        rounds, making it ideal for OpenAI prefix caching. Dynamic context (data
-        files, notebook history, analysis state) is placed in a separate message.
+        Cached by system_prompt value — invalidated when the prompt changes,
+        preserving OpenAI prefix caching benefits while supporting hot reload.
         """
-        return f"""{self.system_prompt}
+        sp = self.system_prompt
+        if getattr(self, "_cached_static_sp_key", None) != sp:
+            result = f"""{sp}
 
 You are conducting single-cell RNA-seq analysis. You have access to tools:
 1. execute_code - Run Python code (scanpy, anndata, numpy, pandas, matplotlib available)
@@ -741,6 +737,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 - Generate informative visualizations
 - Use report_findings when completing an analysis phase
 """
+            self._cached_static_sp_key, self._cached_static_sp = sp, result
+        return self._cached_static_sp
 
     def _build_dynamic_context(self, state: AnalysisState) -> str:
         """Build the dynamic context portion (data files, notebook history, analysis state).

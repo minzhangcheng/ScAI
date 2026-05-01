@@ -25,6 +25,7 @@ from backend.services.session_store import ensure_session_loaded
 from backend.state import detailed_reports, report_websockets
 from backend.utils.files import safe_filename, validate_path_within, validate_session_id
 from backend.utils.auth import require_session_ownership
+from backend.utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -210,9 +211,12 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     
     llm_client = _get_agent_llm_client(state, config, PI_AGENT_NAME, session_id)
 
-    # Get models from state or use defaults
-    pi_model = state.custom_models.get(PI_AGENT_NAME, config.models.pi_model)
-    bio_model = state.custom_models.get("bioinformatics", config.models.bioinformatics_model)
+    # Create provider for resolving per-agent settings
+    provider = AgentSettingsProvider(state, config, global_client=llm_client, session_id=session_id)
+
+    # Get models via provider (respects session-level overrides)
+    pi_model = provider.get_model(PI_AGENT_NAME)
+    bio_model = provider.get_model("bioinformatics")
 
     try:
         workspace_dir = str(_get_session_workspace(session_id))
@@ -222,8 +226,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
 
         # Use SupervisorAgent path for report generation
         supervisor = SupervisorAgent(
-            llm_client=llm_client,
-            model=pi_model,
+            settings_provider=provider,
             session_id=session_id,
         )
 

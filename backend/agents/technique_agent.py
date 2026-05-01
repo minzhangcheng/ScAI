@@ -14,6 +14,7 @@ from .base import BaseAgent, AgentConfig
 from ..models.schemas import AgentType, AnalysisState
 from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type, strip_ansi
 from ..utils.llm_client import OpenAICompatibleClient
+from ..utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -46,18 +47,12 @@ class TechniqueAgent(BaseAgent):
 
     def __init__(
         self,
-        llm_client: OpenAICompatibleClient,
-        model: str,
-        temperature: float = 0.1,
-        system_prompt: str = "",
+        settings_provider: 'AgentSettingsProvider',
         message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ):
         super().__init__(
             agent_type=AgentType.TECHNIQUE,
-            llm_client=llm_client,
-            model=model,
-            system_prompt=system_prompt or _SUMMARIZE_PROMPT,
-            config=AgentConfig(temperature=temperature),
+            settings_provider=settings_provider,
         )
         self.message_callback = message_callback
 

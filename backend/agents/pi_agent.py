@@ -7,7 +7,8 @@ import json
 import re
 import logging
 
-from .base import BaseAgent
+from .base import BaseAgent, AgentConfig
+from ..utils.settings_provider import AgentSettingsProvider
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -61,18 +62,11 @@ class PIAgent(BaseAgent):
 
     def __init__(
         self,
-        llm_client: OpenAICompatibleClient,
-        model: str,
-        system_prompt: str,
-        config: Optional['AgentConfig'] = None
+        settings_provider: 'AgentSettingsProvider',
     ):
-        from .base import AgentConfig
         super().__init__(
             agent_type=AgentType.PI,
-            llm_client=llm_client,
-            model=model,
-            system_prompt=system_prompt,
-            config=config or AgentConfig()
+            settings_provider=settings_provider,
         )
         
     async def process(

@@ -8,6 +8,7 @@ import re
 import logging
 
 from .base import BaseAgent
+from ..utils.settings_provider import AgentSettingsProvider
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -33,20 +34,13 @@ class PathologyAgent(BaseAgent):
     
     def __init__(
         self,
-        llm_client: OpenAICompatibleClient,
-        model: str,
-        system_prompt: str,
+        settings_provider: 'AgentSettingsProvider',
         tile_size: int = 1024,
         max_tiles: int = 50,
-        config: Optional['AgentConfig'] = None
     ):
-        from .base import AgentConfig
         super().__init__(
             agent_type=AgentType.PATHOLOGY,
-            llm_client=llm_client,
-            model=model,
-            system_prompt=system_prompt,
-            config=config or AgentConfig()
+            settings_provider=settings_provider,
         )
         self.tile_size = tile_size
         self.max_tiles = max_tiles

@@ -81,7 +81,8 @@ async def start_session(request: Request, body: StartRequest):
         name=body.session_name or f"Analysis-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
         user_id=user_id,
         initial_instruction=body.instruction,
-        status=TaskStatus.PENDING
+        status=TaskStatus.PENDING,
+        round_wait_seconds=body.round_wait_seconds,
     )
 
     from backend.services.session_store import update_session_cache as _update_session_cache
@@ -200,6 +201,7 @@ async def ensure_session(session_id: str, request: Request, body: StartRequest):
         initial_instruction=body.instruction,
         status=TaskStatus.PENDING,
         user_id=user_id,
+        round_wait_seconds=body.round_wait_seconds,
     )
 
     from backend.services.session_store import update_session_cache as _update_session_cache

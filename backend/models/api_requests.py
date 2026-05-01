@@ -27,6 +27,7 @@ class ValidateKeyRequest(BaseModel):
 class StartRequest(BaseModel):
     instruction: str
     session_name: Optional[str] = None
+    round_wait_seconds: int = Field(ge=-1, le=3600, default=300)
 
 
 class PromptUpdateRequest(BaseModel):

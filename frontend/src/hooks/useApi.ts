@@ -174,13 +174,13 @@ export function useSession() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   
-  const createSession = useCallback(async (instruction: string, name?: string) => {
+  const createSession = useCallback(async (instruction: string, name?: string, roundWaitSeconds?: number) => {
     setLoading(true)
     setError(null)
-    
+
     // Clear messages from previous session
     clearMessages()
-    
+
     try {
       const response = await apiFetch<{
         success: boolean
@@ -188,7 +188,7 @@ export function useSession() {
         data: { name: string }
       }>('/session/start', {
         method: 'POST',
-        body: JSON.stringify({ instruction, session_name: name }),
+        body: JSON.stringify({ instruction, session_name: name, round_wait_seconds: roundWaitSeconds }),
       })
       
       const session: Session = {

@@ -19,6 +19,7 @@ import httpx
 from .base import BaseAgent, AgentConfig
 from ..models.schemas import AgentType, AnalysisState, GraphicAbstract
 from ..utils.llm_client import OpenAICompatibleClient
+from ..utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -64,26 +65,17 @@ class PainterAgent(BaseAgent):
 
     def __init__(
         self,
-        llm_client: OpenAICompatibleClient,
-        model: str = "google/gemini-3-pro-image-preview",
-        system_prompt: str = "",
-        config: Optional[AgentConfig] = None
+        settings_provider: 'AgentSettingsProvider',
     ):
         """
         Initialize the Painter Agent.
 
         Args:
-            llm_client: OpenAI-compatible client (OpenRouter, etc.)
-            model: Model to use for image generation (e.g., google/gemini-3-pro-image-preview)
-            system_prompt: System prompt (optional for image generation)
-            config: Agent configuration
+            settings_provider: Settings provider for hot-reloadable agent settings
         """
         super().__init__(
             agent_type=AgentType.PAINTER,
-            llm_client=llm_client,
-            model=model,
-            system_prompt=system_prompt or "You are a professional scientific illustrator.",
-            config=config or AgentConfig(temperature=0.7)
+            settings_provider=settings_provider,
         )
 
         logger.info(f"[Painter] Initialized with model={model}")

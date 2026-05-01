@@ -18,6 +18,7 @@ from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, BiochemistryIndicator, DataFile
 )
 from ..utils.llm_client import OpenAICompatibleClient
+from ..utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -39,18 +40,11 @@ class BiochemistryAgent(BaseAgent):
 
     def __init__(
         self,
-        llm_client: OpenAICompatibleClient,
-        model: str,
-        system_prompt: str,
-        config: Optional['AgentConfig'] = None
+        settings_provider: 'AgentSettingsProvider',
     ):
-        from .base import AgentConfig
         super().__init__(
             agent_type=AgentType.BIOCHEMISTRY,
-            llm_client=llm_client,
-            model=model,
-            system_prompt=system_prompt,
-            config=config or AgentConfig()
+            settings_provider=settings_provider,
         )
 
     async def process(
