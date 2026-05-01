@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for multi-omics biomedical research. It integrates single-cell sequencing (scRNA-seq / snRNA-seq), bulk RNA-seq, pathology image analysis (H&E / IHC), and biochemical indicators into a unified, iterative workflow. Powered by specialized agents and a **human-in-the-loop** design, ScAI is **provider-agnostic**: any OpenAI-compatible endpoint works, with per-agent routing so you can mix flagship and open-source models to balance quality and cost. Verified endpoints include cloud aggregators (OpenRouter, n1n.ai), direct provider APIs (DeepSeek, Moonshot, Zhipu, MiniMax, Aliyun/Qwen), Google Gemini (for Deep Research literature mode), and **locally deployed open-source models via Ollama**.
 
-**Version**: 0.21.3 · **License**: Apache 2.0
+**Version**: 0.21.4 · **License**: Apache 2.0
 
 ## Quick Start
 
@@ -45,7 +45,7 @@ Customize host/ports:
 
 The script creates a virtual environment, installs dependencies, and starts both backend and frontend. Stop with `./stop.sh`.
 
-> First-run configuration (API keys, PubMed email, optional proxy) is performed in the UI. See the [User Guide](docs/user-guide.md) for full details.
+> First-run configuration (API keys, PubMed email, optional proxy) is performed in the UI. See the [User Guide](user-guide.md) for full details.
 
 ## Core Features
 
@@ -118,7 +118,7 @@ For module-level detail (routes, services, agents, state, deployment, dev workfl
 
 ## Documentation
 
-- **[User Guide](docs/user-guide.md)** — step-by-step walkthrough of a full analysis.
+- **[User Guide](user-guide.md)** — step-by-step walkthrough of a full analysis.
 - **[HANDOVER](HANDOVER.md)** — architecture snapshot, module map, deployment, and developer guide.
 - **[Python client](clients/python/README.md)** — programmatic access to ScAI sessions.
 

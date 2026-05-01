@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from backend.config._config import SystemConfig
 from backend.models.schemas import AnalysisState
 from backend.utils.llm_client import OpenAICompatibleClient
+from backend.state import sessions
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,6 @@ class AgentSettingsProvider:
         transition). Falls back to the direct reference (for tests).
         """
         if self._session_id:
-            from backend.state import sessions
             current = sessions.get(self._session_id)
             if current is not None:
                 return current
@@ -67,10 +67,10 @@ class AgentSettingsProvider:
         return getattr(self._config.models, f"{agent_name}_model", "")
 
     def get_temperature(self, agent_name: str) -> float:
-        merged = self._config.temperatures.merge_custom(
-            self._get_state().custom_temperatures or {}
-        )
-        return getattr(merged, agent_name, 0.5)
+        custom = (self._get_state().custom_temperatures or {}).get(agent_name)
+        if custom is not None:
+            return custom
+        return getattr(self._config.temperatures, agent_name, 0.5)
 
     def get_system_prompt(self, agent_name: str) -> str:
         custom = (self._get_state().custom_prompts or {}).get(agent_name)

@@ -64,7 +64,6 @@ class LiteratureAgent(BaseAgent):
         max_search_rounds: int = 5,
         proxy_url: Optional[str] = None,
     ):
-        from ..utils.settings_provider import AgentSettingsProvider
         super().__init__(
             agent_type=AgentType.LITERATURE,
             settings_provider=settings_provider,

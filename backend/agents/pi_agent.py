@@ -7,7 +7,7 @@ import json
 import re
 import logging
 
-from .base import BaseAgent, AgentConfig
+from .base import BaseAgent
 from ..utils.settings_provider import AgentSettingsProvider
 
 # Configure logger

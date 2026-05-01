@@ -139,8 +139,7 @@ async def _generate_figures_in_chat(
             )
 
             llm_client = get_agent_llm_client(state, config, "bioinformatics", session_id)
-            _fig_provider = AgentSettingsProvider(state, config, global_client=llm_client, session_id=session_id)
-            bio_model = _fig_provider.get_model("bioinformatics") or "google/gemini-3.1-pro-preview"
+            bio_model = (state.custom_models or {}).get("bioinformatics") or getattr(config.models, "bioinformatics_model", "") or "google/gemini-3.1-pro-preview"
             code_resp = await llm_client.chat(
                 model=bio_model,
                 messages=[{"role": "user", "content": code_prompt}],
@@ -943,9 +942,10 @@ async def chat_with_pi(
 
     # --- Build context & prompt ---
     context, figure_inventory = _build_chat_context(state)
-    _pi_provider = AgentSettingsProvider(state, config, global_client=None, session_id=session_id)
-    pi_model = _pi_provider.get_model(PI_AGENT_NAME)
-    pi_temp = _pi_provider.get_temperature(PI_AGENT_NAME)
+    _custom_models = state.custom_models or {}
+    _custom_temps = state.custom_temperatures or {}
+    pi_model = _custom_models.get(PI_AGENT_NAME) or getattr(config.models, f"{PI_AGENT_NAME}_model", "")
+    pi_temp = _custom_temps.get(PI_AGENT_NAME) if _custom_temps.get(PI_AGENT_NAME) is not None else getattr(config.temperatures, PI_AGENT_NAME, 0.5)
 
     system_prompt = (
         "You are the PI (Principal Investigator) Agent of a biomedical research analysis system. "

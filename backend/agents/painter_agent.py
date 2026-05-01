@@ -78,7 +78,7 @@ class PainterAgent(BaseAgent):
             settings_provider=settings_provider,
         )
 
-        logger.info(f"[Painter] Initialized with model={model}")
+        logger.info(f"[Painter] Initialized with model={self.model}")
 
     async def generate_graphic_abstract(
         self,
