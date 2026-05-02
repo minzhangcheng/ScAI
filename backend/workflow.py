@@ -195,6 +195,14 @@ class SingleCellAnalysisWorkflow:
     """
     Multi-agent workflow for single-cell analysis using LangGraph
     """
+
+    @staticmethod
+    def _set_status(state: AnalysisState, status: TaskStatus):
+        state.status = status
+        if status == TaskStatus.WAITING_INPUT:
+            state.waiting_input_started_at = datetime.now()
+        else:
+            state.waiting_input_started_at = None
     
     def __init__(
         self,
@@ -1159,7 +1167,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                     "detailed_report_url": detailed_report_url,
                 }, AgentType.LITERATURE)
 
-                state.status = TaskStatus.WAITING_ANNOTATION
+                self._set_status(state, TaskStatus.WAITING_ANNOTATION)
                 await self._send_state_sync(state, "annotation_confirmation")
 
                 logger.info(f"[{self.session_id}] Waiting for user annotation confirmation...")
@@ -1775,7 +1783,7 @@ Approve if quality_score >= 7."""
         # since current_round is already correct from the snapshot)
         if not analysis_state.last_restored_snapshot_id:
             analysis_state.current_round += 1
-        analysis_state.status = TaskStatus.RUNNING
+        self._set_status(analysis_state, TaskStatus.RUNNING)
 
         # Clear residual should_continue from previous convergence check
         # to prevent stale False value from terminating an extended round
@@ -2961,7 +2969,7 @@ Return ONLY the JSON array, nothing else."""
         self._continue_event.clear()
 
         # Set status to waiting for user input
-        analysis_state.status = TaskStatus.WAITING_INPUT
+        self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
 
         max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
         is_last_round = analysis_state.current_round >= max_rounds
@@ -3022,7 +3030,7 @@ Return ONLY the JSON array, nothing else."""
         elif wait_seconds == -1:
             # Manual mode: wait for user signal (with supplementary analysis support)
             if analysis_state.status != TaskStatus.WAITING_INPUT:
-                analysis_state.status = TaskStatus.WAITING_INPUT
+                self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
                 await self._send_state_sync(analysis_state, "waiting_input")
 
             while True:
@@ -3035,7 +3043,7 @@ Return ONLY the JSON array, nothing else."""
                     req = self._supplementary_request
                     self._supplementary_request = None
                     self._supplementary_target = None
-                    analysis_state.status = TaskStatus.RUNNING
+                    self._set_status(analysis_state, TaskStatus.RUNNING)
                     await self._send_state_sync(analysis_state, "supplementary_running")
 
                     await self._run_supplementary_analysis(analysis_state, req, "direction")
@@ -3068,19 +3076,19 @@ Return ONLY the JSON array, nothing else."""
                         logger.error(f"[{self.session_id}] Exploration report regeneration failed: {e}")
                         await self._send_message("error", f"Report regeneration failed: {e}", AgentType.PI)
 
-                    analysis_state.status = TaskStatus.WAITING_INPUT
+                    self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
                     await self._send_state_sync(analysis_state, "waiting_input")
                     continue
                 elif self._supplementary_request and self._supplementary_target == "round":
                     req = self._supplementary_request
                     self._supplementary_request = None
                     self._supplementary_target = None
-                    analysis_state.status = TaskStatus.RUNNING
+                    self._set_status(analysis_state, TaskStatus.RUNNING)
                     await self._send_state_sync(analysis_state, "supplementary_running")
 
                     await self._run_supplementary_analysis(analysis_state, req, "round")
 
-                    analysis_state.status = TaskStatus.WAITING_INPUT
+                    self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
                     await self._send_state_sync(analysis_state, "waiting_input")
                     continue
                 else:
@@ -3090,7 +3098,7 @@ Return ONLY the JSON array, nothing else."""
             # Countdown mode: backend safety timeout = frontend countdown + 60s buffer
             # Guard: ensure WAITING_INPUT status is synced before blocking
             if analysis_state.status != TaskStatus.WAITING_INPUT:
-                analysis_state.status = TaskStatus.WAITING_INPUT
+                self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
                 await self._send_state_sync(analysis_state, "waiting_input")
             backend_timeout = wait_seconds + 60
             logger.info(f"[{self.session_id}] Waiting for user input (round {analysis_state.current_round}, timeout={backend_timeout}s)")
@@ -3099,7 +3107,7 @@ Return ONLY the JSON array, nothing else."""
                 logger.info(f"[{self.session_id}] Continue signal received")
             except asyncio.TimeoutError:
                 logger.info(f"[{self.session_id}] Wait timeout ({backend_timeout}s), auto-proceeding")
-                analysis_state.status = TaskStatus.RUNNING
+                self._set_status(analysis_state, TaskStatus.RUNNING)
                 await self._send_state_sync(analysis_state, "auto_continue")
 
         # If user provided real input (text or files) on the last round, extend max_rounds to allow one more
@@ -3197,7 +3205,7 @@ Return ONLY the JSON array, nothing else."""
         analysis_state = state["analysis_state"]
 
         # Mark status so interrupted report generation can be detected on resume
-        analysis_state.status = TaskStatus.GENERATING_REPORT
+        self._set_status(analysis_state, TaskStatus.GENERATING_REPORT)
         await self._send_state_sync(analysis_state, "report_generation_start")
 
         logger.info(f"[{self.session_id}] Generating final report after {analysis_state.current_round} rounds")
@@ -3852,7 +3860,7 @@ Return ONLY the JSON array, nothing else."""
             # Don't fail the workflow - detailed report is optional
 
         # Mark analysis as completed
-        analysis_state.status = TaskStatus.COMPLETED
+        self._set_status(analysis_state, TaskStatus.COMPLETED)
         await self._send_message("completed", "Analysis completed", AgentType.PI)
 
         # Send final state sync for completion
@@ -3890,7 +3898,7 @@ Return ONLY the JSON array, nothing else."""
         except Exception as e:
             logger.exception("Failed to initialize workflow")
             await self._send_message("error", f"Initialization failed: {str(e)}")
-            initial_state.status = TaskStatus.FAILED
+            self._set_status(initial_state, TaskStatus.FAILED)
             return initial_state
 
         # Create initial workflow state
@@ -3904,7 +3912,7 @@ Return ONLY the JSON array, nothing else."""
             error_msg = "Workflow not properly initialized - compiled_graph is None"
             logger.error(f"[{self.session_id}] {error_msg}")
             await self._send_message("error", error_msg)
-            initial_state.status = TaskStatus.FAILED
+            self._set_status(initial_state, TaskStatus.FAILED)
             return initial_state
 
         try:
@@ -3921,7 +3929,7 @@ Return ONLY the JSON array, nothing else."""
             error_detail = traceback.format_exc()
             logger.error(f"Workflow execution failed: {error_detail}")
             await self._send_message("error", f"Workflow execution failed: {str(e)}")
-            initial_state.status = TaskStatus.FAILED
+            self._set_status(initial_state, TaskStatus.FAILED)
             initial_state.add_message(
                 AgentType.PI,
                 MessageRole.SYSTEM,
@@ -3949,7 +3957,7 @@ Return ONLY the JSON array, nothing else."""
         except Exception as e:
             logger.exception(f"[{self.session_id}] Failed to initialize for report generation")
             await self._send_message("error", f"Initialization failed: {str(e)}")
-            initial_state.status = TaskStatus.FAILED
+            self._set_status(initial_state, TaskStatus.FAILED)
             return initial_state
 
         # Create workflow state with existing analysis data
@@ -3996,7 +4004,7 @@ Return ONLY the JSON array, nothing else."""
             error_detail = traceback.format_exc()
             logger.error(f"[{self.session_id}] Report generation failed: {error_detail}")
             await self._send_message("error", f"Report generation failed: {str(e)}")
-            initial_state.status = TaskStatus.FAILED
+            self._set_status(initial_state, TaskStatus.FAILED)
             return initial_state
 
     async def resume(
@@ -4069,7 +4077,7 @@ Return ONLY the JSON array, nothing else."""
             f"Resuming from snapshot (Round {analysis_state.current_round})..."
         )
 
-        analysis_state.status = TaskStatus.RUNNING
+        self._set_status(analysis_state, TaskStatus.RUNNING)
         self._current_analysis_state = analysis_state
 
         workflow_state = self._make_initial_workflow_state(
@@ -4087,7 +4095,7 @@ Return ONLY the JSON array, nothing else."""
 
         if state and state.values:
             analysis_state = state.values["analysis_state"]
-            analysis_state.status = TaskStatus.PAUSED
+            self._set_status(analysis_state, TaskStatus.PAUSED)
             
             # Save sandbox state including Python session using dill
             if self.sandbox:

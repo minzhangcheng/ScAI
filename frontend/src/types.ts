@@ -35,6 +35,7 @@ export interface SessionLoadResponse {
   exploration_report_url?: string
   state_version?: number
   round_wait_seconds?: number
+  waiting_input_started_at?: string
   agent_errors?: RawAgentError[]
   messages?: RawMessage[]
 }
@@ -218,7 +219,10 @@ export interface SessionListItem {
   name: string
   status: string
   current_round: number
+  created_at?: string
   updated_at?: string
+  waiting_input_started_at?: string
+  round_wait_seconds?: number
   has_pathology?: boolean
   has_sequencing?: boolean
   has_biochemistry?: boolean

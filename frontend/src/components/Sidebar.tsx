@@ -1,6 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSession, apiFetch, generateId, authHeaders } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
+import { getTargetTab, selectPrioritySession, selectCompletedSession, selectPendingSession } from '../utils/sessionPriority'
+import type { SessionListItem } from '../types'
 import { useTranslation } from '../i18n/translations'
 import { ROUND_WAIT_OPTIONS } from '../constants/roundWait'
 import { DataConfigMenu } from './DataConfigMenu'
@@ -21,13 +23,23 @@ import {
   Pencil
 } from 'lucide-react'
 
+const PRIORITY_TIERS: { select: (s: SessionListItem[]) => SessionListItem | null; tab: 'data' | 'analysis' | 'report' }[] = [
+  { select: selectPrioritySession, tab: 'analysis' },
+  { select: selectCompletedSession, tab: 'report' },
+  { select: selectPendingSession, tab: 'data' },
+]
+
+function syncTabToSessionStatus(session: { status: string }) {
+  useAppStore.getState().setActiveTab(getTargetTab(session.status))
+}
+
 interface SidebarProps {
   isOpen: boolean
   onOpenConfig: () => void
 }
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
-  const { currentSession, setCurrentSession, clearMessages, language, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback, authUser } = useAppStore()
+  const { currentSession, setCurrentSession, clearMessages, language, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback, authUser, _hydrated } = useAppStore()
   const { createSession, loadSession, listSessions, deleteSession, updateSessionInfo, updateRoundWait } = useSession()
   const isReadOnly = authUser?.status === 'readonly'
   const { t } = useTranslation(language)
@@ -57,23 +69,65 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   // the hook-returned functions would cause unnecessary re-fires since their identity
   // changes on every render.
   const hasAutoReloaded = useRef(false)
+  const hasPriorityLoaded = useRef(false)
   const loadSessionRef = useRef(loadSession)
   loadSessionRef.current = loadSession
   const setCurrentSessionRef = useRef(setCurrentSession)
   setCurrentSessionRef.current = setCurrentSession
   const clearMessagesRef = useRef(clearMessages)
   clearMessagesRef.current = clearMessages
+  const listSessionsRef = useRef(listSessions)
+  listSessionsRef.current = listSessions
+
+  const doPriorityLoad = useCallback(async () => {
+    if (hasPriorityLoaded.current) return
+    hasPriorityLoaded.current = true
+    try {
+      const sessions = await listSessionsRef.current()
+      for (const { select } of PRIORITY_TIERS) {
+        const candidate = select(sessions)
+        if (!candidate) continue
+        const session = await loadSessionRef.current(candidate.id)
+        if (session) {
+          hasAutoReloaded.current = true
+          syncTabToSessionStatus(session)
+        }
+        return
+      }
+    } catch (e) {
+      console.warn('Sidebar: Priority session loading failed:', e)
+    }
+  }, [])
+
   useEffect(() => {
     if (currentSession?.id && !hasAutoReloaded.current) {
       hasAutoReloaded.current = true
-      loadSessionRef.current(currentSession.id).catch(e => {
-        // Session no longer exists on server (404) - clear stale session from state
+      loadSessionRef.current(currentSession.id).then(session => {
+        if (session) {
+          syncTabToSessionStatus(session)
+        }
+      }).catch(e => {
         console.warn('Sidebar: Auto-reload session failed, clearing stale session:', e)
         setCurrentSessionRef.current(null)
         clearMessagesRef.current()
+        // Session no longer exists on server — fall through to priority loading
+        hasAutoReloaded.current = false
+        hasPriorityLoaded.current = false
+        doPriorityLoad()
       })
     }
-  }, [currentSession?.id])
+  }, [currentSession?.id, doPriorityLoad])
+
+  // Priority-based session loading: when no persisted session exists, auto-load
+  // the best candidate from the server after Zustand hydration completes.
+  useEffect(() => {
+    if (!_hydrated || hasPriorityLoaded.current) return
+    if (hasAutoReloaded.current || currentSession?.id) {
+      hasPriorityLoaded.current = true
+      return
+    }
+    doPriorityLoad()
+  }, [_hydrated, doPriorityLoad])
 
   // Register session browser callback for external components (e.g., ConfigPanel's Read Mode)
   useEffect(() => {
@@ -107,7 +161,10 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   const handleLoadSession = async (sessionId: string) => {
     try {
       clearMessages()
-      await loadSession(sessionId)
+      const session = await loadSession(sessionId)
+      if (session) {
+        syncTabToSessionStatus(session)
+      }
       setShowSessionBrowser(false)
     } catch (e) {
       console.error('Failed to load session:', e)
@@ -133,7 +190,10 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
     
     try {
       clearMessages()
-      await createSession(instruction, sessionName || undefined, roundWaitSeconds)
+      const session = await createSession(instruction, sessionName || undefined, roundWaitSeconds)
+      if (session) {
+        syncTabToSessionStatus(session)
+      }
       setShowNewSession(false)
       // Reset to defaults for next time
       setInstruction(DEFAULT_PROJECT_DESCRIPTION)
@@ -152,9 +212,10 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
   const handleRefreshSession = async () => {
     if (!currentSession) return
-    
+
     try {
-      await loadSession(currentSession.id)
+      const session = await loadSession(currentSession.id)
+      if (session) syncTabToSessionStatus(session)
     } catch (e) {
       console.error('Failed to refresh session:', e)
     }

@@ -8,6 +8,8 @@ from enum import Enum
 import uuid
 import asyncio
 
+DEFAULT_ROUND_WAIT_SECONDS: int = 300
+
 # Sequencing data type constants
 DATA_TYPE_SCRNASEQ = "scRNA-seq"
 DATA_TYPE_BULK_RNASEQ = "bulk RNA-seq"
@@ -342,7 +344,8 @@ class AnalysisState(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     current_round: int = 0
     max_rounds: int = 3  # User-configurable maximum rounds
-    round_wait_seconds: int = 300  # Countdown seconds between rounds (-1=manual, 0=no wait)
+    round_wait_seconds: int = DEFAULT_ROUND_WAIT_SECONDS  # Countdown seconds between rounds (-1=manual, 0=no wait)
+    waiting_input_started_at: Optional[datetime] = None
 
     # Two-phase workflow state
     analysis_phase: AnalysisPhase = AnalysisPhase.EXPLORATION
@@ -625,6 +628,7 @@ class AnalysisState(BaseModel):
             "current_round": self.current_round,
             "max_rounds": self.max_rounds,
             "round_wait_seconds": self.round_wait_seconds,
+            "waiting_input_started_at": _dt(self.waiting_input_started_at),
             "created_at": _dt(self.created_at),
             "updated_at": _dt(self.updated_at),
             "initial_instruction": self.initial_instruction,

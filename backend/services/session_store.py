@@ -24,7 +24,7 @@ from backend.config import (
     get_session_metadata_path,
     resolve_session_metadata_path,
 )
-from backend.models.schemas import AnalysisState, TaskStatus
+from backend.models.schemas import AnalysisState, TaskStatus, DEFAULT_ROUND_WAIT_SECONDS
 from backend.utils.files import validate_session_id
 from backend.state import (
     sessions, state_lock, session_access_times, last_save_times,
@@ -153,6 +153,8 @@ def list_saved_sessions() -> List[Dict[str, Any]]:
                 "created_at": data.get("created_at", ""),
                 "updated_at": data.get("updated_at", ""),
                 "current_round": data.get("current_round", 0),
+                "waiting_input_started_at": data.get("waiting_input_started_at"),
+                "round_wait_seconds": data.get("round_wait_seconds", DEFAULT_ROUND_WAIT_SECONDS),
                 "has_pathology": has_path,
                 "has_sequencing": has_seq,
                 "has_biochemistry": has_bio,

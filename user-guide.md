@@ -1,63 +1,66 @@
-# ScAI 使用手册
 
-**版本**：0.21.4 · **最后更新**：2026-05-01
+# ScAI User Guide
 
-ScAI（Single-Cell Sequencing Analysis Driven by AI）是一个多 Agent AI 驱动的多组学生物医学研究系统。它将单细胞测序（scRNA-seq / snRNA-seq）、bulk RNA-seq、病理图像（H&E / IHC）和生化指标整合到统一的迭代分析工作流中，由八个专业 AI Agent 协作完成分析，并通过**人在回路（Human-in-the-Loop）**设计让研究人员在关键节点参与决策。
+**Version**: 0.21.5 · **Last Updated**: 2026-05-01
 
----
+> Also available in: [中文 (Chinese)](user-guide-zh.md)
 
-## 目录
-
-1. [简介](#1-简介)
-2. [安装与启动](#2-安装与启动)
-3. [首次配置](#3-首次配置)
-4. [界面概览](#4-界面概览)
-5. [创建分析会话](#5-创建分析会话)
-6. [上传数据](#6-上传数据)
-7. [配置 Agent](#7-配置-agent)
-8. [启动分析](#8-启动分析)
-9. [人机交互（HITL）](#9-人机交互hitl)
-10. [创新阶段](#10-创新阶段)
-11. [查看结果](#11-查看结果)
-12. [生成报告](#12-生成报告)
-13. [会话管理](#13-会话管理)
-14. [对话功能（Chat）](#14-对话功能chat)
-15. [用户管理](#15-用户管理)
-16. [常见问题](#16-常见问题)
+ScAI (Single-Cell Sequencing Analysis Driven by AI) is a multi-agent AI-driven multi-omics biomedical research system. It integrates single-cell sequencing (scRNA-seq / snRNA-seq), bulk RNA-seq, pathology images (H&amp;E / IHC), and biochemical markers into a unified iterative analysis workflow, with eight specialized AI agents collaborating to complete the analysis, and a **Human-in-the-Loop (HITL)** design allowing researchers to participate in decision-making at key nodes.
 
 ---
 
-## 1. 简介
+## Table of Contents
 
-### 1.1 ScAI 是什么
-
-ScAI 是一个面向生物医学研究者的 AI 分析平台。你只需上传实验数据（测序文件、病理图像、生化指标），ScAI 的八个 AI Agent 会自动协作完成数据分析和解释，最终生成一份包含 9 个章节的发表级 HTML 报告。
-
-### 1.2 核心功能
-
-- **八 Agent 协作**：PI（项目负责人）Agent 制定分析计划并综合结果；生信 Agent 在 Jupyter 环境中自主执行代码分析；病理 Agent 分析组织切片图像；生化 Agent 解读生化指标；文献 Agent 进行文献调研；Painter Agent 生成图形摘要；Supervisor Agent 实时监控分析质量；Technique Agent 提供 API 文档查询。
-- **双阶段工作流**：无偏见的探索（Exploration）阶段产生全面的分析报告和研究方向；创新（Innovation）阶段深入追踪选定的方向，自动检测收敛。
-- **人在回路**：可在细胞类型注释确认、研究方向选择、轮次反馈等关键节点介入，随时暂停/恢复分析。
-- **多组学整合**：自动交叉引用 scRNA-seq、snRNA-seq、bulk RNA-seq、病理图像和生化指标的结果。
-- **发表级输出**：经 PI 审阅的图表（PNG + 高分辨率 PDF）、9 章节 HTML 报告、AI 生成的图形摘要。
-- **模型无关**：支持任何 OpenAI 兼容的 API 端点，包括云端商业 API（DeepSeek、Moonshot、智谱、MiniMax、阿里云/通义千问等）、OpenRouter 聚合平台、Google Gemini，以及本地通过 Ollama 部署的开源模型。
-
-### 1.3 适用场景
-
-- 动物模型表型分析（基因敲除/敲入小鼠、疾病模型）
-- 肿瘤 vs 正常组织比较分析
-- 药物毒理学 — 治疗后组织损伤评估
-- 器官特异性研究（肝脏、心脏、肾脏、大脑等）
-- 发育生物学 — 跨发育阶段比较
-- 多组学整合的疾病机制研究
+1. [Introduction](#1-introduction)
+2. [Installation &amp; Startup](#2-installation--startup)
+3. [First-time Configuration](#3-first-time-configuration)
+4. [Interface Overview](#4-interface-overview)
+5. [Creating an Analysis Session](#5-creating-an-analysis-session)
+6. [Uploading Data](#6-uploading-data)
+7. [Configuring Agents](#7-configuring-agents)
+8. [Starting Analysis](#8-starting-analysis)
+9. [Human-in-the-Loop (HITL)](#9-human-in-the-loop-hitl)
+10. [Innovation Phase](#10-innovation-phase)
+11. [Viewing Results](#11-viewing-results)
+12. [Generating Reports](#12-generating-reports)
+13. [Session Management](#13-session-management)
+14. [Chat Feature](#14-chat-feature)
+15. [User Management](#15-user-management)
+16. [FAQ](#16-faq)
 
 ---
 
-## 2. 安装与启动
+## 1. Introduction
 
-### 方式 A — Docker（推荐）
+### 1.1 What is ScAI
 
-此方式无需手动配置 Python 或 Node.js 环境，适合大多数用户。
+ScAI is an AI analysis platform for biomedical researchers. Simply upload your experimental data (sequencing files, pathology images, biochemical markers), and ScAI's eight AI agents will automatically collaborate to complete data analysis and interpretation, ultimately generating a publication-quality HTML report with 9 chapters.
+
+### 1.2 Core Features
+
+- **Eight-Agent Collaboration**: PI (Principal Investigator) Agent formulates analysis plans and synthesizes results; Bioinformatics Agent autonomously executes code analysis in Jupyter environment; Pathology Agent analyzes tissue slice images; Biochemistry Agent interprets biochemical markers; Literature Agent conducts literature research; Painter Agent generates graphical abstracts; Supervisor Agent monitors analysis quality in real-time; Technique Agent provides API documentation lookup.
+- **Dual-Phase Workflow**: Unbiased Exploration phase produces comprehensive analysis reports and research directions; Innovation phase deeply tracks selected directions with automatic convergence detection.
+- **Human-in-the-Loop**: Intervene at key nodes such as cell type annotation confirmation, research direction selection, round feedback; pause/resume analysis at any time.
+- **Multi-Omics Integration**: Automatically cross-reference results from scRNA-seq, snRNA-seq, bulk RNA-seq, pathology images, and biochemical markers.
+- **Publication-Ready Output**: PI-reviewed figures (PNG + high-resolution PDF), 9-chapter HTML report, AI-generated graphical abstract.
+- **Model-Agnostic**: Supports any OpenAI-compatible API endpoints, including cloud commercial APIs (DeepSeek, Moonshot, Zhipu, MiniMax, Alibaba/Tongyi Qianwen, etc.), OpenRouter aggregation platform, Google Gemini, and open-source models locally deployed via Ollama.
+
+### 1.3 Use Cases
+
+- Animal model phenotype analysis (gene knockout/knockin mice, disease models)
+- Tumor vs normal tissue comparative analysis
+- Drug toxicology — tissue damage assessment after treatment
+- Organ-specific research (liver, heart, kidney, brain, etc.)
+- Developmental biology — cross-developmental stage comparison
+- Multi-omics integrated disease mechanism research
+
+---
+
+## 2. Installation &amp; Startup
+
+### Method A — Docker (Recommended)
+
+This method requires no manual configuration of Python or Node.js environments and is suitable for most users.
 
 ```bash
 docker run -d --name scai \
@@ -67,614 +70,614 @@ docker run -d --name scai \
   ghcr.io/minzhangcheng/scai:latest
 ```
 
-参数说明：
-- `-p 3000:3000`：将容器的 3000 端口映射到本机 3000 端口。
-- `-v ./scai-dep:/dep`：持久化 Python 和 Node.js 依赖（首次启动自动安装，后续启动直接复用）。
-- `-v ./scai-data:/data`：持久化分析数据、上传文件、报告和日志。
+Parameter explanation:
+- `-p 3000:3000`: Maps container port 3000 to host port 3000.
+- `-v ./scai-dep:/dep`: Persists Python and Node.js dependencies (automatically installed on first startup, reused on subsequent startups).
+- `-v ./scai-data:/data`: Persists analysis data, uploaded files, reports, and logs.
 
-启动后打开浏览器访问 **http://localhost:3000**。使用 `docker logs -f scai` 查看运行日志。
+After startup, open a browser and visit **http://localhost:3000**. Use `docker logs -f scai` to view runtime logs.
 
-如需自行构建镜像：
+To build the image yourself:
 ```bash
 docker build -t ghcr.io/minzhangcheng/scai:latest .
 ```
 
-### 方式 B — 启动脚本
+### Method B — Startup Script
 
-适用于有 Python 和 Node.js 开发环境的用户。
+Suitable for users with Python and Node.js development environments.
 
 ```bash
-git clone <仓库地址>
+git clone &lt;repository-url&gt;
 cd scai
 ./start.sh
 ```
 
-自定义主机和端口：
+Custom host and port:
 ```bash
 ./start.sh --host 0.0.0.0 --port 3000 --backport 8000
 ```
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--host` | 监听地址 | `127.0.0.1` |
-| `--port` | 前端端口 | `3000` |
-| `--backport` | 后端端口 | `8000` |
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--host` | Listening address | `127.0.0.1` |
+| `--port` | Frontend port | `3000` |
+| `--backport` | Backend port | `8000` |
 
-脚本会自动创建虚拟环境、安装依赖、启动后端（FastAPI）和前端（React）。停止服务使用 `./stop.sh`。
+The script automatically creates a virtual environment, installs dependencies, and starts the backend (FastAPI) and frontend (React). Use `./stop.sh` to stop services.
 
-**环境要求**：Python 3.11+ 和 Node.js LTS。
-
----
-
-## 3. 首次配置
-
-### 3.1 管理员注册
-
-首次访问 ScAI 时，系统会提示你创建管理员账户：
-
-1. 在注册页面填写**用户名**（3-64 位字符，支持字母、数字、下划线和连字符）、密码（至少 8 位）和邮箱（可选）。
-2. 点击注册后，该用户即成为系统管理员。
-3. 后续新用户注册需要管理员审批后才能使用。
-
-### 3.2 API 配置
-
-注册完成后，系统会弹出 API 配置面板。这是 ScAI 调用 AI 模型所必需的设置。
-
-**必填项**：
-- **默认 LLM 服务器**（Default LLM Server）：填写 OpenAI 兼容的 API 端点地址。例如：
-  - OpenRouter：`https://openrouter.ai/api/v1`
-  - DeepSeek：`https://api.deepseek.com/v1`
-  - 智谱 AI：`https://open.bigmodel.cn/api/paas/v4`
-  - 阿里云通义千问：`https://dashscope.aliyuncs.com/compatible-mode/v1`
-  - 本地 Ollama：`http://localhost:11434/v1`
-- **API Key**：对应平台的 API 密钥。
-
-**可选项**：
-- **PubMed 邮箱**：用于文献 Agent 调用 NCBI E-utilities API 时的身份标识（NCBI 要求提供邮箱以提升请求频率上限）。
-- **代理地址**：如果网络环境需要通过代理访问外部 API，可在此配置。
-- **Google AI API Key**：如果希望使用 Google Gemini Deep Research 进行深度文献调研，需填写此项。
-- **不支持的参数发送策略**：控制当模型不支持某参数（如 temperature）时是跳过还是报错。默认为跳过。
-
-### 3.3 阅读模式
-
-如果你暂时没有 API Key，可以点击"阅读模式"进入系统。在阅读模式下：
-- 可以浏览已有的分析结果、报告和图表。
-- 无法创建新的分析会话或启动新的分析任务。
-- 随时可以通过"API 设置"按钮重新配置 API Key，切换为完整模式。
+**Environment Requirements**: Python 3.11+ and Node.js LTS.
 
 ---
 
-## 4. 界面概览
+## 3. First-time Configuration
 
-ScAI 的主界面分为三个区域：
+### 3.1 Admin Registration
 
-### 4.1 左侧边栏
+When accessing ScAI for the first time, the system will prompt you to create an administrator account:
 
-点击左上角的菜单按钮（三横线图标）可以展开/收起侧边栏。侧边栏包含：
+1. On the registration page, fill in **username** (3-64 characters, supporting letters, numbers, underscores, and hyphens), password (at least 8 characters), and email (optional).
+2. After clicking register, this user becomes the system administrator.
+3. Subsequent new user registrations require administrator approval before use.
 
-- **新建分析**（New Analysis）：创建新的分析会话。
-- **打开分析**（Open Session）：浏览和切换已有的分析会话。
-- **API 设置**（API Settings）：重新配置 API Key 和服务器地址。
-- **用户菜单**：查看个人信息、修改密码、切换语言等。
-- **分析列表**：显示所有已保存的会话，点击可快速切换。
+### 3.2 API Configuration
 
-### 4.2 顶部标签栏
+After registration, the system will pop up the API configuration panel. This is required for ScAI to call AI models.
 
-主界面顶部有六个标签页，对应分析流程的六个阶段：
+**Required**:
+- **Default LLM Server**: Fill in the OpenAI-compatible API endpoint address. For example:
+  - OpenRouter: `https://openrouter.ai/api/v1`
+  - DeepSeek: `https://api.deepseek.com/v1`
+  - Zhipu AI: `https://open.bigmodel.cn/api/paas/v4`
+  - Alibaba Tongyi Qianwen: `https://dashscope.aliyuncs.com/compatible-mode/v1`
+  - Local Ollama: `http://localhost:11434/v1`
+- **API Key**: API key for the corresponding platform.
 
-| 标签 | 图标 | 用途 |
-|------|------|------|
-| **数据**（Data） | 📄 | 上传和管理实验数据（测序文件、病理图像、生化指标） |
-| **Agents**（Prompts） | ⚙️ | 配置各 Agent 的 AI 模型、温度和系统提示词 |
-| **分析**（Analysis） | 🧪 | 启动分析、监控进度、查看轮次摘要、进行 HITL 交互 |
-| **结果**（Results） | 📊 | 查看分析产出的图表和数据文件 |
-| **报告**（Report） | 📋 | 生成和下载 HTML 报告 |
-| **对话**（Chat） | 💬 | 与 PI Agent 自由对话，上传文件寻求解读 |
+**Optional**:
+- **PubMed Email**: Identity used by Literature Agent when calling NCBI E-utilities API (NCBI requires an email to increase request frequency limits).
+- **Proxy Address**: Configure if network environment requires proxy to access external APIs.
+- **Google AI API Key**: Required if you want to use Google Gemini Deep Research for deep literature research.
+- **Unsupported Parameter Strategy**: Controls whether to skip or error when a model doesn't support a parameter (like temperature). Default is skip.
 
-### 4.3 右侧消息流
+### 3.3 Read-Only Mode
 
-当选中一个分析会话后，右侧会出现**消息流面板**（Message Stream），实时显示各 Agent 的输出消息、状态更新和生成的图表。你可以拖动面板左侧的分隔线调整宽度。
-
-### 4.4 语言切换
-
-右上角的语言选择器支持**中文**和**英文**切换，切换后整个界面语言立即生效。
-
----
-
-## 5. 创建分析会话
-
-### 5.1 新建会话
-
-1. 点击侧边栏的 **"新建分析"**（+ 图标）按钮。
-2. 在弹出的对话框中填写：
-   - **分析名称**（可选）：给这次分析起个名字，例如"ZnT1/Ctr1 DKO小鼠肝脏分析"。
-   - **研究目标**（必填）：详细描述你的研究背景、实验设计和分析目标。系统会预填一个示例描述，你可以直接修改。
-
-   > **提示**：研究目标描述得越详细，PI Agent 制定的分析计划就越精准。建议包含：研究背景、实验模型、对照组和处理组的信息、以及你希望探索的具体科学问题。
-
-3. 点击 **"创建"** 按钮。
-
-创建后，系统自动打开该会话，你可以在顶部标题栏看到会话名称、当前轮次和状态。
-
-### 5.2 处理组（Treatment Groups）
-
-在**数据**标签页中，你可以设置处理组（即实验分组）：
-
-1. 在"处理组"区域点击 **"添加"**。
-2. 填写**组名**（如 "WT Control"、"DKO"）、**描述**和**样本数量**。
-3. 重复以上步骤添加所有实验组。
-
-处理组信息会被 PI Agent 用于差异分析比较和结果解释。
+If you don't have an API Key yet, you can click "Read-Only Mode" to enter the system. In read-only mode:
+- You can browse existing analysis results, reports, and figures.
+- You cannot create new analysis sessions or start new analysis tasks.
+- You can reconfigure API Key at any time via the "API Settings" button to switch to full mode.
 
 ---
 
-## 6. 上传数据
+## 4. Interface Overview
 
-ScAI 支持三种主要数据类型，在**数据**标签页中分三个区域管理。
+ScAI's main interface is divided into three areas:
 
-### 6.1 病理图像
+### 4.1 Left Sidebar
 
-支持格式：PNG、JPEG、GIF、BMP、TIFF、WebP、SVG。
+Click the menu button (three horizontal lines icon) in the top-left corner to expand/collapse the sidebar. The sidebar contains:
+- **New Analysis**: Create a new analysis session.
+- **Open Session**: Browse and switch between existing analysis sessions.
+- **API Settings**: Reconfigure API Key and server address.
+- **User Menu**: View personal information, change password, switch language, etc.
+- **Session List**: Shows all saved sessions, click to quickly switch.
 
-1. 在"病理图像"区域，先从下拉菜单选择数据类型（如 H&E、IHC）。
-2. 点击上传区域或将文件拖拽到其中。大图像（超过 1024 像素）会被自动切分为小图块（tile）供病理 Agent 分析。
-3. 上传完成后，每个文件可以设置所属的处理组。
+### 4.2 Top Tab Bar
 
-### 6.2 测序数据
+The top of the main interface has six tabs corresponding to the six stages of the analysis workflow:
 
-支持格式：`.h5ad`（AnnData）、`.loom`（Loom）、CSV/TSV（bulk RNA-seq 计数矩阵）。
+| Tab | Icon | Purpose |
+|-----|------|---------|
+| **Data** | 📄 | Upload and manage experimental data (sequencing files, pathology images, biochemical markers) |
+| **Agents** (Prompts) | ⚙️ | Configure AI models, temperature, and system prompts for each agent |
+| **Analysis** | 🧪 | Start analysis, monitor progress, view round summaries, perform HITL interactions |
+| **Results** | 📊 | View figures and data files generated from analysis |
+| **Report** | 📋 | Generate and download HTML reports |
+| **Chat** | 💬 | Free conversation with PI Agent, upload files for interpretation |
 
-1. 在"测序数据"区域，从下拉菜单选择数据类型：**scRNA-seq**、**bulk RNA-seq**、**Loom** 或 **Other**。
-2. 点击上传区域或将文件拖拽到其中。
-3. 上传前请确保 `.h5ad` 文件已包含必要的预处理信息（如基因表达矩阵、细胞元数据等）。
+### 4.3 Right Message Stream
 
-### 6.3 生化指标
+When an analysis session is selected, a **Message Stream Panel** appears on the right, showing output messages, status updates, and generated figures from each agent in real-time. You can drag the divider on the left side of the panel to adjust the width.
 
-生化指标可以通过两种方式输入：
+### 4.4 Language Switching
 
-**方式 A — 手动录入**：
-1. 点击"添加指标"按钮。
-2. 填写指标名称、数值、单位，以及正常参考范围（可选）。
-3. 选择所属的处理组。
-
-**方式 B — 文件上传**：
-1. 在"生化数据"区域，选择数据类型：**CSV/Excel** 或 **图像**（如 Western blot 条带图、生化检测报告照片等）。
-2. 上传文件后，生化 Agent 会自动提取其中的数值和指标。
-
-### 6.4 文件管理
-
-上传的文件会显示在列表中，你可以：
-- 点击文件名**下载**原文件。
-- 点击垃圾桶图标**删除**文件。
-- 查看文件的处理组归属。
+The language selector in the top-right corner supports **Chinese** and **English** switching. The entire interface language takes effect immediately after switching.
 
 ---
 
-## 7. 配置 Agent
+## 5. Creating an Analysis Session
 
-在 **Agents** 标签页中，你可以为每个 Agent 单独配置 AI 模型和参数。ScAI 的每个 Agent 可以使用不同的模型和 API 端点，允许你根据任务复杂度自由组合（例如：核心推理用旗舰模型，实时监控用轻量模型）。
+### 5.1 New Session
 
-### 7.1 Agent 列表
+1. Click the **"New Analysis"** (+ icon) button in the sidebar.
+2. In the pop-up dialog, fill in:
+   - **Analysis Name** (optional): Give this analysis a name, e.g., "ZnT1/Ctr1 DKO Mouse Liver Analysis".
+   - **Research Goal** (required): Describe your research background, experimental design, and analysis goals in detail. The system pre-fills an example description that you can modify directly.
 
-| Agent | 图标 | 职责 | 推荐模型类型 |
-|-------|------|------|------------|
-| **PI Agent** | 👤 | 制定分析计划、综合各方结果、审阅图表、驱动对话 | 强大的推理模型（如 Claude Opus、GPT-4o） |
-| **生信 Agent** | 💻 | 在 Jupyter 内核中自主执行单细胞/ bulk RNA-seq 分析 | 强大的代码模型（如 Claude Sonnet、DeepSeek-Coder） |
-| **病理 Agent** | 🔬 | 分析组织学切片图像（H&E 和特殊染色） | 支持视觉（Vision）的模型 |
-| **生化 Agent** | 🧪 | 解读生化实验指标 | 通用推理模型 |
-| **文献 Agent** | 📚 | 文献调研：支持 PubMed 检索、Deep Research 和 Google Gemini Deep Research | 长上下文模型，或专门的 Deep Research 模型 |
-| **Painter Agent** | 🎨 | 生成图形摘要 | 支持图像生成的模型 |
-| **Supervisor Agent** | 👁️ | 实时监控生信分析执行，升级问题给 PI | 轻量快速的模型（如 Claude Haiku、Gemini Flash） |
-| **Technique Agent** | 🔧 | API 文档查询和错误摘要 | 轻量模型 |
+   &gt; **Tip**: The more detailed your research goal description, the more precise the analysis plan formulated by the PI Agent. It's recommended to include: research background, experimental model, information about control and treatment groups, and specific scientific questions you wish to explore.
 
-### 7.2 配置项
+3. Click the **"Create"** button.
 
-点击每个 Agent 卡片展开详细设置：
+After creation, the system automatically opens the session, and you can see the session name, current round, and status in the top title bar.
 
-- **模型（Model）**：输入模型名称或 ID。例如 `claude-opus-4-7`、`deepseek-chat`、`gpt-4o`。不同 Agent 可以使用同一 API 端点的不同模型，也可以使用完全不同提供商的模型。
-- **温度（Temperature）**：控制输出的随机性，范围 0-2。较低的值（如 0.1-0.3）输出更确定和一致，适合数据分析；较高的值（如 0.7-1.0）输出更多样，适合创意任务。
-- **LLM 服务器覆盖**：如果需要某个 Agent 使用不同于全局设置的 API 端点，在此填写。留空则使用全局设置。
-- **系统提示词（System Prompt）**：每个 Agent 有一个默认的中文系统提示词。高级用户可以修改提示词来调整 Agent 的行为。
-- **Vision 开关**：对于需要分析图像的 Agent（病理 Agent、文献 Agent 等），可以开启视觉能力。注意：开启 Vision 后必须使用支持多模态的模型。
+### 5.2 Treatment Groups
 
-### 7.3 轮次等待时间
+In the **Data** tab, you can set treatment groups (i.e., experimental groups):
 
-在侧边栏底部或会话配置中，可以设置**轮次等待时间（Round Wait）**。在多轮分析中，系统在每个 Innovation 轮次结束后会等待一段时间（默认 30 秒），给你时间查看当前结果并决定是否提供反馈。你可以将此值设为 0 以禁用等待，或设为更长时间以便充分审阅。
+1. Click **"Add"** in the "Treatment Groups" area.
+2. Fill in **group name** (e.g., "WT Control", "DKO"), **description**, and **sample count**.
+3. Repeat the above steps to add all experimental groups.
+
+Treatment group information is used by the PI Agent for differential analysis comparisons and result interpretation.
 
 ---
 
-## 8. 启动分析
+## 6. Uploading Data
 
-### 8.1 启动前的检查清单
+ScAI supports three main data types, managed in three sections in the **Data** tab.
 
-在启动分析之前，请确认：
+### 6.1 Pathology Images
 
-1. ✅ API Key 已配置且有效。
-2. ✅ 已创建分析会话并填写了研究目标。
-3. ✅ 至少上传了一类数据（病理图像、测序数据或生化指标）。
-4. ✅ 各 Agent 的模型配置正确。
-5. ✅ 右上角 WebSocket 连接状态显示为绿色"已连接"。
+Supported formats: PNG, JPEG, GIF, BMP, TIFF, WebP, SVG.
 
-### 8.2 启动探索阶段
+1. In the "Pathology Images" area, first select the data type from the dropdown menu (e.g., H&amp;E, IHC).
+2. Click the upload area or drag files into it. Large images (over 1024 pixels) are automatically split into small tiles for analysis by the Pathology Agent.
+3. After upload is complete, each file can be assigned to a treatment group.
 
-1. 切换到**分析**（Analysis）标签页。
-2. 点击 **"开始分析"** 按钮。
+### 6.2 Sequencing Data
 
-系统将启动**探索（Exploration）阶段**：
-- PI Agent 首先分析你上传的所有数据，制定全面的分析计划。
-- 各专业 Agent（病理、生信、生化、文献）并行执行各自的分析任务。
-- 右侧消息流面板实时显示每个 Agent 的进展：代码执行、图表生成、分析发现等。
-- 如果生信 Agent 通过 Jupyter 内核执行代码，你可以在消息流中看到代码输出和生成的图表。
+Supported formats: `.h5ad` (AnnData), `.loom` (Loom), CSV/TSV (bulk RNA-seq count matrix).
 
-### 8.3 实时监控
+1. In the "Sequencing Data" area, select the data type from the dropdown menu: **scRNA-seq**, **bulk RNA-seq**, **Loom**, or **Other**.
+2. Click the upload area or drag files into it.
+3. Before uploading, ensure `.h5ad` files contain necessary preprocessing information (e.g., gene expression matrix, cell metadata, etc.).
 
-在分析运行期间：
+### 6.3 Biochemical Markers
 
-- **消息流面板**：按时间顺序显示所有 Agent 消息，不同类型的消息用不同颜色标识（Agent 消息、系统状态、错误等）。
-- **分析面板**：顶部显示当前状态（"分析进行中"），以及已完成的轮次和发现数量。
-- **WebSocket 状态**：标题栏中的连接指示灯应保持绿色。如果断开变为黄色，系统会自动尝试重连。
+Biochemical markers can be entered in two ways:
 
-### 8.4 暂停和停止
+**Method A — Manual Entry**:
+1. Click the "Add Marker" button.
+2. Fill in marker name, value, unit, and normal reference range (optional).
+3. Select the treatment group it belongs to.
 
-- **暂停**：点击暂停按钮，系统会在当前步骤完成后暂停。适合在需要中途查看结果时使用。暂停后可以点击"继续"恢复分析。
-- **停止**：点击方形停止按钮，会弹出确认对话框。停止后分析终止，但已生成的结果和图表会保留。
+**Method B — File Upload**:
+1. In the "Biochemical Data" area, select the data type: **CSV/Excel** or **Image** (e.g., Western blot band images, biochemical test report photos, etc.).
+2. After uploading the file, the Biochemistry Agent will automatically extract values and markers from it.
 
----
+### 6.4 File Management
 
-## 9. 人机交互（HITL）
-
-ScAI 在探索阶段设计了三个关键的人机交互节点，让你在重要决策点介入。
-
-### 9.1 细胞类型注释确认
-
-当生信 Agent 对单细胞数据进行聚类分析后，文献 Agent 会进行文献检索以推断细胞类型。系统会弹出一个**注释确认对话框**，包含：
-
-- **聚类列表**：每个聚类及其对应的细胞类型推断结果。
-- **置信度**：PI Agent 对每个注释的置信度评分。
-- **候选细胞类型**：对于不确定的注释，可展开查看备选细胞类型。
-- **操作**：对每个聚类，你可以**确认**、**修改**（选择备选类型或自定义输入）或**标记为未知**。
-
-> **重要**：请仔细审阅注释结果。细胞类型的正确识别是后续所有分析的基础。如果发现注释有误，请务必修改。
-
-### 9.2 探索报告审阅
-
-探索阶段完成后，PI Agent 会生成一份**探索报告**（Exploration Report），总结：
-- 数据概览和质量评估。
-- 各 Agent 的关键发现。
-- 提出的研究方向（Research Directions）。
-
-你需要审阅这份报告，确认分析方向是否合理。如果有需要补充的分析，可以在此阶段提交**补充分析请求**。
-
-### 9.3 研究方向选择
-
-探索报告生成后，系统会弹出**方向选择对话框**，其中列出了 PI Agent 根据分析发现提出的 2-5 个研究方向。对每个方向，PI Agent 会说明：
-
-- 研究假设和创新性。
-- 推荐的分析方法。
-- 预期的生物学发现。
-
-你需要**选择 1-3 个方向**进入创新阶段深度分析。你也可以选择让 PI Agent 自主决定方向。
-
-### 9.4 人工指导
-
-在分析运行的任何时刻，你都可以通过**人工指导**功能输入指令：
-
-1. 在分析面板中点击"人工指导"按钮。
-2. 在弹出的对话框中输入你的指导内容。例如：
-   - "请重点关注 Kupffer 细胞和肝星状细胞之间的相互作用。"
-   - "我对铁代谢相关基因特别感兴趣，请在分析中侧重这方面。"
-3. 你还可以在指导中附带上传额外的数据文件，系统会将新数据纳入后续分析。
+Uploaded files are displayed in a list, where you can:
+- Click the filename to **download** the original file.
+- Click the trash can icon to **delete** the file.
+- View the treatment group assignment of the file.
 
 ---
 
-## 10. 创新阶段
+## 7. Configuring Agents
 
-### 10.1 多方向分析
+In the **Agents** tab, you can configure AI models and parameters for each agent individually. Each agent in ScAI can use different models and API endpoints, allowing you to freely combine based on task complexity (e.g., flagship model for core reasoning, lightweight model for real-time monitoring).
 
-在探索阶段选定研究方向后，创新阶段开始。每个选定方向会启动一个独立的分析轮次：
+### 7.1 Agent List
 
-- 每个方向由 PI Agent 制定专门的分析计划。
-- 生信 Agent、文献 Agent 和其他专业 Agent 针对该方向执行深度分析。
-- 多个方向的分析结果会进行**交叉相关性分析**，发现方向之间的互补性和潜在联系。
+| Agent | Icon | Responsibility | Recommended Model Type |
+|-------|------|----------------|-----------------------|
+| **PI Agent** | 👤 | Formulate analysis plans, synthesize results from all parties, review figures, drive conversations | Powerful reasoning models (e.g., Claude Opus, GPT-4o) |
+| **Bioinformatics Agent** | 💻 | Autonomously execute single-cell / bulk RNA-seq analysis in Jupyter kernel | Powerful code models (e.g., Claude Sonnet, DeepSeek-Coder) |
+| **Pathology Agent** | 🔬 | Analyze histology slice images (H&amp;E and special stains) | Vision-capable models |
+| **Biochemistry Agent** | 🧪 | Interpret biochemical experiment markers | General reasoning models |
+| **Literature Agent** | 📚 | Literature research: supports PubMed search, Deep Research, and Google Gemini Deep Research | Long-context models, or specialized Deep Research models |
+| **Painter Agent** | 🎨 | Generate graphical abstracts | Image generation capable models |
+| **Supervisor Agent** | 👁️ | Real-time monitoring of bioinformatics analysis execution, escalate issues to PI | Lightweight fast models (e.g., Claude Haiku, Gemini Flash) |
+| **Technique Agent** | 🔧 | API documentation lookup and error summarization | Lightweight models |
 
-### 10.2 轮次迭代与收敛
+### 7.2 Configuration Options
 
-创新阶段会持续多个轮次，每轮结束后：
+Click each agent card to expand detailed settings:
 
-1. PI Agent 综合本轮所有结果，评估是否达到了该方向的预定目标。
-2. 系统通过**收敛检测**判断是否继续。如果新发现趋于饱和（连续 2 轮无重大新发现），自动结束该方向的分析。
-3. 如果设置了轮次等待时间，系统会在每轮之间暂停，给你时间查看结果并提供反馈。
+- **Model**: Enter model name or ID. E.g., `claude-opus-4-7`, `deepseek-chat`, `gpt-4o`. Different agents can use different models from the same API endpoint, or models from completely different providers.
+- **Temperature**: Controls randomness of output, range 0-2. Lower values (e.g., 0.1-0.3) produce more deterministic and consistent output, suitable for data analysis; higher values (e.g., 0.7-1.0) produce more diverse output, suitable for creative tasks.
+- **LLM Server Override**: If an agent needs to use a different API endpoint than the global setting, fill it in here. Leave blank to use the global setting.
+- **System Prompt**: Each agent has a default system prompt. Advanced users can modify the prompt to adjust agent behavior.
+- **Vision Toggle**: For agents that need to analyze images (Pathology Agent, Literature Agent, etc.), you can enable vision capabilities. Note: After enabling Vision, you must use a multimodal-capable model.
 
-### 10.3 补充分析
+### 7.3 Round Wait Time
 
-在创新阶段，你可以随时请求补充分析：
-
-1. 点击分析面板中的"补充分析"按钮。
-2. 输入你想增加的分析内容或具体问题。
-3. PI Agent 会将补充分析整合到当前分析流程中。
-
----
-
-## 11. 查看结果
-
-### 11.1 结果面板
-
-切换到**结果**（Results）标签页可以查看分析过程中生成的所有文件：
-
-- **图表**：生信 Agent 和病理 Agent 生成的所有图表（PNG 格式），以及每张图的高分辨率 PDF 版本。
-- **数据表**：差异表达基因列表、通路富集结果、细胞比例矩阵等（CSV 格式）。
-- **代码记录**：生信 Agent 执行过的 Jupyter Notebook（`.ipynb` 格式），方便复现分析。
-
-### 11.2 图表画廊
-
-图表以网格形式展示，你可以：
-- 点击某张图**全屏预览**。
-- 点击下载按钮**下载** PNG 或 PDF 版本。
-- 查看图表的**元数据**（生成时间、所属分析步骤等）。
-
-### 11.3 轮次摘要
-
-在**分析**标签页中，你可以展开每个已完成轮次的摘要卡片，查看：
-- 该轮次执行的 Agent 任务列表。
-- 各 Agent 的关键发现（markdown 格式的文本汇总）。
-- 发现数量统计。
+At the bottom of the sidebar or in session configuration, you can set **Round Wait Time**. In multi-round analysis, the system waits for a period of time (default 30 seconds) after each Innovation round ends, giving you time to review current results and decide whether to provide feedback. You can set this value to 0 to disable waiting, or set it to a longer time for thorough review.
 
 ---
 
-## 12. 生成报告
+## 8. Starting Analysis
 
-### 12.1 报告生成
+### 8.1 Pre-Start Checklist
 
-当分析完成（所有选定方向已收敛或你手动停止），你可以生成最终报告：
+Before starting analysis, please confirm:
 
-1. 切换到**报告**（Report）标签页。
-2. 点击 **"生成报告"** 按钮。
-3. 系统开始调用报告生成流程，你可以在右侧消息流面板中看到生成进度。
+1. ✅ API Key is configured and valid.
+2. ✅ Analysis session is created and research goal is filled in.
+3. ✅ At least one type of data is uploaded (pathology images, sequencing data, or biochemical markers).
+4. ✅ Each agent's model configuration is correct.
+5. ✅ WebSocket connection status in the top-right corner shows green "Connected".
 
-报告生成包含以下步骤：
-- **叙事构建**：Supervisor Agent 从分析日志中提取关键步骤和发现，构建分析叙事。
-- **图表选择**：根据质量评分自动选择最具代表性的图表。
-- **PI 审阅**：PI Agent 审核报告内容和图表质量。
-- **HTML 渲染**：生成交互式 HTML 报告。
-- **图形摘要生成**：Painter Agent 创作总结性图形摘要。
+### 8.2 Start Exploration Phase
 
-### 12.2 报告结构
+1. Switch to the **Analysis** tab.
+2. Click the **"Start Analysis"** button.
 
-生成的 HTML 报告包含 9 个章节：
+The system will start the **Exploration phase**:
+- PI Agent first analyzes all data you uploaded and formulates a comprehensive analysis plan.
+- Each specialized agent (Pathology, Bioinformatics, Biochemistry, Literature) executes their respective analysis tasks in parallel.
+- The right message stream panel shows each agent's progress in real-time: code execution, figure generation, analysis findings, etc.
+- If the Bioinformatics Agent executes code through the Jupyter kernel, you can see code output and generated figures in the message stream.
 
-1. **封面**：项目标题、日期、ScAI 版本。
-2. **项目信息**：研究目标、数据概览、分析方法摘要。
-3. **摘要**：主要发现的简明总结。
-4. **引言**：研究背景和科学问题。
-5. **方法**：详细的数据处理和分析方法（含软件包和参数）。
-6. **结果**：按 Agent 和分析方向组织的结果展示，包含图表和数据表。
-7. **讨论**：跨 Agent 的综合分析解读。
-8. **结论**：关键发现总结和未来研究方向建议。
-9. **附录**：可复现性信息（Python 版本、依赖包列表、文件校验和、可执行代码命令）。
+### 8.3 Real-time Monitoring
 
-### 12.3 报告操作
+During analysis runtime:
 
-- **在线预览**：生成完成后，报告直接在报告面板中嵌入显示。
-- **下载 HTML**：点击下载按钮获取完整 HTML 文件，可在任何浏览器中离线查看。
-- **重新生成**：如果对报告不满意，可以修改提示词或配置后点击"重新生成"。
-- **下载可复现性包**：独立下载包含环境信息、依赖快照和统计信息的可复现性附录。
+- **Message Stream Panel**: Shows all agent messages in chronological order, different message types are marked with different colors (agent messages, system status, errors, etc.).
+- **Analysis Panel**: Top shows current status ("Analysis in progress"), and completed rounds and finding count.
+- **WebSocket Status**: Connection indicator in the title bar should remain green. If disconnected and turns yellow, the system will automatically attempt to reconnect.
+
+### 8.4 Pause and Stop
+
+- **Pause**: Click the pause button, the system will pause after completing the current step. Suitable for when you need to review results mid-way. After pausing, you can click "Continue" to resume analysis.
+- **Stop**: Click the square stop button, a confirmation dialog will pop up. After stopping, analysis terminates, but generated results and figures are retained.
 
 ---
 
-## 13. 会话管理
+## 9. Human-in-the-Loop (HITL)
 
-### 13.1 会话切换
+ScAI designs three key human-in-the-loop interaction nodes in the Exploration phase, allowing you to intervene at important decision points.
 
-在侧边栏的会话列表中，点击任意会话即可切换。当前会话会自动保存状态。
+### 9.1 Cell Type Annotation Confirmation
 
-### 13.2 快照管理
+After the Bioinformatics Agent performs clustering analysis on single-cell data, the Literature Agent conducts literature search to infer cell types. The system will pop up an **Annotation Confirmation Dialog**, containing:
 
-快照（Snapshot）是分析状态的完整备份，包含：
-- 当前的分析状态（轮次、发现、图表等）。
-- Jupyter 内核的完整状态（变量、数据对象等）。
+- **Cluster List**: Each cluster and its corresponding cell type inference result.
+- **Confidence**: PI Agent's confidence score for each annotation.
+- **Candidate Cell Types**: For uncertain annotations, you can expand to view alternative cell types.
+- **Actions**: For each cluster, you can **Confirm**, **Modify** (select alternative type or custom input), or **Mark as Unknown**.
 
-**创建快照**：
-1. 在分析面板中点击相机图标（"创建快照"）。
-2. 输入快照名称和描述。
-3. 点击确认。
+&gt; **Important**: Please carefully review annotation results. Correct cell type identification is the foundation for all subsequent analysis. If you find incorrect annotations, be sure to modify them.
 
-**恢复快照**：
-1. 打开快照面板（Snapshot Panel）。
-2. 在快照列表中选择要恢复的快照。
-3. 点击"恢复"。系统会将分析状态和 Jupyter 内核回滚到快照时的状态。
+### 9.2 Exploration Report Review
 
-**快照树**：多次快照和恢复操作会形成树状结构，你可以在快照面板中直观地查看和选择不同的分析路径分支。
+After the Exploration phase is complete, the PI Agent generates an **Exploration Report**, summarizing:
+- Data overview and quality assessment.
+- Key findings from each agent.
+- Proposed research directions.
 
-> **提示**：在分析的关键节点（如注释确认后、方向选择前）创建快照是一个好习惯。这样如果后续分析方向不理想，可以快速回到关键节点重新选择。
+You need to review this report and confirm if the analysis direction is reasonable. If you need supplementary analysis, you can submit **Supplementary Analysis Requests** at this stage.
 
-### 13.3 导出会话
+### 9.3 Research Direction Selection
 
-导出功能将整个会话打包为归档文件：
+After the Exploration Report is generated, the system will pop up a **Direction Selection Dialog**, listing 2-5 research directions proposed by the PI Agent based on analysis findings. For each direction, the PI Agent will explain:
 
-1. 在侧边栏中选择"导出会话"。
-2. 选择导出格式：**tar.gz** 或 **zip**。
-3. 等待后台打包完成（大文件可能需要几分钟）。
-4. 打包完成后自动触发浏览器下载。
+- Research hypothesis and innovation.
+- Recommended analysis methods.
+- Expected biological findings.
 
-导出内容包含：所有上传的原始数据、分析状态、生成的图表和报告、Jupyter Notebook、可复现性信息。
+You need to **select 1-3 directions** to enter the Innovation phase for deep analysis. You can also choose to let the PI Agent decide directions autonomously.
 
-### 13.4 导入会话
+### 9.4 Human Guidance
 
-1. 在侧边栏中选择"导入会话"。
-2. 选择之前导出的 `.tar.gz`、`.zip` 或 `.json` 文件。
-3. 等待导入完成，会话会出现在会话列表中。
+At any time during analysis runtime, you can input instructions via the **Human Guidance** feature:
 
-导入的会话保留了完整的分析状态，你可以在此基础之上继续分析或重新生成报告。
-
----
-
-## 14. 对话功能（Chat）
-
-### 14.1 PI 对话
-
-切换到**对话**（Chat）标签页，你可以与 PI Agent 自由对话：
-
-- 直接输入问题，PI Agent 会基于当前分析会话的上下文进行回答。
-- 对话历史会被保留，PI Agent 会记住之前的对话内容（最多保留 20 对问答）。
-- 支持 Markdown 格式的回复，包括表格、代码块等。
-
-**典型用法**：
-- "请解释一下生信 Agent 在第三轮中发现的差异表达基因的生物学意义。"
-- "帮我设计一个针对肝纤维化通路的后续分析方案。"
-- "总结一下目前所有分析的主要发现。"
-
-### 14.2 对话中上传文件
-
-在对话输入框中，你可以通过附件按钮上传文件（病理图像、测序文件等）。PI Agent 会分析文件内容并整合到回答中。这不同于正式的分析会话——它是一次性的解读和问答。
-
-### 14.3 Agent 委派
-
-在对话中，PI Agent 可以**委派**任务给其他专业 Agent：
-
-- 当你的问题涉及文献调研时，PI Agent 可能委派给文献 Agent。
-- 当涉及生信分析问题时，PI Agent 可能启动生信 Agent 在 Jupyter 内核中执行代码。
-- 委派过程和结果会实时显示在对话窗口中。
+1. Click the "Human Guidance" button in the analysis panel.
+2. Input your guidance content in the pop-up dialog. For example:
+   - "Please focus on the interaction between Kupffer cells and hepatic stellate cells."
+   - "I'm particularly interested in iron metabolism-related genes, please emphasize this aspect in the analysis."
+3. You can also upload additional data files along with your guidance, and the system will incorporate the new data into subsequent analysis.
 
 ---
 
-## 15. 用户管理
+## 10. Innovation Phase
 
-### 15.1 注册与登录
+### 10.1 Multi-Direction Analysis
 
-- **注册**：在登录页面点击"注册"，填写用户名、密码和邮箱（可选）即可提交注册申请。
-- **登录**：使用用户名和密码登录。
-- **用户状态**：
-  - `pending`（待审批）：新注册用户的默认状态，需要管理员审批。
-  - `active`（正常）：已审批通过，可以正常使用所有功能。
-  - `readonly`（只读）：只能浏览已有分析结果，不能创建新分析或修改数据。
+After selecting research directions in the Exploration phase, the Innovation phase begins. Each selected direction starts an independent analysis round:
 
-### 15.2 管理员功能
+- Each direction has a specialized analysis plan formulated by the PI Agent.
+- Bioinformatics Agent, Literature Agent, and other specialized agents perform deep analysis targeting that direction.
+- Analysis results from multiple directions undergo **cross-correlation analysis** to discover complementarity and potential connections between directions.
 
-管理员（首个注册用户默认为管理员）可以访问**管理面板**（Admin Panel）：
+### 10.2 Round Iteration &amp; Convergence
 
-- **用户审批**：查看待审批用户列表，批准或拒绝注册申请。
-- **用户管理**：查看所有用户、修改用户权限级别。
-- **级联清理**：删除用户及其所有关联的会话和数据。
+The Innovation phase continues for multiple rounds, after each round:
 
-管理面板通过 URL 路径 `/admin` 访问，或在用户菜单中点击"管理"选项。
+1. PI Agent synthesizes all results from the round and assesses whether the predetermined goals for that direction have been achieved.
+2. The system judges whether to continue through **convergence detection**. If new findings are saturated (no major new findings for 2 consecutive rounds), analysis for that direction automatically ends.
+3. If round wait time is set, the system pauses between rounds, giving you time to review results and provide feedback.
 
-### 15.3 个人信息修改
+### 10.3 Supplementary Analysis
 
-通过用户菜单（右上角头像图标）可以：
-- 查看和修改个人信息。
-- 修改密码。
-- 修改邮箱地址。
-- 切换到其他会话。
+During the Innovation phase, you can request supplementary analysis at any time:
+
+1. Click the "Supplementary Analysis" button in the analysis panel.
+2. Input the additional analysis content or specific questions you want.
+3. PI Agent will integrate the supplementary analysis into the current analysis workflow.
 
 ---
 
-## 16. 常见问题
+## 11. Viewing Results
 
-### 16.1 API 配置相关
+### 11.1 Results Panel
 
-**Q: 如何获取 API Key？**
+Switch to the **Results** tab to view all files generated during analysis:
 
-各大 AI 平台的 API Key 获取方式：
-- **OpenRouter**：注册 openrouter.ai 账户，在设置页面生成 Key。OpenRouter 可以聚合调用多个模型，适合想尝试不同模型的用户。
-- **DeepSeek**：注册 platform.deepseek.com，在 API Keys 页面创建。
-- **智谱 AI**：注册 open.bigmodel.cn，在 API Keys 页面创建。
-- **阿里云通义千问**：在阿里云 DashScope 控制台创建。
-- **本地 Ollama**：无需 API Key，模型地址填写 `http://localhost:11434/v1`。
+- **Figures**: All figures generated by Bioinformatics Agent and Pathology Agent (PNG format), and high-resolution PDF versions of each figure.
+- **Data Tables**: Differentially expressed gene lists, pathway enrichment results, cell proportion matrices, etc. (CSV format).
+- **Code Records**: Jupyter Notebooks (`.ipynb` format) executed by Bioinformatics Agent, for analysis reproduction.
 
-**Q: 报错"API Key 验证失败"怎么办？**
+### 11.2 Figure Gallery
 
-1. 确认 API Key 没有被截断或包含多余空格。
-2. 确认 LLM 服务器地址正确（注意末尾不要有多余的斜杠）。
-3. 确认服务器可访问（网络防火墙/代理设置）。
-4. 尝试点击"重新设置 API Key"并重新输入。
+Figures are displayed in a grid, where you can:
+- Click a figure for **full-screen preview**.
+- Click the download button to **download** PNG or PDF versions.
+- View figure **metadata** (generation time,所属 analysis step, etc.).
 
-### 16.2 数据格式相关
+### 11.3 Round Summaries
 
-**Q: 上传 .h5ad 文件报错？**
-
-1. 确认文件是有效的 AnnData 格式（可用 `anndata.read_h5ad()` 验证）。
-2. 确认文件不包含无法序列化的自定义对象。
-3. 对于超大文件（> 5GB），建议先进行预处理（过滤低表达基因、子采样等）减小文件大小。
-
-**Q: 病理图像支持什么染色？**
-
-病理 Agent 不依赖硬编码的染色类型识别，而是通过视觉 AI 直接分析图像内容。支持 H&E、IHC、Masson 三色、PAS 等常见染色，以及自定义染色。在数据类型下拉菜单中可以选择或自定义染色类型。
-
-**Q: 生化指标图片需要什么格式？**
-
-支持 PNG、JPEG 等常见图像格式。生化的实验报告照片、Western blot 条带图、ELISA 读板结果图都可以直接上传，生化 Agent 会利用视觉 AI 自动识别和提取信息。
-
-### 16.3 分析过程相关
-
-**Q: 分析需要多长时间？**
-
-分析时间取决于数据量和复杂度。单次 Exploration 阶段通常需要 10-30 分钟。每个 Innovation 轮次需要 5-15 分钟。系统有 1.5 小时的超时保护机制。
-
-**Q: 分析过程中可以关闭浏览器吗？**
-
-可以。分析在服务器端运行，关闭浏览器不影响分析进程。重新打开后，系统会自动重新连接 WebSocket 并恢复实时消息流。注意：长时间（超过 1 小时）没有活动的会话可能会被服务器自动卸载到磁盘，但不会丢失数据。
-
-**Q: 生信 Agent 报错怎么办？**
-
-生信 Agent 内置了自动错误修复机制（最多重试 3 次）。常见的错误包括：
-- 包版本兼容性问题：Agent 会自动尝试不同 API。
-- 内存不足：Agent 会调整分析策略（如子采样）。
-- 连续 3 次同类错误会触发 Supervisor 介入，并可能升级给 PI Agent 调整分析策略。
-
-如果错误导致分析中断，你可以在修复问题后从最近的快照恢复。
-
-**Q: 如何判断分析是否"够好了"？**
-
-系统会自动检测收敛——如果连续两轮没有重大新发现，会建议结束分析。此外，你可以通过以下指标判断：
-- 探索报告是否全面覆盖了你的科学问题。
-- 关键通路是否已经充分分析。
-- PI Agent 的综合摘要是否给出了明确的生物学结论。
-
-### 16.4 模型配置建议
-
-**Q: 如何选择各 Agent 的模型？**
-
-一个典型的成本效益配置方案：
-
-| Agent | 推荐模型 | 说明 |
-|-------|---------|------|
-| PI Agent | claude-opus-4-7 或 gpt-4o | 核心推理，需要最强模型 |
-| 生信 Agent | claude-sonnet-4-6 或 deepseek-chat | 代码生成，需要强代码能力 |
-| 病理 Agent | claude-sonnet-4-6（Vision） | 图像分析，需要多模态 |
-| 生化 Agent | deepseek-chat | 数值解读，中等模型即可 |
-| 文献 Agent | Google Gemini 2.5 Pro 或 deepseek-chat | 长上下文处理 |
-| Supervisor | claude-haiku-4-5 或 gemini-flash | 快速监控，轻量模型即可 |
-| Technique | claude-haiku-4-5 | API 文档查阅，轻量模型即可 |
-| Painter | 支持图像生成的模型 | 需配置支持 `/v1/images/generations` 的端点 |
-
-**Q: 可以使用本地部署的开源模型吗？**
-
-可以。通过 Ollama 部署开源模型后，将 LLM 服务器地址设为 `http://localhost:11434/v1`，模型名称使用 Ollama 中的模型名（如 `qwen3`、`llama4`）。注意：开源模型的推理能力可能不如商业模型，建议至少 PI Agent 使用较强的商业模型。
-
-### 16.5 其他问题
-
-**Q: 分析结果如何复现？**
-
-ScAI 提供了多层复现保障：
-1. 导出会话包含完整的分析状态和代码记录。
-2. 报告中包含可复现性附录，列出 Python 版本、依赖包及版本、文件校验和。
-3. 生信 Agent 的所有代码都保存在 Jupyter Notebook 中，可以独立运行。
-
-**Q: 多个用户可以同时使用同一个 ScAI 实例吗？**
-
-可以。每个用户有自己的账户和会话，互不干扰。管理员通过管理面板管理所有用户。
-
-**Q: 数据安全吗？**
-
-- 所有数据存储在服务器本地（`/data` 目录）。
-- 上传的文件不会离开你的服务器（除了发送给 LLM API 的分析请求内容）。
-- API Key 加密存储在服务器端，不会暴露给前端。
-- 如果对数据安全有严格要求，建议使用本地 Ollama 部署开源模型，完全不依赖外部 API。
+In the **Analysis** tab, you can expand summary cards for each completed round to view:
+- List of agent tasks executed in that round.
+- Key findings from each agent (markdown format text summary).
+- Finding count statistics.
 
 ---
 
-> **提示**：本手册随 ScAI 版本更新而更新。如发现手册内容与实际界面不符，请以最新版本为准。如有未覆盖的问题，欢迎提交 Issue。
+## 12. Generating Reports
+
+### 12.1 Report Generation
+
+When analysis is complete (all selected directions have converged or you manually stopped), you can generate the final report:
+
+1. Switch to the **Report** tab.
+2. Click the **"Generate Report"** button.
+3. The system starts calling the report generation workflow, and you can see generation progress in the right message stream panel.
+
+Report generation includes the following steps:
+- **Narrative Construction**: Supervisor Agent extracts key steps and findings from analysis logs to construct an analysis narrative.
+- **Figure Selection**: Automatically selects the most representative figures based on quality scores.
+- **PI Review**: PI Agent reviews report content and figure quality.
+- **HTML Rendering**: Generates interactive HTML report.
+- **Graphical Abstract Generation**: Painter Agent creates a summary graphical abstract.
+
+### 12.2 Report Structure
+
+The generated HTML report contains 9 chapters:
+
+1. **Cover**: Project title, date, ScAI version.
+2. **Project Info**: Research goal, data overview, analysis method summary.
+3. **Abstract**: Concise summary of main findings.
+4. **Introduction**: Research background and scientific questions.
+5. **Methods**: Detailed data processing and analysis methods (including software packages and parameters).
+6. **Results**: Results presentation organized by agent and analysis direction, including figures and data tables.
+7. **Discussion**: Cross-agent comprehensive analysis interpretation.
+8. **Conclusion**: Key findings summary and future research direction suggestions.
+9. **Appendix**: Reproducibility information (Python version, dependency package list, file checksums, executable code commands).
+
+### 12.3 Report Operations
+
+- **Online Preview**: After generation is complete, the report is displayed embedded directly in the report panel.
+- **Download HTML**: Click the download button to get the complete HTML file, viewable offline in any browser.
+- **Regenerate**: If not satisfied with the report, you can modify prompts or configuration and click "Regenerate".
+- **Download Reproducibility Package**: Independently download the reproducibility appendix containing environment information, dependency snapshots, and statistics.
+
+---
+
+## 13. Session Management
+
+### 13.1 Session Switching
+
+In the sidebar session list, click any session to switch. The current session automatically saves state.
+
+### 13.2 Snapshot Management
+
+A snapshot is a complete backup of analysis state, containing:
+- Current analysis state (rounds, findings, figures, etc.).
+- Complete state of Jupyter kernel (variables, data objects, etc.).
+
+**Create Snapshot**:
+1. Click the camera icon ("Create Snapshot") in the analysis panel.
+2. Input snapshot name and description.
+3. Click confirm.
+
+**Restore Snapshot**:
+1. Open the Snapshot Panel.
+2. Select the snapshot to restore from the snapshot list.
+3. Click "Restore". The system will roll back analysis state and Jupyter kernel to the snapshot state.
+
+**Snapshot Tree**: Multiple snapshot and restore operations form a tree structure, and you can visually view and select different analysis path branches in the snapshot panel.
+
+&gt; **Tip**: Creating snapshots at key analysis nodes (after annotation confirmation, before direction selection) is a good practice. This way, if subsequent analysis directions are not ideal, you can quickly return to key nodes to reselect.
+
+### 13.3 Export Session
+
+The export function packages the entire session into an archive file:
+
+1. Select "Export Session" in the sidebar.
+2. Select export format: **tar.gz** or **zip**.
+3. Wait for background packaging to complete (large files may take several minutes).
+4. Browser download is automatically triggered after packaging is complete.
+
+Export content includes: all uploaded raw data, analysis state, generated figures and reports, Jupyter Notebooks, reproducibility information.
+
+### 13.4 Import Session
+
+1. Select "Import Session" in the sidebar.
+2. Select a previously exported `.tar.gz`, `.zip`, or `.json` file.
+3. Wait for import to complete, the session will appear in the session list.
+
+Imported sessions retain complete analysis state, and you can continue analysis or regenerate reports on top of them.
+
+---
+
+## 14. Chat Feature
+
+### 14.1 PI Chat
+
+Switch to the **Chat** tab, and you can have free conversations with the PI Agent:
+
+- Directly input questions, PI Agent will answer based on the current analysis session context.
+- Chat history is retained, PI Agent will remember previous conversation content (up to 20 Q&amp;A pairs retained).
+- Markdown format replies are supported, including tables, code blocks, etc.
+
+**Typical Uses**:
+- "Please explain the biological significance of the differentially expressed genes discovered by the Bioinformatics Agent in round 3."
+- "Help me design a follow-up analysis scheme targeting the liver fibrosis pathway."
+- "Summarize the main findings of all analyses so far."
+
+### 14.2 Upload Files in Chat
+
+In the chat input box, you can upload files (pathology images, sequencing files, etc.) via the attachment button. PI Agent will analyze file content and integrate it into the answer. This is different from formal analysis sessions — it's one-time interpretation and Q&amp;A.
+
+### 14.3 Agent Delegation
+
+In chat, PI Agent can **delegate** tasks to other specialized agents:
+
+- When your question involves literature research, PI Agent may delegate to Literature Agent.
+- When involving bioinformatics analysis questions, PI Agent may start Bioinformatics Agent to execute code in Jupyter kernel.
+- Delegation process and results are displayed in real-time in the chat window.
+
+---
+
+## 15. User Management
+
+### 15.1 Registration &amp; Login
+
+- **Registration**: Click "Register" on the login page, fill in username, password, and email (optional) to submit a registration application.
+- **Login**: Log in using username and password.
+- **User Status**:
+  - `pending`: Default status for newly registered users, requires administrator approval.
+  - `active`: Approved, can normally use all features.
+  - `readonly`: Can only browse existing analysis results, cannot create new analysis or modify data.
+
+### 15.2 Administrator Features
+
+Administrators (first registered user is admin by default) can access the **Admin Panel**:
+
+- **User Approval**: View pending user list, approve or reject registration applications.
+- **User Management**: View all users, modify user permission levels.
+- **Cascading Cleanup**: Delete users and all their associated sessions and data.
+
+The admin panel is accessed via URL path `/admin`, or by clicking the "Admin" option in the user menu.
+
+### 15.3 Personal Information Modification
+
+Through the user menu (top-right corner avatar icon) you can:
+- View and modify personal information.
+- Change password.
+- Change email address.
+- Switch to other sessions.
+
+---
+
+## 16. FAQ
+
+### 16.1 API Configuration Related
+
+**Q: How to get an API Key?**
+
+API Key acquisition methods for major AI platforms:
+- **OpenRouter**: Register an openrouter.ai account, generate a Key in the settings page. OpenRouter can aggregate calls to multiple models, suitable for users wanting to try different models.
+- **DeepSeek**: Register at platform.deepseek.com, create in API Keys page.
+- **Zhipu AI**: Register at open.bigmodel.cn, create in API Keys page.
+- **Alibaba Tongyi Qianwen**: Create in Alibaba Cloud DashScope console.
+- **Local Ollama**: No API Key needed, model address fill in `http://localhost:11434/v1`.
+
+**Q: What to do if getting "API Key verification failed" error?**
+
+1. Confirm API Key is not truncated or contains extra spaces.
+2. Confirm LLM server address is correct (note no extra slashes at the end).
+3. Confirm server is accessible (network firewall/proxy settings).
+4. Try clicking "Reset API Key" and re-entering.
+
+### 16.2 Data Format Related
+
+**Q: Error uploading .h5ad file?**
+
+1. Confirm file is valid AnnData format (can verify with `anndata.read_h5ad()`).
+2. Confirm file does not contain non-serializable custom objects.
+3. For very large files (&gt; 5GB), it's recommended to first preprocess (filter low-expression genes, subsample, etc.) to reduce file size.
+
+**Q: What stains are supported for pathology images?**
+
+Pathology Agent does not rely on hard-coded stain type recognition, but directly analyzes image content through vision AI. Supports H&amp;E, IHC, Masson trichrome, PAS, and other common stains, as well as custom stains. You can select or customize stain types in the data type dropdown menu.
+
+**Q: What format is needed for biochemical marker images?**
+
+Supports common image formats like PNG, JPEG. Biochemical experiment report photos, Western blot band images, ELISA plate reader result images can all be directly uploaded, and the Biochemistry Agent will use vision AI to automatically recognize and extract information.
+
+### 16.3 Analysis Process Related
+
+**Q: How long does analysis take?**
+
+Analysis time depends on data volume and complexity. A single Exploration phase usually takes 10-30 minutes. Each Innovation round takes 5-15 minutes. The system has a 1.5-hour timeout protection mechanism.
+
+**Q: Can I close the browser during analysis?**
+
+Yes. Analysis runs on the server side, closing the browser does not affect the analysis process. After reopening, the system will automatically reconnect WebSocket and restore the real-time message stream. Note: Sessions without activity for a long time (over 1 hour) may be automatically unloaded to disk by the server, but data will not be lost.
+
+**Q: What to do if Bioinformatics Agent reports an error?**
+
+Bioinformatics Agent has built-in automatic error repair mechanism (up to 3 retries). Common errors include:
+- Package version compatibility issues: Agent will automatically try different APIs.
+- Insufficient memory: Agent will adjust analysis strategy (e.g., subsampling).
+- 3 consecutive same-type errors will trigger Supervisor intervention and may escalate to PI Agent to adjust analysis strategy.
+
+If an error causes analysis to interrupt, you can restore from the most recent snapshot after fixing the problem.
+
+**Q: How to judge if analysis is "good enough"?**
+
+The system automatically detects convergence — if no major new findings for two consecutive rounds, it will recommend ending analysis. Additionally, you can judge by the following indicators:
+- Whether the exploration report comprehensively covers your scientific questions.
+- Whether key pathways have been fully analyzed.
+- Whether PI Agent's comprehensive summary gives clear biological conclusions.
+
+### 16.4 Model Configuration Recommendations
+
+**Q: How to choose models for each agent?**
+
+A typical cost-effective configuration scheme:
+
+| Agent | Recommended Model | Notes |
+|-------|-------------------|-------|
+| PI Agent | claude-opus-4-7 or gpt-4o | Core reasoning, needs strongest model |
+| Bioinformatics Agent | claude-sonnet-4-6 or deepseek-chat | Code generation, needs strong code capability |
+| Pathology Agent | claude-sonnet-4-6 (Vision) | Image analysis, needs multimodal |
+| Biochemistry Agent | deepseek-chat | Numerical interpretation, medium model sufficient |
+| Literature Agent | Google Gemini 2.5 Pro or deepseek-chat | Long-context processing |
+| Supervisor | claude-haiku-4-5 or gemini-flash | Fast monitoring, lightweight model sufficient |
+| Technique | claude-haiku-4-5 | API documentation lookup, lightweight model sufficient |
+| Painter | Image generation capable model | Needs endpoint supporting `/v1/images/generations` |
+
+**Q: Can I use locally deployed open-source models?**
+
+Yes. After deploying open-source models via Ollama, set LLM server address to `http://localhost:11434/v1`, and use the model name from Ollama (e.g., `qwen3`, `llama4`). Note: Open-source model reasoning capability may not be as good as commercial models, it's recommended at least PI Agent uses a stronger commercial model.
+
+### 16.5 Other Questions
+
+**Q: How to reproduce analysis results?**
+
+ScAI provides multi-layer reproduction guarantees:
+1. Exported session contains complete analysis state and code records.
+2. Report includes reproducibility appendix, listing Python version, dependency packages and versions, file checksums.
+3. All code from Bioinformatics Agent is saved in Jupyter Notebooks and can be run independently.
+
+**Q: Can multiple users use the same ScAI instance simultaneously?**
+
+Yes. Each user has their own account and sessions, no interference. Administrators manage all users through the admin panel.
+
+**Q: Is data secure?**
+
+- All data is stored locally on the server (`/data` directory).
+- Uploaded files do not leave your server (except analysis request content sent to LLM API).
+- API Key is encrypted and stored on the server side, not exposed to frontend.
+- If you have strict data security requirements, it's recommended to use local Ollama deployed open-source models, completely independent of external APIs.
+
+---
+
+&gt; **Tip**: This manual updates with ScAI versions. If manual content is found to be inconsistent with the actual interface, please refer to the latest version. For issues not covered, welcome to submit an Issue.
 
 ---
 
 **ScAI · Single Cell Sequencing Analysis Driven by AI · © 2025–2026 Minzhang Cheng**
+

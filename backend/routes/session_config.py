@@ -7,7 +7,7 @@ from backend.models.api_requests import (
     PromptUpdateRequest, ModelUpdateRequest, TemperatureUpdateRequest,
     VisionSettingUpdateRequest, LiteratureConfigRequest, AgentServerConfigRequest,
 )
-from backend.models.schemas import APIResponse
+from backend.models.schemas import APIResponse, DEFAULT_ROUND_WAIT_SECONDS
 from backend.services.session_store import async_save_session, ensure_session_loaded
 from backend.state import system_config
 from backend.utils.files import validate_session_id
@@ -20,7 +20,7 @@ class MaxRoundsRequest(BaseModel):
 
 
 class RoundWaitRequest(BaseModel):
-    round_wait_seconds: int = Field(ge=-1, le=3600, default=300)
+    round_wait_seconds: int = Field(ge=-1, le=3600, default=DEFAULT_ROUND_WAIT_SECONDS)
 
 
 @router.post("/session/{session_id}/prompts")

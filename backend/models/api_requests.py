@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
+from backend.models.schemas import DEFAULT_ROUND_WAIT_SECONDS
+
 
 VALID_AGENTS = Literal["pi", "pathology", "bioinformatics", "biochemistry", "literature", "painter", "supervisor", "technique"]
 
@@ -27,7 +29,7 @@ class ValidateKeyRequest(BaseModel):
 class StartRequest(BaseModel):
     instruction: str
     session_name: Optional[str] = None
-    round_wait_seconds: int = Field(ge=-1, le=3600, default=300)
+    round_wait_seconds: int = Field(ge=-1, le=3600, default=DEFAULT_ROUND_WAIT_SECONDS)
 
 
 class PromptUpdateRequest(BaseModel):

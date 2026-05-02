@@ -1,4 +1,4 @@
-import { create } from 'zustand'
+import { create, type StateCreator } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { Language, getDefaultPrompts } from '../i18n/translations'
 import { getToken, setToken, clearToken } from '../utils/authStorage'
@@ -365,11 +365,12 @@ interface AppState {
   updateProfilePassword: (currentPassword: string, newPassword: string) => Promise<void>
   logout: () => void
   loadAuthFromStorage: () => Promise<void>
+
+  // Internal: true after Zustand persist finishes hydrating from localStorage.
+  _hydrated: boolean
 }
 
-export const useAppStore = create<AppState>()(
-  persist(
-    (set, get) => ({
+const createAppState: StateCreator<AppState> = (set, get) => ({
       // Language
       language: 'en' as Language,
       setLanguage: (lang) => {
@@ -495,7 +496,7 @@ export const useAppStore = create<AppState>()(
 
       // UI state - default to 'data' tab as users typically upload data first
       activeTab: 'data',
-      setActiveTab: (tab) => set({ activeTab: tab }),
+      setActiveTab: (tab) => set(s => s.activeTab === tab ? s : { activeTab: tab }),
       
       sidebarOpen: true,
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
@@ -553,6 +554,7 @@ export const useAppStore = create<AppState>()(
 
       // Auth state
       authReady: false,
+      _hydrated: false,
       authUser: null,
       login: async (username: string, password: string) => {
         const r = await fetch('/api/auth/login', {
@@ -633,9 +635,26 @@ export const useAppStore = create<AppState>()(
           set({ authUser: null, authReady: true })
         }
       },
-    }),
+})
+
+export const useAppStore = create<AppState>()(
+  persist(
+    createAppState,
     {
       name: 'scai-storage',
+      onRehydrateStorage: () => {
+        return (_state: unknown, error?: unknown) => {
+          if (error) {
+            console.error('Zustand hydration failed:', error)
+          }
+          // setTimeout(0) defers the flag flip out of the rehydration commit,
+          // so subscribers see _hydrated as a distinct state change after
+          // currentSession is restored.
+          setTimeout(() => {
+            useAppStore.setState({ _hydrated: true })
+          }, 0)
+        }
+      },
       // Validate critical fields on hydration to prevent crashes from corrupted/outdated localStorage
       merge: (persistedState: unknown, currentState) => {
         const ps = (persistedState && typeof persistedState === 'object') ? persistedState as Record<string, any> : {}

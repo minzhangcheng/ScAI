@@ -120,6 +120,8 @@ async def list_sessions(request: Request):
             "created_at": state.created_at.isoformat() if state.created_at else "",
             "updated_at": state.updated_at.isoformat() if state.updated_at else "",
             "current_round": state.current_round,
+            "waiting_input_started_at": state.waiting_input_started_at.isoformat() if state.waiting_input_started_at else "",
+            "round_wait_seconds": state.round_wait_seconds,
             "has_pathology": any(f.section == "pathology" for f in state.data_files),
             "has_sequencing": state.has_sequencing_data(),
             "has_biochemistry": any(f.section == "biochemistry" for f in state.data_files) or len(state.biochemistry_indicators) > 0,
