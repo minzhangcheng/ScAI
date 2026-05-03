@@ -20,6 +20,12 @@ DATA_BASE_DIR = Path(os.environ.get(
     str((_BACKEND_DIR.parent.parent.parent / "data").resolve())
 ))
 
+_ENABLE_REPRODUCIBILITY = os.environ.get("SCAI_ENABLE_REPRODUCIBILITY", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 # Legacy top-level directories (kept for backward compatibility / migration fallback)
 UPLOAD_DIR = DATA_BASE_DIR / "uploads"
 STATE_DIR = DATA_BASE_DIR / "states"
@@ -224,6 +230,11 @@ class SystemConfig(BaseModel):
     # Session settings
     max_rounds: int = 3  # Maximum analysis rounds
     convergence_rounds: int = 2  # Rounds without new findings to stop
+
+    enable_reproducibility: bool = Field(
+        default=_ENABLE_REPRODUCIBILITY,
+        description="Enable reproducibility bundle generation (checksums, environment snapshot, commands, decisions)",
+    )
     
     # State persistence (deprecated: use get_session_states/get_session_workspace instead)
     # Kept for serialization compatibility only.

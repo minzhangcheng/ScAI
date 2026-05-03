@@ -277,7 +277,7 @@ class TestFullBundle:
     def test_create_zip(self, tmp_workspace):
         output_dir = tmp_workspace / "reproducibility"
         output_dir.mkdir()
-        (output_dir / "manifest.json").write_text('{"scai_version":"0.21.4"}')
+        (output_dir / "manifest.json").write_text('{"scai_version":"0.22.1"}')
         (output_dir / "environment_frozen.txt").write_text("scanpy==1.9.6\n")
 
         bundle = ReproducibilityBundle()

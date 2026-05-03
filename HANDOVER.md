@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.21.5 · **Last updated**: 2026-05-01
+**Version**: 0.22.1 · **Last updated**: 2026-05-03
 
 ## 1. Runtime Architecture
 
@@ -193,6 +193,10 @@ scai/
 ## 12. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
+
+**0.22.x — reproducibility toggle, config-driven feature flags (2026-05-03)**
+
+- `0.22.1` — ReproducibilityBundle opt-in toggle: added `enable_reproducibility` boolean field to `SystemConfig` (controlled by `SCAI_ENABLE_REPRODUCIBILITY` env var, default `False`); report generator's bundle creation extracted into `_maybe_generate_reproducibility_bundle()` method that checks the toggle before generating; download endpoint (`/reports/{session_id}/reproducibility`) returns 404 when toggle is off; `DataFile` and `RoundResult` imports added to generator; lazy import of `ReproducibilityBundle` inside the method; comprehensive test suite (`test_config_toggle.py`) covering config defaults, env var parsing (true/yes/1/false/0/no/empty), subprocess isolation, and generator branching logic. Aligns with ScAI's human-in-the-loop free exploration philosophy — reproducibility bundles are now opt-in rather than always-on.
 
 **0.21.x — reproducibility bundle, username-based auth, unified settings (2026-04-30 → 2026-05-01)**
 

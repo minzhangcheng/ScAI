@@ -336,7 +336,9 @@ async def download_reproducibility_bundle(
 ):
     """Download reproducibility bundle as a ZIP file"""
     validate_session_id(session_id)
-    from backend.config import get_session_workspace
+    from backend.config import default_config, get_session_workspace
+    if not default_config.enable_reproducibility:
+        raise HTTPException(status_code=403, detail="Reproducibility bundle generation is disabled")
     from backend.services.reproducibility import ReproducibilityBundle, REPRODUCIBILITY_DIR_NAME
 
     repro_dir = get_session_workspace(session_id) / REPRODUCIBILITY_DIR_NAME
