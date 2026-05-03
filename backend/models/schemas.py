@@ -250,6 +250,10 @@ class Snapshot(BaseModel):
     state_file: str = ""  # Filename within snapshots/ directory
     size_bytes: int = 0
     parent_id: Optional[str] = None  # Parent snapshot ID for tree view
+    notebook_file: str = ""  # Filename of ipynb backup within snapshots/ directory
+    workspace_manifest: Dict[str, List[str]] = Field(default_factory=dict)
+    # e.g. {"figures": ["fig_001.jpg"], "tables": ["markers.csv"], "reproducibility": []}
+    branch_label: Optional[str] = None  # "main", "branch-A", "branch-B", etc.
 
 class ExplorationReport(BaseModel):
     """Structured exploration report (Report A) generated after Phase 1"""

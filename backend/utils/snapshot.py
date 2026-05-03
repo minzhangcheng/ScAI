@@ -6,7 +6,7 @@ import os
 import logging
 import shutil
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from ..models.schemas import AnalysisState, Snapshot
 from ..config import get_session_dir, get_session_states
@@ -17,12 +17,65 @@ logger = logging.getLogger(__name__)
 class SnapshotManager:
     """Manages lightweight analysis state snapshots for debugging rollback."""
 
+    @staticmethod
+    def find_descendant_ids(all_snapshots: List["Snapshot"], root_id: str, include_root: bool = False) -> set:
+        """BFS to find all descendant snapshot IDs of a given root.
+
+        Args:
+            all_snapshots: All snapshots in the session.
+            root_id: The ID of the root snapshot to start from.
+            include_root: Whether to include root_id in the result set.
+
+        Returns:
+            Set of descendant snapshot IDs (optionally including root_id).
+        """
+        # Build adjacency map: parent_id -> [child_ids]
+        children_map: Dict[str, List[str]] = {}
+        for s in all_snapshots:
+            if s.parent_id:
+                children_map.setdefault(s.parent_id, []).append(s.id)
+
+        descendant_ids = set()
+        queue = [root_id]
+        while queue:
+            parent = queue.pop(0)
+            for child_id in children_map.get(parent, []):
+                if child_id not in descendant_ids:
+                    descendant_ids.add(child_id)
+                    queue.append(child_id)
+
+        if include_root:
+            descendant_ids.add(root_id)
+        return descendant_ids
+
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.snapshots_dir = get_session_dir(session_id) / "snapshots"
 
     def _ensure_dir(self):
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+
+    def scan_workspace_manifest(self) -> Dict[str, List[str]]:
+        """Scan workspace directories and return relative file paths."""
+        session_dir = get_session_dir(self.session_id)
+        manifest: Dict[str, List[str]] = {}
+        for subdir in ("figures", "tables", "reproducibility"):
+            dir_path = session_dir / "workspace" / subdir
+            files = []
+            if dir_path.exists():
+                for f in sorted(dir_path.iterdir()):
+                    if f.is_file():
+                        files.append(f.name)
+            manifest[subdir] = files
+        # Also track files in workspace root (e.g. .h5ad, stray .csv)
+        root_files = []
+        workspace_dir = session_dir / "workspace"
+        if workspace_dir.exists():
+            for f in sorted(workspace_dir.iterdir()):
+                if f.is_file():
+                    root_files.append(f.name)
+        manifest["root"] = root_files
+        return manifest
 
     async def create_snapshot(
         self,
@@ -31,6 +84,7 @@ class SnapshotManager:
         phase: str,
         description: str = "",
         parent_id: Optional[str] = None,
+        branch_label: Optional[str] = None,
     ) -> Snapshot:
         """Create a snapshot: AnalysisState JSON + kernel session pkl backup."""
         self._ensure_dir()
@@ -41,6 +95,7 @@ class SnapshotManager:
             phase=phase,
             round_number=state.current_round,
             parent_id=parent_id,
+            branch_label=branch_label,
         )
         snapshot.state_file = f"{snapshot.id}.json"
 
@@ -79,6 +134,17 @@ class SnapshotManager:
                 f"size={snapshot.size_bytes} bytes (no pkl found)"
             )
 
+        # Copy notebook file for full state restoration
+        nb_src = get_session_states(self.session_id) / f"{self.session_id}.ipynb"
+        nb_dst = self.snapshots_dir / f"{snapshot.id}_notebook.ipynb"
+        if nb_src.exists():
+            await asyncio.to_thread(shutil.copy2, nb_src, nb_dst)
+            snapshot.notebook_file = f"{snapshot.id}_notebook.ipynb"
+            snapshot.size_bytes += nb_dst.stat().st_size
+
+        # Record workspace file manifest for rollback cleanup
+        snapshot.workspace_manifest = await asyncio.to_thread(self.scan_workspace_manifest)
+
         return snapshot
 
     async def restore_snapshot(self, snapshot: Snapshot) -> AnalysisState:
@@ -110,6 +176,86 @@ class SnapshotManager:
         logger.info(f"[{self.session_id}] Snapshot restored: {snapshot.name}")
         return restored
 
+    async def restore_notebook(self, snapshot: Snapshot) -> bool:
+        """Restore the notebook file from a snapshot. Returns True if restored."""
+        if not snapshot.notebook_file:
+            logger.warning(
+                f"[{self.session_id}] No notebook backup in snapshot {snapshot.name}; "
+                "notebook will not be rolled back"
+            )
+            return False
+        nb_backup = self.snapshots_dir / snapshot.notebook_file
+        if not nb_backup.exists():
+            logger.warning(
+                f"[{self.session_id}] Notebook backup file not found: {nb_backup}; "
+                "notebook will not be rolled back"
+            )
+            return False
+        nb_dst = get_session_states(self.session_id) / f"{self.session_id}.ipynb"
+        await asyncio.to_thread(shutil.copy2, nb_backup, nb_dst)
+        logger.info(f"[{self.session_id}] Notebook restored from snapshot {snapshot.name}")
+        return True
+
+    def cleanup_workspace_files(self, manifest: Dict[str, List[str]]) -> Dict[str, int]:
+        """Delete workspace files NOT in the given manifest. Returns deletion counts."""
+        session_dir = get_session_dir(self.session_id)
+        deleted: Dict[str, int] = {}
+        for subdir in ("figures", "tables", "reproducibility"):
+            dir_path = session_dir / "workspace" / subdir
+            keep_set = set(manifest.get(subdir, []))
+            count = 0
+            if dir_path.exists():
+                for f in list(dir_path.iterdir()):
+                    if f.is_file() and f.name not in keep_set:
+                        f.unlink(missing_ok=True)
+                        count += 1
+            deleted[subdir] = count
+        # Also clean workspace root files
+        workspace_dir = session_dir / "workspace"
+        root_keep = set(manifest.get("root", []))
+        root_count = 0
+        if workspace_dir.exists():
+            for f in list(workspace_dir.iterdir()):
+                if f.is_file() and f.name not in root_keep:
+                    f.unlink(missing_ok=True)
+                    root_count += 1
+        deleted["root"] = root_count
+        if any(deleted.values()):
+            logger.info(
+                f"[{self.session_id}] Workspace cleanup: deleted "
+                + ", ".join(f"{k}={v}" for k, v in deleted.items() if v > 0)
+            )
+        return deleted
+
+    def cleanup_reports(self):
+        """Delete generated report files, preserving directory structure."""
+        session_dir = get_session_dir(self.session_id)
+        reports_dir = session_dir / "reports"
+        if not reports_dir.exists():
+            return
+        for subdir in ("figures", "tables"):
+            d = reports_dir / subdir
+            if d.exists():
+                for f in d.iterdir():
+                    if f.is_file():
+                        f.unlink(missing_ok=True)
+        # Delete all files in reports root by extension (html, json, csv, ipynb)
+        for f in reports_dir.iterdir():
+            if f.is_file() and f.suffix in (".html", ".json", ".csv", ".ipynb"):
+                f.unlink(missing_ok=True)
+        logger.info(f"[{self.session_id}] Reports directory cleaned")
+
+    async def delete_branch(self, root_snapshot: Snapshot, all_snapshots: List[Snapshot]) -> List[str]:
+        """Delete a snapshot and all its descendants. Returns list of deleted snapshot IDs."""
+        ids_to_delete = self.find_descendant_ids(all_snapshots, root_snapshot.id, include_root=True)
+        deleted = []
+        for sid in ids_to_delete:
+            snap = next((s for s in all_snapshots if s.id == sid), None)
+            if snap:
+                await self.delete_snapshot(snap)
+                deleted.append(sid)
+        return deleted
+
     async def delete_snapshot(self, snapshot: Snapshot):
         """Delete a snapshot file and its kernel session pkl backup."""
         state_path = (self.snapshots_dir / snapshot.state_file).resolve()
@@ -119,6 +265,8 @@ class SnapshotManager:
             state_path.unlink()
         pkl = self.snapshots_dir / f"{snapshot.id}_session.pkl"
         pkl.unlink(missing_ok=True)
+        nb = self.snapshots_dir / f"{snapshot.id}_notebook.ipynb"
+        nb.unlink(missing_ok=True)
         logger.info(f"[{self.session_id}] Snapshot deleted: {snapshot.name}")
 
     async def cleanup_old_snapshots(self, keep_count: int = 20) -> List[str]:
@@ -136,6 +284,8 @@ class SnapshotManager:
             removed.append(old.name)
             # Remove corresponding pkl backup
             (self.snapshots_dir / f"{old.stem}_session.pkl").unlink(missing_ok=True)
+            # Remove corresponding notebook backup
+            (self.snapshots_dir / f"{old.stem}_notebook.ipynb").unlink(missing_ok=True)
         return removed
 
     async def delete_checkpoint(self):

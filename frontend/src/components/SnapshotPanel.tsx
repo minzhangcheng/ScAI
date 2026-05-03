@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Camera, RotateCcw, Trash2, X, GitBranch } from 'lucide-react'
 import { Language } from '../i18n/translations'
 import { apiFetch } from '../hooks/useApi'
@@ -12,6 +12,9 @@ interface Snapshot {
   timestamp: string
   size_bytes: number
   parent_id: string | null
+  branch_label: string | null
+  notebook_file: string
+  workspace_manifest: Record<string, string[]>
 }
 
 interface TreeNode {
@@ -33,6 +36,13 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
   const [loading, setLoading] = useState(true)
   const [restoring, setRestoring] = useState<string | null>(null)
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null)
+  const [rollbackPreview, setRollbackPreview] = useState<{
+    snapshotId: string
+    filesCount: number
+    cellsRemoved: number
+    descendantSnapshots: string[]
+  } | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   const fetchSnapshots = useCallback(async () => {
     try {
@@ -47,6 +57,11 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
 
   useEffect(() => { fetchSnapshots() }, [fetchSnapshots])
 
+  // Abort in-flight rollback preview request on unmount
+  useEffect(() => {
+    return () => { abortControllerRef.current?.abort() }
+  }, [])
+
   const handleRestore = async (snapshotId: string) => {
     setRestoring(snapshotId)
     try {
@@ -57,7 +72,33 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
     } finally {
       setRestoring(null)
       setConfirmRestore(null)
+      setRollbackPreview(null)
     }
+  }
+
+  const fetchRollbackPreview = async (snapshotId: string) => {
+    abortControllerRef.current?.abort()
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+    try {
+      const data = await apiFetch<any>(`/session/${sessionId}/snapshots/${snapshotId}/rollback-preview`, { signal: controller.signal })
+      if (data.success && !controller.signal.aborted) {
+        setRollbackPreview({
+          snapshotId,
+          filesCount: data.data.files_to_delete_count,
+          cellsRemoved: data.data.notebook_cells_removed,
+          descendantSnapshots: data.data.descendant_snapshots,
+        })
+      }
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      console.error('Failed to fetch rollback preview', e)
+    }
+  }
+
+  const handleRestoreClick = (snapshotId: string) => {
+    setConfirmRestore(snapshotId)
+    fetchRollbackPreview(snapshotId)
   }
 
   const handleDelete = async (snapshotId: string) => {
@@ -75,8 +116,8 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
 
   const phaseLabel = (phase: string) => {
     const labels: Record<string, string> = isZh
-      ? { pre_annotation: '注释前', post_annotation: '注释后', pre_direction: '选方向前', post_direction: '选方向后', manual: '手动' }
-      : { pre_annotation: 'Pre-Annotation', post_annotation: 'Post-Annotation', pre_direction: 'Pre-Direction', post_direction: 'Post-Direction', manual: 'Manual' }
+      ? { pre_annotation: '注释前', post_annotation: '注释后', pre_direction: '选方向前', post_direction: '选方向后', pre_round_wait: '轮次结束', manual: '手动' }
+      : { pre_annotation: 'Pre-Annotation', post_annotation: 'Post-Annotation', pre_direction: 'Pre-Direction', post_direction: 'Post-Direction', pre_round_wait: 'Round Complete', manual: 'Manual' }
     return labels[phase] || phase
   }
 
@@ -171,6 +212,11 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
               <div className="font-medium text-sm text-slate-900 truncate">{snap.name}</div>
               <div className="flex items-center gap-3 mt-1 text-xs text-slate-500 flex-wrap">
                 <span className="px-2 py-0.5 bg-slate-100 rounded-full">{phaseLabel(snap.phase)}</span>
+                {snap.branch_label && snap.branch_label !== 'main' && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300 ml-1">
+                    {snap.branch_label}
+                  </span>
+                )}
                 <span>Round {snap.round_number}</span>
                 <span>{new Date(snap.timestamp).toLocaleString()}</span>
                 <span>{formatSize(snap.size_bytes)}</span>
@@ -178,28 +224,48 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
             </div>
             <div className="flex items-center gap-1 ml-2 flex-shrink-0">
               {confirmRestore === snap.id ? (
-                <div className="flex items-center gap-1">
-                  <span className="text-xs text-amber-600 mr-1">
-                    {isZh ? '确认？' : 'Sure?'}
-                  </span>
-                  <button
-                    onClick={() => handleRestore(snap.id)}
-                    disabled={restoring === snap.id}
-                    className="px-2 py-1 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50"
-                  >
-                    {restoring === snap.id ? '...' : (isZh ? '确认' : 'Yes')}
-                  </button>
-                  <button
-                    onClick={() => setConfirmRestore(null)}
-                    className="px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 rounded-lg"
-                  >
-                    {isZh ? '取消' : 'No'}
-                  </button>
+                <div className="flex flex-col gap-1">
+                  {rollbackPreview?.snapshotId === snap.id && (
+                    <div className="p-2 bg-yellow-50 dark:bg-yellow-900/20 rounded text-xs">
+                      <p className="font-medium text-yellow-800 dark:text-yellow-200">
+                        {isZh ? '回滚将删除以下内容：' : 'Restoring will delete:'}
+                      </p>
+                      <ul className="list-disc list-inside text-yellow-700 dark:text-yellow-300">
+                        {rollbackPreview.filesCount > 0 && (
+                          <li>{rollbackPreview.filesCount} {isZh ? '个工作区文件' : ' workspace file(s)'}</li>
+                        )}
+                        {rollbackPreview.cellsRemoved > 0 && (
+                          <li>{rollbackPreview.cellsRemoved} {isZh ? '个notebook单元格' : ' notebook cell(s)'}</li>
+                        )}
+                        {rollbackPreview.descendantSnapshots.length > 0 && (
+                          <li>{rollbackPreview.descendantSnapshots.length} {isZh ? '个后续快照' : ' descendant snapshot(s)'}</li>
+                        )}
+                      </ul>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-amber-600 mr-1">
+                      {isZh ? '确认？' : 'Sure?'}
+                    </span>
+                    <button
+                      onClick={() => handleRestore(snap.id)}
+                      disabled={restoring === snap.id}
+                      className="px-2 py-1 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50"
+                    >
+                      {restoring === snap.id ? '...' : (isZh ? '确认' : 'Yes')}
+                    </button>
+                    <button
+                      onClick={() => { setConfirmRestore(null); setRollbackPreview(null) }}
+                      className="px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 rounded-lg"
+                    >
+                      {isZh ? '取消' : 'No'}
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <>
                   <button
-                    onClick={() => setConfirmRestore(snap.id)}
+                    onClick={() => handleRestoreClick(snap.id)}
                     className="p-1.5 text-accent-600 hover:bg-accent-50 rounded-lg"
                     title={isZh ? '恢复' : 'Restore'}
                   >

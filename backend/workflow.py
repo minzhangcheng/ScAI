@@ -745,6 +745,9 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         try:
             # Save kernel session first so the pkl reflects the current state
             if self.sandbox:
+                # Save notebook so the ipynb file is up to date for snapshot backup
+                if hasattr(self.sandbox, 'notebook_state') and self.sandbox.notebook_state:
+                    self.sandbox.notebook_state.save()
                 await self.sandbox.save_session()
 
             mgr = SnapshotManager(self.session_id)
@@ -753,7 +756,20 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             parent_id = state.last_restored_snapshot_id
             if parent_id is None and state.snapshots:
                 parent_id = state.snapshots[-1].id
-            snapshot = await mgr.create_snapshot(state, name, phase, parent_id=parent_id)
+            # Compute branch label for tree visualization
+            if state.last_restored_snapshot_id:
+                existing_branches_from_parent = sum(
+                    1 for s in state.snapshots
+                    if s.parent_id == state.last_restored_snapshot_id
+                    and s.branch_label and s.branch_label != "main"
+                )
+                branch_letter = chr(ord('A') + existing_branches_from_parent) if existing_branches_from_parent < 26 else str(existing_branches_from_parent)
+                branch_label = f"branch-{branch_letter}"
+            else:
+                branch_label = "main"
+            if branch_label and branch_label != "main":
+                name = f"Auto: {phase} (Round {state.current_round}) [{branch_label}]"
+            snapshot = await mgr.create_snapshot(state, name, phase, parent_id=parent_id, branch_label=branch_label)
             state.snapshots.append(snapshot)
             # Clear restore marker: only the first snapshot after restore is a "branch point"
             if state.last_restored_snapshot_id:

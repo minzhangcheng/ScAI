@@ -3,6 +3,7 @@
 Extracted from backend/main.py to decouple snapshot route handlers.
 """
 import asyncio
+import json
 import logging
 from typing import Dict
 
@@ -22,6 +23,8 @@ from backend.state import (
     initializing_sessions as _initializing_sessions,
 )
 from backend.utils.files import validate_session_id
+from backend.utils.snapshot import SnapshotManager
+from backend.config import get_session_states
 
 logger = logging.getLogger(__name__)
 
@@ -89,9 +92,20 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
         workflows.pop(session_id, None)
 
     # Restore state
-    from backend.utils.snapshot import SnapshotManager
     mgr = SnapshotManager(session_id)
     restored_state = await mgr.restore_snapshot(snapshot)
+
+    await mgr.restore_notebook(snapshot)
+
+    mgr.cleanup_workspace_files(snapshot.workspace_manifest)
+
+    # Reports will be regenerated from clean workspace
+    mgr.cleanup_reports()
+
+    # Clear report path fields to prevent broken links after cleanup
+    restored_state.exploration_report_html_path = None
+    restored_state.detailed_report_html_path = None
+    restored_state.annotation_report_html_path = None
 
     # Delete stale LangGraph checkpoint so resume() won't continue at
     # the old graph node position after restoring a different state
@@ -241,6 +255,68 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
     )
 
 
+@router.get("/{session_id}/snapshots/{snapshot_id}/rollback-preview")
+async def rollback_preview(session_id: str, snapshot_id: str):
+    """Preview what will be affected by restoring a snapshot (without actually restoring)."""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    mgr = SnapshotManager(session_id)
+    current_manifest = await asyncio.to_thread(mgr.scan_workspace_manifest)
+    snapshot_manifest = snapshot.workspace_manifest or {}
+
+    files_to_delete = {}
+    for subdir in ("figures", "tables", "reproducibility", "root"):
+        current_set = set(current_manifest.get(subdir, []))
+        keep_set = set(snapshot_manifest.get(subdir, []))
+        to_delete = current_set - keep_set
+        files_to_delete[subdir] = sorted(to_delete)
+
+    # Count notebook cells (current vs snapshot)
+    current_cells = 0
+    nb_path = get_session_states(session_id) / f"{session_id}.ipynb"
+    if nb_path.exists():
+        try:
+            current_cells = len(json.loads(nb_path.read_text()).get("cells", []))
+        except Exception:
+            pass
+
+    snapshot_cells = 0
+    if snapshot.notebook_file:
+        nb_backup = mgr.snapshots_dir / snapshot.notebook_file
+        if nb_backup.exists():
+            try:
+                snapshot_cells = len(json.loads(nb_backup.read_text()).get("cells", []))
+            except Exception:
+                pass
+
+    # Find descendant snapshots (snapshots on branches after this point)
+    descendant_ids = SnapshotManager.find_descendant_ids(state.snapshots, snapshot_id)
+
+    descendant_names = [
+        s.name for s in state.snapshots if s.id in descendant_ids
+    ]
+
+    return APIResponse(
+        success=True,
+        data={
+            "files_to_delete": files_to_delete,
+            "files_to_delete_count": sum(len(v) for v in files_to_delete.values()),
+            "notebook_cells_removed": max(0, current_cells - snapshot_cells),
+            "current_notebook_cells": current_cells,
+            "snapshot_notebook_cells": snapshot_cells,
+            "descendant_snapshots": descendant_names,
+        },
+        message="ok"
+    )
+
+
 @router.delete("/{session_id}/snapshots/{snapshot_id}")
 async def delete_snapshot(session_id: str, snapshot_id: str):
     """Delete a snapshot."""
@@ -253,7 +329,6 @@ async def delete_snapshot(session_id: str, snapshot_id: str):
     if not snapshot:
         raise HTTPException(status_code=404, detail="Snapshot not found")
 
-    from backend.utils.snapshot import SnapshotManager
     mgr = SnapshotManager(session_id)
     await mgr.delete_snapshot(snapshot)
     state.snapshots = [s for s in state.snapshots if s.id != snapshot_id]
@@ -261,3 +336,28 @@ async def delete_snapshot(session_id: str, snapshot_id: str):
     await async_save_session(session_id, state)
 
     return APIResponse(success=True, message="Snapshot deleted")
+
+
+@router.delete("/{session_id}/snapshots/{snapshot_id}/branch")
+async def delete_branch(session_id: str, snapshot_id: str):
+    """Delete a snapshot and all its descendants (entire branch)."""
+    validate_session_id(session_id)
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    mgr = SnapshotManager(session_id)
+    deleted_ids = await mgr.delete_branch(snapshot, state.snapshots)
+    state.snapshots = [s for s in state.snapshots if s.id not in deleted_ids]
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state)
+
+    return APIResponse(
+        success=True,
+        message=f"Deleted {len(deleted_ids)} snapshots in branch",
+        data={"deleted_count": len(deleted_ids), "deleted_ids": deleted_ids}
+    )
