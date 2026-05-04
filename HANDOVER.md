@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.22.2 · **Last updated**: 2026-05-03
+**Version**: 0.22.3 · **Last updated**: 2026-05-04
 
 ## 1. Runtime Architecture
 
@@ -194,8 +194,9 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.22.x — reproducibility toggle, config-driven feature flags (2026-05-03)**
+**0.22.x — reproducibility toggle, config-driven feature flags, import hardening (2026-05-03 → 2026-05-04)**
 
+- `0.22.3` — Import security hardening & memory optimization: `validate_path_within()` added to `backend/utils/files.py` for path-traversal protection; `_resolve_import_dest()` extracts archive-to-session path mapping into a testable helper; `shutil.copyfileobj()` with `UPLOAD_CHUNK_SIZE` replaces whole-file `write_bytes()` in tar.gz extraction to reduce peak memory for large archives; explicit `validate_session_id()` calls replace inline regex checks in both tar.gz and zip import paths; structured logging (`logger.info`/`logger.error`/`logger.exception`) added to `_process_import_job` for import lifecycle observability; snapshot JSON path remapping consolidated to `_resolve_import_dest` dispatch.
 - `0.22.2` — Snapshot rollback enhancement: full-state restoration (ipynb notebook backup, workspace file manifest, report cleanup); `Snapshot` model extended with `notebook_file`, `workspace_manifest`, `branch_label` fields; `SnapshotManager.scan_workspace_manifest()` tracks workspace files at snapshot time; `restore_notebook()` and `cleanup_workspace_files()` enable precise rollback to snapshot state; `cleanup_reports()` removes stale generated reports and clears report path fields; `GET /rollback-preview` endpoint shows affected files, notebook cells, and descendant snapshots before restore; `DELETE /branch` endpoint deletes a snapshot and all its descendants; branch labels auto-computed in workflow (`main` / `branch-A` / `branch-B`) for tree visualization; `pre_round_wait` phase label added to frontend; frontend SnapshotPanel shows rollback preview with affected-file/cell/descendant counts and branch badge, with AbortController cleanup on unmount; comprehensive test suite (`test_snapshot_rollback.py`, 321 lines) covering manifest creation, workspace/report cleanup, branch labels, and branch deletion.
 - `0.22.1` — ReproducibilityBundle opt-in toggle: added `enable_reproducibility` boolean field to `SystemConfig` (controlled by `SCAI_ENABLE_REPRODUCIBILITY` env var, default `False`); report generator's bundle creation extracted into `_maybe_generate_reproducibility_bundle()` method that checks the toggle before generating; download endpoint (`/reports/{session_id}/reproducibility`) returns 404 when toggle is off; `DataFile` and `RoundResult` imports added to generator; lazy import of `ReproducibilityBundle` inside the method; comprehensive test suite (`test_config_toggle.py`) covering config defaults, env var parsing (true/yes/1/false/0/no/empty), subprocess isolation, and generator branching logic. Aligns with ScAI's human-in-the-loop free exploration philosophy — reproducibility bundles are now opt-in rather than always-on.
 

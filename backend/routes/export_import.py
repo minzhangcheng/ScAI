@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import tarfile
 import uuid
 import zipfile
@@ -17,7 +18,8 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Reque
 
 from backend.config import (
     DATA_BASE_DIR, REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR,
-    UPLOAD_TEMP_DIR, get_session_dir, get_session_metadata_path, get_session_reports,
+    UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR,
+    get_session_dir, get_session_metadata_path, get_session_reports,
     get_session_states, get_session_uploads, get_session_workspace, resolve_session_metadata_path,
 )
 from backend.models.schemas import AnalysisState, APIResponse
@@ -32,7 +34,7 @@ from backend.state import (
     prepared_exports as _prepared_exports,
     prepared_exports_lock as _prepared_exports_lock,
 )
-from backend.utils.files import validate_session_id
+from backend.utils.files import validate_path_within, validate_session_id
 from backend.utils.upload import stream_save_file
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
@@ -337,6 +339,7 @@ async def import_state(request: Request, background_tasks: BackgroundTasks, file
         try:
             await stream_save_file(file, tmp_path)
         except Exception as e:
+            logger.error(f"Import {import_job_id}: stream_save_file failed: {e}")
             async with _import_jobs_lock:
                 _import_jobs[import_job_id] = {"status": "failed", "error": f"Upload failed: {str(e)}"}
             tmp_path.unlink(missing_ok=True)
@@ -365,8 +368,7 @@ async def import_state(request: Request, background_tasks: BackgroundTasks, file
         state = AnalysisState(**state_data)
 
     # Validate imported session ID (zip/json path)
-    if not state.id or '/' in state.id or '\\' in state.id or '..' in state.id:
-        raise HTTPException(status_code=400, detail="Invalid session ID in imported data")
+    validate_session_id(state.id)
 
     # Save state to disk and load into memory
     await async_save_session(state.id, state)
@@ -382,22 +384,23 @@ async def import_state(request: Request, background_tasks: BackgroundTasks, file
 
 async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: str):
     """Background task: extract tar.gz archive and load session."""
+    logger.info(f"Import {import_job_id}: starting extraction from {tmp_path_str}")
     try:
         state = await asyncio.to_thread(_import_tar_gz, tmp_path_str, user_id)
 
-        if not state.id or '/' in state.id or '\\' in state.id or '..' in state.id:
-            async with _import_jobs_lock:
-                _import_jobs[import_job_id] = {"status": "failed", "error": "Invalid session ID in imported data"}
-            return
+        validate_session_id(state.id)
 
         await async_save_session(state.id, state)
         await _update_session_cache(state.id, state)
         async with _import_jobs_lock:
             _import_jobs[import_job_id] = {"status": "completed", "session_id": state.id, "name": state.name}
+        logger.info(f"Import {import_job_id}: completed, session_id={state.id}")
     except HTTPException as e:
+        logger.error(f"Import {import_job_id}: failed (HTTPException): {e.detail}")
         async with _import_jobs_lock:
             _import_jobs[import_job_id] = {"status": "failed", "error": e.detail}
     except Exception as e:
+        logger.exception(f"Import {import_job_id}: failed with exception")
         async with _import_jobs_lock:
             _import_jobs[import_job_id] = {"status": "failed", "error": str(e)}
     finally:
@@ -418,115 +421,94 @@ async def get_import_status(import_id: str):
 # Import helper functions
 # ---------------------------------------------------------------------------
 
+def _resolve_import_dest(relative_to_base: str, session_id: str) -> Path:
+    """Map an archive-relative path to the destination path in the new session-centric layout."""
+    if relative_to_base.startswith("states/"):
+        fname = relative_to_base.split("/", 1)[1]
+        return get_session_states(session_id) / fname
+    if relative_to_base.startswith(f"uploads/{session_id}/"):
+        rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
+        return get_session_uploads(session_id) / rest
+    if relative_to_base.startswith(f"workspace/{session_id}/"):
+        rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
+        return get_session_workspace(session_id) / rest
+    if relative_to_base.startswith(f"reports/{session_id}/"):
+        rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
+        return get_session_reports(session_id) / rest
+    if relative_to_base.startswith("snapshots/"):
+        fname = relative_to_base.split("/", 1)[1]
+        return get_session_dir(session_id) / "snapshots" / fname
+    return DATA_BASE_DIR / relative_to_base
+
+
 def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
-    """Import from tar.gz archive file on disk with path remapping"""
+    """Import from tar.gz archive file on disk with path remapping.
+
+    Uses streaming iteration and chunked file writes to minimise memory usage,
+    which is critical for large archives (20+ GB) on memory-constrained systems.
+    """
     data_base_str = str(DATA_BASE_DIR)
 
+    session_id = None
+    old_base_dir = ""
+    state_json_data = None
+
     with tarfile.open(file_path, mode='r:gz') as tf:
-        # Read manifest first
-        manifest_data = None
-        session_id = None
-        for member in tf.getmembers():
-            if member.name.endswith('/manifest.json'):
-                f = tf.extractfile(member)
-                if f:
-                    manifest_data = json.loads(f.read().decode('utf-8'))
-                    session_id = manifest_data.get("session_id")
-                    break
-
-        if not session_id:
-            # Fallback: infer session_id from first path component
-            members = tf.getmembers()
-            if not members:
-                raise HTTPException(status_code=400, detail="Empty archive")
-            session_id = members[0].name.split('/')[0]
-
-        # Validate session_id
-        if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
-            raise HTTPException(status_code=400, detail="Invalid session ID in archive")
-
-        old_base_dir = manifest_data.get("data_base_dir", "") if manifest_data else ""
-
-        # Extract files with security checks
-        state_json_data = None
-        for member in tf.getmembers():
+        for member in tf:
             if not member.isfile():
                 continue
 
-            # Security: skip paths with .. or absolute paths
             if '..' in member.name or member.name.startswith('/'):
                 logger.warning(f"Skipping archive entry with suspicious path: {member.name}")
                 continue
 
-            # Skip manifest (already processed)
-            if member.name.endswith('/manifest.json'):
-                continue
-
-            # Determine destination: strip session_id prefix, rest maps to session dir
             parts = member.name.split('/', 1)
             if len(parts) < 2:
                 continue
-            relative_to_base = parts[1]  # e.g. "sessions/{id}.json", "uploads/{id}/pathology/img.png"
 
-            # Read state JSON for later processing
+            if session_id is None:
+                session_id = parts[0]
+
+            relative_to_base = parts[1]
+
+            if relative_to_base == 'manifest.json':
+                f = tf.extractfile(member)
+                if f:
+                    manifest_data = json.loads(f.read().decode('utf-8'))
+                    session_id = manifest_data.get("session_id", session_id)
+                    old_base_dir = manifest_data.get("data_base_dir", "")
+                continue
+
             if relative_to_base == f"sessions/{session_id}.json":
                 f = tf.extractfile(member)
                 if f:
                     state_json_data = f.read()
-
-            # Map archive paths to new session-centric structure
-            if relative_to_base.startswith(f"sessions/{session_id}.json"):
-                # Will be handled via state_json_data below
-                continue
-            elif relative_to_base.startswith("states/"):
-                fname = relative_to_base.split("/", 1)[1]
-                dest_path = (get_session_states(session_id) / fname).resolve()
-            elif relative_to_base.startswith(f"uploads/{session_id}/"):
-                rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
-                dest_path = (get_session_uploads(session_id) / rest).resolve()
-            elif relative_to_base.startswith(f"workspace/{session_id}/"):
-                rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
-                dest_path = (get_session_workspace(session_id) / rest).resolve()
-            elif relative_to_base.startswith(f"reports/{session_id}/"):
-                rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
-                dest_path = (get_session_reports(session_id) / rest).resolve()
-            elif relative_to_base.startswith("snapshots/"):
-                fname = relative_to_base.split("/", 1)[1]
-                dest_path = (get_session_dir(session_id) / "snapshots" / fname).resolve()
-                # Validate path stays within DATA_BASE_DIR
-                if not str(dest_path).startswith(data_base_str + os.sep) and str(dest_path) != data_base_str:
-                    logger.warning(f"Skipping entry outside data dir: {member.name}")
-                    continue
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                f = tf.extractfile(member)
-                if f:
-                    if fname.endswith(".json"):
-                        # Apply same path remapping as the main session state JSON
-                        content = f.read().decode("utf-8")
-                        if old_base_dir and old_base_dir != data_base_str:
-                            content = content.replace(old_base_dir, data_base_str)
-                        content = content.replace(
-                            str(UPLOAD_DIR / session_id), str(get_session_uploads(session_id)))
-                        content = content.replace(
-                            str(WORKSPACE_DIR / session_id), str(get_session_workspace(session_id)))
-                        content = content.replace(
-                            str(REPORTS_DIR / session_id), str(get_session_reports(session_id)))
-                        dest_path.write_text(content, encoding="utf-8")
-                    else:
-                        dest_path.write_bytes(f.read())
-                continue
-            else:
-                dest_path = (DATA_BASE_DIR / relative_to_base).resolve()
-
-            # Validate path stays within DATA_BASE_DIR
-            if not str(dest_path).startswith(data_base_str + os.sep) and str(dest_path) != data_base_str:
-                logger.warning(f"Skipping entry outside data dir: {member.name}")
                 continue
 
+            validate_session_id(session_id)
+
+            dest_path = _resolve_import_dest(relative_to_base, session_id)
+            validate_path_within(dest_path, DATA_BASE_DIR)
             dest_path.parent.mkdir(parents=True, exist_ok=True)
+
             f = tf.extractfile(member)
-            if f:
-                dest_path.write_bytes(f.read())
+            if not f:
+                continue
+
+            if relative_to_base.startswith("snapshots/") and dest_path.suffix == ".json":
+                content = f.read().decode("utf-8")
+                if old_base_dir and old_base_dir != data_base_str:
+                    content = content.replace(old_base_dir, data_base_str)
+                content = content.replace(
+                    str(UPLOAD_DIR / session_id), str(get_session_uploads(session_id)))
+                content = content.replace(
+                    str(WORKSPACE_DIR / session_id), str(get_session_workspace(session_id)))
+                content = content.replace(
+                    str(REPORTS_DIR / session_id), str(get_session_reports(session_id)))
+                dest_path.write_text(content, encoding="utf-8")
+            else:
+                with open(dest_path, 'wb') as out_f:
+                    shutil.copyfileobj(f, out_f, length=UPLOAD_CHUNK_SIZE)
 
     if state_json_data is None:
         raise HTTPException(status_code=400, detail="Session state JSON not found in archive")
@@ -566,8 +548,7 @@ def _import_zip(content: bytes, user_id: str) -> AnalysisState:
             raise HTTPException(status_code=400, detail="Empty zip file")
 
         session_id = namelist[0].split('/')[0]
-        if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
-            raise HTTPException(status_code=400, detail="Invalid session ID in archive")
+        validate_session_id(session_id)
 
         # Extract state.json
         state_json_path = f"{session_id}/state.json"
