@@ -7,6 +7,8 @@ interface ConfirmDialogProps {
   message: string
   confirmLabel?: string
   variant?: 'danger' | 'default'
+  titleIcon?: React.ReactNode
+  confirmIcon?: React.ReactNode
   onConfirm: () => void
   onCancel: () => void
 }
@@ -17,6 +19,8 @@ export function ConfirmDialog({
   message,
   confirmLabel = 'Confirm',
   variant = 'default',
+  titleIcon,
+  confirmIcon,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -30,7 +34,10 @@ export function ConfirmDialog({
       <div className="bg-white rounded-2xl shadow-modal w-full max-w-sm mx-4 overflow-hidden animate-scale-in">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200">
-          <h2 className="text-lg font-display font-semibold text-surface-900">{title}</h2>
+          <div className="flex items-center gap-2">
+            {titleIcon}
+            <h2 className="text-lg font-display font-semibold text-surface-900">{title}</h2>
+          </div>
           <button
             onClick={onCancel}
             className="p-1 hover:bg-surface-100 rounded-lg transition-colors"
@@ -62,12 +69,13 @@ export function ConfirmDialog({
           </button>
           <button
             onClick={onConfirm}
-            className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors ${
+            className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors flex items-center gap-2 ${
               variant === 'danger'
                 ? 'bg-red-600 hover:bg-red-700'
                 : 'bg-accent-600 hover:bg-accent-700'
             }`}
           >
+            {confirmIcon}
             {confirmLabel}
           </button>
         </div>

@@ -352,6 +352,12 @@ interface AppState {
   readMode: boolean
   setReadMode: (mode: boolean) => void
 
+  // Snapshot count and cleanup reminder
+  snapshotCount: number
+  setSnapshotCount: (count: number) => void
+  showSnapshotCleanupReminder: boolean
+  setShowSnapshotCleanupReminder: (show: boolean) => void
+
   // Session browser callback (set by Sidebar, invoked by ConfigPanel's Read Mode)
   openSessionBrowser: (() => void) | null
   setOpenSessionBrowserCallback: (callback: (() => void) | null) => void
@@ -390,7 +396,11 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       
       // Current session
       currentSession: null,
-      setCurrentSession: (session) => set({ currentSession: session }),
+      setCurrentSession: (session) => set({
+        currentSession: session,
+        snapshotCount: 0,
+        showSnapshotCleanupReminder: false,
+      }),
       updateSession: (updates) => set((state) => ({
         currentSession: state.currentSession 
           ? { ...state.currentSession, ...updates }
@@ -547,6 +557,15 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       // Read mode
       readMode: false,
       setReadMode: (mode) => set({ readMode: mode }),
+
+      snapshotCount: 0,
+      setSnapshotCount: (count) => {
+        if (get().snapshotCount !== count) set({ snapshotCount: count })
+      },
+      showSnapshotCleanupReminder: false,
+      setShowSnapshotCleanupReminder: (show) => {
+        if (get().showSnapshotCleanupReminder !== show) set({ showSnapshotCleanupReminder: show })
+      },
 
       // Session browser callback
       openSessionBrowser: null,

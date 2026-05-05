@@ -687,6 +687,7 @@ class AnalysisState(BaseModel):
             "custom_temperatures": self.custom_temperatures,
             "state_version": self.state_version,
             "last_sync_timestamp": _dt(self.last_sync_timestamp),
+            "snapshot_count": len(self.snapshots),
             "agent_errors": [
                 {"id": err.id, "agent": _enum(err.agent),
                  "error_type": err.error_type, "message": err.message,
@@ -778,7 +779,8 @@ class WebSocketMessage(BaseModel):
         # Chat delegation
         "chat_delegation", "chat_result", "chat_error",
         # Supervisor monitoring
-        "supervisor_feedback", "supervisor_checkpoint", "supervisor_summary"
+        "supervisor_feedback", "supervisor_checkpoint", "supervisor_summary",
+        "snapshot_count"
     ]
     agent: Optional[AgentType] = None
     content: Any

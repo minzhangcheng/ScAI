@@ -743,42 +743,17 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         """Create an automatic snapshot at a key analysis point."""
         from .utils.snapshot import SnapshotManager
         try:
-            # Save kernel session first so the pkl reflects the current state
             if self.sandbox:
-                # Save notebook so the ipynb file is up to date for snapshot backup
                 if hasattr(self.sandbox, 'notebook_state') and self.sandbox.notebook_state:
                     self.sandbox.notebook_state.save()
                 await self.sandbox.save_session()
 
-            mgr = SnapshotManager(self.session_id)
-            name = f"Auto: {phase} (Round {state.current_round})"
-            # Determine parent: if just restored, parent is the restored snapshot; otherwise the last snapshot
-            parent_id = state.last_restored_snapshot_id
-            if parent_id is None and state.snapshots:
-                parent_id = state.snapshots[-1].id
-            # Compute branch label for tree visualization
-            if state.last_restored_snapshot_id:
-                existing_branches_from_parent = sum(
-                    1 for s in state.snapshots
-                    if s.parent_id == state.last_restored_snapshot_id
-                    and s.branch_label and s.branch_label != "main"
-                )
-                branch_letter = chr(ord('A') + existing_branches_from_parent) if existing_branches_from_parent < 26 else str(existing_branches_from_parent)
-                branch_label = f"branch-{branch_letter}"
-            else:
-                branch_label = "main"
-            if branch_label and branch_label != "main":
-                name = f"Auto: {phase} (Round {state.current_round}) [{branch_label}]"
-            snapshot = await mgr.create_snapshot(state, name, phase, parent_id=parent_id, branch_label=branch_label)
-            state.snapshots.append(snapshot)
-            # Clear restore marker: only the first snapshot after restore is a "branch point"
-            if state.last_restored_snapshot_id:
-                state.last_restored_snapshot_id = None
-            removed = await mgr.cleanup_old_snapshots(keep_count=20)
-            if removed:
-                removed_set = set(removed)
-                state.snapshots = [s for s in state.snapshots if s.state_file not in removed_set]
-            logger.info(f"[{self.session_id}] Auto-snapshot: {name}")
+            async def notify(sid, msg_type, content):
+                await self._send_message(msg_type, content, AgentType.PI)
+
+            await SnapshotManager.create_and_register_snapshot(
+                self.session_id, state, phase, notify_fn=notify,
+            )
         except Exception as e:
             logger.warning(f"[{self.session_id}] Auto-snapshot failed: {e}")
 
@@ -3874,6 +3849,9 @@ Return ONLY the JSON array, nothing else."""
                 AgentType.PI
             )
             # Don't fail the workflow - detailed report is optional
+
+        # Auto-snapshot after all reports are generated
+        await self._create_auto_snapshot(analysis_state, "post_report")
 
         # Mark analysis as completed
         self._set_status(analysis_state, TaskStatus.COMPLETED)

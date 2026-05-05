@@ -89,28 +89,6 @@ if ! command -v node &> /dev/null; then
     exit 1
 fi
 
-# ── Frontend build for production mode ───────────────────────────
-if [ "$MODE" = "prod" ]; then
-    echo "Production mode: Building frontend..."
-    if [ ! -d "$SCRIPT_DIR/frontend/dist" ]; then
-        echo "Building frontend for production (no dist found)..."
-        cd "$SCRIPT_DIR/frontend"
-        npm run build
-        cd "$SCRIPT_DIR"
-    else
-        _SRC_MTIME=$(find "$SCRIPT_DIR/frontend/src" -type f -exec stat -c %Y {} + 2>/dev/null | sort -rn | head -1)
-        _DIST_MTIME=$(stat -c %Y "$SCRIPT_DIR/frontend/dist/index.html" 2>/dev/null || echo 0)
-        if [ "$_SRC_MTIME" -gt "$_DIST_MTIME" ]; then
-            echo "Building frontend for production (src modified)..."
-            cd "$SCRIPT_DIR/frontend"
-            npm run build
-            cd "$SCRIPT_DIR"
-        else
-            echo "Frontend build up to date, skipping."
-        fi
-    fi
-fi
-
 # Create dependencies directory
 mkdir -p "$DEP_DIR"
 echo "Dependencies directory: $DEP_DIR"
@@ -138,7 +116,7 @@ source "$VENV_DIR/bin/activate"
 echo "Installing backend dependencies..."
 pip install -q -r "$SCRIPT_DIR/requirements.txt"
 
-# Setup frontend dependencies
+# Setup frontend dependencies (must be done BEFORE building)
 # Create symlink for node_modules in frontend directory pointing to shared location
 if [ ! -d "$NODE_MODULES_DIR" ]; then
     echo "Installing frontend dependencies to shared directory..."
@@ -181,6 +159,28 @@ else
         npm install
     fi
     cd "$SCRIPT_DIR"
+fi
+
+# ── Frontend build for production mode ───────────────────────────
+if [ "$MODE" = "prod" ]; then
+    echo "Production mode: Building frontend..."
+    if [ ! -d "$SCRIPT_DIR/frontend/dist" ]; then
+        echo "Building frontend for production (no dist found)..."
+        cd "$SCRIPT_DIR/frontend"
+        npm run build
+        cd "$SCRIPT_DIR"
+    else
+        _SRC_MTIME=$(find "$SCRIPT_DIR/frontend/src" -type f -exec stat -c %Y {} + 2>/dev/null | sort -rn | head -1)
+        _DIST_MTIME=$(stat -c %Y "$SCRIPT_DIR/frontend/dist/index.html" 2>/dev/null || echo 0)
+        if [ "$_SRC_MTIME" -gt "$_DIST_MTIME" ]; then
+            echo "Building frontend for production (src modified)..."
+            cd "$SCRIPT_DIR/frontend"
+            npm run build
+            cd "$SCRIPT_DIR"
+        else
+            echo "Frontend build up to date, skipping."
+        fi
+    fi
 fi
 
 echo ""

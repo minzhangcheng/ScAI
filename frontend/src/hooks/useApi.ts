@@ -3,6 +3,9 @@ import { useAppStore, Message, Session, AgentType, RoundResult, FigureReviewStat
 import { transformRawMessage, restoreAgentErrors } from '../utils/messageTransform'
 import { devLog } from '../utils/logger'
 import { downloadBlob } from '../utils/download'
+
+const SNAPSHOT_CLEANUP_THRESHOLD = 20
+const SNAPSHOT_REMINDER_INTERVAL = 5
 import { getToken, clearToken } from '../utils/authStorage'
 import { WS_AUTH_SUBPROTOCOL } from '../constants/auth'
 import type {
@@ -302,6 +305,10 @@ export function useSession() {
       }
 
       setCurrentSession(session)
+
+      if (data.snapshot_count != null) {
+        useAppStore.getState().setSnapshotCount(data.snapshot_count)
+      }
 
       // Sync round_wait_seconds from server to store
       if (typeof data.round_wait_seconds === 'number') {
@@ -947,6 +954,16 @@ export function useWebSocket() {
             }
           }
           // Also add to message stream for visibility
+        }
+
+        if (data.type === 'snapshot_count') {
+          const count = data.content?.count ?? 0
+          useAppStore.getState().setSnapshotCount(count)
+
+          if (count >= SNAPSHOT_CLEANUP_THRESHOLD && count % SNAPSHOT_REMINDER_INTERVAL === 0) {
+            useAppStore.getState().setShowSnapshotCleanupReminder(true)
+          }
+          return  // Don't add to MessageStream
         }
 
         // Handle chat_result - final response from chat delegation

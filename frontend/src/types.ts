@@ -37,6 +37,7 @@ export interface SessionLoadResponse {
   round_wait_seconds?: number
   waiting_input_started_at?: string
   agent_errors?: RawAgentError[]
+  snapshot_count?: number
   messages?: RawMessage[]
 }
 

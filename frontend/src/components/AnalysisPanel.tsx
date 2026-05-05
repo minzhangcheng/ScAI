@@ -10,6 +10,7 @@ import { ExplorationReportDialog } from './ExplorationReportDialog'
 import { ValidationDialog } from './ValidationDialog'
 import { StopDialog } from './StopDialog'
 import { SnapshotPanel } from './SnapshotPanel'
+import { ConfirmDialog } from './ConfirmDialog'
 import {
   Play,
   AlertCircle,
@@ -27,7 +28,8 @@ import {
   Wrench,
   Pause,
   Square,
-  Camera
+  Camera,
+  Trash2
 } from 'lucide-react'
 
 const API_BASE = '/api'
@@ -75,6 +77,11 @@ export function AnalysisPanel() {
 
   // Snapshot panel state
   const [showSnapshotPanel, setShowSnapshotPanel] = useState(false)
+
+  // Snapshot cleanup reminder state
+  const snapshotCount = useAppStore(state => state.snapshotCount)
+  const showSnapshotCleanupReminder = useAppStore(state => state.showSnapshotCleanupReminder)
+  const setShowSnapshotCleanupReminder = useAppStore(state => state.setShowSnapshotCleanupReminder)
 
   // Reset message refs when session changes so dialogs can re-trigger after page reload
   useEffect(() => {
@@ -1070,6 +1077,23 @@ export function AnalysisPanel() {
           }}
         />
       )}
+
+      {/* Snapshot Cleanup Reminder */}
+      <ConfirmDialog
+        open={showSnapshotCleanupReminder}
+        title={language === 'zh' ? '快照数量提醒' : 'Snapshot Count Reminder'}
+        message={language === 'zh'
+          ? `当前会话已有 ${snapshotCount} 个快照，建议清理不需要的快照以释放空间。`
+          : `This session has ${snapshotCount} snapshots. Consider cleaning up unused snapshots to free space.`}
+        confirmLabel={language === 'zh' ? '去清理' : 'Cleanup'}
+        titleIcon={<Camera className="w-5 h-5 text-accent-600" />}
+        confirmIcon={<Trash2 className="w-4 h-4" />}
+        onConfirm={() => {
+          setShowSnapshotCleanupReminder(false)
+          setShowSnapshotPanel(true)
+        }}
+        onCancel={() => setShowSnapshotCleanupReminder(false)}
+      />
     </div>
   )
 }

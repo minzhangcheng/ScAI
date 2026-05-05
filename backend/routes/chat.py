@@ -13,12 +13,13 @@ from fastapi import APIRouter, Form, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 
 from backend.config import get_session_workspace, get_session_reports, get_session_uploads, get_session_states, PI_AGENT_NAME
-from backend.models.schemas import WebSocketMessage, AgentType, DataFile
+from backend.models.schemas import WebSocketMessage, AgentType, DataFile, AnalysisState
 from backend.services.session_store import ensure_session_loaded, async_save_session, update_session_cache
 from backend.state import (
     chat_tasks, chat_task_lock, chat_sandboxes,
     websockets, workflows, state_lock,
 )
+from backend.utils.snapshot import SnapshotManager
 from backend.utils.files import safe_filename, validate_session_id
 from backend.utils.upload import stream_save_file
 from backend.utils.settings_provider import AgentSettingsProvider
@@ -259,6 +260,16 @@ async def _send_chat_ws(session_id: str, msg_type: str, content: Any):
             logger.warning(f"Chat WS send failed for {session_id} ({msg_type}): {e}")
     else:
         logger.warning(f"Chat WS: no connection for {session_id}, message {msg_type} not delivered")
+
+
+async def _create_chat_snapshot(session_id: str, state: AnalysisState):
+    """Create an automatic snapshot after chat exchange completes."""
+    try:
+        await SnapshotManager.create_and_register_snapshot(
+            session_id, state, "post_chat", notify_fn=_send_chat_ws,
+        )
+    except Exception as e:
+        logger.warning(f"[{session_id}] Chat auto-snapshot failed: {e}")
 
 
 def _try_parse_delegation(content: str) -> Optional[Dict[str, Any]]:
@@ -778,6 +789,9 @@ async def _run_chat_delegation(
         await update_session_cache(session_id, state)
         await async_save_session(session_id, state)
 
+        # Auto-snapshot after chat delegation completes
+        await _create_chat_snapshot(session_id, state)
+
         duration = time.time() - start_time
         logger.info(f"Chat delegation completed for {session_id} in {duration:.1f}s, "
                      f"{len(agent_results)} agents, {len(merged_figures)} figures")
@@ -1155,6 +1169,11 @@ async def chat_with_pi(
     result: Dict[str, Any] = {"role": "assistant", "content": cleaned_content}
     if assistant_msg.get("figures"):
         result["figures"] = assistant_msg["figures"]
+
+    # Auto-snapshot after chat exchange
+    await _create_chat_snapshot(session_id, state)
+    await async_save_session(session_id, state)
+
     return result
 
 

@@ -18,6 +18,60 @@ class SnapshotManager:
     """Manages lightweight analysis state snapshots for debugging rollback."""
 
     @staticmethod
+    def compute_snapshot_context(state: "AnalysisState", phase: str) -> dict:
+        """Compute parent_id, branch_label, and name for the next auto-snapshot.
+
+        Shared by both workflow and chat snapshot creation to avoid logic drift.
+        """
+        parent_id = state.last_restored_snapshot_id
+        if parent_id is None and state.snapshots:
+            parent_id = state.snapshots[-1].id
+
+        if state.last_restored_snapshot_id:
+            existing_branches = sum(
+                1 for s in state.snapshots
+                if s.parent_id == state.last_restored_snapshot_id
+                and s.branch_label and s.branch_label != "main"
+            )
+            branch_letter = chr(ord('A') + existing_branches) if existing_branches < 26 else str(existing_branches)
+            branch_label = f"branch-{branch_letter}"
+        else:
+            branch_label = "main"
+
+        name = f"Auto: {phase} (Round {state.current_round})"
+        if branch_label != "main":
+            name += f" [{branch_label}]"
+
+        return {"parent_id": parent_id, "branch_label": branch_label, "name": name}
+
+    @staticmethod
+    async def create_and_register_snapshot(
+        session_id: str,
+        state: "AnalysisState",
+        phase: str,
+        *,
+        notify_fn,
+    ) -> "Snapshot":
+        """Create a snapshot, append to state, clear restore marker, and notify.
+
+        Shared by workflow and chat to prevent logic drift.
+        notify_fn(session_id, "snapshot_count", {"count": len(state.snapshots)})
+        """
+        mgr = SnapshotManager(session_id)
+        ctx = SnapshotManager.compute_snapshot_context(state, phase)
+        snapshot = await mgr.create_snapshot(
+            state, ctx["name"], phase,
+            parent_id=ctx["parent_id"],
+            branch_label=ctx["branch_label"],
+        )
+        state.snapshots.append(snapshot)
+        if state.last_restored_snapshot_id:
+            state.last_restored_snapshot_id = None
+        await notify_fn(session_id, "snapshot_count", {"count": len(state.snapshots)})
+        logger.info(f"[{session_id}] Auto-snapshot ({phase}): {ctx['name']}")
+        return snapshot
+
+    @staticmethod
     def find_descendant_ids(all_snapshots: List["Snapshot"], root_id: str, include_root: bool = False) -> set:
         """BFS to find all descendant snapshot IDs of a given root.
 
@@ -268,25 +322,6 @@ class SnapshotManager:
         nb = self.snapshots_dir / f"{snapshot.id}_notebook.ipynb"
         nb.unlink(missing_ok=True)
         logger.info(f"[{self.session_id}] Snapshot deleted: {snapshot.name}")
-
-    async def cleanup_old_snapshots(self, keep_count: int = 20) -> List[str]:
-        """Remove oldest snapshots if count exceeds limit."""
-        if not self.snapshots_dir.exists():
-            return []
-        files = sorted(
-            self.snapshots_dir.glob("*.json"),
-            key=lambda p: p.stat().st_mtime,
-        )
-        removed = []
-        while len(files) > keep_count:
-            old = files.pop(0)
-            old.unlink()
-            removed.append(old.name)
-            # Remove corresponding pkl backup
-            (self.snapshots_dir / f"{old.stem}_session.pkl").unlink(missing_ok=True)
-            # Remove corresponding notebook backup
-            (self.snapshots_dir / f"{old.stem}_notebook.ipynb").unlink(missing_ok=True)
-        return removed
 
     async def delete_checkpoint(self):
         """Delete LangGraph checkpoint files so resume() starts fresh after restore."""
