@@ -7,11 +7,17 @@ API_ERROR_TYPES: FrozenSet[str] = frozenset({
     "AttributeError", "TypeError", "ImportError", "ModuleNotFoundError",
 })
 
+# Error types caused by LLM code-generation bugs (static hint, no API doc lookup)
+CODE_GEN_ERROR_TYPES: FrozenSet[str] = frozenset({
+    "SyntaxError", "IndentationError", "TabError",
+})
+
 # Error types that indicate purely technical failures (no PI guidance needed)
 _TECHNICAL_ERROR_TYPES: FrozenSet[str] = frozenset({
     "KeyError", "TypeError", "IndexError", "ValueError",
     "ModuleNotFoundError", "AttributeError", "NameError",
     "SyntaxError", "ImportError", "FileNotFoundError",
+    "IndentationError", "TabError",
     "ZeroDivisionError", "RuntimeError", "OSError",
     "IOError", "PermissionError", "StopIteration",
     "UnicodeDecodeError", "UnicodeEncodeError",

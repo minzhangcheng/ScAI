@@ -1147,9 +1147,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         figure_iteration_count = 0
         MAX_FIGURE_ITERATIONS = 5  # Max figure-only iterations excluded from step count
         consecutive_errors = 0
-        MAX_CONSECUTIVE_ERRORS = 3  # Force report_findings after this many consecutive code errors
+        MAX_CONSECUTIVE_ERRORS = 5  # Force report_findings after this many consecutive code errors
         total_errors = 0
-        MAX_TOTAL_ERRORS = 30  # Hard limit: force report_findings after this many total errors
+        MAX_TOTAL_ERRORS = 50  # Hard limit: force report_findings after this many total errors
 
         while step_count < max_steps and not completed:
             step_count += 1
@@ -1603,13 +1603,15 @@ except Exception as _autosave_block_err:
                                 )
                             })
                         else:
-                            logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive code errors, forcing report")
+                            logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive code errors, last-chance attempt")
                             messages.append({
                                 "role": "user",
                                 "content": (
-                                    "[System] Too many consecutive code execution errors. "
-                                    "Stop trying to fix the code. Report your findings so far "
-                                    "using the report_findings tool and move on."
+                                    "[System] You have had several consecutive code execution errors. "
+                                    "This is your last chance to fix the code. Take a completely different "
+                                    "approach: simplify the code, use a different library function, or "
+                                    "write a minimal version first. If this attempt also fails, you MUST "
+                                    "call report_findings with whatever results you have so far."
                                 )
                             })
                         consecutive_errors = 0  # Reset after circuit breaker triggers

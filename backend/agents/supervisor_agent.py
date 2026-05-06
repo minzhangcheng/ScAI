@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 from openai import APIConnectionError
 
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep
-from ..utils.error_parsing import API_ERROR_TYPES, extract_error_type, _TECHNICAL_ERROR_TYPES
+from ..utils.error_parsing import API_ERROR_TYPES, CODE_GEN_ERROR_TYPES, extract_error_type, _TECHNICAL_ERROR_TYPES
 from ..services.report import get_agent_stats_html
 from ..utils.llm_client import OpenAICompatibleClient
 from ..utils.settings_provider import AgentSettingsProvider
@@ -276,24 +276,42 @@ class SupervisorAgent:
                         feedback_parts.append(issue)
                         self._recent_rule_feedback_hashes.add(issue_hash)
 
+        # Resolve error type once — used by Phase 1.5 and Phase 2 below
+        _err_type = extract_error_type(step.code_error) if step.code_error else None
+
         # Phase 1.5: Technique Agent for repeated API errors
         if self._should_trigger_technique(step):
             try:
-                logger.info(
-                    f"[{self.session_id}] Triggering Technique Agent for repeated API error "
-                    f"at step {step.step_number}"
-                )
-                await self._notify("status", "Looking up API documentation...")
-                doc_hint = await self.technique_agent.lookup_from_error(
-                    self._sandbox,
-                    step.code_error,
-                    step.code or "",
-                )
-                if doc_hint:
-                    feedback_parts.append(
-                        f"[Technique Support] Repeated API error detected. "
-                        f"Here is the correct API documentation:\n{doc_hint}"
+                # Syntax/gen errors get a static hint; API doc lookup is irrelevant.
+                if _err_type in CODE_GEN_ERROR_TYPES:
+                    logger.info(
+                        f"[{self.session_id}] Triggering Technique Agent for repeated "
+                        f"{_err_type} error at step {step.step_number}"
                     )
+                    feedback_parts.append(
+                        f"[Technique Support] Repeated syntax error ({_err_type}) detected. "
+                        f"Check for: (1) unclosed parentheses, brackets, or quotes; "
+                        f"(2) newline characters inside single/double-quoted strings — "
+                        f"use triple quotes for multi-line strings; "
+                        f"(3) mixed tabs and spaces for indentation. "
+                        f"Simplify: break complex code into smaller cells and test incrementally."
+                    )
+                else:
+                    logger.info(
+                        f"[{self.session_id}] Triggering Technique Agent for repeated "
+                        f"{_err_type} error at step {step.step_number}"
+                    )
+                    await self._notify("status", "Looking up API documentation...")
+                    doc_hint = await self.technique_agent.lookup_from_error(
+                        self._sandbox,
+                        step.code_error,
+                        step.code or "",
+                    )
+                    if doc_hint:
+                        feedback_parts.append(
+                            f"[Technique Support] Repeated API error detected. "
+                            f"Here is the correct API documentation:\n{doc_hint}"
+                        )
             except Exception as e:
                 logger.warning(f"[{self.session_id}] Technique Agent lookup failed: {e}")
 
@@ -303,11 +321,11 @@ class SupervisorAgent:
         # or the error is non-technical (potential data/biological issue).
         # Detect stuck: same error type appearing >= 3 times in recent history,
         # OR two consecutive identical types (original check).
-        _current_err_type = extract_error_type(step.code_error) if step.code_error else None
+        # (_err_type is hoisted above Phase 1.5 — no redundant re-parse here.)
         _same_type_count = sum(
             1 for e in self._recent_errors
-            if extract_error_type(e) == _current_err_type
-        ) if _current_err_type else 0
+            if extract_error_type(e) == _err_type
+        ) if _err_type else 0
         is_stuck = (
             _same_type_count >= 3
             or (
@@ -408,6 +426,32 @@ class SupervisorAgent:
                     record.pi_escalated = True
                     record.pi_response = pi_resp
                     feedback_parts.append(f"PI guidance: {pi_resp}")
+
+        # If the agent is stuck (same error type repeated), escalate to PI
+        # regardless of LLM severity classification — the cheap supervisor LLM
+        # may underrate repeated technical errors as "warning" when PI-level
+        # strategic guidance is needed to break the cycle.
+        if is_stuck and step.code_error and not record.pi_escalated:
+            logger.info(
+                f"[{self.session_id}] Agent stuck (same error type repeated), "
+                f"escalating to PI at step {step.step_number}"
+            )
+            await self._notify("status", "Agent stuck — consulting PI for strategic guidance...")
+            stuck_question = (
+                f"Agent is stuck: the same error type ({_err_type or 'unknown'}) "
+                f"has occurred repeatedly at step {step.step_number}. "
+                f"The agent has attempted self-correction but keeps failing. "
+                f"Please provide strategic guidance: should the agent try a completely "
+                f"different approach, simplify the analysis, or skip this step?"
+            )
+            pi_resp = await self._escalate_to_pi(
+                stuck_question,
+                self._build_step_context(step),
+            )
+            if pi_resp:
+                record.pi_escalated = True
+                record.pi_response = pi_resp
+                feedback_parts.append(f"[PI stuck intervention] {pi_resp}")
 
         # Assemble final feedback
         feedback = None

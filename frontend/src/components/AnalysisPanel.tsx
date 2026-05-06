@@ -477,6 +477,18 @@ export function AnalysisPanel() {
     }
   }, [pauseAnalysis])
 
+  // Resume handler
+  const handleResume = useCallback(async () => {
+    try {
+      await resumeAnalysis()
+      if (!wsConnected) {
+        setTimeout(() => wsConnect?.(), 100)
+      }
+    } catch (e) {
+      console.error('Failed to resume:', e)
+    }
+  }, [resumeAnalysis, wsConnected, wsConnect])
+
   // Stop handler (immediate or summarize)
   const handleStop = useCallback(async (action: 'immediate' | 'summarize') => {
     setStopping(true)
@@ -586,7 +598,8 @@ export function AnalysisPanel() {
     )
   }
 
-  const isWaitingInput = currentSession.status === 'paused' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation'
+  const isPaused = currentSession.status === 'paused'
+  const isWaitingInput = currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation'
   const isRunning = currentSession.status === 'running'
   const isCompleted = currentSession.status === 'completed'
   const isFailed = currentSession.status === 'failed'
@@ -666,6 +679,32 @@ export function AnalysisPanel() {
               >
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
+              </button>
+            </div>
+          )}
+
+          {isPaused && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowSnapshotPanel(true)}
+                className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition-colors"
+                title={language === 'zh' ? '快照管理' : 'Snapshots'}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                {language === 'zh' ? '快照' : 'Snapshot'}
+              </button>
+              <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 text-slate-600 rounded-lg">
+                <Pause className="w-4 h-4" />
+                <span className="font-medium">
+                  {language === 'zh' ? '已暂停' : 'Paused'}
+                </span>
+              </div>
+              <button
+                onClick={handleResume}
+                className="flex items-center gap-1.5 px-3 py-1 bg-green-100 hover:bg-green-200 text-green-700 rounded-lg text-sm font-medium transition-colors"
+              >
+                <Play className="w-3.5 h-3.5" />
+                {language === 'zh' ? '继续' : 'Resume'}
               </button>
             </div>
           )}
