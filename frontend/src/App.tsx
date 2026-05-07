@@ -35,7 +35,6 @@ function App() {
   const { connect, disconnect } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
-  const [configSkipped, setConfigSkipped] = useState(false)
   const { t } = useTranslation(language)
 
   // Resizable panel state
@@ -137,16 +136,14 @@ function App() {
       {showConfig && (
         <ConfigPanel
           onClose={() => {
-            if (configured || configSkipped) setShowConfig(false)
+            setShowConfig(false)
           }}
           onSave={() => {
             setConfigured(true)
-            setConfigSkipped(false)
             setShowConfig(false)
             useAppStore.getState().setReadMode(false)
           }}
           onReadMode={!configured ? () => {
-            setConfigSkipped(true)
             setShowConfig(false)
             useAppStore.getState().setReadMode(true)
             setTimeout(() => {

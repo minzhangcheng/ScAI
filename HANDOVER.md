@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.22.9 · **Last updated**: 2026-05-07
+**Version**: 0.22.10 · **Last updated**: 2026-05-07
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,8 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.22.x — per-user LLM config, config persistence, reproducibility toggle (2026-05-03 → 2026-05-07)**
+
+- `0.22.10` — **Minor fixes & improvements**: Version bump for release.
 
 - `0.22.9` — **Per-user LLM configuration & config persistence**: Added per-user LLM configuration support with new `user_llm_config` database table and API routes (`/api/user/config`, `/api/user/config/status`, `/api/user/config/validate`); added `useUserConfig` hook in frontend for non-admin users to configure their own API keys and LLM endpoints; config persistence: global system config now saves to database and restores on server restart; refactored config access throughout codebase to use `resolve_config_for_user(user_id)` instead of direct `system_config.get("current")`; simplified auth middleware by removing `CONFIG_MUTATION_PATHS` and adding `/api/user/` to protected prefixes; updated `require_active_user` to allow any active role for write operations.
 
