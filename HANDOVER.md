@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.22.8 · **Last updated**: 2026-05-07
+**Version**: 0.22.9 · **Last updated**: 2026-05-07
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,11 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.22.x — reproducibility toggle, config-driven feature flags, import hardening, snapshot lifecycle, LLM failure handling (2026-05-03 → 2026-05-07)**
+**0.22.x — per-user LLM config, config persistence, reproducibility toggle (2026-05-03 → 2026-05-07)**
+
+- `0.22.9` — **Per-user LLM configuration & config persistence**: Added per-user LLM configuration support with new `user_llm_config` database table and API routes (`/api/user/config`, `/api/user/config/status`, `/api/user/config/validate`); added `useUserConfig` hook in frontend for non-admin users to configure their own API keys and LLM endpoints; config persistence: global system config now saves to database and restores on server restart; refactored config access throughout codebase to use `resolve_config_for_user(user_id)` instead of direct `system_config.get("current")`; simplified auth middleware by removing `CONFIG_MUTATION_PATHS` and adding `/api/user/` to protected prefixes; updated `require_active_user` to allow any active role for write operations.
+
+- `0.22.8` — **Auth-optional path refinement**: Added `SESSION_AUTH_OPTIONAL_SUFFIXES` tuple in auth middleware to define auth-optional paths under `/api/session/<uuid>/` (e.g., `/report/`, `/export`, `/figure/`); refactored auth-optional path checking logic in `AuthMiddleware` to use new `_is_auth_optional()` helper function, improving maintainability and extensibility.
 
 - `0.22.7` — **Session ownership enforcement**: All backend session routes now enforce ownership verification via `require_session_ownership()` — replacing ad-hoc `ensure_session_loaded()` checks with a unified middleware that validates user_id against session ownership; routes updated: lifecycle (run/pause/resume/stop/llm-failure-action/retry-node/get-failed-node/resume-bioinformatics), interaction (human-input-status/confirm-annotations/supplementary-analysis/choose-direction/request-input), reports (all endpoints), session-config (prompts/models/temperatures/vision/rounds/literature/agent-server), snapshots (list/restore/rollback-preview/delete/branch-delete), upload (data/file/chunked), chat (history), sessions (create-group/update-info/update-group/delete-group/save); session creation also checks ownership; middleware auth.py refactored with caching for admin-initialized check.
 

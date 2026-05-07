@@ -63,6 +63,7 @@ from .routes.chat import router as chat_router
 from .routes.websockets import router as websockets_router
 from .routes.reports import router as reports_router
 from .routes.admin import router as admin_router
+from .routes.user_config import router as user_config_router
 from .middleware.auth import AuthMiddleware
 from .utils.auth import get_db, require_auth, require_session_ownership, ws_require_auth, ws_authenticate_and_load, WS_AUTH_FAILED_CODE
 from .utils.files import safe_filename, validate_session_id, validate_path_within
@@ -107,6 +108,17 @@ async def lifespan(app: FastAPI):
     db = await get_db()
     logger.info(f"Auth database initialized at {db.path}")
 
+    # Restore persisted global system config (survives server restarts)
+    try:
+        saved_cfg_json = await db.get_meta("global_system_config")
+        if saved_cfg_json:
+            from backend.config._config import SystemConfig
+            from backend.state import system_config
+            system_config["current"] = SystemConfig.model_validate_json(saved_cfg_json)
+            logger.info("Restored global system config from database")
+    except Exception as e:
+        logger.warning("Failed to restore global system config: %s; using defaults", e)
+
     from backend.services.upload import set_session_callbacks
     set_session_callbacks(_update_session_cache, async_save_session)
 
@@ -133,7 +145,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.22.8",
+    version="0.22.9",
     lifespan=lifespan,
 )
 
@@ -156,6 +168,7 @@ app.include_router(chat_router)
 app.include_router(websockets_router)
 app.include_router(reports_router)
 app.include_router(admin_router)
+app.include_router(user_config_router)
 
 # CORS
 app.add_middleware(AuthMiddleware)

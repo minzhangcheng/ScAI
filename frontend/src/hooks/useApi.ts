@@ -1267,3 +1267,107 @@ export function usePrompts() {
   
   return { prompts, setPrompt, savePrompt, models, setModel, saveModel, temperatures, setTemperature, saveTemperature, loadPrompts }
 }
+
+// User config hook
+interface UserConfigStatus {
+  configured: boolean
+  has_api_key?: boolean
+  llm_base_url?: string
+  masked_api_key?: string
+}
+
+interface ValidateResult {
+  valid: boolean
+  uncertain?: boolean
+  message?: string
+}
+
+export function useUserConfig() {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const getUserConfig = useCallback(async (): Promise<UserConfigStatus> => {
+    setLoading(true)
+    setError(null)
+    try {
+      return await apiFetch<UserConfigStatus>('/user/config', { method: 'GET' })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to get user config')
+      throw e
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const saveUserConfig = useCallback(async (
+    api_key: string,
+    llm_base_url: string,
+    proxy_url: string
+  ): Promise<void> => {
+    setLoading(true)
+    setError(null)
+    try {
+      await apiFetch<void>('/user/config', {
+        method: 'POST',
+        body: JSON.stringify({ api_key, llm_base_url, proxy_url: proxy_url || null }),
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save user config')
+      throw e
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const getUserConfigStatus = useCallback(async (): Promise<UserConfigStatus> => {
+    setLoading(true)
+    setError(null)
+    try {
+      return await apiFetch<UserConfigStatus>('/user/config/status', { method: 'GET' })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to get user config status')
+      throw e
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const validateUserConfig = useCallback(async (
+    api_key: string,
+    llm_base_url: string,
+    proxy_url: string
+  ): Promise<ValidateResult> => {
+    setLoading(true)
+    setError(null)
+    try {
+      return await apiFetch<ValidateResult>('/user/config/validate', {
+        method: 'POST',
+        body: JSON.stringify({ api_key, llm_base_url, proxy_url: proxy_url || null }),
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to validate user config')
+      throw e
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const deleteUserConfig = useCallback(async (): Promise<void> => {
+    setLoading(true)
+    setError(null)
+    try {
+      await apiFetch<void>('/user/config', { method: 'DELETE' })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to delete user config')
+      throw e
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  return {
+    loading, error,
+    getUserConfig, saveUserConfig, getUserConfigStatus,
+    validateUserConfig, deleteUserConfig,
+  }
+}

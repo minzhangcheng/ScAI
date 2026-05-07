@@ -170,13 +170,13 @@ async def require_active_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> str:
-    """Return user_id for write operations. Requires user.status=='active' and role=='user'."""
+    """Return user_id for write operations. Requires active status (any role)."""
     user_id = await require_auth(request, credentials)
     db = await get_db()
     user = await db.get_user_by_id(user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    if not (user.role == "user" and user.status == "active"):
+    if user.status != "active":
         raise HTTPException(status_code=403, detail="Active user required for write operations")
     return user_id
 

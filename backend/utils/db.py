@@ -53,6 +53,16 @@ CREATE TABLE IF NOT EXISTS app_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS user_llm_config (
+    user_id TEXT PRIMARY KEY,
+    encrypted_api_key TEXT NOT NULL DEFAULT '',
+    llm_base_url TEXT NOT NULL DEFAULT '',
+    encrypted_proxy_url TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 """
 
 # Throttle API key last_used_at updates (seconds)
@@ -65,11 +75,18 @@ class AppDB:
     def __init__(self, path: Path):
         self.path = Path(path)
 
+    async def _connect(self) -> aiosqlite.Connection:
+        """Open a connection with foreign keys enabled."""
+        db = await aiosqlite.connect(self.path, timeout=30)
+        await db.execute("PRAGMA foreign_keys = ON")
+        return db
+
     async def init(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path, timeout=30) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("PRAGMA synchronous=NORMAL")
+            await db.execute("PRAGMA foreign_keys = ON")
             await db.executescript(SCHEMA)
             await db.commit()
 
@@ -170,7 +187,7 @@ class AppDB:
             return cur.rowcount > 0
 
     async def delete_user(self, uid: str) -> bool:
-        async with aiosqlite.connect(self.path, timeout=30) as db:
+        async with self._connect() as db:
             cur = await db.execute("DELETE FROM users WHERE id=?", (uid,))
             await db.commit()
             return cur.rowcount > 0
@@ -232,6 +249,57 @@ class AppDB:
             await db.execute(
                 "INSERT OR REPLACE INTO app_meta(key,value) VALUES(?,?)",
                 (key, value),
+            )
+            await db.commit()
+
+    # ── User LLM Config ──────────────────────────────────────────────────
+
+    async def get_user_llm_config(self, user_id: str) -> Optional[dict]:
+        """Return the LLM config dict for *user_id* or None if not found."""
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM user_llm_config WHERE user_id=?", (user_id,)
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return dict(row)
+
+    async def set_user_llm_config(
+        self,
+        user_id: str,
+        encrypted_api_key: str,
+        llm_base_url: str,
+        encrypted_proxy_url: str,
+    ) -> None:
+        """Upsert the LLM config for *user_id*.
+
+        On INSERT, created_at is set to the current UTC time.
+        On UPDATE, created_at is preserved; only the payload fields and
+        updated_at are changed.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO user_llm_config
+                       (user_id, encrypted_api_key, llm_base_url, encrypted_proxy_url,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       encrypted_api_key=excluded.encrypted_api_key,
+                       llm_base_url=excluded.llm_base_url,
+                       encrypted_proxy_url=excluded.encrypted_proxy_url,
+                       updated_at=excluded.updated_at""",
+                (user_id, encrypted_api_key, llm_base_url, encrypted_proxy_url, now, now),
+            )
+            await db.commit()
+
+    async def delete_user_llm_config(self, user_id: str) -> None:
+        """Delete the LLM config for *user_id* (no-op if not found)."""
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            await db.execute(
+                "DELETE FROM user_llm_config WHERE user_id=?", (user_id,)
             )
             await db.commit()
 

@@ -54,6 +54,7 @@ async def delete_user_data(user_id: str) -> dict:
     # 3. Delete from database
     db = await get_db()
     await db.delete_api_keys_by_user(user_id)
+    await db.delete_user_llm_config(user_id)
     await db.delete_user(user_id)
 
     logger.info(f"User {user_id} deleted: {deleted_sessions} sessions, {deleted_state_files} state files")

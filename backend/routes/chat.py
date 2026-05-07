@@ -19,6 +19,7 @@ from backend.state import (
     chat_tasks, chat_task_lock, chat_sandboxes,
     websockets, workflows, state_lock,
 )
+from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.snapshot import SnapshotManager
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import safe_filename, validate_session_id
@@ -112,8 +113,9 @@ async def _generate_figures_in_chat(
     """Generate figures via bioinformatics sandbox for chat responses."""
     from backend.utils.sandbox import LocalJupyterSandbox
     from backend.utils.agent_llm import get_agent_llm_client
-    from backend.state import system_config
-    config = system_config.get("current")
+
+    user_id = getattr(state, "user_id", "") if state else ""
+    config = await resolve_config_for_user(user_id)
 
     generated_figures: List[Dict[str, str]] = []
 
@@ -398,10 +400,11 @@ async def _execute_chat_agent(
     saved_files: List[Dict[str, str]],
 ) -> Tuple[Dict[str, Any], List[Any]]:
     """Execute a single agent in chat delegation context."""
-    from backend.state import system_config
-    config = system_config.get("current")
     from backend.utils.sandbox import LocalJupyterSandbox
     from backend.utils.agent_llm import get_agent_llm_client
+
+    user_id = getattr(state, "user_id", "") if state else ""
+    config = await resolve_config_for_user(user_id)
 
     extra_clients: List[Any] = []
 
@@ -556,9 +559,10 @@ async def _run_chat_delegation(
 ):
     """Background task: orchestrate delegated agent work, then PI synthesizes results."""
     import traceback
-    from backend.state import system_config
-    config = system_config.get("current")
     from backend.utils.llm_client import LLMManager
+
+    user_id = getattr(state, "user_id", "") if state else ""
+    config = await resolve_config_for_user(user_id)
     from backend.utils.agent_llm import get_agent_llm_client
 
     llm_manager = None
@@ -859,14 +863,13 @@ async def chat_with_pi(
     files: List[UploadFile] = File(default=[]),
 ):
     """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
-    from backend.state import system_config
-    config = system_config.get("current")
     from backend.utils.agent_llm import get_agent_llm_client
     import base64
 
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    config = await resolve_config_for_user(user_id)
 
     if config is None:
         raise HTTPException(status_code=400, detail="API configuration not set")

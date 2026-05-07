@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useConfig } from '../hooks/useApi'
+import { useState, useEffect } from 'react'
+import { useConfig, useUserConfig } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import { Key, X, Check, AlertCircle, Loader2, Server, BookOpen, Eye, EyeOff } from 'lucide-react'
@@ -8,38 +8,110 @@ interface ConfigPanelProps {
   onClose: () => void
   onSave: () => void
   onReadMode?: () => void
+  isAdmin?: boolean
 }
 
-export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
-  const { apiConfig, setApiConfig, saveConfig, loading, error, clearError } = useConfig()
+export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: ConfigPanelProps) {
+  const adminConfig = useConfig()
+  const userConfig = useUserConfig()
+
   const { language, pubmedEmail, setPubmedEmail } = useAppStore()
   const { t } = useTranslation(language)
   const [localError, setLocalError] = useState<string | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
+  const [uncertainWarning, setUncertainWarning] = useState<string | null>(null)
 
-  // Clear errors when user modifies config
-  const handleConfigChange = (updates: Partial<typeof apiConfig>) => {
-    setApiConfig(updates)
+  const [userApiKey, setUserApiKey] = useState('')
+  const [userLlmBaseUrl, setUserLlmBaseUrl] = useState('')
+  const [userProxyUrl, setUserProxyUrl] = useState('')
+
+  useEffect(() => {
+    if (!isAdmin) {
+      userConfig.getUserConfig()
+        .then((status) => {
+          if (status.llm_base_url) setUserLlmBaseUrl(status.llm_base_url)
+        })
+        .catch(() => { /* fields stay blank */ })
+    }
+  }, [isAdmin, userConfig.getUserConfig])
+
+  const loading = isAdmin ? adminConfig.loading : userConfig.loading
+  const hookError = isAdmin ? adminConfig.error : userConfig.error
+
+  const clearErrors = () => {
     setLocalError(null)
-    clearError()
+    setUncertainWarning(null)
   }
 
-  const handleSave = async () => {
-    setLocalError(null)
-    clearError()
+  const validateMsg = (zh: string, en: string) => language === 'zh' ? zh : en
 
-    if (!apiConfig.apiKey) {
-      setLocalError(language === 'zh' ? '请输入 API Key' : 'Please enter API Key')
+  const handleSave = async () => {
+    clearErrors()
+    if (isAdmin) adminConfig.clearError()
+
+    const apiKey = isAdmin ? adminConfig.apiConfig.apiKey : userApiKey
+    if (!apiKey) {
+      setLocalError(validateMsg('请输入 API Key', 'Please enter API Key'))
       return
     }
 
     try {
-      await saveConfig()
+      if (isAdmin) {
+        const result = await adminConfig.validateApiKey()
+        if (result.uncertain) {
+          setUncertainWarning(validateMsg('无法验证（网络问题），但仍可保存', 'Cannot validate (network issue), but you can still save'))
+        } else if (!result.valid) {
+          setLocalError(result.message || validateMsg('API Key 验证失败', 'API Key validation failed'))
+          return
+        }
+        await adminConfig.saveConfig()
+      } else {
+        const result = await userConfig.validateUserConfig(userApiKey, userLlmBaseUrl, userProxyUrl)
+        if (result.uncertain) {
+          setUncertainWarning(validateMsg('无法验证（网络问题），但仍可保存', 'Cannot validate (network issue), but you can still save'))
+        } else if (!result.valid) {
+          setLocalError(result.message || validateMsg('API Key 验证失败', 'API Key validation failed'))
+          return
+        }
+        await userConfig.saveUserConfig(userApiKey, userLlmBaseUrl, userProxyUrl)
+      }
       onSave()
-    } catch (e) {
-      // Error is already set in the hook
+    } catch {
+      // Error already set in the hook
     }
   }
+
+  type FieldDef = { value: string; onChange: (v: string) => void }
+
+  const fields: Record<'llmBaseUrl' | 'apiKey' | 'proxyUrl', FieldDef> = isAdmin
+    ? {
+        llmBaseUrl: {
+          value: adminConfig.apiConfig.llmBaseUrl,
+          onChange: (v) => { adminConfig.setApiConfig({ llmBaseUrl: v }); clearErrors() },
+        },
+        apiKey: {
+          value: adminConfig.apiConfig.apiKey,
+          onChange: (v) => { adminConfig.setApiConfig({ apiKey: v }); clearErrors() },
+        },
+        proxyUrl: {
+          value: adminConfig.apiConfig.proxyUrl || '',
+          onChange: (v) => { adminConfig.setApiConfig({ proxyUrl: v }); clearErrors() },
+        },
+      }
+    : {
+        llmBaseUrl: {
+          value: userLlmBaseUrl,
+          onChange: (v) => { setUserLlmBaseUrl(v); clearErrors() },
+        },
+        apiKey: {
+          value: userApiKey,
+          onChange: (v) => { setUserApiKey(v); clearErrors() },
+        },
+        proxyUrl: {
+          value: userProxyUrl,
+          onChange: (v) => { setUserProxyUrl(v); clearErrors() },
+        },
+      }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
@@ -67,8 +139,6 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
 
         {/* Content */}
         <div className="p-6 space-y-5">
-          {/* === Required Fields === */}
-
           {/* LLM Server URL */}
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-2">
@@ -77,8 +147,8 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
             </label>
             <input
               type="url"
-              value={apiConfig.llmBaseUrl}
-              onChange={(e) => handleConfigChange({ llmBaseUrl: e.target.value })}
+              value={fields.llmBaseUrl.value}
+              onChange={(e) => fields.llmBaseUrl.onChange(e.target.value)}
               placeholder="https://openrouter.ai/api/v1"
               className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all font-mono text-sm"
             />
@@ -102,8 +172,8 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
             <div className="relative">
               <input
                 type={showApiKey ? 'text' : 'password'}
-                value={apiConfig.apiKey}
-                onChange={(e) => handleConfigChange({ apiKey: e.target.value })}
+                value={fields.apiKey.value}
+                onChange={(e) => fields.apiKey.onChange(e.target.value)}
                 placeholder="sk-or-v1-..."
                 className="w-full px-4 py-3 pr-12 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all"
               />
@@ -124,24 +194,24 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
             </p>
           </div>
 
-          {/* PubMed Email */}
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              {t('literaturePubmedEmailLabel')} <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="email"
-              value={pubmedEmail}
-              onChange={(e) => setPubmedEmail(e.target.value)}
-              placeholder="your@email.com"
-              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all text-sm"
-            />
-            <p className="text-xs text-slate-500 mt-1.5">
-              {t('literaturePubmedEmailNote')}
-            </p>
-          </div>
-
-          {/* === Optional Fields === */}
+          {/* PubMed Email — admin mode only */}
+          {isAdmin && (
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                {t('literaturePubmedEmailLabel')} <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="email"
+                value={pubmedEmail}
+                onChange={(e) => setPubmedEmail(e.target.value)}
+                placeholder="your@email.com"
+                className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all text-sm"
+              />
+              <p className="text-xs text-slate-500 mt-1.5">
+                {t('literaturePubmedEmailNote')}
+              </p>
+            </div>
+          )}
 
           {/* Proxy Server */}
           <div>
@@ -153,8 +223,8 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
             </label>
             <input
               type="text"
-              value={apiConfig.proxyUrl || ''}
-              onChange={(e) => handleConfigChange({ proxyUrl: e.target.value })}
+              value={fields.proxyUrl.value}
+              onChange={(e) => fields.proxyUrl.onChange(e.target.value)}
               placeholder="http://proxy.example.com:8080"
               className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all"
             />
@@ -165,11 +235,19 @@ export function ConfigPanel({ onClose, onSave, onReadMode }: ConfigPanelProps) {
             </p>
           </div>
 
+          {/* Uncertain warning (orange) */}
+          {uncertainWarning && (
+            <div className="flex items-center gap-2 p-3 bg-orange-50 border border-orange-200 rounded-xl text-orange-700 text-sm">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              {uncertainWarning}
+            </div>
+          )}
+
           {/* Error */}
-          {(error || localError) && (
+          {(hookError || localError) && (
             <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
               <AlertCircle className="w-4 h-4 shrink-0" />
-              {error || localError}
+              {hookError || localError}
             </div>
           )}
         </div>

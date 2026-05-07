@@ -15,6 +15,7 @@ from backend.state import (
     sessions as _sessions,
 )
 from backend.utils.auth import ws_authenticate_and_load
+from backend.utils.config_resolver import resolve_config_for_user
 from backend.services.session_store import (
     update_session_cache as _update_session_cache,
     async_save_session as _async_save_session,
@@ -42,14 +43,12 @@ def _serialize_realtime_messages(messages):
 @router.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """WebSocket for real-time updates during analysis"""
-    # Import config here to avoid circular imports
-    from backend.state import system_config
-    config = system_config.get("current")
-
     result = await ws_authenticate_and_load(websocket, session_id)
     if result is None:
         return
     user_id, state = result
+
+    config = await resolve_config_for_user(user_id)
 
     if config is None:
         await websocket.send_json({"error": "API configuration not set"})

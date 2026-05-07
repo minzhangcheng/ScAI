@@ -23,6 +23,7 @@ from backend.config import (
 from backend.models.schemas import AnalysisState
 from backend.services.session_store import ensure_session_loaded
 from backend.state import detailed_reports, report_websockets
+from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import safe_filename, validate_path_within, validate_session_id
 from backend.utils.auth import require_session_ownership
 from backend.utils.settings_provider import AgentSettingsProvider
@@ -167,10 +168,10 @@ async def generate_detailed_report(session_id: str, background_tasks: Background
 
 async def _generate_report_task(session_id: str, state: AnalysisState):
     """Background task for report generation"""
-    # Import config inside function to avoid circular import
-    from backend.state import system_config
-    config = system_config.get("current")
     from backend.utils.agent_llm import get_agent_llm_client as _get_agent_llm_client
+
+    user_id = getattr(state, "user_id", "") if state else ""
+    config = await resolve_config_for_user(user_id)
     from backend.config import get_session_workspace as _get_session_workspace
     
     # Debug: log state data paths

@@ -21,7 +21,6 @@ from backend.utils.auth import require_session_ownership
 from backend.state import (
     _run_tasks,
     state_lock as _state_lock,
-    system_config,
     websockets,
     workflows,
 )

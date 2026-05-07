@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from backend.models.config_schema import ConfigV1
 from backend.utils.auth import require_session_ownership
+from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_path_within
 from backend.services.config_io import apply_config_to_session, export_session_to_config
 from backend.services.upload import init_upload, upload_chunk, complete_upload, cleanup_session_uploads
@@ -100,14 +101,13 @@ async def complete_file_upload(session_id: str, upload_id: str, request: Request
 @router.post("/analyses/{session_id}/start")
 async def start_analysis(session_id: str, request: Request):
     """Start a pending analysis. Idempotent: running/completed/failed return current status."""
-    from backend.state import system_config
-    config = system_config.get("current")
     from backend.services.workflow_runner import start_workflow_if_needed
     from backend.services.session_store import async_save_session, update_session_cache as _update_session_cache
     from backend.models.schemas import TaskStatus
 
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    config = await resolve_config_for_user(user_id)
 
     if state.status in {TaskStatus.RUNNING, TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.GENERATING_REPORT}:
         return {"job_id": session_id, "status": state.status.value}

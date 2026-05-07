@@ -9,8 +9,8 @@ from backend.models.api_requests import (
 )
 from backend.models.schemas import APIResponse, DEFAULT_ROUND_WAIT_SECONDS
 from backend.services.session_store import async_save_session, ensure_session_loaded
-from backend.state import system_config
 from backend.utils.auth import require_session_ownership
+from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_session_id
 
 router = APIRouter(prefix="/api", tags=["session-config"])
@@ -39,8 +39,8 @@ async def update_prompts(session_id: str, request: Request, body: PromptUpdateRe
 @router.get("/session/{session_id}/prompts")
 async def get_prompts(session_id: str, request: Request):
     """Get current prompts"""
-    cfg = system_config["current"]
     user_id = getattr(request.state, "user_id", "")
+    cfg = await resolve_config_for_user(user_id)
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     prompts = {
@@ -71,8 +71,8 @@ async def update_models(session_id: str, request: Request, body: ModelUpdateRequ
 @router.get("/session/{session_id}/models")
 async def get_models(session_id: str, request: Request):
     """Get current models"""
-    cfg = system_config["current"]
     user_id = getattr(request.state, "user_id", "")
+    cfg = await resolve_config_for_user(user_id)
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     models = {
@@ -103,8 +103,8 @@ async def update_temperatures(session_id: str, request: Request, body: Temperatu
 @router.get("/session/{session_id}/temperatures")
 async def get_temperatures(session_id: str, request: Request):
     """Get current temperatures - uses centralized config with custom overrides"""
-    cfg = system_config["current"]
     user_id = getattr(request.state, "user_id", "")
+    cfg = await resolve_config_for_user(user_id)
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     base_temps = cfg.temperatures if cfg else AgentTemperatures()

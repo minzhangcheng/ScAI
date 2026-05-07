@@ -23,9 +23,9 @@ from backend.services.session_store import (
 from backend.state import (
     sessions, workflows, state_lock, initializing_sessions,
     session_access_times, last_save_times,
-    system_config,
 )
 from backend.utils.auth import require_session_ownership
+from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_session_id
 
 router = APIRouter(prefix="/api", tags=["sessions"])
@@ -67,11 +67,10 @@ def _strip_message_base64(msg_type: str, content) -> Any:
 @router.post("/session/start")
 async def start_session(request: Request, body: StartRequest):
     """Start a new analysis session"""
-    cfg = system_config["current"]
+    user_id = getattr(request.state, "user_id", "")
+    cfg = await resolve_config_for_user(user_id)
     if cfg is None:
         raise HTTPException(status_code=400, detail="API configuration not set")
-
-    user_id = getattr(request.state, "user_id", "")
 
     import uuid
     session_id = str(uuid.uuid4())
@@ -172,13 +171,12 @@ async def delete_session(session_id: str, request: Request):
 @router.post("/session/{session_id}/ensure")
 async def ensure_session(session_id: str, request: Request, body: StartRequest):
     """Ensure session exists, create if not found"""
-    cfg = system_config["current"]
     validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    cfg = await resolve_config_for_user(user_id)
 
     if cfg is None:
         raise HTTPException(status_code=400, detail="API configuration not set")
-
-    user_id = getattr(request.state, "user_id", "")
 
     state = sessions.get(session_id)
     if state is not None:

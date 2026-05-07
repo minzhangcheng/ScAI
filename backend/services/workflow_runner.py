@@ -12,9 +12,9 @@ from backend.state import (
     sessions, workflows,
     state_lock as _state_lock,
     initializing_sessions as _initializing_sessions,
-    system_config,
 )
 from backend.services.session_store import async_save_session, update_session_cache as _update_session_cache
+from backend.utils.config_resolver import resolve_config_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,14 @@ async def _headless_workflow_runner(session_id: str):
         if state is None:
             return
 
-        cfg = system_config.get("current")
+        user_id = getattr(state, "user_id", "") if state else ""
+        cfg = await resolve_config_for_user(user_id)
+        if cfg is None:
+            logger.error("No global config available for session %s; aborting workflow", session_id)
+            state.status = TaskStatus.FAILED
+            state.error = "API configuration not set"
+            await async_save_session(session_id, state)
+            return
 
         def message_callback(msg):
             pass

@@ -3,7 +3,8 @@
 Enforces JWT/API-Key authentication and role/status-based access control.
 
 Access rules:
-- admin role: only /api/admin/*, /api/auth/profile/*, /api/auth/me, /api/auth/logout
+- admin role: only /api/admin/*, /api/auth/profile/*, /api/auth/me, /api/auth/logout,
+  /api/config, /api/user/
 - readonly status (pending/active but not user+active): non-GET blocked except
   /api/auth/logout, /api/auth/profile/password
 
@@ -35,16 +36,14 @@ PROTECTED_PREFIXES = (
     "/api/download/",
     "/api/auth/",
     "/api/admin/",
+    "/api/user/",
 )
 
 # Exact public paths
 PUBLIC_EXACT = {"/", "/api"}
 
 # Additional protected exact paths
-PROTECTED_EXACT = {"/api/sessions", "/api/config/status"}
-
-# Paths that require admin role for mutations but are readable by any authenticated user
-CONFIG_MUTATION_PATHS = {"/api/config", "/api/config/validate"}
+PROTECTED_EXACT = {"/api/sessions"}
 
 # Paths where auth is optional - authentication is delegated to route layer
 # These are image/file endpoints embedded in HTML that browsers request without auth headers
@@ -98,13 +97,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 # Before admin setup, config is public (first-time configuration)
                 request.state.user_id = None
                 return await call_next(request)
-
-        needs_auth = path in PROTECTED_EXACT
-        if not needs_auth:
-            for prefix in PROTECTED_PREFIXES:
-                if path.startswith(prefix):
-                    needs_auth = True
-                    break
+        else:
+            needs_auth = path in PROTECTED_EXACT
+            if not needs_auth:
+                for prefix in PROTECTED_PREFIXES:
+                    if path.startswith(prefix):
+                        needs_auth = True
+                        break
 
         if not needs_auth:
             return await call_next(request)
@@ -149,6 +148,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             allowed = (
                 path.startswith("/api/admin/") or
                 path.startswith("/api/auth/profile/") or
+                path == "/api/config" or path.startswith("/api/config/") or
+                path.startswith("/api/user/") or
                 path == "/api/auth/me" or
                 path == "/api/auth/logout"
             )

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from './stores/appStore'
-import { useConfig, useWebSocket } from './hooks/useApi'
+import { useConfig, useWebSocket, useUserConfig } from './hooks/useApi'
 import { useTranslation } from './i18n/translations'
 import { ConfigPanel } from './components/ConfigPanel'
 import { Sidebar } from './components/Sidebar'
@@ -30,7 +30,8 @@ import {
 
 function App() {
   const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, authUser } = useAppStore()
-  const { checkStatus, saveConfig } = useConfig()
+  const { checkStatus } = useConfig()
+  const { getUserConfigStatus } = useUserConfig()
   const { connect, disconnect } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
@@ -79,26 +80,21 @@ function App() {
     }
   }, [isResizing, handleMouseMove, handleMouseUp])
 
-  // Check API config status; auto-sync from localStorage if backend lost config
+  // Check API config status based on user role
   useEffect(() => {
-    checkStatus().then(async (status) => {
-      if (!status.configured) {
-        const { apiConfig } = useAppStore.getState()
-        if (apiConfig.apiKey) {
-          // Frontend has saved config but backend doesn't — auto-sync
-          try {
-            await saveConfig()
-            setConfigured(true)
-            return
-          } catch (e) {
-            console.warn('[ScAI] Auto-sync config on startup failed:', e)
-          }
-        }
-        setShowConfig(true)
+    const run = async () => {
+      if (authUser?.role === 'admin') {
+        const s = await checkStatus()
+        if (!s.configured) setShowConfig(true)
+        setConfigured(s.configured)
+      } else if (authUser) {
+        const s = await getUserConfigStatus()
+        if (!s.configured) setShowConfig(true)
+        setConfigured(s.configured)
       }
-      setConfigured(status.configured)
-    })
-  }, [checkStatus, saveConfig])
+    }
+    run()
+  }, [authUser, checkStatus, getUserConfigStatus])
 
   // Register the showConfigPanel callback for other components (e.g., AnalysisPanel)
   useEffect(() => {
@@ -157,6 +153,7 @@ function App() {
               useAppStore.getState().openSessionBrowser?.()
             }, 100)
           } : undefined}
+          isAdmin={authUser?.role === 'admin'}
         />
       )}
 
