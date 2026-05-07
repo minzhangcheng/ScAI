@@ -116,6 +116,8 @@ export function PromptsPanel() {
     pubmedEmail,
     literatureMaxSearchRounds, setLiteratureMaxSearchRounds,
   } = useAppStore()
+  const llmModifyPending = useAppStore(s => s.llmModifyPending)
+  const llmFailureInfo = useAppStore(s => s.llmFailureInfo)
   const { savePrompt, saveModel, saveTemperature } = usePrompts()
   const { t } = useTranslation(language)
   const defaultPrompts = getDefaultPrompts(language)
@@ -217,6 +219,23 @@ export function PromptsPanel() {
     },
   ]
 
+  // Auto-select the agent that had the LLM failure when modify is pending
+  useEffect(() => {
+    if (llmModifyPending && llmFailureInfo) {
+      const agentMap: Record<string, AgentType> = {
+        pi: 'pi',
+        pathology: 'pathology',
+        bioinformatics: 'bioinformatics',
+        biochemistry: 'biochemistry',
+        literature: 'literature',
+      }
+      const agentType = agentMap[llmFailureInfo.agent]
+      if (agentType) {
+        handleSelectAgent(agentType)
+      }
+    }
+  }, [llmModifyPending, llmFailureInfo])
+
   const handleSelectAgent = (agentId: AgentType) => {
     setSelectedAgent(agentId)
     setEditedPrompt(prompts[agentId] ?? defaultPrompts[agentId] ?? '')
@@ -303,6 +322,13 @@ export function PromptsPanel() {
         setAgentVisionSetting(selectedAgent, editedVisionEnabled)
       }
       setSaved(true)
+      // If this save was triggered from LLM modify flow, mark it as saved only for the failing agent
+      if (useAppStore.getState().llmModifyPending) {
+        const failureAgent = useAppStore.getState().llmFailureInfo?.agent
+        if (selectedAgent === failureAgent) {
+          useAppStore.getState().setLlmModifySaved(true)
+        }
+      }
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
       savedTimerRef.current = setTimeout(() => setSaved(false), 2000)
     } catch (e) {

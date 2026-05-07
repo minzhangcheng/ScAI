@@ -457,6 +457,17 @@ class AnalysisState(BaseModel):
     human_input_requested: bool = False  # Whether system is waiting for human input
     human_messages: List[Dict[str, Any]] = Field(default_factory=list)  # History of human interventions
 
+    # LLM failure user intervention
+    wait_input_reason: Optional[str] = None    # None | "llm_failure"
+    llm_failure_info: Optional[Dict[str, Any]] = None
+    # llm_failure_info keys when set:
+    #   "agent": str       — agent name (e.g. "pathology")
+    #   "model": str       — model identifier
+    #   "llm_server": str  — base URL
+    #   "error": str       — error message
+    #   "node_name": str   — workflow node name
+    #   "generation": int  — monotonic counter
+
     # Error tracking for parallel analysis
     agent_errors: List[AgentError] = Field(default_factory=list)
 

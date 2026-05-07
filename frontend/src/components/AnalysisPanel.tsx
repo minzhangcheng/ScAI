@@ -9,6 +9,9 @@ import { AnnotationConfirmationDialog } from './AnnotationConfirmationDialog'
 import { ExplorationReportDialog } from './ExplorationReportDialog'
 import { ValidationDialog } from './ValidationDialog'
 import { StopDialog } from './StopDialog'
+import LlmTimeoutDialog from './LlmTimeoutDialog'
+import LlmModifySubDialog from './LlmModifySubDialog'
+import { useCountdownTimer } from '../hooks/useCountdownTimer'
 import { SnapshotPanel } from './SnapshotPanel'
 import { ConfirmDialog } from './ConfirmDialog'
 import {
@@ -53,6 +56,13 @@ export function AnalysisPanel() {
   const { startAnalysis, resumeAnalysis, continueRound, pauseAnalysis, stopAnalysis } = useSession()
   const { checkStatus, validateApiKey, saveConfig } = useConfig()
   const { t } = useTranslation(language)
+
+  // LLM failure state selectors
+  const llmFailureInfo = useAppStore(s => s.llmFailureInfo)
+  const showLlmTimeoutDialog = useAppStore(s => s.showLlmTimeoutDialog)
+  const setShowLlmTimeoutDialog = useAppStore(s => s.setShowLlmTimeoutDialog)
+  const llmModifySaved = useAppStore(s => s.llmModifySaved)
+  const roundWaitSeconds = useAppStore(s => s.roundWaitSeconds)
 
   // Round results state
   const [expandedRound, setExpandedRound] = useState<number | null>(null)
@@ -503,6 +513,89 @@ export function AnalysisPanel() {
     }
   }, [stopAnalysis])
 
+  // ── LLM failure handlers ──────────────────────────────────────────
+
+  const handleLlmSkip = useCallback(async () => {
+    const info = useAppStore.getState().llmFailureInfo
+    if (!currentSession || !info) return
+    try {
+      await apiFetch(`/session/${currentSession.id}/llm-failure-action`, {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'skip',
+          node_name: info.nodeName,
+          generation: info.generation,
+        }),
+      })
+      setShowLlmTimeoutDialog(false)
+    } catch (e) {
+      console.error('Failed to signal LLM skip:', e)
+    }
+  }, [currentSession])
+
+  const handleLlmRetry = useCallback(async () => {
+    const info = useAppStore.getState().llmFailureInfo
+    if (!currentSession || !info) return
+    try {
+      await apiFetch(`/session/${currentSession.id}/llm-failure-action`, {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'retry',
+          node_name: info.nodeName,
+          generation: info.generation,
+        }),
+      })
+      setShowLlmTimeoutDialog(false)
+    } catch (e) {
+      console.error('Failed to signal LLM retry:', e)
+    }
+  }, [currentSession])
+
+  const handleLlmModifyAgent = useCallback(() => {
+    setShowLlmTimeoutDialog(false)
+    useAppStore.getState().setLlmModifyPending(true)
+    useAppStore.getState().setLlmModifySaved(false)
+    useAppStore.getState().setActiveTab('prompts')
+  }, [])
+
+  const handleLlmTerminate = useCallback(() => {
+    setShowLlmTimeoutDialog(false)
+    setShowStopDialog(true)
+  }, [])
+
+  // StopDialog cancel callback: close StopDialog, reopen LlmTimeoutDialog if LLM failure in progress
+  const handleStopDialogCancel = useCallback(() => {
+    setShowStopDialog(false)
+    if (useAppStore.getState().llmFailureInfo) {
+      setShowLlmTimeoutDialog(true)
+    }
+  }, [])
+
+  const handleLlmResumeAfterModify = useCallback(() => {
+    useAppStore.getState().setLlmModifyPending(false)
+    useAppStore.getState().setLlmModifySaved(false)
+    useAppStore.getState().setActiveTab('analysis')
+    handleLlmRetry()
+  }, [handleLlmRetry])
+
+  const handleLlmReturnToSettings = useCallback(() => {
+    useAppStore.getState().setLlmModifySaved(false)
+  }, [])
+
+  const handleLlmReturnToTimeout = useCallback(() => {
+    useAppStore.getState().setLlmModifySaved(false)
+    useAppStore.getState().setShowLlmTimeoutDialog(true)
+  }, [])
+
+  // Countdown timer for LLM failure auto-skip
+  const { timeRemaining } = useCountdownTimer({
+    countdownSeconds: roundWaitSeconds > 0 ? roundWaitSeconds : 0,
+    onExpire: handleLlmSkip,
+    resetKey: llmFailureInfo?.generation != null
+      ? String(llmFailureInfo.generation)
+      : undefined,
+  })
+
   // Auto-connect WebSocket when session is running and not connected
   // Uses wsConnect from the store (managed by App.tsx) to avoid duplicate WebSocket instances
   useEffect(() => {
@@ -719,18 +812,31 @@ export function AnalysisPanel() {
                 <Camera className="w-3.5 h-3.5" />
                 {language === 'zh' ? '快照' : 'Snapshot'}
               </button>
-              <div className={`flex items-center gap-2 px-3 py-1 rounded-lg ${
-                currentSession.status === 'waiting_annotation'
-                  ? 'bg-accent-100 text-accent-700'
-                  : 'bg-amber-100 text-amber-700'
-              }`}>
-                <AlertCircle className="w-4 h-4" />
-                <span className="font-medium">
-                  {currentSession.status === 'waiting_annotation'
-                    ? (language === 'zh' ? '等待注释确认' : 'Waiting for Annotation')
-                    : (language === 'zh' ? '等待输入' : 'Waiting for Input')}
-                </span>
-              </div>
+              {llmFailureInfo ? (
+                <button
+                  onClick={() => setShowLlmTimeoutDialog(true)}
+                  className="flex items-center gap-2 px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg transition-colors"
+                  aria-label={t('llmCallFailedBadge')}
+                >
+                  <AlertCircle className="w-4 h-4" aria-hidden="true" />
+                  <span className="font-medium">
+                    {t('llmCallFailedBadge')}
+                  </span>
+                </button>
+              ) : (
+                <div className={`flex items-center gap-2 px-3 py-1 rounded-lg ${
+                  currentSession.status === 'waiting_annotation'
+                    ? 'bg-accent-100 text-accent-700'
+                    : 'bg-amber-100 text-amber-700'
+                }`}>
+                  <AlertCircle className="w-4 h-4" />
+                  <span className="font-medium">
+                    {currentSession.status === 'waiting_annotation'
+                      ? (language === 'zh' ? '等待注释确认' : 'Waiting for Annotation')
+                      : (language === 'zh' ? '等待输入' : 'Waiting for Input')}
+                  </span>
+                </div>
+              )}
               <button
                 onClick={() => setShowStopDialog(true)}
                 className="flex items-center gap-1.5 px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition-colors"
@@ -1077,7 +1183,7 @@ export function AnalysisPanel() {
       )}
 
       {/* Round Feedback Dialog — shown after each round completes (not during exploration report) */}
-      {showFeedbackDialog && !showExplorationDialog && feedbackRoundData && currentSession && (
+      {showFeedbackDialog && !showExplorationDialog && feedbackRoundData && currentSession && !llmFailureInfo && (
         <RoundFeedbackDialog
           roundNumber={feedbackRoundData.round}
           maxRounds={useAppStore.getState().maxRounds}
@@ -1097,8 +1203,34 @@ export function AnalysisPanel() {
         <StopDialog
           onStopImmediate={() => handleStop('immediate')}
           onStopSummarize={() => handleStop('summarize')}
-          onClose={() => setShowStopDialog(false)}
+          onClose={handleStopDialogCancel}
           stopping={stopping}
+          language={language}
+        />
+      )}
+
+      {/* LLM Timeout Dialog */}
+      {llmFailureInfo && (
+        <LlmTimeoutDialog
+          open={showLlmTimeoutDialog}
+          llmFailureInfo={llmFailureInfo}
+          timeRemaining={timeRemaining}
+          hasCountdown={roundWaitSeconds > 0}
+          onRetry={handleLlmRetry}
+          onModifyAgent={handleLlmModifyAgent}
+          onTerminate={handleLlmTerminate}
+          onSkip={handleLlmSkip}
+          onClose={() => setShowLlmTimeoutDialog(false)}
+          language={language}
+        />
+      )}
+
+      {/* LLM Modify Sub-Dialog */}
+      {llmModifySaved && llmFailureInfo && !showLlmTimeoutDialog && (
+        <LlmModifySubDialog
+          onResume={handleLlmResumeAfterModify}
+          onReturnToSettings={handleLlmReturnToSettings}
+          onReturnToTimeout={handleLlmReturnToTimeout}
           language={language}
         />
       )}

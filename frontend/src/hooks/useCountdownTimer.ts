@@ -10,9 +10,11 @@ import { useState, useEffect, useRef } from 'react'
 export function useCountdownTimer({
   countdownSeconds,
   onExpire,
+  resetKey,
 }: {
   countdownSeconds: number
   onExpire?: () => void
+  resetKey?: string
 }) {
   const hasCountdown = countdownSeconds > 0
 
@@ -38,7 +40,7 @@ export function useCountdownTimer({
       clearInterval(intervalRef.current)
       intervalRef.current = null
     }
-  }, [countdownSeconds])
+  }, [countdownSeconds, resetKey])
 
   // Handle pause/resume: shift deadline when pausing/resuming
   useEffect(() => {

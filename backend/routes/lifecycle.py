@@ -5,13 +5,14 @@ Extracted from backend/main.py to decouple lifecycle route handlers.
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.config import get_session_states
-from backend.models.api_requests import RetryNodeRequest, StopAnalysisRequest
+from backend.constants import WaitInputReason
+from backend.models.api_requests import LlmFailureActionRequest, RetryNodeRequest, StopAnalysisRequest
 from backend.models.schemas import (
     AnalysisPhase, APIResponse, TaskStatus,
 )
@@ -26,6 +27,17 @@ from backend.state import (
 from backend.services.session_store import update_session_cache as _update_session_cache
 
 logger = logging.getLogger(__name__)
+
+
+async def _resume_workflow(session_id, state, signal_fn=None):
+    """Transition state to RUNNING, persist, and optionally signal the workflow."""
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state)
+    async with _state_lock:
+        workflow = workflows.get(session_id)
+    if workflow and signal_fn:
+        signal_fn(workflow)
+    return workflow
 
 
 async def _pause_and_restart_ws(session_id: str, state):
@@ -232,28 +244,30 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
 
     elif req.action == "summarize":
         if state.status == TaskStatus.WAITING_INPUT:
-            # Workflow is blocked at _wait_for_user_input
-            # Set max_rounds = current_round so _should_continue routes to "stop" -> report gen
-            state.max_rounds = state.current_round
-            state.status = TaskStatus.RUNNING
-            await _update_session_cache(session_id, state)
-            await async_save_session(session_id, state)
-            async with _state_lock:
-                workflow = workflows.get(session_id)
-            if workflow:
-                workflow.signal_continue()
-            return APIResponse(success=True, message="Generating report...")
+            if state.wait_input_reason == WaitInputReason.LLM_FAILURE.value:
+                # LLM failure wait — signal skip to unblock @with_retry
+                state.max_rounds = state.current_round
+                state.status = TaskStatus.RUNNING
+                info = state.llm_failure_info
+                node_name = info.get("node_name", "") if info else ""
+                generation = info.get("generation", 0) if info else 0
+                await _resume_workflow(session_id, state,
+                    signal_fn=lambda w, nn=node_name, g=generation: w.signal_llm_failure_action(nn, "skip", g))
+                return APIResponse(success=True, message="Skipping failed LLM call, generating report...")
+            else:
+                # Round completion wait — existing behavior
+                state.max_rounds = state.current_round
+                state.status = TaskStatus.RUNNING
+                await _resume_workflow(session_id, state,
+                    signal_fn=lambda w: w.signal_continue())
+                return APIResponse(success=True, message="Generating report...")
         elif state.status == TaskStatus.WAITING_ANNOTATION:
             # Workflow is blocked at _annotation_event.wait() inside callback
             # Unblock it and let the round finish, then route to report gen
             state.max_rounds = state.current_round
             state.status = TaskStatus.RUNNING
-            await _update_session_cache(session_id, state)
-            await async_save_session(session_id, state)
-            async with _state_lock:
-                workflow = workflows.get(session_id)
-            if workflow:
-                workflow.signal_annotation_confirmed()
+            await _resume_workflow(session_id, state,
+                signal_fn=lambda w: w.signal_annotation_confirmed())
             return APIResponse(success=True, message="Generating report...")
         else:
             # RUNNING - mid-agent execution: cancel task, start report generation
@@ -264,6 +278,47 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
             if task and not task.done():
                 task.cancel()
             return APIResponse(success=True, message="Generating report...")
+
+
+@router.post("/{session_id}/llm-failure-action")
+async def llm_failure_action(session_id: str, req: LlmFailureActionRequest):
+    """Handle user's choice for an LLM timeout/failure.
+
+    Idempotency: the `generation` field must match the workflow's
+    current `_llm_failure_generation`. Duplicate or stale requests
+    (e.g. double-click) are rejected with 409.
+    """
+    state = await ensure_session_loaded(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if state.status != TaskStatus.WAITING_INPUT:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session is {state.status.value}, expected waiting_input"
+        )
+    if state.wait_input_reason != WaitInputReason.LLM_FAILURE.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session wait_input_reason is {state.wait_input_reason}, expected llm_failure"
+        )
+
+    workflow = workflows.get(session_id)
+
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    ok = workflow.signal_llm_failure_action(req.node_name, req.action, req.generation)
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Stale or duplicate request (generation {req.generation} != current)"
+        )
+
+    return APIResponse(
+        success=True,
+        message=f"LLM failure action '{req.action}' applied to node '{req.node_name}'"
+    )
 
 
 @router.post("/{session_id}/retry-node")

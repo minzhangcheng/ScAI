@@ -223,6 +223,15 @@ export const DEFAULT_TEMPERATURES: AgentTemperatures = {
   technique: 0.1     // Technique needs precise documentation lookup
 }
 
+export interface LlmFailureInfo {
+  agent: string
+  model: string
+  llmServer: string
+  error: string
+  nodeName: string
+  generation: number
+}
+
 interface AppState {
   // Language
   language: Language
@@ -372,6 +381,17 @@ interface AppState {
   logout: () => void
   loadAuthFromStorage: () => Promise<void>
 
+  // LLM failure user intervention
+  llmFailureInfo: LlmFailureInfo | null
+  setLlmFailureInfo: (info: LlmFailureInfo | null) => void
+  showLlmTimeoutDialog: boolean
+  setShowLlmTimeoutDialog: (show: boolean) => void
+  llmModifyPending: boolean
+  setLlmModifyPending: (pending: boolean) => void
+  llmModifySaved: boolean
+  setLlmModifySaved: (saved: boolean) => void
+  clearLlmFailureState: () => void
+
   // Internal: true after Zustand persist finishes hydrating from localStorage.
   _hydrated: boolean
 }
@@ -400,6 +420,10 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
         currentSession: session,
         snapshotCount: 0,
         showSnapshotCleanupReminder: false,
+        llmFailureInfo: null,
+        showLlmTimeoutDialog: false,
+        llmModifyPending: false,
+        llmModifySaved: false,
       }),
       updateSession: (updates) => set((state) => ({
         currentSession: state.currentSession 
@@ -570,6 +594,22 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       // Session browser callback
       openSessionBrowser: null,
       setOpenSessionBrowserCallback: (callback) => set({ openSessionBrowser: callback }),
+
+      // LLM failure user intervention
+      llmFailureInfo: null,
+      setLlmFailureInfo: (info) => set({ llmFailureInfo: info }),
+      showLlmTimeoutDialog: false,
+      setShowLlmTimeoutDialog: (show) => set({ showLlmTimeoutDialog: show }),
+      llmModifyPending: false,
+      setLlmModifyPending: (pending) => set({ llmModifyPending: pending }),
+      llmModifySaved: false,
+      setLlmModifySaved: (saved) => set({ llmModifySaved: saved }),
+      clearLlmFailureState: () => set({
+        llmFailureInfo: null,
+        showLlmTimeoutDialog: false,
+        llmModifyPending: false,
+        llmModifySaved: false,
+      }),
 
       // Auth state
       authReady: false,

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.22.5 · **Last updated**: 2026-05-05
+**Version**: 0.22.6 · **Last updated**: 2026-05-07
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,9 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.22.x — reproducibility toggle, config-driven feature flags, import hardening, snapshot lifecycle (2026-05-03 → 2026-05-05)**
+**0.22.x — reproducibility toggle, config-driven feature flags, import hardening, snapshot lifecycle, LLM failure handling (2026-05-03 → 2026-05-07)**
+
+- `0.22.6` — **LLM failure handling & user intervention**: When LLM calls fail with timeouts/5xx and exhaust retries, workflow pauses in `WAITING_INPUT` state for user action; `backend/constants.py` created for shared enums (`LlmFailureAction`, `WaitInputReason`, `StateSyncChangeType`) and mappings (`NODE_TO_AGENT`, `NODE_TO_RESULT_KEY`); `with_retry` decorator rewritten to use `while` loop (instead of `for`) to support resetting attempt counter; `UpstreamExhaustedError` now carries `agent_name`, `model`, `llm_server` context for display in frontend; `SingleCellAnalysisWorkflow` gains per-node events and `signal_llm_failure_action()` method with generation-based idempotency; `/session/{id}/llm-failure-action` endpoint accepts `retry`/`skip` actions; session load cleans up stale LLM failure states from previous server runs; frontend: `LlmTimeoutDialog` with 4 options (Retry, Modify Agent Settings, Terminate, Skip) and optional auto-skip countdown; `LlmModifySubDialog` confirms config changes before resume; Analysis panel shows "LLM Call Failed" badge to reopen dialog; Prompts panel auto-selects failing agent when modify is pending; state_sync messages carry `llm_failure_info` and `wait_input_reason`; comprehensive i18n coverage (zh/en); full test suite (`test_llm_failure_workflow.py`, 297 lines).
 
 - `0.22.4` — Snapshot lifecycle & cleanup UX: auto-snapshot after chat delegation (`_create_chat_snapshot` in `chat.py`) and after report generation (`post_report` phase); `SnapshotManager.compute_snapshot_context()` extracted as shared static method to avoid parent/branch logic drift between workflow and chat; `snapshot_count` field added to `AnalysisState.to_dict()` and `WebSocketMessage` types, with real-time `snapshot_count` WebSocket messages pushed on every snapshot creation; frontend tracks `snapshotCount` in Zustand store and shows a cleanup reminder dialog when count ≥ 20 and divisible by 5; `ConfirmDialog` extended with `titleIcon` and `confirmIcon` props; SnapshotPanel shows active main-line snapshots distinctly from archived branch timelines (reduced opacity, "Archived timeline" label); branch children sorted with active-line child first; size formatting now includes GB; `start.sh` reordered to run frontend production build AFTER `node_modules` setup; removed `cleanup_old_snapshots(keep_count=20)` auto-pruning from workflow (cleanup is now user-driven via reminder).
 - `0.22.3` — Import security hardening & memory optimization: `validate_path_within()` added to `backend/utils/files.py` for path-traversal protection; `_resolve_import_dest()` extracts archive-to-session path mapping into a testable helper; `shutil.copyfileobj()` with `UPLOAD_CHUNK_SIZE` replaces whole-file `write_bytes()` in tar.gz extraction to reduce peak memory for large archives; explicit `validate_session_id()` calls replace inline regex checks in both tar.gz and zip import paths; structured logging (`logger.info`/`logger.error`/`logger.exception`) added to `_process_import_job` for import lifecycle observability; snapshot JSON path remapping consolidated to `_resolve_import_dest` dispatch.

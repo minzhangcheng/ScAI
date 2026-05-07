@@ -151,3 +151,10 @@ class DirectionChoice(BaseModel):
     # Each dict: {"direction": str, "notes": str}
 
 
+class LlmFailureActionRequest(BaseModel):
+    """Request to handle an LLM timeout/failure after user intervention."""
+    action: Literal["retry", "skip"]
+    node_name: str
+    generation: int  # monotonic counter from frontend for idempotency
+
+

@@ -49,7 +49,7 @@ export function AboutDialog() {
                     : 'Single Cell Sequencing Analysis Driven by AI'}
                 </p>
                 <div className="mt-2 inline-block px-3 py-1 bg-accent-100 text-accent-700 text-xs font-medium rounded-full">
-                  v0.22.5
+                  v0.22.6
                 </div>
               </div>
 
@@ -94,7 +94,7 @@ export function AboutDialog() {
               {/* Footer info */}
               <div className="text-center text-xs text-slate-400 space-y-1">
                 <p>
-                  {zh ? '更新日期：2026年5月4日' : 'Updated: May 4, 2026'}
+                  {zh ? '更新日期：2026年5月7日' : 'Updated: May 7, 2026'}
                 </p>
                 <p>&copy; 2025-2026 Minzhang Cheng. All rights reserved.</p>
               </div>

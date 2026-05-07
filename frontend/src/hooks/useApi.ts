@@ -917,6 +917,24 @@ export function useWebSocket() {
           } else {
             // Update state version and session status
             setStateVersion(syncContent.version)
+
+            // Handle LLM failure state (single source of truth — state_sync only)
+            if (syncContent.change_type === 'llm_failure' && syncContent.llm_failure_info) {
+              const info = syncContent.llm_failure_info
+              const store = useAppStore.getState()
+              store.setLlmFailureInfo({
+                agent: info.agent,
+                model: info.model,
+                llmServer: info.llm_server,
+                error: info.error,
+                nodeName: info.node_name,
+                generation: info.generation,
+              })
+              store.setShowLlmTimeoutDialog(true)
+            } else if (syncContent.change_type === 'llm_retry') {
+              useAppStore.getState().clearLlmFailureState()
+            }
+
             updateSession({
               status: syncContent.status,
               currentRound: syncContent.current_round,

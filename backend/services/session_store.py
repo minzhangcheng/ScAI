@@ -24,6 +24,7 @@ from backend.config import (
     get_session_metadata_path,
     resolve_session_metadata_path,
 )
+from backend.constants import WaitInputReason
 from backend.models.schemas import AnalysisState, TaskStatus, DEFAULT_ROUND_WAIT_SECONDS
 from backend.utils.files import validate_session_id
 from backend.state import (
@@ -118,6 +119,27 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
             return sessions[session_id]
         state = await asyncio.to_thread(load_session_from_disk, session_id)
         if state:
+            # Clean up stale LLM failure state from a previous process
+            if state.wait_input_reason == WaitInputReason.LLM_FAILURE.value:
+                logger.warning(
+                    f"Session {session_id}: clearing stale LLM failure state from previous process"
+                )
+                info = state.llm_failure_info
+                if info:
+                    node_name = info.get("node_name", "")
+                    logger.info(
+                        f"Session {session_id}: LLM failure for node '{node_name}' "
+                        f"was not resolved before server restart. Node marked as failed."
+                    )
+                state.wait_input_reason = None
+                state.llm_failure_info = None
+                state.status = TaskStatus.PAUSED
+                logger.info(
+                    f"Session {session_id}: Analysis paused due to unresolved LLM failure before restart."
+                )
+                # Save the cleaned-up state so PAUSED status persists
+                json_str = state.model_dump_json()
+                await asyncio.to_thread(_write_session_json, session_id, json_str)
             sessions[session_id] = state
             session_access_times[session_id] = time.time()
             return state

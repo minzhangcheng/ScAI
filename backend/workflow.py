@@ -42,6 +42,7 @@ from .agents.supervisor_agent import SupervisorAgent
 from .agents.technique_agent import TechniqueAgent
 from .agents.base import AgentConfig
 from .utils.llm_client import LLMManager, OpenAICompatibleClient, UpstreamExhaustedError
+from .constants import LlmFailureAction, WaitInputReason, StateSyncChangeType, NODE_TO_RESULT_KEY
 from .utils.settings_provider import AgentSettingsProvider
 from .utils.sandbox import LocalJupyterSandbox
 from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR, get_session_reports, get_session_workspace, get_session_states
@@ -82,31 +83,21 @@ def _normalize_tasks(tasks: list) -> List[str]:
     return result
 
 
-# Mapping from node names to result keys
-NODE_TO_RESULT_KEY = {
-    "pathology_analysis": "pathology_result",
-    "bioinformatics_analysis": "bioinformatics_result",
-    "biochemistry_analysis": "biochemistry_result",
-    "literature_research": "literature_result",
-}
-
 
 def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
-    """
-    Decorator to add retry logic to workflow nodes.
-    Retries the node function internally before propagating failure.
+    """Decorator to add retry logic to workflow nodes.
 
-    Args:
-        node_name: Name of the node (for logging and tracking)
-        max_retries: Maximum retry attempts
+    When UpstreamExhaustedError exhausts all retries (LLM timeout/5xx),
+    blocks the workflow and waits for user intervention.
 
-    Returns:
-        Decorated function with retry capability
+    Uses a while loop (not for) so that on 'retry' the attempt counter
+    truly resets to 0.  Python's for-loop rebinds the variable each
+    iteration, making in-loop assignment ineffective.
     """
     def decorator(func):
         @wraps(func)
         async def wrapper(self, state: 'WorkflowState') -> 'WorkflowState':
-            # Check if node should be skipped (PI decided this agent is not needed this round)
+            # Check skip_nodes
             if node_name in state.get("skip_nodes", []):
                 logger.info(f"[{self.session_id}] Skipping node {node_name} (not activated by PI)")
                 if hasattr(self, '_send_message'):
@@ -115,12 +106,13 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                         f"{node_name} skipped this round (not needed)",
                         None
                     )
-                # Clear stale failed_node and set result to skipped (avoid using stale previous round result)
                 result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
                 return {**state, "failed_node": None, result_key: {"findings": [], "status": "skipped"}}
 
             last_error = None
-            for attempt in range(max_retries + 1):
+            attempt = 0  # manual counter — while loop, not for
+
+            while attempt <= max_retries:
                 try:
                     if attempt > 0:
                         await self._send_message(
@@ -128,12 +120,110 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                             f"Retrying {node_name} (attempt {attempt + 1}/{max_retries + 1})...",
                             AgentType.PI
                         )
-                        # Exponential backoff with jitter
                         delay = min(2 ** attempt + random.uniform(0, 1), 30)
                         await asyncio.sleep(delay)
 
                     result = await func(self, state)
                     return result
+
+                except UpstreamExhaustedError as e:
+                    async with self._llm_failure_lock:
+                        last_error = e
+                        logger.error(
+                            f"[{self.session_id}] Node {node_name} LLM upstream exhausted "
+                            f"(node attempt {attempt + 1}/{max_retries + 1}): "
+                            f"agent={e.agent_name} model={e.model} server={e.llm_server}"
+                        )
+                        await self._send_message(
+                            "error",
+                            f"Node {node_name} LLM call failed: {str(e)}",
+                            AgentType.PI
+                        )
+
+                        analysis_state = state["analysis_state"]
+
+                        self._llm_failure_generation += 1
+                        gen = self._llm_failure_generation
+
+                        if node_name not in self._llm_failure_events:
+                            self._llm_failure_events[node_name] = asyncio.Event()
+                        event = self._llm_failure_events[node_name]
+                        event.clear()
+
+                        analysis_state.wait_input_reason = WaitInputReason.LLM_FAILURE.value
+                        analysis_state.llm_failure_info = {
+                            "agent": e.agent_name,
+                            "model": e.model,
+                            "llm_server": e.llm_server,
+                            "error": str(e),
+                            "node_name": node_name,
+                            "generation": gen,
+                        }
+                        self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+
+                        await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_FAILURE.value)
+
+                        logger.info(
+                            f"[{self.session_id}] Waiting for user intervention "
+                            f"on LLM failure (node={node_name}, generation={gen})"
+                        )
+
+                    # CRITICAL: Release the Lock before awaiting the Event
+                    # so the API endpoint can acquire it to set the Event
+                    try:
+                        await event.wait()
+
+                        action = self._llm_failure_actions.pop(node_name, None)
+                        analysis_state.wait_input_reason = None
+                        analysis_state.llm_failure_info = None
+                        self._set_status(analysis_state, TaskStatus.RUNNING)
+                        await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_RETRY.value)
+                    except asyncio.CancelledError:
+                        # Only clear LLM fields — do NOT touch status,
+                        # which is set to PAUSED by stop_analysis.
+                        analysis_state.wait_input_reason = None
+                        analysis_state.llm_failure_info = None
+                        raise
+                    finally:
+                        self._llm_failure_events.pop(node_name, None)
+
+                    if action == LlmFailureAction.RETRY.value:
+                        # User may have changed model/server config — invalidate cache
+                        if self._settings_provider is not None:
+                            self._settings_provider._client_cache.clear()
+                            logger.info(f"[{self.session_id}] Cleared agent client cache for retry of node {node_name}")
+
+                        attempt = 0
+                        continue  # re-enter while loop
+
+                    elif action == LlmFailureAction.SKIP.value:
+                        result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
+                        return {
+                            **state,
+                            "failed_node": node_name,
+                            result_key: {
+                                "error": str(last_error),
+                                "findings": [],
+                                "status": "failed"
+                            }
+                        }
+
+                    else:
+                        # Unknown or None action — defensive: treat as skip
+                        logger.warning(
+                            f"[{self.session_id}] Unknown LLM failure action "
+                            f"'{action}' for node '{node_name}', defaulting to skip"
+                        )
+                        result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
+                        return {
+                            **state,
+                            "failed_node": node_name,
+                            result_key: {
+                                "error": str(last_error),
+                                "findings": [],
+                                "status": "failed"
+                            }
+                        }
 
                 except Exception as e:
                     last_error = e
@@ -147,8 +237,9 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                         f"Node {node_name} failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}",
                         AgentType.PI
                     )
+                    attempt += 1
 
-            # All retries exhausted - return error state to allow workflow to continue
+            # All retries exhausted for non-LLM error
             logger.error(
                 f"[{self.session_id}] Node {node_name} failed after {max_retries + 1} attempts"
             )
@@ -245,6 +336,12 @@ class SingleCellAnalysisWorkflow:
         # Event for blocking during annotation confirmation (exploration phase)
         self._annotation_event = asyncio.Event()
 
+        # LLM failure intervention — serialized via Lock
+        self._llm_failure_lock = asyncio.Lock()
+        self._llm_failure_events: Dict[str, asyncio.Event] = {}
+        self._llm_failure_actions: Dict[str, Optional[str]] = {}
+        self._llm_failure_generation: int = 0  # monotonic counter for idempotency
+
         # Supplementary analysis request (set by API, consumed by HITL loop)
         self._supplementary_request: Optional[str] = None
         self._supplementary_target: Optional[str] = None  # "annotation" or "direction"
@@ -259,6 +356,40 @@ class SingleCellAnalysisWorkflow:
     def signal_annotation_confirmed(self):
         """Signal that user has confirmed cell type annotations"""
         self._annotation_event.set()
+
+    def signal_llm_failure_action(self, node_name: str, action: str, generation: int) -> bool:
+        """Signal the workflow to handle an LLM failure with the given action.
+
+        Called from the lifecycle API endpoint when the user chooses
+        'retry' or 'skip' in the LlmTimeoutDialog.
+
+        Args:
+            node_name: The workflow node that failed (e.g. 'pathology_analysis')
+            action: "retry" or "skip"
+            generation: Monotonic generation counter from the frontend.
+
+        Returns:
+            True if the signal was delivered, False if the generation
+            doesn't match (stale/duplicate request).
+        """
+        current_gen = self._llm_failure_generation
+        if generation != current_gen or current_gen == 0:
+            logger.warning(
+                f"[{self.session_id}] Rejected LLM failure action '{action}' "
+                f"for node '{node_name}': generation {generation} != {current_gen}"
+            )
+            return False
+
+        event = self._llm_failure_events.get(node_name)
+        if event is None:
+            logger.warning(
+                f"[{self.session_id}] No LLM failure event for node '{node_name}'"
+            )
+            return False
+
+        self._llm_failure_actions[node_name] = action
+        event.set()
+        return True
 
     def signal_supplementary_analysis(self, request_text: str, target: str):
         """Signal that user wants supplementary analysis at current HITL point."""
@@ -589,13 +720,16 @@ class SingleCellAnalysisWorkflow:
                 type="state_sync",
                 agent=None,
                 content={
-                    "change_type": change_type,  # "round_complete", "status_change", "data_added", "error_added"
+                    "change_type": change_type,  # "round_complete", "status_change", "data_added", "error_added", "llm_failure", "llm_retry"
                     "version": analysis_state.state_version,
                     "status": analysis_state.status.value,
                     "current_round": analysis_state.current_round,
                     "analysis_phase": analysis_state.analysis_phase,
                     "timestamp": analysis_state.last_sync_timestamp.isoformat(),
-                    "unresolved_errors": len(analysis_state.get_unresolved_errors())
+                    "unresolved_errors": len(analysis_state.get_unresolved_errors()),
+                    # LLM failure intervention fields (single source of truth)
+                    "wait_input_reason": analysis_state.wait_input_reason,
+                    "llm_failure_info": analysis_state.llm_failure_info,
                 }
             )
             try:

@@ -86,7 +86,22 @@ MAX_JSON_RETRIES = 2
 
 
 class UpstreamExhaustedError(RuntimeError):
-    """Raised when retries are exhausted against a flaky upstream (5xx/timeouts)."""
+    """Raised when retries are exhausted against a flaky upstream (5xx/timeouts).
+
+    Carries context so callers can present meaningful intervention dialogs
+    without reverse-looking up agent configuration.
+    """
+    def __init__(
+        self,
+        message: str,
+        agent_name: str = "unknown",
+        model: str = "",
+        llm_server: str = "",
+    ):
+        super().__init__(message)
+        self.agent_name = agent_name
+        self.model = model
+        self.llm_server = llm_server
 
 # OpenAI reasoning models that do NOT support the temperature parameter at all.
 # Matched by exact model name segment (e.g., "openai/o4-mini" -> "o4-mini").
@@ -154,6 +169,8 @@ async def retry_with_backoff(
     max_retries: int = MAX_RETRIES,
     retry_delay_base: float = RETRY_DELAY_BASE,
     agent_name: str = "unknown",
+    model_name: str = "",
+    llm_server: str = "",
     request_timeout: float = 300.0,
     on_retry: Optional[Callable[[int, int, float, str], Awaitable[None]]] = None,
 ):
@@ -247,7 +264,10 @@ async def retry_with_backoff(
 
     raise UpstreamExhaustedError(
         f"[{agent_name}] Upstream LLM exhausted after {effective_max + 1} attempts. "
-        f"Last error: {type(last_exception).__name__}: {last_exception}"
+        f"Last error: {type(last_exception).__name__}: {last_exception}",
+        agent_name=agent_name,
+        model=model_name,
+        llm_server=llm_server,
     ) from last_exception
 
 
@@ -429,7 +449,11 @@ class OpenAICompatibleClient:
 
     def _build_retry_kwargs(self, request_timeout: Optional[float] = None, max_retries_override: Optional[int] = None) -> Dict[str, Any]:
         """统一构建 retry_kwargs，保持各方法逻辑一致."""
-        kwargs: Dict[str, Any] = {"agent_name": self.agent_name}
+        kwargs: Dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "model_name": self.model,
+            "llm_server": self.base_url,
+        }
         if request_timeout is not None:
             kwargs["request_timeout"] = request_timeout
             if max_retries_override is not None:
