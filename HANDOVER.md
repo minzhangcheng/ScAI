@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.22.7 · **Last updated**: 2026-05-07
+**Version**: 0.22.8 · **Last updated**: 2026-05-07
 
 ## 1. Runtime Architecture
 

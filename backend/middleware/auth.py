@@ -53,9 +53,29 @@ AUTH_OPTIONAL_PATHS = (
     "/api/download/",  # file download with path-based ownership check
 )
 
+# Suffixes under /api/session/<uuid>/ that are auth-optional
+# (content served to browsers/responses that can't send auth headers,
+#  e.g. report HTML pages, figures, tables, exports)
+SESSION_AUTH_OPTIONAL_SUFFIXES = (
+    "/report/",    # /report/html, /report/figure/*, /report/table/*
+    "-report/",    # /exploration-report/*, /annotation-report/*, /detailed-report/*
+    "/export",     # /export, /export/download (Sidebar link.click() without auth headers)
+    "/figure/",    # /figure/{fid}/png, /figure/{fid}/pdf (FigureGallery <img src> without auth headers)
+)
+
 # Cache for admin_initialized check (avoids DB query on every config request)
 _admin_initialized_cache: dict = {"value": None, "expires": 0}
 _ADMIN_INITIALIZED_CACHE_TTL = 60  # seconds
+
+
+def _is_auth_optional(path: str) -> bool:
+    """Check if a path is auth-optional (auth delegated to route layer)."""
+    if any(path.startswith(p) for p in AUTH_OPTIONAL_PATHS):
+        return True
+    if path.startswith("/api/session/"):
+        if any(suffix in path for suffix in SESSION_AUTH_OPTIONAL_SUFFIXES):
+            return True
+    return False
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -98,8 +118,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         if not user_id:
             # Check if path is auth-optional - delegate auth to route layer via require_session_ownership
-            auth_optional = any(path.startswith(p) for p in AUTH_OPTIONAL_PATHS)
-            if auth_optional:
+            if _is_auth_optional(path):
                 # No auth token provided, but path is auth-optional - let route handle auth
                 request.state.user_id = None
                 return await call_next(request)
@@ -116,8 +135,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if user is None:
             # Auth-optional paths: pass through with token user_id,
             # let route layer handle ownership checking
-            auth_optional = any(path.startswith(p) for p in AUTH_OPTIONAL_PATHS)
-            if auth_optional:
+            if _is_auth_optional(path):
                 request.state.user_id = user_id
                 return await call_next(request)
             return JSONResponse(
