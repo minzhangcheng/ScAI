@@ -2,7 +2,7 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from backend.config import (
@@ -10,6 +10,7 @@ from backend.config import (
 )
 from backend.models.schemas import APIResponse, DataFile, TaskStatus, DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ
 from backend.services.session_store import async_save_session, ensure_session_loaded
+from backend.utils.auth import require_session_ownership
 from backend.utils.files import safe_filename, validate_path_within
 from backend.utils.upload import stream_save_file
 
@@ -32,6 +33,7 @@ class InitChunkedUploadRequest(BaseModel):
 @router.post("/session/{session_id}/upload/data")
 async def upload_data(
     session_id: str,
+    request: Request,
     file: UploadFile = File(...),
     section: str = Form(...),
     data_type: str = Form(...),
@@ -40,9 +42,8 @@ async def upload_data(
     description: Optional[str] = Form(None)
 ):
     """Unified data file upload endpoint"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Validate section
     if section not in ("pathology", "sequencing", "biochemistry"):
@@ -130,12 +131,12 @@ async def upload_data(
 @router.post("/session/{session_id}/upload/file")
 async def upload_generic_file(
     session_id: str,
+    request: Request,
     file: UploadFile = File(...)
 ):
     """Upload a generic file (for supplementary data)"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
     
     # Save file with absolute path (sanitize filename to prevent path traversal)
     sanitized_name = safe_filename(file.filename)
@@ -177,16 +178,15 @@ async def upload_generic_file(
 
 
 @router.post("/session/{session_id}/upload/init-chunked")
-async def init_chunked_upload(session_id: str, request: InitChunkedUploadRequest):
+async def init_chunked_upload(session_id: str, request: Request, body: InitChunkedUploadRequest):
     """Initialize a chunked upload for large files"""
     # Import here to avoid circular import
     from backend.services.upload import upload_manager
 
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    if request.total_size > MAX_UPLOAD_SIZE:
+    if body.total_size > MAX_UPLOAD_SIZE:
         raise HTTPException(
             status_code=400,
             detail=f"File size exceeds maximum allowed ({MAX_UPLOAD_SIZE / (1024**3):.1f}GB)"
@@ -194,17 +194,17 @@ async def init_chunked_upload(session_id: str, request: InitChunkedUploadRequest
 
     upload_id = await upload_manager.init_upload(
         session_id=session_id,
-        filename=request.filename,
-        total_size=request.total_size,
-        total_chunks=request.total_chunks,
-        file_type=request.file_type,
-        group=request.group
+        filename=body.filename,
+        total_size=body.total_size,
+        total_chunks=body.total_chunks,
+        file_type=body.file_type,
+        group=body.group
     )
 
     return {
         "upload_id": upload_id,
         "chunk_size": UPLOAD_CHUNK_SIZE,
-        "total_chunks": request.total_chunks
+        "total_chunks": body.total_chunks
     }
 
 
@@ -239,6 +239,7 @@ async def upload_chunk(
 async def complete_chunked_upload(
     session_id: str,
     upload_id: str,
+    request: Request,
     file_type: str = Form(None),
     group: Optional[str] = Form(None)
 ):
@@ -246,9 +247,8 @@ async def complete_chunked_upload(
     # Import here to avoid circular import
     from backend.services.upload import upload_manager
 
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Get upload metadata
     status = await upload_manager.get_upload_status(upload_id)
@@ -321,8 +321,11 @@ async def get_chunked_upload_status(session_id: str, upload_id: str):
 
 
 @router.delete("/session/{session_id}/upload/cancel/{upload_id}")
-async def cancel_chunked_upload(session_id: str, upload_id: str):
+async def cancel_chunked_upload(session_id: str, upload_id: str, request: Request):
     """Cancel and cleanup a chunked upload"""
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
     # Import here to avoid circular import
     from backend.services.upload import upload_manager
 

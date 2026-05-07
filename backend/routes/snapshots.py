@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from backend.models.schemas import (
     APIResponse, TaskStatus, WebSocketMessage, AgentType,
@@ -22,6 +22,7 @@ from backend.state import (
     state_lock as _state_lock,
     initializing_sessions as _initializing_sessions,
 )
+from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
 from backend.utils.snapshot import SnapshotManager
 from backend.config import get_session_states
@@ -32,12 +33,11 @@ router = APIRouter(prefix="/api/session", tags=["snapshots"])
 
 
 @router.get("/{session_id}/snapshots")
-async def list_snapshots(session_id: str):
+async def list_snapshots(session_id: str, request: Request):
     """List all snapshots for a session."""
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
     return APIResponse(
         success=True,
         data={"snapshots": [s.model_dump(mode="json") for s in state.snapshots]},
@@ -46,15 +46,14 @@ async def list_snapshots(session_id: str):
 
 
 @router.post("/{session_id}/snapshots/{snapshot_id}/restore")
-async def restore_snapshot(session_id: str, snapshot_id: str):
+async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
     """Restore analysis state from a snapshot.
 
     WARNING: This stops any running workflow and replaces the session state.
     """
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
     if not snapshot:
@@ -256,12 +255,11 @@ async def restore_snapshot(session_id: str, snapshot_id: str):
 
 
 @router.get("/{session_id}/snapshots/{snapshot_id}/rollback-preview")
-async def rollback_preview(session_id: str, snapshot_id: str):
+async def rollback_preview(session_id: str, snapshot_id: str, request: Request):
     """Preview what will be affected by restoring a snapshot (without actually restoring)."""
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
     if not snapshot:
@@ -318,12 +316,11 @@ async def rollback_preview(session_id: str, snapshot_id: str):
 
 
 @router.delete("/{session_id}/snapshots/{snapshot_id}")
-async def delete_snapshot(session_id: str, snapshot_id: str):
+async def delete_snapshot(session_id: str, snapshot_id: str, request: Request):
     """Delete a snapshot."""
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
     if not snapshot:
@@ -339,12 +336,11 @@ async def delete_snapshot(session_id: str, snapshot_id: str):
 
 
 @router.delete("/{session_id}/snapshots/{snapshot_id}/branch")
-async def delete_branch(session_id: str, snapshot_id: str):
+async def delete_branch(session_id: str, snapshot_id: str, request: Request):
     """Delete a snapshot and all its descendants (entire branch)."""
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
     if not snapshot:

@@ -1,16 +1,17 @@
 """Config routes for API key and LLM settings."""
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 import httpx
 
 from backend.models.api_requests import ConfigRequest, ValidateKeyRequest
 from backend.models.schemas import APIResponse
 from backend.state import system_config
+from backend.utils.auth import require_admin
 
 router = APIRouter(prefix="/api", tags=["config"])
 
 
 @router.post("/config")
-async def set_config(request: ConfigRequest):
+async def set_config(request: ConfigRequest, _: str = Depends(require_admin)):
     """Set API configuration"""
     from backend.config import SystemConfig
 
@@ -44,7 +45,7 @@ async def config_status():
 
 
 @router.post("/config/validate")
-async def validate_api_key(request: ValidateKeyRequest):
+async def validate_api_key(request: ValidateKeyRequest, _: str = Depends(require_admin)):
     """Validate API key by attempting to list models from the LLM endpoint"""
     base_url = request.llm_base_url.rstrip('/')
     models_url = f"{base_url}/models"

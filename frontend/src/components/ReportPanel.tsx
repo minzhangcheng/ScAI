@@ -4,6 +4,8 @@ import { useTranslation } from '../i18n/translations'
 import { devLog } from '../utils/logger'
 import { fetchAndDownload } from '../utils/download'
 import { WS_CONNECT_TIMEOUT_MS, apiFetch } from '../hooks/useApi'
+import { getToken } from '../utils/authStorage'
+import { WS_AUTH_SUBPROTOCOL } from '../constants/auth'
 import ReactMarkdown from 'react-markdown'
 import {
   FileText,
@@ -140,7 +142,9 @@ export function ReportPanel() {
 
     let isMounted = true
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/report/${currentSession.id}`
-    const websocket = new WebSocket(wsUrl)
+    const token = getToken()
+    const wsProtocols = token ? [WS_AUTH_SUBPROTOCOL, token] : undefined
+    const websocket = new WebSocket(wsUrl, wsProtocols)
 
     // Connection timeout
     const connectTimeout = setTimeout(() => {

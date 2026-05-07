@@ -9,6 +9,8 @@ Access rules:
 
 All protected paths require authentication; user is loaded from DB per request.
 """
+import time
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -20,7 +22,6 @@ PUBLIC_PREFIXES = (
     "/api/auth/login",
     "/api/auth/register",
     "/api/auth/setup",
-    "/api/config",
     "/docs",
     "/openapi",
     "/redoc",
@@ -40,15 +41,21 @@ PROTECTED_PREFIXES = (
 PUBLIC_EXACT = {"/", "/api"}
 
 # Additional protected exact paths
-PROTECTED_EXACT = {"/api/sessions"}
+PROTECTED_EXACT = {"/api/sessions", "/api/config/status"}
+
+# Paths that require admin role for mutations but are readable by any authenticated user
+CONFIG_MUTATION_PATHS = {"/api/config", "/api/config/validate"}
 
 # Paths where auth is optional - authentication is delegated to route layer
 # These are image/file endpoints embedded in HTML that browsers request without auth headers
 AUTH_OPTIONAL_PATHS = (
-    "/api/session/",  # report images and figures - route uses require_session_ownership
     "/api/file/",     # file serving with path-based ownership check
     "/api/download/",  # file download with path-based ownership check
 )
+
+# Cache for admin_initialized check (avoids DB query on every config request)
+_admin_initialized_cache: dict = {"value": None, "expires": 0}
+_ADMIN_INITIALIZED_CACHE_TTL = 60  # seconds
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -60,6 +67,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         for prefix in PUBLIC_PREFIXES:
             if path.startswith(prefix):
+                return await call_next(request)
+
+        # Config endpoints: allow unauthenticated access only before admin is initialized
+        if path.startswith("/api/config"):
+            if await self._admin_initialized():
+                # After admin setup, config requires authentication
+                needs_auth = True
+            else:
+                # Before admin setup, config is public (first-time configuration)
+                request.state.user_id = None
                 return await call_next(request)
 
         needs_auth = path in PROTECTED_EXACT
@@ -136,3 +153,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.user_id = user_id
 
         return await call_next(request)
+
+    @staticmethod
+    async def _admin_initialized() -> bool:
+        """Check if admin has been initialized, with short-lived cache."""
+        global _admin_initialized_cache
+        now = time.time()
+        if _admin_initialized_cache["value"] is not None and now < _admin_initialized_cache["expires"]:
+            return _admin_initialized_cache["value"]
+        db = await get_db()
+        result = await db.is_admin_initialized()
+        _admin_initialized_cache["value"] = result
+        _admin_initialized_cache["expires"] = now + _ADMIN_INITIALIZED_CACHE_TTL
+        return result

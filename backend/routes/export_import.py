@@ -34,6 +34,7 @@ from backend.state import (
     prepared_exports as _prepared_exports,
     prepared_exports_lock as _prepared_exports_lock,
 )
+from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_path_within, validate_session_id
 from backend.utils.upload import stream_save_file
 from starlette.background import BackgroundTask
@@ -77,15 +78,14 @@ def _add_reproducibility_to_tar(tf, session_id: str):
 # ---------------------------------------------------------------------------
 
 @router.api_route("/api/session/{session_id}/export", methods=["GET", "HEAD"])
-async def export_state(session_id: str):
+async def export_state(session_id: str, request: Request):
     """Export complete session as tar.gz including all uploads, workspace, reports, and state files.
 
     Uses a temporary file on disk to avoid loading the entire archive into memory.
     """
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Save latest state to disk first
     await async_save_session(session_id, state)
@@ -181,16 +181,15 @@ async def export_state(session_id: str):
 
 
 @router.post("/api/session/{session_id}/export/prepare")
-async def export_prepare(session_id: str):
+async def export_prepare(session_id: str, request: Request):
     """Phase 1: Build the tar.gz archive on disk and return metadata.
 
     The frontend calls this first (showing a spinner), then triggers
     the streaming download via GET /export/download once ready.
     """
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Save latest state to disk first
     await async_save_session(session_id, state)
@@ -292,12 +291,14 @@ async def export_prepare(session_id: str):
 
 
 @router.get("/api/session/{session_id}/export/download")
-async def export_download(session_id: str):
+async def export_download(session_id: str, request: Request):
     """Phase 2: Stream the pre-built tar.gz to the browser.
 
     The file is deleted after the response is fully sent.
     """
     validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
 
     async with _prepared_exports_lock:
         info = _prepared_exports.pop(session_id, None)

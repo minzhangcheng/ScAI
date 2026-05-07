@@ -178,8 +178,12 @@ async def ensure_session(session_id: str, request: Request, body: StartRequest):
     if cfg is None:
         raise HTTPException(status_code=400, detail="API configuration not set")
 
+    user_id = getattr(request.state, "user_id", "")
+
     state = sessions.get(session_id)
     if state is not None:
+        if user_id and state.user_id and state.user_id != user_id:
+            raise HTTPException(status_code=404, detail="Session not found")
         return APIResponse(
             success=True, message="Session exists",
             session_id=session_id, data={"name": state.name, "created": False}
@@ -187,12 +191,13 @@ async def ensure_session(session_id: str, request: Request, body: StartRequest):
 
     existing = await ensure_session_loaded(session_id)
     if existing:
+        if user_id and existing.user_id and existing.user_id != user_id:
+            raise HTTPException(status_code=404, detail="Session not found")
         return APIResponse(
             success=True, message="Session loaded from disk",
             session_id=session_id, data={"name": existing.name, "created": False}
         )
 
-    user_id = getattr(request.state, "user_id", None)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated", headers={"WWW-Authenticate": "Bearer"})
 
@@ -243,11 +248,10 @@ async def get_session(session_id: str, request: Request):
 
 
 @router.post("/session/{session_id}/groups")
-async def create_group(session_id: str, request: GroupCreateRequest):
+async def create_group(session_id: str, request: Request, body: GroupCreateRequest):
     """Create a new treatment group"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     from backend.models.schemas import TreatmentGroup
     group = TreatmentGroup(
@@ -268,11 +272,10 @@ async def create_group(session_id: str, request: GroupCreateRequest):
 
 
 @router.put("/session/{session_id}/info")
-async def update_session_info(session_id: str, request: SessionUpdateRequest):
+async def update_session_info(session_id: str, request: Request, body: SessionUpdateRequest):
     """Update session name and/or instruction"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if request.name is not None:
         state.name = request.name
@@ -288,11 +291,10 @@ async def update_session_info(session_id: str, request: SessionUpdateRequest):
 
 
 @router.put("/session/{session_id}/groups/{group_id}")
-async def update_group(session_id: str, group_id: str, request: GroupUpdateRequest):
+async def update_group(session_id: str, group_id: str, request: Request, body: GroupUpdateRequest):
     """Update a treatment group"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     group = state.get_group_by_id(group_id)
     if group is None:
@@ -329,11 +331,10 @@ async def update_group(session_id: str, group_id: str, request: GroupUpdateReque
 
 
 @router.delete("/session/{session_id}/groups/{group_id}")
-async def delete_group(session_id: str, group_id: str):
+async def delete_group(session_id: str, group_id: str, request: Request):
     """Delete a treatment group and all associated data files"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     group = state.get_group_by_id(group_id)
     if group is None:
@@ -361,11 +362,10 @@ async def delete_group(session_id: str, group_id: str):
 
 
 @router.post("/session/{session_id}/save")
-async def save_session(session_id: str):
+async def save_session(session_id: str, request: Request):
     """Manually save session to disk"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
     await async_save_session(session_id, state)
 
     return APIResponse(success=True, message="Session saved")

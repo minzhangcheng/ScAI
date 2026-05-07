@@ -8,7 +8,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from backend.models.api_requests import (
     HumanInputRequest, AnnotationConfirmation, SupplementaryAnalysisRequest,
@@ -25,6 +25,7 @@ from backend.state import (
     websockets,
     workflows,
 )
+from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
 
 logger = logging.getLogger(__name__)
@@ -39,17 +40,16 @@ async def _pause_and_restart_ws(session_id: str, state):
 
 
 @router.post("/{session_id}/human-input")
-async def send_human_input(session_id: str, request: HumanInputRequest):
+async def send_human_input(session_id: str, request: Request, body: HumanInputRequest):
     """Send human input/intervention to the analysis"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    state.pending_human_input = request.message
-    state.pending_uploaded_files = [f.model_dump() for f in request.uploaded_files]
+    state.pending_human_input = body.message
+    state.pending_uploaded_files = [f.model_dump() for f in body.uploaded_files]
     state.human_input_requested = False
 
-    if request.clear_queue and state.directions_queue:
+    if body.clear_queue and state.directions_queue:
         cleared_count = len(state.directions_queue)
         state.directions_queue = []
         state.max_rounds = state.current_round + 1
@@ -57,9 +57,9 @@ async def send_human_input(session_id: str, request: HumanInputRequest):
 
     state.human_messages.append({
         "timestamp": datetime.now().isoformat(),
-        "message": request.message,
-        "target_agent": request.target_agent,
-        "uploaded_files": [f.model_dump() for f in request.uploaded_files]
+        "message": body.message,
+        "target_agent": body.target_agent,
+        "uploaded_files": [f.model_dump() for f in body.uploaded_files]
     })
 
     if session_id in websockets:
@@ -67,10 +67,10 @@ async def send_human_input(session_id: str, request: HumanInputRequest):
             await websockets[session_id].send_json({
                 "type": "human_input_received",
                 "content": {
-                    "message": request.message,
-                    "uploaded_files": [f.model_dump() for f in request.uploaded_files]
+                    "message": body.message,
+                    "uploaded_files": [f.model_dump() for f in body.uploaded_files]
                 },
-                "target_agent": request.target_agent,
+                "target_agent": body.target_agent,
                 "timestamp": datetime.now().isoformat()
             })
         except Exception:
@@ -86,18 +86,17 @@ async def send_human_input(session_id: str, request: HumanInputRequest):
         success=True,
         message="Human input received",
         data={
-            "target_agent": request.target_agent,
-            "files_count": len(request.uploaded_files)
+            "target_agent": body.target_agent,
+            "files_count": len(body.uploaded_files)
         }
     )
 
 
 @router.get("/{session_id}/human-input")
-async def get_human_input_status(session_id: str):
+async def get_human_input_status(session_id: str, request: Request):
     """Check if system is waiting for human input"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     return {
         "waiting_for_input": state.human_input_requested,
@@ -107,18 +106,17 @@ async def get_human_input_status(session_id: str):
 
 
 @router.post("/{session_id}/confirm-annotations")
-async def confirm_annotations(session_id: str, request: AnnotationConfirmation):
+async def confirm_annotations(session_id: str, request: Request, body: AnnotationConfirmation):
     """User confirms or modifies cell type annotations during exploration phase"""
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status != TaskStatus.WAITING_ANNOTATION:
         raise HTTPException(status_code=400, detail="Session is not waiting for annotation confirmation")
 
     if state.annotation_state:
-        for ua in request.annotations:
+        for ua in body.annotations:
             cid = ua.get("cluster_id", "")
             for ca in state.annotation_state.cluster_annotations:
                 if ca.cluster_id == cid:
@@ -149,17 +147,16 @@ async def confirm_annotations(session_id: str, request: AnnotationConfirmation):
 
 @router.post("/{session_id}/supplementary-analysis")
 async def request_supplementary_analysis(
-    session_id: str, request: SupplementaryAnalysisRequest
+    session_id: str, request: Request, body: SupplementaryAnalysisRequest
 ):
     """User requests additional analysis at a HITL point before finalizing their decision."""
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    if request.target == "annotation" and state.status != TaskStatus.WAITING_ANNOTATION:
+    if body.target == "annotation" and state.status != TaskStatus.WAITING_ANNOTATION:
         raise HTTPException(status_code=400, detail="Session is not at annotation confirmation point")
-    if request.target == "direction" and state.status != TaskStatus.WAITING_INPUT:
+    if body.target == "direction" and state.status != TaskStatus.WAITING_INPUT:
         raise HTTPException(status_code=400, detail="Session is not at direction selection point")
 
     async with _state_lock:
@@ -167,7 +164,7 @@ async def request_supplementary_analysis(
     if not workflow:
         raise HTTPException(status_code=400, detail="No active workflow for this session")
 
-    workflow.signal_supplementary_analysis(request.request_text, request.target)
+    workflow.signal_supplementary_analysis(body.request_text, body.target)
 
     return APIResponse(
         success=True,
@@ -176,34 +173,33 @@ async def request_supplementary_analysis(
 
 
 @router.post("/{session_id}/choose-direction")
-async def choose_direction(session_id: str, request: DirectionChoice):
+async def choose_direction(session_id: str, request: Request, body: DirectionChoice):
     """User chooses research direction(s) for innovation phase after exploration report"""
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status != TaskStatus.WAITING_INPUT:
         raise HTTPException(status_code=400, detail="Session is not waiting for input")
 
-    if request.let_pi_decide:
+    if body.let_pi_decide:
         state.user_chosen_direction = "[PI_DECIDE]"
         state.pending_human_input = "[PI_DECIDE]"
-    elif request.directions and len(request.directions) > 0:
-        state.user_chosen_directions = request.directions
-        state.directions_queue = [d.copy() for d in request.directions]
-        state.max_rounds = len(request.directions) + 1
+    elif body.directions and len(body.directions) > 0:
+        state.user_chosen_directions = body.directions
+        state.directions_queue = [d.copy() for d in body.directions]
+        state.max_rounds = len(body.directions) + 1
         state.user_chosen_direction = None
         state.pending_human_input = json.dumps(
-            [d.get("direction", "") for d in request.directions], ensure_ascii=False
+            [d.get("direction", "") for d in body.directions], ensure_ascii=False
         )
-        logger.info(f"[{session_id}] Multi-direction mode: {len(request.directions)} directions, max_rounds={state.max_rounds}")
-    elif request.direction:
-        state.user_chosen_directions = [{"direction": request.direction, "notes": ""}]
-        state.directions_queue = [{"direction": request.direction, "notes": ""}]
+        logger.info(f"[{session_id}] Multi-direction mode: {len(body.directions)} directions, max_rounds={state.max_rounds}")
+    elif body.direction:
+        state.user_chosen_directions = [{"direction": body.direction, "notes": ""}]
+        state.directions_queue = [{"direction": body.direction, "notes": ""}]
         state.max_rounds = 2
-        state.user_chosen_direction = request.direction
-        state.pending_human_input = request.direction
+        state.user_chosen_direction = body.direction
+        state.pending_human_input = body.direction
     else:
         raise HTTPException(status_code=400, detail="No direction provided: specify direction, directions list, or let_pi_decide")
 
@@ -217,19 +213,18 @@ async def choose_direction(session_id: str, request: DirectionChoice):
     else:
         await _pause_and_restart_ws(session_id, state)
 
-    direction_count = len(request.directions) if request.directions else (1 if request.direction else 0)
+    direction_count = len(body.directions) if body.directions else (1 if body.direction else 0)
     return APIResponse(
         success=True,
-        message=f"Direction selected: {'PI decides' if request.let_pi_decide else f'{direction_count} direction(s)'}"
+        message=f"Direction selected: {'PI decides' if body.let_pi_decide else f'{direction_count} direction(s)'}"
     )
 
 
 @router.post("/{session_id}/request-input")
-async def request_human_input(session_id: str):
+async def request_human_input(session_id: str, request: Request):
     """Request human input (called by workflow when needing guidance)"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
     state.human_input_requested = True
 
     if session_id in websockets:

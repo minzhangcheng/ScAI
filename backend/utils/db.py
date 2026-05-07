@@ -189,6 +189,11 @@ class AppDB:
             row = await cur.fetchone()
             return row["cnt"] if row else 0
 
+    async def is_admin_initialized(self) -> bool:
+        """Check if admin has been initialized (same check as setup route)."""
+        meta = await self.get_meta("admin_initialized")
+        return meta == "1"
+
     async def create_admin_if_missing(self, *, password_hash: str, email: Optional[str] = None) -> tuple[str, bool]:
         """
         Get existing admin or create new one if not exists.

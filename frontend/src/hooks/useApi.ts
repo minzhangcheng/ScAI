@@ -897,7 +897,7 @@ export function useWebSocket() {
             console.warn('WebSocket: Received outdated state sync, current:', currentVersion, 'received:', syncContent.version, '. Reloading session state.')
             const sessionId = useAppStore.getState().currentSession?.id
             if (sessionId) {
-              fetch(`${API_BASE}/session/${sessionId}/load`)
+              fetch(`${API_BASE}/session/${sessionId}/load`, { headers: authHeaders() })
                 .then(resp => resp.ok ? resp.json() : null)
                 .then(reloadData => {
                   if (reloadData) {

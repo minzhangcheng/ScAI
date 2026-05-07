@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 
 from backend.config import get_session_states
@@ -17,6 +17,7 @@ from backend.models.schemas import (
     AnalysisPhase, APIResponse, TaskStatus,
 )
 from backend.services.session_store import async_save_session, ensure_session_loaded, pause_and_restart_ws as _pause_and_restart_ws_impl
+from backend.utils.auth import require_session_ownership
 from backend.state import (
     _run_tasks,
     state_lock as _state_lock,
@@ -48,11 +49,10 @@ router = APIRouter(prefix="/api/session", tags=["lifecycle"])
 
 
 @router.post("/{session_id}/run")
-async def run_analysis(session_id: str):
+async def run_analysis(session_id: str, request: Request):
     """Start running analysis (use WebSocket for real-time updates)"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status == TaskStatus.RUNNING:
         raise HTTPException(status_code=400, detail="Analysis already running")
@@ -68,11 +68,10 @@ async def run_analysis(session_id: str):
 
 
 @router.post("/{session_id}/pause")
-async def pause_analysis(session_id: str):
+async def pause_analysis(session_id: str, request: Request):
     """Pause running analysis"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status != TaskStatus.RUNNING:
         raise HTTPException(status_code=400, detail="Analysis not running")
@@ -93,11 +92,10 @@ async def pause_analysis(session_id: str):
 
 
 @router.post("/{session_id}/resume")
-async def resume_analysis(session_id: str):
+async def resume_analysis(session_id: str, request: Request):
     """Resume paused or completed analysis (for re-analysis)"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status == TaskStatus.COMPLETED:
         # Re-analysis: reset for a new round while keeping existing data
@@ -196,11 +194,10 @@ async def resume_analysis(session_id: str):
 
 
 @router.post("/{session_id}/stop")
-async def stop_analysis(session_id: str, req: StopAnalysisRequest):
+async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequest):
     """Stop a running analysis - either immediately or with summary report"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
                              TaskStatus.WAITING_ANNOTATION, TaskStatus.GENERATING_REPORT):
@@ -281,16 +278,15 @@ async def stop_analysis(session_id: str, req: StopAnalysisRequest):
 
 
 @router.post("/{session_id}/llm-failure-action")
-async def llm_failure_action(session_id: str, req: LlmFailureActionRequest):
+async def llm_failure_action(session_id: str, request: Request, req: LlmFailureActionRequest):
     """Handle user's choice for an LLM timeout/failure.
 
     Idempotency: the `generation` field must match the workflow's
     current `_llm_failure_generation`. Duplicate or stale requests
     (e.g. double-click) are rejected with 409.
     """
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status != TaskStatus.WAITING_INPUT:
         raise HTTPException(
@@ -322,14 +318,13 @@ async def llm_failure_action(session_id: str, req: LlmFailureActionRequest):
 
 
 @router.post("/{session_id}/retry-node")
-async def retry_node(session_id: str, request: RetryNodeRequest):
+async def retry_node(session_id: str, request: Request, body: RetryNodeRequest):
     """Retry or skip a failed node"""
-    node_name = request.node_name
-    skip = request.skip
+    node_name = body.node_name
+    skip = body.skip
 
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status != TaskStatus.FAILED:
         raise HTTPException(status_code=400, detail="Session is not in failed state")
@@ -361,11 +356,10 @@ async def retry_node(session_id: str, request: RetryNodeRequest):
 
 
 @router.get("/{session_id}/failed-node")
-async def get_failed_node(session_id: str):
+async def get_failed_node(session_id: str, request: Request):
     """Get information about the failed node"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Check if we have workflow state with error info
     if session_id in workflows:
@@ -394,11 +388,10 @@ async def get_failed_node(session_id: str):
 
 
 @router.post("/{session_id}/resume-bioinformatics")
-async def resume_bioinformatics(session_id: str):
+async def resume_bioinformatics(session_id: str, request: Request):
     """Resume bioinformatics analysis from last checkpoint"""
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Check for checkpoint
     checkpoint_path = get_session_states(session_id) / f"{session_id}_bioinfo_checkpoint.json"

@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Form, HTTPException, UploadFile, File
+from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 
 from backend.config import get_session_workspace, get_session_reports, get_session_uploads, get_session_states, PI_AGENT_NAME
@@ -20,6 +20,7 @@ from backend.state import (
     websockets, workflows, state_lock,
 )
 from backend.utils.snapshot import SnapshotManager
+from backend.utils.auth import require_session_ownership
 from backend.utils.files import safe_filename, validate_session_id
 from backend.utils.upload import stream_save_file
 from backend.utils.settings_provider import AgentSettingsProvider
@@ -848,6 +849,7 @@ async def _run_chat_delegation(
 
 @router.post("/{session_id}/chat")
 async def chat_with_pi(
+    request: Request,
     session_id: str,
     message: str = Form(...),
     target_agents: str = Form(default="[]"),
@@ -863,9 +865,8 @@ async def chat_with_pi(
     import base64
 
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if config is None:
         raise HTTPException(status_code=400, detail="API configuration not set")
@@ -1178,9 +1179,11 @@ async def chat_with_pi(
 
 
 @router.post("/{session_id}/chat/cancel")
-async def cancel_chat(session_id: str):
+async def cancel_chat(request: Request, session_id: str):
     """Cancel an in-progress chat request (delegation or simple)."""
     validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
 
     cancelled = False
 
@@ -1205,11 +1208,10 @@ async def cancel_chat(session_id: str):
 
 
 @router.get("/{session_id}/chat")
-async def get_chat_history(session_id: str):
+async def get_chat_history(request: Request, session_id: str):
     """Get chat history for a session"""
     validate_session_id(session_id)
-    state = await ensure_session_loaded(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     return {"messages": state.chat_messages}

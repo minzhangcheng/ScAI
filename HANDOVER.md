@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.22.6 · **Last updated**: 2026-05-07
+**Version**: 0.22.7 · **Last updated**: 2026-05-07
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,8 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.22.x — reproducibility toggle, config-driven feature flags, import hardening, snapshot lifecycle, LLM failure handling (2026-05-03 → 2026-05-07)**
+
+- `0.22.7` — **Session ownership enforcement**: All backend session routes now enforce ownership verification via `require_session_ownership()` — replacing ad-hoc `ensure_session_loaded()` checks with a unified middleware that validates user_id against session ownership; routes updated: lifecycle (run/pause/resume/stop/llm-failure-action/retry-node/get-failed-node/resume-bioinformatics), interaction (human-input-status/confirm-annotations/supplementary-analysis/choose-direction/request-input), reports (all endpoints), session-config (prompts/models/temperatures/vision/rounds/literature/agent-server), snapshots (list/restore/rollback-preview/delete/branch-delete), upload (data/file/chunked), chat (history), sessions (create-group/update-info/update-group/delete-group/save); session creation also checks ownership; middleware auth.py refactored with caching for admin-initialized check.
 
 - `0.22.6` — **LLM failure handling & user intervention**: When LLM calls fail with timeouts/5xx and exhaust retries, workflow pauses in `WAITING_INPUT` state for user action; `backend/constants.py` created for shared enums (`LlmFailureAction`, `WaitInputReason`, `StateSyncChangeType`) and mappings (`NODE_TO_AGENT`, `NODE_TO_RESULT_KEY`); `with_retry` decorator rewritten to use `while` loop (instead of `for`) to support resetting attempt counter; `UpstreamExhaustedError` now carries `agent_name`, `model`, `llm_server` context for display in frontend; `SingleCellAnalysisWorkflow` gains per-node events and `signal_llm_failure_action()` method with generation-based idempotency; `/session/{id}/llm-failure-action` endpoint accepts `retry`/`skip` actions; session load cleans up stale LLM failure states from previous server runs; frontend: `LlmTimeoutDialog` with 4 options (Retry, Modify Agent Settings, Terminate, Skip) and optional auto-skip countdown; `LlmModifySubDialog` confirms config changes before resume; Analysis panel shows "LLM Call Failed" badge to reopen dialog; Prompts panel auto-selects failing agent when modify is pending; state_sync messages carry `llm_failure_info` and `wait_input_reason`; comprehensive i18n coverage (zh/en); full test suite (`test_llm_failure_workflow.py`, 297 lines).
 
