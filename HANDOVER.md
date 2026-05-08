@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.22.10 · **Last updated**: 2026-05-07
+**Version**: 0.22.11 · **Last updated**: 2026-05-08
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,9 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.22.x — per-user LLM config, config persistence, reproducibility toggle (2026-05-03 → 2026-05-07)**
+**0.22.x — per-user LLM config, config persistence, reproducibility toggle (2026-05-03 → 2026-05-08)**
+
+- `0.22.11` — **PubMed Email available to all users**: The PubMed email field in ConfigPanel is now available to all users (not just admin), enabling non-admin users to configure their literature search credentials.
 
 - `0.22.10` — **Minor fixes & improvements**: Version bump for release.
 

@@ -194,24 +194,22 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
             </p>
           </div>
 
-          {/* PubMed Email — admin mode only */}
-          {isAdmin && (
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                {t('literaturePubmedEmailLabel')} <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="email"
-                value={pubmedEmail}
-                onChange={(e) => setPubmedEmail(e.target.value)}
-                placeholder="your@email.com"
-                className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all text-sm"
-              />
-              <p className="text-xs text-slate-500 mt-1.5">
-                {t('literaturePubmedEmailNote')}
-              </p>
-            </div>
-          )}
+          {/* PubMed Email */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">
+              {t('literaturePubmedEmailLabel')} <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="email"
+              value={pubmedEmail}
+              onChange={(e) => setPubmedEmail(e.target.value)}
+              placeholder="your@email.com"
+              className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-accent-500 transition-all text-sm"
+            />
+            <p className="text-xs text-slate-500 mt-1.5">
+              {t('literaturePubmedEmailNote')}
+            </p>
+          </div>
 
           {/* Proxy Server */}
           <div>
