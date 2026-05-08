@@ -75,12 +75,6 @@ class AppDB:
     def __init__(self, path: Path):
         self.path = Path(path)
 
-    async def _connect(self) -> aiosqlite.Connection:
-        """Open a connection with foreign keys enabled."""
-        db = await aiosqlite.connect(self.path, timeout=30)
-        await db.execute("PRAGMA foreign_keys = ON")
-        return db
-
     async def init(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path, timeout=30) as db:
@@ -187,7 +181,8 @@ class AppDB:
             return cur.rowcount > 0
 
     async def delete_user(self, uid: str) -> bool:
-        async with self._connect() as db:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
             cur = await db.execute("DELETE FROM users WHERE id=?", (uid,))
             await db.commit()
             return cur.rowcount > 0
@@ -280,7 +275,8 @@ class AppDB:
         updated_at are changed.
         """
         now = datetime.now(timezone.utc).isoformat()
-        async with self._connect() as db:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
             await db.execute(
                 """INSERT INTO user_llm_config
                        (user_id, encrypted_api_key, llm_base_url, encrypted_proxy_url,

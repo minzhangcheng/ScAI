@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.22.11 · **Last updated**: 2026-05-08
+**Version**: 0.22.12 · **Last updated**: 2026-05-08
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,8 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.22.x — per-user LLM config, config persistence, reproducibility toggle (2026-05-03 → 2026-05-08)**
+
+- `0.22.12` — **Database inline foreign keys**: Removed `_connect()` helper method; foreign keys are now enabled directly in methods that need it (`delete_user`, `update_user_llm_config`) instead of via a shared connection wrapper, improving consistency and clarity.
 
 - `0.22.11` — **PubMed Email available to all users**: The PubMed email field in ConfigPanel is now available to all users (not just admin), enabling non-admin users to configure their literature search credentials.
 
