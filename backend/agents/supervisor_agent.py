@@ -154,6 +154,13 @@ If images are provided, check for:
 """
 
 
+def _serialize_record(r, round_number: int) -> Dict:
+    d = asdict(r)
+    d["timestamp"] = r.timestamp.isoformat()
+    d["round_number"] = round_number
+    return d
+
+
 class SupervisorAgent:
     """Lightweight analysis supervisor using a cheap vision-capable LLM."""
 
@@ -473,15 +480,28 @@ class SupervisorAgent:
         self._pi_question_hashes = set()
 
     def restore_log_from_saved(self, records: List[Dict]):
-        """Restore supervision log from saved analysis_log dicts (e.g., from report.json)."""
-        restored = []
+        """Restore supervision log from saved analysis_log dicts, grouping by round_number.
+        
+        Records with round_number == max(round_number) go to supervision_log (current round).
+        All other rounds are grouped into all_rounds_log.
+        Old format records without round_number default to round 1.
+        Empty records list short-circuits to empty logs.
+        """
+        if not records:
+            self.all_rounds_log = []
+            self.supervision_log = []
+            return
+
+        max_round = max(r.get("round_number", 1) for r in records)
+
+        rounds: Dict[int, List[SupervisorRecord]] = {}
         for d in records:
             ts = d.get("timestamp", "")
             try:
                 timestamp = datetime.fromisoformat(ts) if ts else datetime.now()
             except (ValueError, TypeError):
                 timestamp = datetime.now()
-            restored.append(SupervisorRecord(
+            record = SupervisorRecord(
                 step_number=d.get("step_number", 0),
                 step_type=d.get("step_type", ""),
                 timestamp=timestamp,
@@ -498,21 +518,30 @@ class SupervisorAgent:
                 code_error=d.get("code_error"),
                 saved_figure_filenames=d.get("saved_figure_filenames", []),
                 agent_reasoning=d.get("agent_reasoning"),
-            ))
-        # Store all restored records in supervision_log (flat, not split by rounds)
-        self.supervision_log = restored
+            )
+            rn = d.get("round_number", 1)
+            rounds.setdefault(rn, []).append(record)
+
+        self.all_rounds_log = []
+        self.supervision_log = []
+        for rn in sorted(rounds.keys()):
+            if rn == max_round:
+                self.supervision_log = rounds[rn]
+            else:
+                self.all_rounds_log.append(rounds[rn])
+
+        logger.info(f"Restored {len(records)} records: {len(self.all_rounds_log)} completed rounds, "
+                     f"{len(self.supervision_log)} current round records (round {max_round})")
 
     def get_supervision_log(self) -> List[Dict]:
-        """Return serializable log of all rounds + current round."""
-        all_records = []
-        for round_log in self.all_rounds_log:
-            all_records.extend(round_log)
-        all_records.extend(self.supervision_log)
+        """Return serializable log of all rounds + current round, with round_number."""
         result = []
-        for r in all_records:
-            d = asdict(r)
-            d["timestamp"] = r.timestamp.isoformat()
-            result.append(d)
+        for round_idx, round_log in enumerate(self.all_rounds_log):
+            for r in round_log:
+                result.append(_serialize_record(r, round_idx + 1))
+        current_round = len(self.all_rounds_log) + 1
+        for r in self.supervision_log:
+            result.append(_serialize_record(r, current_round))
         return result
 
     def get_summary_stats(self) -> Dict[str, Any]:
@@ -559,6 +588,7 @@ class SupervisorAgent:
         workspace_dir: str = None,
         progress_callback: Optional[Callable] = None,
         report_llm_client: Optional["OpenAICompatibleClient"] = None,
+        chat_messages: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
         """
         Generate a detailed report from the supervisor's accumulated analysis records.
@@ -575,6 +605,7 @@ class SupervisorAgent:
             progress_callback: Optional progress reporting callback
             report_llm_client: LLM client matching report_model's endpoint.
                 If None, falls back to supervisor's own llm_client.
+            chat_messages: Optional chat messages to build chat sections from.
 
         Returns:
             Report dict compatible with existing frontend expectations.
@@ -657,6 +688,21 @@ class SupervisorAgent:
 
         # Parse the LLM output into sections
         sections = self._parse_report_sections(report_content, language)
+
+        # Build chat sections if chat_messages provided
+        if chat_messages:
+            try:
+                from backend.services.report.chat_sections import build_chat_sections_async
+                chat_sections = await build_chat_sections_async(
+                    chat_messages,
+                    figures_dir=str(Path(workspace_dir) / "figures") if workspace_dir else "",
+                    tables_dir=str(Path(workspace_dir) / "tables") if workspace_dir else "",
+                    llm_client=report_llm_client or self._provider.get_llm_client("pi"),
+                    progress_callback=progress_callback,
+                )
+                sections.extend(chat_sections)
+            except Exception as e:
+                logger.warning(f"Failed to build chat sections: {e}", exc_info=True)
 
         # Extract abstract and conclusions
         abstract = ""

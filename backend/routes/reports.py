@@ -3,16 +3,19 @@ publication-figures, publication-tables, figure/{id}/pdf, figure/{id}/png, integ
 
 Extracted from backend/main.py to decouple report generation and serving route handlers.
 """
+import asyncio
 import io
 import json
 import logging
 import math
 import os
 import re
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -32,6 +35,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/session", tags=["reports"])
 
+# Note: _report_generation_pending is process-local. In multi-worker deployments
+# (e.g., uvicorn --workers N), cross-worker concurrency is not prevented. This is
+# consistent with the existing chat_task_lock pattern in chat.py. For multi-worker
+# production, a Redis-based lock would be needed — out of scope for this fix.
+_report_generation_pending: set = set()
+
+
+def clear_generation_pending(session_id: str) -> None:
+    """Remove session_id from the report-generation-pending set.
+
+    Public helper so that external cleanup code (session deletion, periodic
+    cleanup) does not need to import the private ``_report_generation_pending``
+    set directly.
+    """
+    _report_generation_pending.discard(session_id)
+
 
 
 def _sanitize_nan(obj):
@@ -45,6 +64,53 @@ def _sanitize_nan(obj):
     if isinstance(obj, list):
         return [_sanitize_nan(v) for v in obj]
     return obj
+
+
+def _next_archive_version(reports_dir: Path) -> int:
+    """Determine the next archive version number as max(existing) + 1."""
+    if not reports_dir.exists():
+        return 1
+    existing_versions = []
+    for p in reports_dir.glob("previous_report_v*.zip"):
+        try:
+            version = int(p.stem.split("_v")[-1])
+            existing_versions.append(version)
+        except (ValueError, IndexError):
+            continue
+    return max(existing_versions, default=0) + 1
+
+
+def _create_report_archive(reports_dir: Path, version: int) -> Path:
+    """Create a versioned zip archive of the reports directory, excluding existing archives.
+    
+    Uses atomic write (tmp file + os.replace) to avoid self-inclusion race.
+    """
+    archive_path = reports_dir / f"previous_report_v{version}.zip"
+    tmp_path = archive_path.with_suffix(".zip.tmp")
+    
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
+        for file_path in reports_dir.rglob("*"):
+            if file_path.is_file():
+                if file_path.name.startswith("previous_report_v") and file_path.name.endswith(".zip"):
+                    continue
+                if file_path == tmp_path:
+                    continue
+                arcname = file_path.relative_to(reports_dir)
+                zf.write(file_path, arcname)
+    
+    os.replace(tmp_path, archive_path)
+    return archive_path
+
+
+def _enforce_archive_retention(reports_dir: Path, max_archives: int = 5):
+    """Keep only the most recent max_archives archives, delete the rest sorted by mtime."""
+    archives = sorted(
+        reports_dir.glob("previous_report_v*.zip"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    while len(archives) > max_archives:
+        oldest = archives.pop(0)
+        oldest.unlink(missing_ok=True)
 
 
 # ============================================
@@ -150,18 +216,25 @@ async def get_detailed_report(session_id: str, request: Request):
 @router.post("/{session_id}/generate-detailed-report")
 async def generate_detailed_report(session_id: str, background_tasks: BackgroundTasks, request: Request):
     """Start generating a detailed report"""
+    if session_id in _report_generation_pending:
+        raise HTTPException(status_code=409, detail="Report generation already in progress for this session")
+    
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
     
     if state.status.value != "completed":
         raise HTTPException(status_code=400, detail="Analysis must be completed before generating report")
     
-    # Start generation in background
-    background_tasks.add_task(
-        _generate_report_task,
-        session_id,
-        state
-    )
+    _report_generation_pending.add(session_id)
+    try:
+        background_tasks.add_task(
+            _generate_report_task,
+            session_id,
+            state
+        )
+    except Exception:
+        _report_generation_pending.discard(session_id)
+        raise
     
     return {"status": "started", "message": "Report generation started"}
 
@@ -231,7 +304,30 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
 
         # Restore supervision log from previously saved report.json
         report_json_path = Path(output_dir) / "report.json"
+
+        # Archive existing report before regeneration
         if report_json_path.exists():
+            try:
+                next_version = _next_archive_version(Path(output_dir))
+                try:
+                    archive_path = await asyncio.to_thread(
+                        _create_report_archive, Path(output_dir), next_version
+                    )
+                    logger.info(f"Archived previous report as {archive_path.name}")
+                    await asyncio.to_thread(_enforce_archive_retention, Path(output_dir), 5)
+                except Exception as archive_err:
+                    logger.error(f"Failed to archive previous report: {archive_err}", exc_info=True)
+                    if session_id in report_websockets:
+                        try:
+                            await report_websockets[session_id].send_json({
+                                "type": "archive_failed",
+                                "message": f"Failed to archive previous report: {archive_err}"
+                            })
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.warning(f"Error during archive check: {e}", exc_info=True)
+
             try:
                 with open(report_json_path, encoding="utf-8") as f:
                     saved_report = json.load(f)
@@ -248,6 +344,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
             output_dir=output_dir,
             workspace_dir=workspace_dir,
             progress_callback=progress_callback,
+            chat_messages=state.chat_messages,
         )
         detailed_reports[session_id] = report
 
@@ -272,6 +369,8 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                 })
             except Exception as ws_error:
                 logger.warning(f"Failed to send error to WebSocket for session {session_id}: {ws_error}", exc_info=True)
+    finally:
+        _report_generation_pending.discard(session_id)
 
 
 # ============================================
@@ -386,6 +485,56 @@ async def download_full_report(session_id: str, state: AnalysisState = Depends(r
         zip_buffer,
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@router.get("/{session_id}/report/archives")
+async def list_report_archives(session_id: str, request: Request):
+    """List available report archive versions with metadata."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+    
+    reports_dir = get_session_reports(session_id)
+    if not reports_dir.exists():
+        return []
+    
+    archives = []
+    for archive_path in reports_dir.glob("previous_report_v*.zip"):
+        try:
+            version = int(archive_path.stem.split("_v")[-1])
+            stat = archive_path.stat()
+            archives.append({
+                "version": version,
+                "filename": archive_path.name,
+                "created_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "size_bytes": stat.st_size,
+                "download_url": f"session/{session_id}/report/download-archive/{archive_path.name}",
+            })
+        except (ValueError, IndexError):
+            continue
+    
+    return sorted(archives, key=lambda a: a["version"])
+
+
+@router.get("/{session_id}/report/download-archive/{filename}")
+async def download_report_archive(session_id: str, filename: str, request: Request):
+    """Download a specific report archive zip file."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+    
+    reports_dir = get_session_reports(session_id)
+    archive_path = reports_dir / filename
+    validate_path_within(archive_path, reports_dir)
+    
+    if not archive_path.exists() or not filename.startswith("previous_report_v") or not filename.endswith(".zip"):
+        raise HTTPException(status_code=404, detail="Archive not found")
+    
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename=filename,
     )
 
 

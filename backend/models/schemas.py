@@ -136,6 +136,8 @@ class AnalysisStep(BaseModel):
     # text_response fields
     text_content: Optional[str] = None
 
+    round_number: int = 1
+
 class ScoreDefinition(BaseModel):
     """Definition of a computed score for methodology transparency in the final report"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

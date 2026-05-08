@@ -416,6 +416,7 @@ class AnalysisLogMixin:
                     "step_type": step.step_type,
                     "timestamp": step.timestamp.isoformat() if hasattr(step.timestamp, 'isoformat') else str(step.timestamp),
                     "agent_reasoning": step.agent_reasoning,
+                    "round_number": step.round_number,
                 }
                 if step.step_type == "execute_code":
                     entry.update({
@@ -480,6 +481,7 @@ class AnalysisLogMixin:
                 "code_error": cell.error,
                 "code_description": None,
                 "saved_figure_filenames": _saved,
+                "round_number": 1,
             })
         return log_entries
 

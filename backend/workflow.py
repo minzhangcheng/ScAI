@@ -2571,6 +2571,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             if isinstance(step, dict):
                 step = AnalysisStep(**step)
             if step.id not in existing_step_ids:
+                step.round_number = max(analysis_state.current_round, 1)
                 analysis_state.analysis_log.append(step)
                 existing_step_ids.add(step.id)
         # Cap log size to prevent unbounded memory growth
@@ -3941,6 +3942,7 @@ Return ONLY the JSON array, nothing else."""
                     workspace_dir=str(get_session_workspace(self.session_id)),
                     progress_callback=progress_callback,
                     report_llm_client=self._settings_provider.get_llm_client('pi'),
+                    chat_messages=None,
                 )
             else:
                 # Fallback: use original DetailedReportGenerator

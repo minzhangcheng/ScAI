@@ -30,6 +30,8 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
       userConfig.getUserConfig()
         .then((status) => {
           if (status.llm_base_url) setUserLlmBaseUrl(status.llm_base_url)
+          if (status.masked_api_key) setUserApiKey(status.masked_api_key)
+          if (status.has_proxy_url) setUserProxyUrl('•••••')
         })
         .catch(() => { /* fields stay blank */ })
     }
@@ -57,22 +59,8 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
 
     try {
       if (isAdmin) {
-        const result = await adminConfig.validateApiKey()
-        if (result.uncertain) {
-          setUncertainWarning(validateMsg('无法验证（网络问题），但仍可保存', 'Cannot validate (network issue), but you can still save'))
-        } else if (!result.valid) {
-          setLocalError(result.message || validateMsg('API Key 验证失败', 'API Key validation failed'))
-          return
-        }
         await adminConfig.saveConfig()
       } else {
-        const result = await userConfig.validateUserConfig(userApiKey, userLlmBaseUrl, userProxyUrl)
-        if (result.uncertain) {
-          setUncertainWarning(validateMsg('无法验证（网络问题），但仍可保存', 'Cannot validate (network issue), but you can still save'))
-        } else if (!result.valid) {
-          setLocalError(result.message || validateMsg('API Key 验证失败', 'API Key validation failed'))
-          return
-        }
         await userConfig.saveUserConfig(userApiKey, userLlmBaseUrl, userProxyUrl)
       }
       onSave()

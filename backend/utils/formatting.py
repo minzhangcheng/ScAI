@@ -97,6 +97,69 @@ def safe_parse_json(response: str, default: Optional[Dict[str, Any]] = None) -> 
     return default
 
 
+def safe_parse_json_array(response: str, default: Optional[List[Any]] = None) -> Optional[List[Any]]:
+    """Parse a JSON array from LLM response using balanced bracket matching.
+
+    Similar to safe_parse_json but targets ``[...]`` instead of ``{...}``.
+
+    Args:
+        response: Raw LLM response string (may be None/empty).
+        default: Value to return when parsing fails. If *None*, returns
+                 ``None`` on failure.
+
+    Returns:
+        Parsed list, or *default* when extraction/parsing fails.
+    """
+    if not response:
+        return default
+
+    start = response.find('[')
+    if start == -1:
+        return default
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    end = start
+
+    for i, c in enumerate(response[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+        if c == '\\' and in_string:
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '[':
+            depth += 1
+        elif c == ']':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+
+    if depth == 0 and end > start:
+        try:
+            result = json.loads(response[start:end])
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            if _JSON_REPAIR_AVAILABLE:
+                try:
+                    repaired = _repair_json(response[start:end], return_objects=True)
+                    if isinstance(repaired, list):
+                        return repaired
+                except Exception:
+                    pass
+            logger.debug("JSON array extraction from LLM response failed at position %d-%d", start, end)
+
+    return default
+
+
 def truncate_for_llm(text: str, max_chars: int = 128 * 1024) -> str:
     """Truncate sandbox output for LLM consumption, keeping head and tail halves.
 

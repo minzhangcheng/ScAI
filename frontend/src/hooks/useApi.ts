@@ -1274,6 +1274,7 @@ interface UserConfigStatus {
   has_api_key?: boolean
   llm_base_url?: string
   masked_api_key?: string
+  has_proxy_url?: boolean
 }
 
 interface ValidateResult {
@@ -1352,6 +1353,19 @@ export function useUserConfig() {
     }
   }, [])
 
+  const validateSavedConfig = useCallback(async (): Promise<ValidateResult> => {
+    setLoading(true)
+    setError(null)
+    try {
+      return await apiFetch<ValidateResult>('/user/config/validate-saved', { method: 'POST' })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to validate saved config')
+      return { valid: false, message: 'Failed to reach validation endpoint', uncertain: true }
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
   const deleteUserConfig = useCallback(async (): Promise<void> => {
     setLoading(true)
     setError(null)
@@ -1368,6 +1382,6 @@ export function useUserConfig() {
   return {
     loading, error,
     getUserConfig, saveUserConfig, getUserConfigStatus,
-    validateUserConfig, deleteUserConfig,
+    validateUserConfig, validateSavedConfig, deleteUserConfig,
   }
 }

@@ -373,6 +373,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/llm-failure-action",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/{session_id}/load",
     [
       "GET"
@@ -439,6 +445,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/report/archives",
+    [
+      "GET"
+    ]
+  ],
+  [
     "/api/session/{session_id}/report/download-all-figures",
     [
       "POST"
@@ -451,7 +463,19 @@
     ]
   ],
   [
+    "/api/session/{session_id}/report/download-archive/{filename}",
+    [
+      "GET"
+    ]
+  ],
+  [
     "/api/session/{session_id}/report/download-full",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/report/download-reproducibility",
     [
       "POST"
     ]
@@ -553,9 +577,21 @@
     ]
   ],
   [
+    "/api/session/{session_id}/snapshots/{snapshot_id}/branch",
+    [
+      "DELETE"
+    ]
+  ],
+  [
     "/api/session/{session_id}/snapshots/{snapshot_id}/restore",
     [
       "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshots/{snapshot_id}/rollback-preview",
+    [
+      "GET"
     ]
   ],
   [
@@ -640,6 +676,42 @@
     "/api/sessions",
     [
       "GET"
+    ]
+  ],
+  [
+    "/api/user/config",
+    [
+      "DELETE"
+    ]
+  ],
+  [
+    "/api/user/config",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/user/config",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/user/config/status",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/user/config/validate",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/user/config/validate-saved",
+    [
+      "POST"
     ]
   ],
   [

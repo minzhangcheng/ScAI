@@ -135,7 +135,10 @@ async def resolve_config_for_user(user_id: str) -> Optional[SystemConfig]:
     """Return the SystemConfig that the given user should use.
 
     Resolution rules:
-    - If no ``system_config["current"]`` is set, return ``None``.
+    - If no ``system_config["current"]`` is set AND the user has no per-user
+      ``api_key``, return ``None``.
+    - If no global config is set but the user has per-user credentials, create
+      a default ``SystemConfig`` and overlay the per-user API credentials.
     - If the user has no per-user ``api_key``, return a shallow copy of the
       global config with a fresh ``api`` sub-model to prevent callers from
       mutating the singleton.
@@ -143,16 +146,25 @@ async def resolve_config_for_user(user_id: str) -> Optional[SystemConfig]:
       API credentials (``api_key``, ``llm_base_url``, ``proxy_url``).
     """
     base = system_config.get("current")
-    if base is None:
+    user_api = await _get_cached_user_api(user_id) if user_id else None
+
+    # Neither global nor per-user config available.
+    if base is None and (not user_api or not user_api.get("api_key")):
         return None
 
-    user_api = await _get_cached_user_api(user_id) if user_id else None
+    if base is None:
+        base = SystemConfig()
+
     if not user_api or not user_api.get("api_key"):
         return base.model_copy(update={"api": base.api.model_copy()})
 
-    cfg = base.model_copy(update={"api": base.api.model_copy(update={
+    return _overlay_user_api(base, user_api)
+
+
+def _overlay_user_api(base: SystemConfig, user_api: dict) -> SystemConfig:
+    """Return a copy of *base* with per-user API credentials overlaid."""
+    return base.model_copy(update={"api": base.api.model_copy(update={
         "api_key": user_api["api_key"],
         "llm_base_url": user_api.get("llm_base_url") or base.api.llm_base_url,
         "proxy_url": user_api.get("proxy_url") or base.api.proxy_url,
     })})
-    return cfg

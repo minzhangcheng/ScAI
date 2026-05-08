@@ -74,6 +74,9 @@ async def _evict_single_session(
             session_locks.pop(session_id, None)
             report_websockets.pop(session_id, None)
             detailed_reports.pop(session_id, None)
+            # Clean up report generation pending flag
+            from backend.routes.reports import clear_generation_pending
+            clear_generation_pending(session_id)
 
     async with chat_task_lock:
         chat_sandbox = chat_sandboxes.pop(session_id, None)

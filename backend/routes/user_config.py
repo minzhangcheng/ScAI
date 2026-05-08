@@ -50,7 +50,22 @@ def _validate_url(url: str, field_name: str) -> None:
         raise HTTPException(400, f"{field_name} must use http or https scheme")
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+def _decrypt_masked(row: dict, field_name: str) -> tuple[bool, str]:
+    """Decrypt an encrypted field and return (has_value, masked_value)."""
+    encrypted = row.get(field_name)
+    if not encrypted:
+        return False, ""
+    try:
+        plaintext = crypto.decrypt_value(encrypted)
+    except (crypto.ConfigEncryptionUnavailable, InvalidToken):
+        return False, ""
+    return bool(plaintext), _mask_api_key(plaintext) if plaintext else ""
+
+
+def _has_decryptable_value(row: dict, field_name: str) -> bool:
+    """Return True if the encrypted field decrypts to a non-empty string."""
+    has, _ = _decrypt_masked(row, field_name)
+    return has
 
 @router.get("/config")
 async def get_user_config(
@@ -61,32 +76,22 @@ async def get_user_config(
     if user_id is None:
         return {"configured": False}
 
-    # Per-user config is meaningless without a global config to merge with.
-    if system_config.get("current") is None:
-        return {"configured": False, "has_api_key": False, "llm_base_url": ""}
-
     row = await db.get_user_llm_config(user_id)
     if row is None:
-        return {"configured": False, "has_api_key": False, "llm_base_url": ""}
+        return {"configured": False, "has_api_key": False, "llm_base_url": "", "has_proxy_url": False}
 
-    # Decrypt api_key for masking (display only — never return plaintext)
-    masked_key = ""
-    has_api_key = False
-    if row.get("encrypted_api_key"):
-        try:
-            plaintext_key = crypto.decrypt_value(row["encrypted_api_key"])
-            has_api_key = bool(plaintext_key)
-            masked_key = _mask_api_key(plaintext_key) if plaintext_key else ""
-        except crypto.ConfigEncryptionUnavailable:
-            logger.warning("Encryption unavailable; cannot decrypt api_key for user %s", user_id)
-        except InvalidToken:
-            logger.warning("Invalid token decrypting api_key for user %s", user_id, exc_info=True)
+    if system_config.get("current") is None and not row.get("encrypted_api_key"):
+        return {"configured": False, "has_api_key": False, "llm_base_url": "", "has_proxy_url": False}
+
+    has_api_key, masked_key = _decrypt_masked(row, "encrypted_api_key")
+    has_proxy_url = _has_decryptable_value(row, "encrypted_proxy_url")
 
     return {
         "configured": True,
         "has_api_key": has_api_key,
         "llm_base_url": row.get("llm_base_url", ""),
         "masked_api_key": masked_key,
+        "has_proxy_url": has_proxy_url,
     }
 
 
@@ -98,10 +103,10 @@ async def get_user_config_status(
     """Lightweight status check — no decryption. Returns {configured, has_api_key}."""
     if user_id is None:
         return {"configured": False}
-    if system_config.get("current") is None:
-        return {"configured": False, "has_api_key": False}
     row = await db.get_user_llm_config(user_id)
     if row is None:
+        return {"configured": False, "has_api_key": False}
+    if system_config.get("current") is None and not row.get("encrypted_api_key"):
         return {"configured": False, "has_api_key": False}
     return {"configured": True, "has_api_key": bool(row.get("encrypted_api_key"))}
 
@@ -134,7 +139,7 @@ async def set_user_config(
 
     invalidate_cache(user_id)
 
-    return APIResponse(success=True)
+    return APIResponse(success=True, message="Config saved")
 
 
 @router.delete("/config")
@@ -147,7 +152,7 @@ async def delete_user_config(
 
     invalidate_cache(user_id)
 
-    return APIResponse(success=True)
+    return APIResponse(success=True, message="Config deleted")
 
 
 @router.post("/config/validate")
@@ -161,4 +166,22 @@ async def validate_user_config(
         _validate_url(body.proxy_url, "proxy_url")
 
     result = await validate_llm_credentials(body.api_key, body.llm_base_url, body.proxy_url)
+    return result
+
+
+@router.post("/config/validate-saved")
+async def validate_saved_user_config(
+    user_id: str = Depends(require_active_user),
+    db: AppDB = Depends(get_db),
+):
+    """Validate the per-user LLM credentials already saved in the database."""
+    from backend.utils.config_resolver import resolve_config_for_user
+
+    cfg = await resolve_config_for_user(user_id)
+    if cfg is None or not cfg.api.api_key:
+        return {"valid": False, "uncertain": False, "message": "No API key configured"}
+
+    result = await validate_llm_credentials(
+        cfg.api.api_key, cfg.api.llm_base_url, cfg.api.proxy_url
+    )
     return result

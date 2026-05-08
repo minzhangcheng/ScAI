@@ -150,6 +150,8 @@ async def delete_session(session_id: str, request: Request):
         sessions.pop(session_id, None)
         session_access_times.pop(session_id, None)
         last_save_times.pop(session_id, None)
+        from backend.routes.reports import clear_generation_pending
+        clear_generation_pending(session_id)
 
     def _delete_from_disk():
         session_dir = get_session_dir(session_id)

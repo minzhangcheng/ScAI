@@ -1,11 +1,12 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useTranslation } from '../i18n/translations'
 import { devLog } from '../utils/logger'
 import { fetchAndDownload } from '../utils/download'
-import { WS_CONNECT_TIMEOUT_MS, apiFetch } from '../hooks/useApi'
+import { WS_CONNECT_TIMEOUT_MS, apiFetch, useConfig, useUserConfig } from '../hooks/useApi'
 import { getToken } from '../utils/authStorage'
 import { WS_AUTH_SUBPROTOCOL } from '../constants/auth'
+import { ValidationDialog } from './ValidationDialog'
 import ReactMarkdown from 'react-markdown'
 import {
   FileText,
@@ -98,18 +99,28 @@ interface ReportPreview {
 }
 
 export function ReportPanel() {
-  const { currentSession, language, addMessage, setReportGenerated } = useAppStore()
-  useTranslation(language) // For future use
+  const { currentSession, language, addMessage, setReportGenerated, authUser, showConfigPanel } = useAppStore()
+  const { t } = useTranslation(language)
+  const adminConfig = useConfig()
+  const userConfig = useUserConfig()
 
   const [report, setReport] = useState<DetailedReport | null>(null)
   const [preview, setPreview] = useState<ReportPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [reportArchives, setReportArchives] = useState<Array<{version: number; filename: string; created_at: string; size_bytes: number; download_url: string}>>([])
+  const [archiveWarning, setArchiveWarning] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
   const wsRef = useRef<WebSocket | null>(null)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [viewMode, setViewMode] = useState<'preview' | 'detail'>('preview')
+
+  // API validation state
+  const [validating, setValidating] = useState(false)
+  const [showValidationDialog, setShowValidationDialog] = useState(false)
+  const [validationMessage, setValidationMessage] = useState('')
+  const [validationUncertain, setValidationUncertain] = useState(false)
 
   // Load existing report on mount and when analysis completes
   useEffect(() => {
@@ -167,12 +178,10 @@ export function ReportPanel() {
         return
       }
       if (data.type === 'progress') {
-        setReport(prev => prev ? {
-          ...prev,
-          progress: data.progress,
-          current_step: data.step,
-          status: data.status
-        } : null)
+        setReport(prev => {
+          if (prev && prev.progress === data.progress && prev.current_step === data.step) return prev
+          return prev ? { ...prev, progress: data.progress, current_step: data.step, status: data.status } : null
+        })
         // Also add to message stream (object format so MessageStream can detect progress=100 for checkmark icon)
         addMessage({
           id: `report-progress-${Date.now()}`,
@@ -190,7 +199,7 @@ export function ReportPanel() {
         setGenerating(false)
         setReportGenerated(true)
         // Load preview after generation
-        loadPreview()
+        Promise.all([loadPreview(), fetchArchives()])
         // Add completion message
         addMessage({
           id: `report-complete-${Date.now()}`,
@@ -213,6 +222,9 @@ export function ReportPanel() {
           content: `[Report Error] ${data.message}`,
           timestamp: new Date().toISOString()
         })
+      } else if (data.type === 'archive_failed') {
+        console.warn('Report archive failed:', data.message)
+        setArchiveWarning(data.message || 'Failed to archive previous report')
       }
     }
 
@@ -260,7 +272,7 @@ export function ReportPanel() {
           setExpandedSections(new Set([data.report.sections[0].id]))
         }
         // Also load preview
-        await loadPreview()
+        await Promise.all([loadPreview(), fetchArchives()])
       }
     } catch (e) {
       console.error('Failed to load report:', e)
@@ -282,7 +294,19 @@ export function ReportPanel() {
     }
   }
 
-  const generateReport = async () => {
+  const fetchArchives = useCallback(async () => {
+    if (!currentSession?.id) return
+    try {
+      const data = await apiFetch<any>(`/session/${currentSession.id}/report/archives`)
+      if (data) {
+        setReportArchives(data)
+      }
+    } catch {
+      setReportArchives([])
+    }
+  }, [currentSession?.id])
+
+  const doGenerateReport = async () => {
     if (!currentSession?.id) return
 
     setGenerating(true)
@@ -318,9 +342,43 @@ export function ReportPanel() {
         method: 'POST'
       })
     } catch (e: any) {
+      if (e?.message?.includes('already in progress') || e?.message?.includes('409')) {
+        setError(language === 'zh' ? '报告生成已在进行中' : 'Report generation already in progress')
+        setGenerating(false)
+        return
+      }
       setError(e.message)
       setGenerating(false)
     }
+  }
+
+  const generateReport = async () => {
+    if (!currentSession?.id) return
+
+    setValidating(true)
+    try {
+      const isAdmin = authUser?.role === 'admin'
+      let validation: { valid: boolean; message?: string; uncertain?: boolean }
+
+      if (isAdmin) {
+        validation = await adminConfig.validateApiKey()
+      } else {
+        validation = await userConfig.validateSavedConfig()
+      }
+
+      setValidating(false)
+
+      if (!validation.valid && !validation.uncertain) {
+        setValidationMessage(validation.message || t('apiKeyInvalid'))
+        setValidationUncertain(validation.uncertain || false)
+        setShowValidationDialog(true)
+        return
+      }
+    } catch {
+      setValidating(false)
+    }
+
+    await doGenerateReport()
   }
 
   const toggleSection = (sectionId: string) => {
@@ -418,6 +476,29 @@ export function ReportPanel() {
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
+      {/* Validating spinner overlay */}
+      {validating && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-lg p-6 flex items-center gap-3">
+            <Loader2 className="w-5 h-5 animate-spin text-accent-600" />
+            <span className="text-slate-700 font-medium">
+              {t('validatingApiKey')}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Validation failure dialog */}
+      {showValidationDialog && (
+        <ValidationDialog
+          message={validationMessage}
+          uncertain={validationUncertain}
+          onIgnore={() => { setShowValidationDialog(false); doGenerateReport() }}
+          onReconfigure={() => { setShowValidationDialog(false); if (showConfigPanel) showConfigPanel() }}
+          language={language}
+        />
+      )}
+
       {/* Header */}
       <div className="p-4 border-b border-slate-200 bg-white">
         <div className="flex items-center justify-between">
@@ -510,6 +591,31 @@ export function ReportPanel() {
             )}
           </div>
         </div>
+
+        {archiveWarning && (
+          <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-sm text-yellow-800">
+            {language === 'zh' ? '归档历史报告失败：' : 'Previous report archive failed: '}{archiveWarning}
+          </div>
+        )}
+
+        {reportArchives.length > 0 && (
+          <div className="mt-4 pt-4 border-t border-slate-200">
+            <h4 className="text-sm font-medium text-slate-600 mb-2">
+              {language === 'zh' ? '历史报告' : 'Previous Reports'}
+            </h4>
+            <div className="space-y-1">
+              {reportArchives.map(archive => (
+                <button
+                  key={archive.filename}
+                  onClick={() => fetchAndDownload(`${API_BASE}/${archive.download_url}`, archive.filename)}
+                  className="block text-sm text-blue-600 hover:text-blue-800 hover:underline text-left cursor-pointer"
+                >
+                  v{archive.version} — {new Date(archive.created_at).toLocaleString()} ({(archive.size_bytes / 1024 / 1024).toFixed(1)} MB)
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Progress bar */}
         {generating && report && (

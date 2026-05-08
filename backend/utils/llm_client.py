@@ -447,11 +447,11 @@ class OpenAICompatibleClient:
             else:
                 raise
 
-    def _build_retry_kwargs(self, request_timeout: Optional[float] = None, max_retries_override: Optional[int] = None) -> Dict[str, Any]:
+    def _build_retry_kwargs(self, model: str, request_timeout: Optional[float] = None, max_retries_override: Optional[int] = None) -> Dict[str, Any]:
         """统一构建 retry_kwargs，保持各方法逻辑一致."""
         kwargs: Dict[str, Any] = {
             "agent_name": self.agent_name,
-            "model_name": self.model,
+            "model_name": model,
             "llm_server": self.base_url,
         }
         if request_timeout is not None:
@@ -657,7 +657,7 @@ class OpenAICompatibleClient:
         _make_request, _make_request_no_temp = self._build_request_pair(
             base_params, model, temperature, max_tokens, request_timeout=timeout
         )
-        retry_kwargs = self._build_retry_kwargs(request_timeout=timeout, max_retries_override=max_retries)
+        retry_kwargs = self._build_retry_kwargs(model, request_timeout=timeout, max_retries_override=max_retries)
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat request to {model}")
@@ -747,7 +747,7 @@ class OpenAICompatibleClient:
         _make_request, _make_request_no_temp = self._build_request_pair(
             base_params, model, temperature, max_tokens
         )
-        retry_kwargs = self._build_retry_kwargs()
+        retry_kwargs = self._build_retry_kwargs(model)
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat_with_tools request to {model}")
@@ -860,7 +860,7 @@ class OpenAICompatibleClient:
         )
 
         # Retry connection establishment (most common failure point)
-        stream_retry_kwargs = self._build_retry_kwargs(request_timeout=120.0)
+        stream_retry_kwargs = self._build_retry_kwargs(model, request_timeout=120.0)
         stream_retry_kwargs["max_retries"] = MAX_RETRIES  # stream needs explicit retries
 
         stream = await self._call_with_temp_fallback(
@@ -935,7 +935,7 @@ class OpenAICompatibleClient:
         _make_request, _make_request_no_temp = self._build_request_pair(
             base_params, model, temperature, max_tokens
         )
-        retry_kwargs = self._build_retry_kwargs(request_timeout=request_timeout)
+        retry_kwargs = self._build_retry_kwargs(model, request_timeout=request_timeout)
 
         try:
             logger.info(f"[{self.agent_name}] Sending vision request to {model} with {len(images)} images")
