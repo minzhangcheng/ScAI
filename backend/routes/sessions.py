@@ -25,7 +25,6 @@ from backend.state import (
     session_access_times, last_save_times,
 )
 from backend.utils.auth import require_session_ownership
-from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_session_id
 
 router = APIRouter(prefix="/api", tags=["sessions"])
@@ -68,9 +67,6 @@ def _strip_message_base64(msg_type: str, content) -> Any:
 async def start_session(request: Request, body: StartRequest):
     """Start a new analysis session"""
     user_id = getattr(request.state, "user_id", "")
-    cfg = await resolve_config_for_user(user_id)
-    if cfg is None:
-        raise HTTPException(status_code=400, detail="API configuration not set")
 
     import uuid
     session_id = str(uuid.uuid4())
@@ -175,10 +171,6 @@ async def ensure_session(session_id: str, request: Request, body: StartRequest):
     """Ensure session exists, create if not found"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    cfg = await resolve_config_for_user(user_id)
-
-    if cfg is None:
-        raise HTTPException(status_code=400, detail="API configuration not set")
 
     state = sessions.get(session_id)
     if state is not None:
@@ -255,9 +247,9 @@ async def create_group(session_id: str, request: Request, body: GroupCreateReque
 
     from backend.models.schemas import TreatmentGroup
     group = TreatmentGroup(
-        name=request.name,
-        description=request.description,
-        sample_count=request.sample_count,
+        name=body.name,
+        description=body.description,
+        sample_count=body.sample_count,
         order=len(state.treatment_groups)
     )
     state.treatment_groups.append(group)
@@ -265,7 +257,7 @@ async def create_group(session_id: str, request: Request, body: GroupCreateReque
 
     return APIResponse(
         success=True,
-        message=f"Treatment group created: {request.name}",
+        message=f"Treatment group created: {body.name}",
         data={"id": group.id, "name": group.name, "description": group.description,
               "sampleCount": group.sample_count, "order": group.order}
     )
@@ -277,10 +269,10 @@ async def update_session_info(session_id: str, request: Request, body: SessionUp
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    if request.name is not None:
-        state.name = request.name
-    if request.instruction is not None:
-        state.initial_instruction = request.instruction
+    if body.name is not None:
+        state.name = body.name
+    if body.instruction is not None:
+        state.initial_instruction = body.instruction
 
     await async_save_session(session_id, state)
     return APIResponse(
@@ -300,12 +292,12 @@ async def update_group(session_id: str, group_id: str, request: Request, body: G
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    if request.name is not None:
-        group.name = request.name
-    if request.description is not None:
-        group.description = request.description
-    if request.sample_count is not None:
-        if request.sample_count < group.sample_count:
+    if body.name is not None:
+        group.name = body.name
+    if body.description is not None:
+        group.description = body.description
+    if body.sample_count is not None:
+        if body.sample_count < group.sample_count:
             sample_numbers_in_use = (
                 [f.sample_number for f in state.data_files
                  if f.group_id == group_id and f.sample_number is not None] +
@@ -314,12 +306,12 @@ async def update_group(session_id: str, group_id: str, request: Request, body: G
             )
             if sample_numbers_in_use:
                 max_sample_in_use = max(sample_numbers_in_use)
-                if request.sample_count < max_sample_in_use:
+                if body.sample_count < max_sample_in_use:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Cannot reduce sample count below {max_sample_in_use}: data exists for sample {max_sample_in_use}"
                     )
-        group.sample_count = request.sample_count
+        group.sample_count = body.sample_count
 
     await async_save_session(session_id, state)
     return APIResponse(

@@ -15,7 +15,7 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
   const adminConfig = useConfig()
   const userConfig = useUserConfig()
 
-  const { language, pubmedEmail, setPubmedEmail } = useAppStore()
+  const { language, pubmedEmail, setPubmedEmail, setApiConfig } = useAppStore()
   const { t } = useTranslation(language)
   const [localError, setLocalError] = useState<string | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
@@ -59,8 +59,16 @@ export function ConfigPanel({ onClose, onSave, onReadMode, isAdmin = true }: Con
 
     try {
       if (isAdmin) {
+        setApiConfig({ apiKey: adminConfig.apiConfig.apiKey, llmBaseUrl: adminConfig.apiConfig.llmBaseUrl, proxyUrl: adminConfig.apiConfig.proxyUrl })
         await adminConfig.saveConfig()
       } else {
+        // Only update apiKey in store if user entered a real (non-masked) key.
+        // Masked keys contain "..." from the backend's _mask_api_key function.
+        const isRealKey = userApiKey && !userApiKey.includes('...')
+        setApiConfig({
+          ...(isRealKey ? { apiKey: userApiKey } : {}),
+          llmBaseUrl: userLlmBaseUrl || 'https://openrouter.ai/api/v1',
+        })
         await userConfig.saveUserConfig(userApiKey, userLlmBaseUrl, userProxyUrl)
       }
       onSave()

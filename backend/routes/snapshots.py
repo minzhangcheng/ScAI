@@ -21,6 +21,8 @@ from backend.state import (
     _run_tasks,
     state_lock as _state_lock,
     initializing_sessions as _initializing_sessions,
+    websockets,
+    get_session_lock,
 )
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
@@ -59,18 +61,24 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
     if not snapshot:
         raise HTTPException(status_code=404, detail="Snapshot not found")
 
-    # Stop running workflow if any
+    # Mark session as initializing + save workflow ref in one lock acquisition.
+    # Observer WS connections will wait until this flag is cleared.
     async with _state_lock:
+        _initializing_sessions.add(session_id)
         workflow = workflows.get(session_id)
-    if workflow:
-        if state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_ANNOTATION, TaskStatus.WAITING_INPUT):
-            state.status = TaskStatus.PAUSED
-            workflow.signal_continue()
-            workflow.signal_annotation_confirmed()
-        # Close DB connection before deleting checkpoint file (avoid SQLite lock)
-        await workflow.close()
 
-    # Cancel running workflow asyncio task (same pattern as stop endpoint)
+    # Stop running workflow if any.
+    # Do NOT signal_continue/annotation_confirmed — signaling would let the
+    # graph run nodes, each calling state_callback which writes old state.
+    if workflow:
+        try:
+            await workflow.close()
+        except Exception:
+            logger.exception(f"[{session_id}] Error closing workflow during restore")
+
+    # Cancel running task. state_callback (runs inside run_coro) completes
+    # before wait_for returns. CancelledError handler (runs in the task's
+    # exception handler) is guarded by the per-session lock below.
     task = _run_tasks.get(session_id)
     if task and not task.done():
         task.cancel()
@@ -78,6 +86,7 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
             await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
         except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
+    _run_tasks.pop(session_id, None)
 
     # Cancel monitor task
     from backend.state import _monitor_tasks
@@ -85,53 +94,35 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
     if monitor and not monitor.done():
         monitor.cancel()
 
-    # Clean up initializing flag and workflow reference
-    async with _state_lock:
-        _initializing_sessions.discard(session_id)
-        workflows.pop(session_id, None)
-
-    # Restore state
+    # Restore state from snapshot
     mgr = SnapshotManager(session_id)
     restored_state = await mgr.restore_snapshot(snapshot)
 
     await mgr.restore_notebook(snapshot)
-
     mgr.cleanup_workspace_files(snapshot.workspace_manifest)
-
-    # Reports will be regenerated from clean workspace
     mgr.cleanup_reports()
 
-    # Clear report path fields to prevent broken links after cleanup
     restored_state.exploration_report_html_path = None
     restored_state.detailed_report_html_path = None
     restored_state.annotation_report_html_path = None
 
-    # Delete stale LangGraph checkpoint so resume() won't continue at
-    # the old graph node position after restoring a different state
     await mgr.delete_checkpoint()
 
-    # Preserve snapshots list + set parent tracking
     restored_state.snapshots = state.snapshots
     restored_state.last_restored_snapshot_id = snapshot.id
 
     # Phase-aware status setting
     phase = snapshot.phase
     if phase == "pre_direction":
-        # User wants to re-choose direction — frontend shows exploration report
         restored_state.status = TaskStatus.WAITING_INPUT
     elif phase == "pre_annotation":
-        # User wants to re-annotate — frontend shows annotation dialog
         restored_state.status = TaskStatus.WAITING_ANNOTATION
     elif phase == "pre_round_wait":
-        # User wants to continue after round completion — frontend shows round wait dialog
-        # Will be set to PAUSED if no round_results available (defensive check below)
         restored_state.status = TaskStatus.WAITING_INPUT
     else:
-        # Other phases: set to PAUSED, WebSocket reconnect will start fresh run
         restored_state.status = TaskStatus.PAUSED
 
     # Synthesize HITL messages into realtime_messages so frontend can show dialogs
-    # (snapshots exclude realtime_messages to save space, but frontend needs them)
     if phase == "pre_annotation" and restored_state.annotation_state:
         ann = restored_state.annotation_state
         report_html_url = (
@@ -156,9 +147,6 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
             }
         ))
     elif phase == "pre_annotation" and not restored_state.annotation_state:
-        # Backward compat: old snapshots taken before the fix lack annotation_state.
-        # Fall back to PAUSED so the workflow re-runs the annotation step from scratch
-        # instead of hanging in HITL-hold with no dialog data.
         logger.warning(
             f"[{session_id}] pre_annotation snapshot lacks annotation_state "
             f"(legacy snapshot). Falling back to PAUSED status."
@@ -188,12 +176,8 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
         ))
 
     elif phase == "pre_round_wait":
-        # Synthesize round_summary and status messages for frontend dialog
-        # Note: status already set to WAITING_INPUT at top; PAUSED if no round_results
         last_round = restored_state.round_results[-1] if restored_state.round_results else None
         if not last_round:
-            # Defensive: no round results available, fallback to PAUSED
-            # Workflow will re-run the round completion step from scratch
             logger.warning(
                 f"[{session_id}] pre_round_wait snapshot has no round_results. "
                 f"Falling back to PAUSED status."
@@ -220,7 +204,6 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
                     "status": "waiting_input"
                 }
             ))
-            # Add status message
             max_rounds = restored_state.max_rounds if restored_state.max_rounds > 0 else 4
             is_last_round = last_round.round_number >= max_rounds
             if is_last_round:
@@ -238,15 +221,40 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
         restored_state.annotation_state.confirmed = False
         restored_state.annotation_state.pending = True
 
-    # Replace in-memory and on-disk state
-    await _update_session_cache(session_id, restored_state)
-    await async_save_session(session_id, restored_state, force=True)
+    # ---- Synchronization point ----
+    # Pop workflows AND write cache AND write disk inside the per-session lock.
+    # This serializes against state_callback and the CancelledError/Exception
+    # handlers in websocket_endpoint, which acquire the same lock before writing.
+    # Lock ordering: sess_lock → state_lock (never the reverse).
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        async with _state_lock:
+            workflows.pop(session_id, None)
+
+        await _update_session_cache(session_id, restored_state)
+        await async_save_session(session_id, restored_state, force=True)
 
     logger.info(
         f"[{session_id}] Snapshot restored: {snapshot.name} (Round {snapshot.round_number}), "
         f"phase={phase}, status={restored_state.status.value}, "
         f"current_round={restored_state.current_round}"
     )
+
+    # Clear the initializing flag FIRST so the reconnecting WS can fall
+    # through to the HITL-hold path (websockets.py:215) with the restored
+    # state. If we close the WS before clearing the flag, a fast reconnect
+    # may arrive while initializing_sessions still holds the session, enter
+    # the observer path (is_restoring=True), and simply return without ever
+    # reaching HITL-hold.
+    async with _state_lock:
+        _initializing_sessions.discard(session_id)
+
+    ws = websockets.get(session_id)
+    if ws:
+        try:
+            await ws.close(code=4000, reason="snapshot_restore")
+        except Exception:
+            logger.debug(f"[{session_id}] WebSocket close during restore", exc_info=True)
 
     return APIResponse(
         success=True,

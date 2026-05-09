@@ -200,6 +200,8 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       setSessionName(DEFAULT_PROJECT_NAME)
     } catch (e) {
       console.error('Failed to create session:', e)
+      const msg = e instanceof Error ? e.message : String(e)
+      alert(msg)
     }
   }
 

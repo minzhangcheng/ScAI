@@ -4198,6 +4198,13 @@ Return ONLY the JSON array, nothing else."""
             logger.error(f"[{self.session_id}] No checkpoint and no analysis_state for {thread_id}")
             raise ValueError(f"No saved state found for thread {thread_id}")
 
+        if analysis_state.status in (TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION):
+            logger.info(
+                f"[{self.session_id}] Status is {analysis_state.status.value}, "
+                f"deferring to HITL-hold path"
+            )
+            return analysis_state
+
         logger.info(
             f"[{self.session_id}] No checkpoint found, starting fresh run "
             f"(current_round={analysis_state.current_round})"

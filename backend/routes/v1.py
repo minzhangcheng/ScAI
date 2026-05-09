@@ -116,7 +116,7 @@ async def start_analysis(session_id: str, request: Request):
         raise HTTPException(status_code=409, detail=f"Cannot start from status {state.status.value}")
 
     if config is None:
-        raise HTTPException(status_code=400, detail="API configuration not set")
+        raise HTTPException(status_code=400, detail="No API key configured. Please configure your LLM API key in Settings before starting analysis.")
 
     missing = [df.filename for df in state.data_files if not df.file_path]
     if missing:

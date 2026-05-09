@@ -13,6 +13,7 @@ from backend.state import (
     _run_tasks, state_lock, initializing_sessions,
     report_websockets, detailed_reports,
     sessions as _sessions,
+    get_session_lock,
 )
 from backend.utils.auth import ws_authenticate_and_load
 from backend.utils.config_resolver import resolve_config_for_user
@@ -51,7 +52,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     config = await resolve_config_for_user(user_id)
 
     if config is None:
-        await websocket.send_json({"error": "API configuration not set"})
+        await websocket.send_json({"error": "No API key configured. Please configure your LLM API key in Settings before starting analysis."})
         await websocket.close()
         return
 
@@ -71,6 +72,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     if workflow_running or workflow_initializing:
         logger.info(f"Workflow already running for session {session_id}, reconnecting WebSocket...")
 
+        # is_restoring is True ONLY when initializing_sessions has the session
+        # but workflows does NOT. This happens during snapshot restore, which
+        # adds to initializing_sessions before popping workflows. In this case
+        # there is no running workflow to observe — just wait for restore to
+        # finish. Don't send stale status/history to the frontend.
+        is_restoring = workflow_initializing and not workflow_running
+
         # Cancel old monitor task to prevent zombie background tasks
         old_monitor = _monitor_tasks.pop(session_id, None)
         if old_monitor and not old_monitor.done():
@@ -81,38 +89,38 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         async with state_lock:
             websockets[session_id] = websocket
 
-        # Send current status
-        try:
-            await websocket.send_json({
-                "type": "status",
-                "agent": None,
-                "content": f"Analysis in progress (Round {state.current_round})...",
-                "timestamp": datetime.now().isoformat()
-            })
-
-        except Exception as e:
-            logger.exception("Failed to send status to observer")
-
-        # Send message history from state (same approach as completed/HITL restore)
-        if state.realtime_messages:
-            msg_data_list = _serialize_realtime_messages(state.realtime_messages)
-            logger.info(f"Sending {len(msg_data_list)} messages from history to observer")
+        if not is_restoring:
+            # Only send status/history if a workflow is actually running
             try:
                 await websocket.send_json({
-                    "type": "message_history",
-                    "content": {
-                        "messages": msg_data_list,
-                        "count": len(msg_data_list)
-                    },
+                    "type": "status",
+                    "agent": None,
+                    "content": f"Analysis in progress (Round {state.current_round})...",
                     "timestamp": datetime.now().isoformat()
                 })
-            except Exception as e:
-                logger.warning(f"Failed to send history to observer: {e}")
 
-        # Wait for existing workflow to complete or for disconnect
-        # websockets[session_id] was updated above; message_callback will auto-detect the new connection
+            except Exception as e:
+                logger.exception("Failed to send status to observer")
+
+            # Send message history from state (same approach as completed/HITL restore)
+            if state.realtime_messages:
+                msg_data_list = _serialize_realtime_messages(state.realtime_messages)
+                logger.info(f"Sending {len(msg_data_list)} messages from history to observer")
+                try:
+                    await websocket.send_json({
+                        "type": "message_history",
+                        "content": {
+                            "messages": msg_data_list,
+                            "count": len(msg_data_list)
+                        },
+                        "timestamp": datetime.now().isoformat()
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to send history to observer: {e}")
+
+        # Wait for workflow to complete AND restore to finish
         try:
-            while session_id in workflows:
+            while session_id in workflows or session_id in initializing_sessions:
                 # Keep connection alive by waiting for messages
                 try:
                     await asyncio.wait_for(websocket.receive_text(), timeout=WS_RECEIVE_TIMEOUT)
@@ -338,10 +346,30 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         logger.exception(f"[{session_id}] Failed to send initial message")
 
     # State callback to save after each round
+    _sess_lock = get_session_lock(session_id)
+
+    async def _write_state_if_current(state: AnalysisState, *, set_paused=False, set_failed=False) -> bool:
+        """Write state to cache and disk only if this workflow is still current.
+        
+        Returns True if state was written, False if workflow was superseded.
+        If set_paused/set_failed is True, applies the status change inside the lock
+        before writing — ensuring no write happens if superseded.
+        """
+        async with _sess_lock:
+            if workflows.get(session_id) is not workflow:
+                logger.info(f"[{session_id}] Workflow superseded, skipping stale write")
+                return False
+            if set_paused and state.status == TaskStatus.RUNNING:
+                state.status = TaskStatus.PAUSED
+            if set_failed:
+                state.status = TaskStatus.FAILED
+            await _update_session_cache(session_id, state)
+            await _async_save_session(session_id, state)
+            return True
+
     async def state_callback(state: AnalysisState):
-        await _update_session_cache(session_id, state)
-        # Use thread pool for disk I/O to avoid blocking event loop
-        await _async_save_session(session_id, state)
+        if not await _write_state_if_current(state):
+            return
 
     # Import workflow here to avoid circular imports
     from backend.workflow import SingleCellAnalysisWorkflow
@@ -432,7 +460,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             logger.info(f"[{session_id}] Workflow task was cancelled")
             current_state = _sessions.get(session_id, state)
             if current_state.status == TaskStatus.GENERATING_REPORT:
-                # Stop-and-summarize: generate report from current results
+                # Stop-and-summarize (not hit during restore; only normal stop)
                 try:
                     logger.info(f"[{session_id}] Starting report generation after stop-and-summarize")
                     report_state = await workflow.generate_report(current_state, session_id)
@@ -454,20 +482,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     await _async_save_session(session_id, current_state)
                     final_state = current_state
             else:
-                # Immediate stop or unknown state - save as PAUSED
-                if current_state.status == TaskStatus.RUNNING:
-                    current_state.status = TaskStatus.PAUSED
-                await _update_session_cache(session_id, current_state)
-                await _async_save_session(session_id, current_state)
-                final_state = current_state
+                if await _write_state_if_current(current_state, set_paused=True):
+                    final_state = current_state
+                else:
+                    final_state = _sessions.get(session_id, state)
         finally:
             _run_tasks.pop(session_id, None)
 
-        await _update_session_cache(session_id, final_state)
-        logger.info(f"Workflow completed for session {session_id}")
-
-        # Save completed state to disk (use thread pool for I/O)
-        await _async_save_session(session_id, final_state)
+        # Second write after inner finally — guarded by per-session lock
+        if await _write_state_if_current(final_state):
+            logger.info(f"Workflow completed for session {session_id}")
 
         # Send completion message (safely) - only if actually completed
         if final_state.status == TaskStatus.COMPLETED:
@@ -489,11 +513,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             "type": "error",
             "content": str(e)
         })
-        # Get the latest state to avoid race condition
         current_state = _sessions.get(session_id, state)
-        current_state.status = TaskStatus.FAILED
-        await _update_session_cache(session_id, current_state)
-        await _async_save_session(session_id, current_state)
+        await _write_state_if_current(current_state, set_failed=True)
 
     finally:
         # Clean up task tracking
@@ -516,7 +537,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         async with state_lock:
             if session_id in workflows:
                 del workflows[session_id]
-            if session_id in websockets:
+            if websockets.get(session_id) is websocket:
                 del websockets[session_id]
             # Remove from initializing set
             initializing_sessions.discard(session_id)

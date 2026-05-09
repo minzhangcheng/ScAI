@@ -31,7 +31,7 @@ import {
 function App() {
   const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, authUser } = useAppStore()
   const { checkStatus } = useConfig()
-  const { getUserConfigStatus } = useUserConfig()
+  const { getUserConfigStatus, getUserConfig } = useUserConfig()
   const { connect, disconnect } = useWebSocket()
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showConfig, setShowConfig] = useState(false)
@@ -79,21 +79,36 @@ function App() {
     }
   }, [isResizing, handleMouseMove, handleMouseUp])
 
-  // Check API config status based on user role
+  // Check API config status based on user role; sync config to store
   useEffect(() => {
     const run = async () => {
+      const { apiConfig, setApiConfig } = useAppStore.getState()
       if (authUser?.role === 'admin') {
         const s = await checkStatus()
         if (!s.configured) setShowConfig(true)
         setConfigured(s.configured)
+        // Sync admin config from store to backend if store has values
+        if (s.configured && !apiConfig.apiKey) {
+          // Admin has config on server but store is empty (e.g. cleared cache)
+          // User will be prompted to re-enter key when needed
+        }
       } else if (authUser) {
         const s = await getUserConfigStatus()
         if (!s.configured) setShowConfig(true)
         setConfigured(s.configured)
+        // Sync non-admin user's llmBaseUrl from backend if store has defaults
+        if (s.configured && !apiConfig.apiKey) {
+          try {
+            const uc = await getUserConfig()
+            if (uc.llm_base_url) {
+              setApiConfig({ llmBaseUrl: uc.llm_base_url })
+            }
+          } catch { /* ignore — store will use defaults */ }
+        }
       }
     }
     run()
-  }, [authUser, checkStatus, getUserConfigStatus])
+  }, [authUser, checkStatus, getUserConfigStatus, getUserConfig])
 
   // Register the showConfigPanel callback for other components (e.g., AnalysisPanel)
   useEffect(() => {

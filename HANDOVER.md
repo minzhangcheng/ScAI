@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.23.1 · **Last updated**: 2026-05-08
+**Version**: 0.23.2 · **Last updated**: 2026-05-08
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,8 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.23.x — report enhancements, chat sections, round tracking (2026-05-08 → 2026-05-08)**
+
+- `0.23.2` — **Snapshot restore synchronization & config sync**: Refactored snapshot restore with per-session locking to prevent race conditions; `_write_state_if_current()` helper prevents stale writes from superseded workflows; improved error message "No API key configured..."; removed unnecessary API key check from session creation endpoints (`start_session`, `ensure_session`); WebSocket observer skips sending stale status during snapshot restore; workflow defers to HITL-hold path when status is WAITING_INPUT/WAITING_ANNOTATION; frontend shows alert on session creation failure; frontend config sync: App startup now syncs non-admin user's llmBaseUrl from backend to store; ConfigPanel saves both user LLM config to backend and updates store for in-session use.
 
 - `0.23.1` — **Report enhancements, chat sections, round tracking**: Added report generation concurrency guard (409 on duplicate requests); automatic report archiving before regeneration (keeps last 5 versions); archive listing/download API endpoints; `round_number` field added to `AnalysisStep` schema for round tracking; supervisor log restored from report.json now groups by round (`all_rounds_log` vs current `supervision_log`); new chat sections generation from chat messages (`chat_sections.py`); config resolver now allows per-user config without global config; new `/user/config/validate-saved` endpoint for validating saved credentials; frontend validation flow: admin validates with frontend config, non-admin validates saved config; validation on report generation (check API key before start); session cleanup clears report generation pending flag.
 

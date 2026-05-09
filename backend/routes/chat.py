@@ -872,7 +872,7 @@ async def chat_with_pi(
     config = await resolve_config_for_user(user_id)
 
     if config is None:
-        raise HTTPException(status_code=400, detail="API configuration not set")
+        raise HTTPException(status_code=400, detail="No API key configured. Please configure your LLM API key in Settings before sending a message.")
 
     # Parse per-file metadata arrays
     def _parse_json_list(raw: str) -> list:

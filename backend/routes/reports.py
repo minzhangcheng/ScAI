@@ -275,7 +275,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
             try:
                 await report_websockets[session_id].send_json({
                     "type": "error",
-                    "message": "API configuration not set"
+                    "message": "No API key configured. Please configure your LLM API key in Settings before generating a report."
                 })
             except Exception as e:
                 logger.warning(f"Failed to send error to WebSocket for session {session_id}: {e}", exc_info=True)

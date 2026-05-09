@@ -41,7 +41,7 @@ async def _headless_workflow_runner(session_id: str):
         if cfg is None:
             logger.error("No global config available for session %s; aborting workflow", session_id)
             state.status = TaskStatus.FAILED
-            state.error = "API configuration not set"
+            state.error = "No API key configured. Please configure your LLM API key in Settings."
             await async_save_session(session_id, state)
             return
 
