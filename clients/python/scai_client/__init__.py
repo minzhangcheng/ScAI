@@ -16,6 +16,9 @@ Usage:
 
     # Import a previously exported archive:
     session_id = client.import_session("session-export.tar.gz")
+
+    # Export an existing session by id:
+    path = client.export_session("<session_id>")
     job = client.get_job(session_id)
 """
 from .client import Client

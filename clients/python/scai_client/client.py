@@ -108,12 +108,20 @@ class Client:
         """List all analysis sessions belonging to the authenticated user.
 
         Returns:
-            A list of session dicts. Each dict contains at least:
-            ``id``, ``name``, ``status``, ``current_round``, ``created_at``,
-            ``updated_at``. ``status`` is one of TaskStatus values such as
-            ``"pending"``, ``"running"``, ``"waiting_input"``,
-            ``"waiting_annotation"``, ``"generating_report"``, ``"completed"``,
-            ``"failed"``, ``"paused"``.
+            A list of session dicts. Each dict contains:
+
+            * ``id`` (str) — unique session identifier
+            * ``name`` (str) — session title / display name
+            * ``status`` (str) — TaskStatus value: ``"pending"``, ``"running"``,
+              ``"waiting_input"``, ``"waiting_annotation"``,
+              ``"generating_report"``, ``"completed"``, ``"failed"``, ``"paused"``
+            * ``current_round`` (int) — current analysis round
+            * ``created_at`` (str) — ISO 8601 creation timestamp
+            * ``updated_at`` (str) — ISO 8601 last-modification timestamp
+
+        Note:
+            The session model has no separate ``description`` field;
+            ``name`` serves as the title.
         """
         r = self._http.get("/api/sessions")
         if r.status_code == 401:
@@ -180,6 +188,93 @@ class Client:
             return import_id
 
         return self._wait_for_import(import_id, poll_interval, timeout)
+
+    def export_session(
+        self,
+        session_id: str,
+        output_path: str | Path | None = None,
+        *,
+        timeout: float | None = None,
+        chunk_size: int = 1024 * 1024,
+    ) -> Path:
+        """Export a session as a tar.gz archive (streaming).
+
+        Calls ``GET /api/session/{session_id}/export``. The server builds the
+        archive synchronously before streaming the first byte, so large
+        sessions may need ``timeout`` raised above the client's default.
+        Bytes are written to ``{output_path}.partial`` first and atomically
+        renamed on success — a network failure leaves no half-written file
+        at ``output_path``.
+
+        Args:
+            session_id: The session ID to export.
+            output_path: Destination file. If ``None``, writes
+                ``{session_id[:8]}_export.tar.gz`` in the current directory.
+                If a directory is given, the file is saved inside it with
+                that default name.
+            timeout: Per-request timeout in seconds. ``None`` disables the
+                read timeout for this call (recommended for large archives).
+            chunk_size: Bytes per ``iter_bytes`` chunk.
+
+        Returns:
+            Resolved ``Path`` of the downloaded archive.
+
+        Raises:
+            AuthError: HTTP 401.
+            ScaiError: HTTP 403 (session not owned by caller) or HTTP 404
+                (session not found).
+            httpx.HTTPStatusError: Other HTTP errors.
+        """
+        default_name = f"{session_id[:8]}_export.tar.gz"
+        if output_path is None:
+            output_path = Path.cwd() / default_name
+        else:
+            output_path = Path(output_path)
+            if output_path.is_dir():
+                output_path = output_path / default_name
+
+        partial = output_path.with_name(output_path.name + ".partial")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if timeout is None:
+            # Disable read/write/pool timeouts for large streaming downloads,
+            # but preserve the client-level connect timeout.
+            base = self._http.timeout
+            req_timeout = httpx.Timeout(
+                connect=base.connect,
+                read=None,
+                write=None,
+                pool=None,
+            )
+        else:
+            req_timeout = httpx.Timeout(timeout)
+
+        try:
+            with self._http.stream(
+                "GET",
+                f"/api/session/{session_id}/export",
+                timeout=req_timeout,
+            ) as r:
+                if r.status_code == 401:
+                    raise AuthError("Authentication failed")
+                if r.status_code == 403:
+                    raise ScaiError(
+                        f"Forbidden: session not owned by caller: {session_id}"
+                    )
+                if r.status_code == 404:
+                    raise ScaiError(f"Session not found: {session_id}")
+                r.raise_for_status()
+                with open(partial, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=chunk_size):
+                        f.write(chunk)
+            partial.replace(output_path)
+        except BaseException:
+            try:
+                partial.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        return output_path
 
     def _wait_for_import(
         self,
