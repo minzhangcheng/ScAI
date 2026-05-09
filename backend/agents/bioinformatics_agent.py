@@ -1256,14 +1256,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                     temperature=self.config.temperature,  # Use configured temperature
                     max_tokens=32768
                 )
-            except UpstreamExhaustedError as e:
-                logger.error(f"[Bioinformatics] Upstream exhausted: {e}")
-                await self._notify(
-                    "status",
-                    "LLM upstream is currently unavailable. The session has been "
-                    "checkpointed and can be resumed when service returns."
-                )
-                break
+            except UpstreamExhaustedError:
+                logger.error(f"[Bioinformatics] Upstream exhausted, propagating to @with_retry")
+                raise
             except Exception as e:
                 llm_error = str(e)
                 await self._notify("error", f"LLM call failed: {llm_error}")

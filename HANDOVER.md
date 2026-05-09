@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.23.3 · **Last updated**: 2026-05-08
+**Version**: 0.23.4 · **Last updated**: 2026-05-08
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,8 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.23.x — report enhancements, chat sections, round tracking (2026-05-08 → 2026-05-08)**
+
+- `0.23.4` — **Bioinformatics upstream error propagation**: Fixed `UpstreamExhaustedError` from bioinformatics agent not propagating to `@with_retry` decorator; bioinformatics agent now raises instead of catching; workflow caller no longer catches and returns early; ensures LlmTimeoutDialog triggers for upstream exhaustion in bioinformatics node; comprehensive regression tests added.
 
 - `0.23.3` — **Python client session export**: Added `export_session()` method to Python client for exporting sessions as tar.gz archives with streaming download, atomic write (`.partial` + rename), configurable timeout and chunk size.
 

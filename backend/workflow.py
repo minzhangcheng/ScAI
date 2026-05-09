@@ -2514,22 +2514,13 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         if self.supervisor_agent:
             self.supervisor_agent.reset_for_round()
 
-        try:
-            result = await self.bioinformatics_agent.run_autonomous_analysis(
-                analysis_state,
-                instruction,
-                max_steps=200,  # Allow sufficient steps for full analysis + figure review loops
-                figure_review_callback=self._figure_review_callback,
-                supervisor_callback=self._supervisor_callback,
-            )
-        except UpstreamExhaustedError as e:
-            logger.error(f"[{self.session_id}] Bioinformatics analysis halted: upstream exhausted: {e}")
-            await self._send_message(
-                "session_halted",
-                "LLM upstream unavailable. Session checkpointed; you can resume from the dashboard.",
-                AgentType.BIOINFORMATICS,
-            )
-            return
+        result = await self.bioinformatics_agent.run_autonomous_analysis(
+            analysis_state,
+            instruction,
+            max_steps=200,  # Allow sufficient steps for full analysis + figure review loops
+            figure_review_callback=self._figure_review_callback,
+            supervisor_callback=self._supervisor_callback,
+        )
 
         # Collect supervisor stats
         if self.supervisor_agent:

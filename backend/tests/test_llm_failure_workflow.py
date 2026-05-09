@@ -3,11 +3,11 @@ generation-based idempotency, and UpstreamExhaustedError context fields."""
 
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from backend.utils.llm_client import UpstreamExhaustedError
-from backend.constants import LlmFailureAction, WaitInputReason, StateSyncChangeType
-from backend.models.schemas import AnalysisState, TaskStatus
+from backend.constants import LlmFailureAction, StateSyncChangeType
+from backend.models.schemas import AnalysisState
 
 
 async def _signal_action_once(mock_self, node_name, action):
@@ -295,3 +295,158 @@ class TestUpstreamExhaustedError:
         error = UpstreamExhaustedError("timeout occurred")
         assert str(error) == "timeout occurred"
         assert error.agent_name == "unknown"
+
+
+# ── Test 4: Bioinformatics _bioinformatics_analysis propagation ────
+
+
+class TestBioinformaticsNodeUpstreamPropagation:
+    """Verify that UpstreamExhaustedError from bioinformatics_agent
+    propagates through _bioinformatics_analysis (the @with_retry-decorated
+    workflow node) to trigger LlmTimeoutDialog.
+
+    This is a regression test: if someone re-adds 'except
+    UpstreamExhaustedError: break' inside the agent loop or 'except
+    UpstreamExhaustedError: return' in the workflow caller, these
+    tests will fail because the error won't reach @with_retry.
+    """
+
+    @pytest.fixture
+    def mock_workflow(self):
+        """Create a mock workflow with the real _bioinformatics_analysis method bound."""
+        from backend.workflow import SingleCellAnalysisWorkflow
+
+        mock = MagicMock(spec=SingleCellAnalysisWorkflow)
+        mock.session_id = "test-session"
+        mock._llm_failure_lock = asyncio.Lock()
+        mock._llm_failure_events = {}
+        mock._llm_failure_actions = {}
+        mock._llm_failure_generation = 0
+        mock._send_message = AsyncMock()
+        mock._send_state_sync = AsyncMock()
+        mock._set_status = MagicMock()
+        mock._settings_provider = MagicMock()
+        mock._settings_provider._client_cache = {}
+        mock._collect_current_round_results = MagicMock(return_value={})
+        mock._build_previous_findings_context = MagicMock(return_value="")
+        mock._build_code_history_summary = MagicMock(return_value="")
+        mock._figure_review_callback = None
+        mock._supervisor_callback = None
+        mock.supervisor_agent = None
+
+        # Mock the bioinformatics agent so run_autonomous_analysis raises UpstreamExhaustedError
+        mock.bioinformatics_agent = MagicMock()
+        mock.bioinformatics_agent.run_autonomous_analysis = AsyncMock(
+            side_effect=UpstreamExhaustedError(
+                "No available channel for model claude-sonnet-4.6",
+                agent_name="bioinformatics",
+                model="claude-sonnet-4.6",
+                llm_server="https://api.n1n.ai/v1",
+            )
+        )
+
+        # Mock pi_agent for the PI planning section of _bioinformatics_analysis
+        mock.pi_agent = MagicMock()
+        mock.pi_agent.plan_agent_tasks = AsyncMock(return_value=["Perform standard scRNA-seq analysis"])
+
+        # Bind the real method
+        mock._bioinformatics_analysis = SingleCellAnalysisWorkflow._bioinformatics_analysis.__get__(mock, type(mock))
+
+        return mock
+
+    @pytest.fixture
+    def bioinfo_state(self):
+        """Create a workflow state that will reach the run_autonomous_analysis call."""
+        from backend.models.schemas import DataFile
+        analysis_state = AnalysisState(user_id="test-user")
+        # has_sequencing_data() checks data_files (not data_sections);
+        # without a sequencing DataFile, _bioinformatics_analysis returns
+        # early and never calls run_autonomous_analysis.
+        analysis_state.data_files = [
+            DataFile(
+                filename="test.h5ad",
+                file_path="/tmp/test.h5ad",
+                section="sequencing",
+                data_type="scrnaseq",
+            )
+        ]
+        analysis_state.current_round = 1
+        return {
+            "analysis_state": analysis_state,
+            "skip_nodes": [],
+            "pi_instructions": {
+                "bioinformatics_tasks": ["Perform standard scRNA-seq analysis"],
+                "overview": "Test analysis",
+            },
+            "human_guidance": "",
+            "pathology_result": None,
+            "biochemistry_result": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_from_agent_reaches_with_retry(self, mock_workflow, bioinfo_state):
+        # Signal SKIP so the test doesn't hang on event.wait()
+        task = asyncio.create_task(
+            _signal_action_once(mock_workflow, "bioinformatics_analysis", LlmFailureAction.SKIP.value)
+        )
+        result = await mock_workflow._bioinformatics_analysis(bioinfo_state)
+        await task
+
+        # If the error was swallowed (old behavior), @with_retry would NOT
+        # have been triggered and these assertions would fail:
+        # 1. generation incremented => @with_retry handled the error
+        assert mock_workflow._llm_failure_generation >= 1
+        # 2. _send_state_sync called with LLM_FAILURE => popup triggered
+        # Note: decorator sends LLM_FAILURE first (line 164), then LLM_RETRY
+        # after the user action is processed (line 180). call_args references
+        # the last call, so use assert_any_call to check LLM_FAILURE.
+        mock_workflow._send_state_sync.assert_any_call(
+            bioinfo_state["analysis_state"], StateSyncChangeType.LLM_FAILURE.value
+        )
+        # 3. Result has failed_node => @with_retry returned proper state dict
+        assert result.get("failed_node") == "bioinformatics_analysis"
+        assert result.get("bioinformatics_result", {}).get("status") == "failed"
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_populates_llm_failure_info(self, mock_workflow, bioinfo_state):
+        captured_info = {}
+        original_sync = mock_workflow._send_state_sync
+
+        async def capture_and_forward(*args, **kwargs):
+            info = bioinfo_state["analysis_state"].llm_failure_info
+            if info:
+                captured_info.update(info)
+            await original_sync(*args, **kwargs)
+
+        mock_workflow._send_state_sync = capture_and_forward
+
+        task = asyncio.create_task(
+            _signal_action_once(mock_workflow, "bioinformatics_analysis", LlmFailureAction.SKIP.value)
+        )
+        await mock_workflow._bioinformatics_analysis(bioinfo_state)
+        await task
+
+        # llm_failure_info must contain the UpstreamExhaustedError context
+        assert captured_info.get("agent") == "bioinformatics"
+        assert captured_info.get("model") == "claude-sonnet-4.6"
+        assert captured_info.get("llm_server") == "https://api.n1n.ai/v1"
+        assert captured_info.get("node_name") == "bioinformatics_analysis"
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_not_swallowed_by_agent_break(self, mock_workflow, bioinfo_state):
+        """Regression guard: if run_autonomous_analysis raises UpstreamExhaustedError,
+        it must NOT be silently caught and turned into a normal result (the old
+        'except ... break' pattern that returned status='max_steps_reached')."""
+        task = asyncio.create_task(
+            _signal_action_once(mock_workflow, "bioinformatics_analysis", LlmFailureAction.SKIP.value)
+        )
+        result = await mock_workflow._bioinformatics_analysis(bioinfo_state)
+        await task
+
+        # Old bug: agent break => status='max_steps_reached', no failed_node
+        # Fix: error propagates => @with_retry sets failed_node
+        assert result.get("failed_node") == "bioinformatics_analysis"
+        # Must NOT be a "normal" result like max_steps_reached
+        bioinfo_result = result.get("bioinformatics_result", {})
+        assert bioinfo_result.get("status") == "failed"
+        assert bioinfo_result.get("status") != "max_steps_reached"
