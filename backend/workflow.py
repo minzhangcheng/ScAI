@@ -3,6 +3,7 @@ LangGraph workflow for multi-agent single-cell analysis
 """
 import asyncio
 import logging
+import os
 import traceback
 import uuid
 from functools import wraps
@@ -127,103 +128,24 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                     return result
 
                 except UpstreamExhaustedError as e:
-                    async with self._llm_failure_lock:
-                        last_error = e
-                        logger.error(
-                            f"[{self.session_id}] Node {node_name} LLM upstream exhausted "
-                            f"(node attempt {attempt + 1}/{max_retries + 1}): "
-                            f"agent={e.agent_name} model={e.model} server={e.llm_server}"
-                        )
-                        await self._send_message(
-                            "error",
-                            f"Node {node_name} LLM call failed: {str(e)}",
-                            AgentType.PI
-                        )
-
-                        analysis_state = state["analysis_state"]
-
-                        self._llm_failure_generation += 1
-                        gen = self._llm_failure_generation
-
-                        if node_name not in self._llm_failure_events:
-                            self._llm_failure_events[node_name] = asyncio.Event()
-                        event = self._llm_failure_events[node_name]
-                        event.clear()
-
-                        analysis_state.wait_input_reason = WaitInputReason.LLM_FAILURE.value
-                        analysis_state.llm_failure_info = {
-                            "agent": e.agent_name,
-                            "model": e.model,
-                            "llm_server": e.llm_server,
-                            "error": str(e),
-                            "node_name": node_name,
-                            "generation": gen,
-                        }
-                        self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
-
-                        await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_FAILURE.value)
-
-                        logger.info(
-                            f"[{self.session_id}] Waiting for user intervention "
-                            f"on LLM failure (node={node_name}, generation={gen})"
-                        )
-
-                    # CRITICAL: Release the Lock before awaiting the Event
-                    # so the API endpoint can acquire it to set the Event
-                    try:
-                        await event.wait()
-
-                        action = self._llm_failure_actions.pop(node_name, None)
-                        analysis_state.wait_input_reason = None
-                        analysis_state.llm_failure_info = None
-                        self._set_status(analysis_state, TaskStatus.RUNNING)
-                        await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_RETRY.value)
-                    except asyncio.CancelledError:
-                        # Only clear LLM fields — do NOT touch status,
-                        # which is set to PAUSED by stop_analysis.
-                        analysis_state.wait_input_reason = None
-                        analysis_state.llm_failure_info = None
-                        raise
-                    finally:
-                        self._llm_failure_events.pop(node_name, None)
-
-                    if action == LlmFailureAction.RETRY.value:
-                        # User may have changed model/server config — invalidate cache
-                        if self._settings_provider is not None:
-                            self._settings_provider._client_cache.clear()
-                            logger.info(f"[{self.session_id}] Cleared agent client cache for retry of node {node_name}")
-
+                    last_error = e
+                    action = await self._wait_for_llm_intervention(
+                        e, node_name, state["analysis_state"]
+                    )
+                    if action == LlmFailureAction.RETRY:
                         attempt = 0
                         continue  # re-enter while loop
-
-                    elif action == LlmFailureAction.SKIP.value:
-                        result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
-                        return {
-                            **state,
-                            "failed_node": node_name,
-                            result_key: {
-                                "error": str(last_error),
-                                "findings": [],
-                                "status": "failed"
-                            }
+                    # skip
+                    result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
+                    return {
+                        **state,
+                        "failed_node": node_name,
+                        result_key: {
+                            "error": str(last_error),
+                            "findings": [],
+                            "status": "failed"
                         }
-
-                    else:
-                        # Unknown or None action — defensive: treat as skip
-                        logger.warning(
-                            f"[{self.session_id}] Unknown LLM failure action "
-                            f"'{action}' for node '{node_name}', defaulting to skip"
-                        )
-                        result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
-                        return {
-                            **state,
-                            "failed_node": node_name,
-                            result_key: {
-                                "error": str(last_error),
-                                "findings": [],
-                                "status": "failed"
-                            }
-                        }
+                    }
 
                 except Exception as e:
                     last_error = e
@@ -348,6 +270,76 @@ class SingleCellAnalysisWorkflow:
 
         # Settings provider — set in initialize(), provides hot-reloadable settings
         self._settings_provider: Optional[AgentSettingsProvider] = None
+
+    async def _wait_for_llm_intervention(
+        self,
+        error: UpstreamExhaustedError,
+        node_name: str,
+        analysis_state: AnalysisState,
+    ) -> LlmFailureAction:
+        """Block workflow, show LlmTimeoutDialog, wait for user action.
+
+        Returns:
+            LlmFailureAction.RETRY — user clicked Retry (caller should clear caches and retry)
+            LlmFailureAction.SKIP  — user clicked Skip or Terminate
+        """
+        async with self._llm_failure_lock:
+            logger.error(
+                f"[{self.session_id}] Node {node_name} LLM upstream exhausted: "
+                f"agent={error.agent_name} model={error.model} server={error.llm_server}"
+            )
+            await self._send_message(
+                "error",
+                f"Node {node_name} LLM call failed: {str(error)}",
+                AgentType.PI,
+            )
+
+            self._llm_failure_generation += 1
+            gen = self._llm_failure_generation
+
+            if node_name not in self._llm_failure_events:
+                self._llm_failure_events[node_name] = asyncio.Event()
+            event = self._llm_failure_events[node_name]
+            event.clear()
+
+            analysis_state.wait_input_reason = WaitInputReason.LLM_FAILURE.value
+            analysis_state.llm_failure_info = {
+                "agent": error.agent_name,
+                "model": error.model,
+                "llm_server": error.llm_server,
+                "error": str(error),
+                "node_name": node_name,
+                "generation": gen,
+            }
+            self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+            await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_FAILURE.value)
+
+            logger.info(
+                f"[{self.session_id}] Waiting for user intervention "
+                f"on LLM failure (node={node_name}, generation={gen})"
+            )
+
+        # CRITICAL: Release lock before awaiting Event so API can acquire it
+        try:
+            await event.wait()
+
+            action = self._llm_failure_actions.pop(node_name, None)
+            analysis_state.wait_input_reason = None
+            analysis_state.llm_failure_info = None
+            self._set_status(analysis_state, TaskStatus.RUNNING)
+            await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_RETRY.value)
+        except asyncio.CancelledError:
+            analysis_state.wait_input_reason = None
+            analysis_state.llm_failure_info = None
+            raise
+        finally:
+            self._llm_failure_events.pop(node_name, None)
+
+        if action == LlmFailureAction.RETRY.value:
+            if self._settings_provider is not None:
+                self._settings_provider._client_cache.clear()
+            return LlmFailureAction.RETRY
+        return LlmFailureAction.SKIP
 
     def signal_continue(self):
         """Signal the workflow to continue from wait_for_user_input"""
@@ -3327,17 +3319,44 @@ Return ONLY the JSON array, nothing else."""
 
         logger.info(f"[{self.session_id}] Generating final report after {analysis_state.current_round} rounds")
 
-        # Step 1: Generate final summary
+        # Step 1: Generate final summary (with LLM failure intervention)
         await self._send_message("status", "Generating final summary...", AgentType.PI)
 
-        final_summary = await self.pi_agent.generate_final_summary(analysis_state)
-        analysis_state.final_summary = final_summary
-
-        await self._send_message(
-            "result",
-            {"final_summary": final_summary},
-            AgentType.PI
-        )
+        while True:
+            try:
+                final_summary = await self.pi_agent.generate_final_summary(analysis_state)
+                analysis_state.final_summary = final_summary
+                await self._send_message(
+                    "result",
+                    {"final_summary": final_summary},
+                    AgentType.PI
+                )
+                break
+            except UpstreamExhaustedError as e:
+                action = await self._wait_for_llm_intervention(
+                    e, "generate_final_report", analysis_state
+                )
+                if action == LlmFailureAction.RETRY:
+                    continue
+                # Skip: use minimal fallback summary
+                analysis_state.final_summary = (
+                    "Analysis completed. Summary generation was skipped due to LLM failure."
+                )
+                await self._send_message(
+                    "error",
+                    "Final summary generation skipped due to LLM failure.",
+                    AgentType.PI,
+                )
+                break
+            except Exception as e:
+                logger.exception(f"[{self.session_id}] Failed to generate final summary")
+                analysis_state.final_summary = f"Summary generation failed: {str(e)}"
+                await self._send_message(
+                    "error",
+                    f"Final summary generation failed: {str(e)}",
+                    AgentType.PI,
+                )
+                break
 
         # Step 2: Generate integrated report with figure/table references
         await self._send_message("status", "Generating integrated report with figures...", AgentType.PI)
@@ -3459,6 +3478,13 @@ Return ONLY the JSON array, nothing else."""
 
             logger.info(f"[{self.session_id}] Integrated report generated with {len(figures_data)} brief figures")
 
+        except UpstreamExhaustedError as e:
+            logger.warning(f"[{self.session_id}] Integrated report LLM failed, skipping: {e}")
+            await self._send_message(
+                "error",
+                "Integrated report generation skipped due to LLM failure.",
+                AgentType.PI,
+            )
         except Exception as e:
             logger.exception(f"[{self.session_id}] Failed to generate integrated report")
             await self._send_message("error", f"Integrated report generation failed: {str(e)}", AgentType.PI)
@@ -3472,14 +3498,14 @@ Return ONLY the JSON array, nothing else."""
         }
 
     async def _generate_graphic_abstract(self, state: WorkflowState) -> WorkflowState:
-        """
-        Dispatcher: try image mode first when Painter is available; on failure (or when
+        """Dispatcher: try image mode first when Painter is available; on failure (or when
         Painter is disabled) fall back to text-mode ASCII diagram drawn by the Bio agent.
         """
         if self.painter_agent:
             try:
                 return await self._generate_image_graphic_abstract(state)
             except Exception as e:
+                # Any failure (including UpstreamExhaustedError) falls back to text mode
                 logger.exception(
                     f"[{self.session_id}] Image graphic abstract failed; "
                     f"falling back to text-mode diagram"
@@ -3494,7 +3520,25 @@ Return ONLY the JSON array, nothing else."""
                 f"[{self.session_id}] Painter agent disabled; generating text-mode diagram"
             )
 
-        return await self._generate_text_graphic_abstract(state)
+        # Text mode — with LLM failure intervention
+        # (UpstreamExhaustedError propagates from _generate_text_graphic_abstract
+        #  thanks to the except UpstreamExhaustedError: raise added above)
+        while True:
+            try:
+                return await self._generate_text_graphic_abstract(state)
+            except UpstreamExhaustedError as e:
+                action = await self._wait_for_llm_intervention(
+                    e, "generate_graphic_abstract", state["analysis_state"]
+                )
+                if action == LlmFailureAction.RETRY:
+                    continue
+                # Skip: graphic abstract is optional
+                await self._send_message(
+                    "error",
+                    "Graphic abstract generation skipped due to LLM failure.",
+                    AgentType.PI,
+                )
+                return {**state, "analysis_state": state["analysis_state"]}
 
     async def _generate_image_graphic_abstract(self, state: WorkflowState) -> WorkflowState:
         """Generate image graphic abstract with revision loop (max 2 revisions, PI selects best).
@@ -3876,6 +3920,8 @@ Return ONLY the JSON array, nothing else."""
                 f"{len(candidates) - 1} revisions"
             )
 
+        except UpstreamExhaustedError:
+            raise  # let dispatcher show intervention dialog
         except Exception as e:
             logger.exception(
                 f"[{self.session_id}] Failed to generate text-mode graphic abstract"
@@ -3894,104 +3940,111 @@ Return ONLY the JSON array, nothing else."""
         analysis_state = state["analysis_state"]
 
         logger.info(f"[{self.session_id}] Generating detailed report")
-        await self._send_message("status", "Generating detailed report with figures and tables...", AgentType.PI)
+        await self._send_message(
+            "status", "Generating detailed report with figures and tables...", AgentType.PI
+        )
 
-        try:
-            import os
-            output_dir = str(get_session_reports(self.session_id))
-            os.makedirs(output_dir, exist_ok=True)
+        output_dir = str(get_session_reports(self.session_id))
+        os.makedirs(output_dir, exist_ok=True)
 
-            # Progress callback for report generation
-            async def progress_callback(data: dict):
-                await self._send_message(
-                    "progress",
-                    {
-                        "step": data.get("step", ""),
-                        "progress": data.get("progress", 0),
-                        "status": data.get("status", "generating")
-                    },
-                    AgentType.PI
-                )
-
-            # Create LLM client (use PI agent's server config for report generation)
-            llm_client = self._settings_provider.get_llm_client('pi')
-
-            # Get models from state or use defaults
-            pi_model = self._settings_provider.get_model("pi")
-            bio_model = self._settings_provider.get_model("bioinformatics")
-
-            workspace_dir = str(get_session_workspace(self.session_id))
-
-            if self.supervisor_agent:
-                # Supervisor generates report from its accumulated analysis records.
-                # Pass the PI agent's LLM client so the report_model (pi_model) is
-                # called on the correct endpoint, not the supervisor's own endpoint.
-                report = await self.supervisor_agent.generate_detailed_report(
-                    analysis_state=analysis_state,
-                    report_model=pi_model,
-                    output_dir=output_dir,
-                    workspace_dir=str(get_session_workspace(self.session_id)),
-                    progress_callback=progress_callback,
-                    report_llm_client=self._settings_provider.get_llm_client('pi'),
-                    chat_messages=None,
-                )
-            else:
-                # Fallback: use original DetailedReportGenerator
-                supervisor_model = self._settings_provider.get_model("supervisor")
-                generator = DetailedReportGenerator(
-                    llm_client=llm_client,
-                    pi_model=pi_model,
-                    bio_model=bio_model,
-                    output_dir=output_dir,
-                    workspace_dir=workspace_dir,
-                    progress_callback=progress_callback,
-                    session_id=self.session_id,
-                    vision_settings=self._vision_settings,
-                    supervisor_model=supervisor_model,
-                )
-                report = await generator.generate_report(analysis_state)
-
+        async def progress_callback(data: dict):
             await self._send_message(
-                "detailed_report",
+                "progress",
                 {
-                    "status": "completed",
-                    "report_id": report.get("id", ""),
-                    "title": report.get("title", ""),
-                    "sections_count": len(report.get("sections", [])),
-                    "figures_count": len(report.get("figures", [])),
-                    "tables_count": len(report.get("tables", []))
+                    "step": data.get("step", ""),
+                    "progress": data.get("progress", 0),
+                    "status": data.get("status", "generating"),
                 },
-                AgentType.PI
+                AgentType.PI,
             )
 
-            logger.info(f"[{self.session_id}] Detailed report generated successfully")
+        llm_client = self._settings_provider.get_llm_client('pi')
+        pi_model = self._settings_provider.get_model("pi")
+        bio_model = self._settings_provider.get_model("bioinformatics")
+        workspace_dir = str(get_session_workspace(self.session_id))
 
-        except Exception as e:
-            logger.exception(f"[{self.session_id}] Failed to generate detailed report")
-            import traceback
-            logger.error(traceback.format_exc())
-            await self._send_message(
-                "error",
-                f"Detailed report generation failed: {str(e)}. Analysis is still complete.",
-                AgentType.PI
-            )
-            # Don't fail the workflow - detailed report is optional
+        # === LLM call with retry + user intervention ===
+        while True:
+            try:
+                if self.supervisor_agent:
+                    report = await self.supervisor_agent.generate_detailed_report(
+                        analysis_state=analysis_state,
+                        report_model=pi_model,
+                        output_dir=output_dir,
+                        workspace_dir=workspace_dir,
+                        progress_callback=progress_callback,
+                        report_llm_client=llm_client,
+                        chat_messages=None,
+                    )
+                else:
+                    supervisor_model = self._settings_provider.get_model("supervisor")
+                    generator = DetailedReportGenerator(
+                        llm_client=llm_client,
+                        pi_model=pi_model,
+                        bio_model=bio_model,
+                        output_dir=output_dir,
+                        workspace_dir=workspace_dir,
+                        progress_callback=progress_callback,
+                        session_id=self.session_id,
+                        vision_settings=self._vision_settings,
+                        supervisor_model=supervisor_model,
+                    )
+                    report = await generator.generate_report(analysis_state)
 
-        # Auto-snapshot after all reports are generated
+                await self._send_message(
+                    "detailed_report",
+                    {
+                        "status": "completed",
+                        "report_id": report.get("id", ""),
+                        "title": report.get("title", ""),
+                        "sections_count": len(report.get("sections", [])),
+                        "figures_count": len(report.get("figures", [])),
+                        "tables_count": len(report.get("tables", [])),
+                    },
+                    AgentType.PI,
+                )
+
+                logger.info(f"[{self.session_id}] Detailed report generated successfully")
+                break  # success
+
+            except UpstreamExhaustedError as e:
+                action = await self._wait_for_llm_intervention(
+                    e, "generate_detailed_report", analysis_state
+                )
+                if action == LlmFailureAction.RETRY:
+                    continue
+                # Skip: send error and fall through to post-processing
+                await self._send_message(
+                    "error",
+                    "Detailed report generation skipped due to LLM failure. "
+                    "Analysis is still complete.",
+                    AgentType.PI,
+                )
+                break
+
+            except Exception as e:
+                logger.exception(f"[{self.session_id}] Failed to generate detailed report")
+                await self._send_message(
+                    "error",
+                    f"Detailed report generation failed: {str(e)}. "
+                    "Analysis is still complete.",
+                    AgentType.PI,
+                )
+                break
+
+        # === POST-PROCESSING: ALWAYS RUNS (even on Skip/Error) ===
         await self._create_auto_snapshot(analysis_state, "post_report")
 
-        # Mark analysis as completed
         self._set_status(analysis_state, TaskStatus.COMPLETED)
         await self._send_message("completed", "Analysis completed", AgentType.PI)
 
-        # Send final state sync for completion
         await self._send_state_sync(analysis_state, "analysis_complete")
 
         logger.info(f"[{self.session_id}] Analysis workflow completed")
 
         return {
             **state,
-            "analysis_state": analysis_state
+            "analysis_state": analysis_state,
         }
 
     async def run(

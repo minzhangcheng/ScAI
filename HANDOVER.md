@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.23.4 · **Last updated**: 2026-05-08
+**Version**: 0.23.5 · **Last updated**: 2026-05-08
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,8 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.23.x — report enhancements, chat sections, round tracking (2026-05-08 → 2026-05-08)**
+
+- `0.23.5` — **LLM failure intervention & report robustness**: Extracted `_wait_for_llm_intervention()` helper for LLM failure handling; `UpstreamExhaustedError` now propagates from `generate_final_summary`, `generate_detailed_report`, `generate_graphic_abstract`, and report route (with 3 retries + exponential backoff); supervisor report generation also propagates UpstreamExhaustedError; section title safety net replaces placeholder text with descriptive defaults; improved retry messaging via WebSocket (`retrying` type).
 
 - `0.23.4` — **Bioinformatics upstream error propagation**: Fixed `UpstreamExhaustedError` from bioinformatics agent not propagating to `@with_retry` decorator; bioinformatics agent now raises instead of catching; workflow caller no longer catches and returns early; ensures LlmTimeoutDialog triggers for upstream exhaustion in bioinformatics node; comprehensive regression tests added.
 

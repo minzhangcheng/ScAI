@@ -30,13 +30,32 @@ from openai import APIConnectionError
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep
 from ..utils.error_parsing import API_ERROR_TYPES, CODE_GEN_ERROR_TYPES, extract_error_type, _TECHNICAL_ERROR_TYPES
 from ..services.report import get_agent_stats_html
-from ..utils.llm_client import OpenAICompatibleClient
+from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..utils.settings_provider import AgentSettingsProvider
 
 # Section IDs that represent specific/targeted analysis
 _SPECIFIC_SECTION_IDS = frozenset({
     "differential_expression", "key_findings", "integrated_findings",
     "exploration_findings",
+})
+
+# Section ID → default fallback title (used in prompt guidance and parse-time safety net)
+_SECTION_ID_TO_DEFAULT_TITLE: dict[str, str] = {
+    "abstract": "Abstract",
+    "analysis_overview": "Analysis Methodology Overview",
+    "data_qc": "Data Overview and Quality Control",
+    "clustering_annotation": "Clustering and Cell Type Annotation",
+    "differential_expression": "Differential Expression Analysis",
+    "exploration_findings": "Phase 1 Exploration Findings Summary",
+    "integrated_findings": "Integrated Findings Across All Phases",
+    "key_findings": "Key Biological Findings",
+    "conclusions": "Conclusions and Future Directions",
+}
+
+# Placeholder title strings that LLMs sometimes emit verbatim instead of generating titles
+_PLACEHOLDER_SECTION_TITLES = frozenset({
+    "section title",
+    "your descriptive scientific title here",
 })
 
 # ---------------------------------------------------------------------------
@@ -662,6 +681,8 @@ class SupervisorAgent:
                     )
                     report_content = response.content or ""
                     break
+                except UpstreamExhaustedError:
+                    raise  # propagate to caller for retry/user-intervention
                 except APIConnectionError:
                     if attempt == 0:
                         logger.warning(
@@ -1497,6 +1518,20 @@ Respond in JSON:
 
         sections_text = "\n".join(base_sections)
 
+        # Build per-section title guidance from base_sections
+        section_title_lines = []
+        for sec_line in base_sections:
+            sec_id = sec_line.split("]")[0].lstrip("[")
+            default_title = _SECTION_ID_TO_DEFAULT_TITLE.get(
+                sec_id, sec_id.replace("_", " ").title()
+            )
+            section_title_lines.append(
+                f"  {sec_line}\n"
+                f"    → Use a descriptive scientific title (e.g., \"{default_title}\") "
+                f"based on your analysis"
+            )
+        section_title_guide = "\n".join(section_title_lines)
+
         # Build table list text
         table_list = table_list or []
         table_list_text = "\n".join(
@@ -1520,13 +1555,21 @@ Respond in JSON:
 
 ## Instructions
 Write the report in English.
-Generate the report with the following sections (use the exact section IDs in brackets):
+Generate the report with the following sections. Use the EXACT section IDs in brackets.
+Each section MUST have a descriptive, scientific title — do NOT use placeholder text like "Section Title".
 
 {sections_text}
 
+## Section Title Guidance
+For each section, write a concrete descriptive title (like the examples below) instead of generic placeholder text:
+
+{section_title_guide}
+
 Format each section as:
-## [section_id] Section Title
+## [section_id] Your Descriptive Scientific Title Here
 Content...
+
+CRITICAL: Replace "Your Descriptive Scientific Title Here" with an actual title that describes what this specific analysis found. NEVER write "Section Title" as a title.
 
 When referencing a figure, use this exact format (each marker on its own line).
 IMPORTANT: Use the EXACT filename from the Available Figures list above (including the correct extension — most are .jpg, NOT .png):
@@ -1569,6 +1612,16 @@ IMPORTANT:
         for i, match in enumerate(matches):
             section_id = match.group(1)
             title = match.group(2).strip()
+            # Safety net: replace placeholder text with section-ID-derived fallback
+            if not title or title.lower() in _PLACEHOLDER_SECTION_TITLES:
+                title = _SECTION_ID_TO_DEFAULT_TITLE.get(
+                    section_id,
+                    section_id.replace("_", " ").title(),
+                )
+                logger.warning(
+                    f"[{self.session_id}] Section '{section_id}' had placeholder title "
+                    f"'{match.group(2).strip()}', replaced with '{title}'"
+                )
             # Content is between this match and the next
             start = match.end()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(content)

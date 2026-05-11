@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import shutil
 import zipfile
@@ -292,20 +293,17 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
 
     try:
         workspace_dir = str(_get_session_workspace(session_id))
-
-        # Import SupervisorAgent inside function to avoid circular import
         from backend.agents.supervisor_agent import SupervisorAgent
+        from backend.utils.llm_client import UpstreamExhaustedError
 
-        # Use SupervisorAgent path for report generation
+        # Create SupervisorAgent ONCE (stateless after log restore)
         supervisor = SupervisorAgent(
             settings_provider=provider,
             session_id=session_id,
         )
 
-        # Restore supervision log from previously saved report.json
+        # Archive and restore ONCE before retry loop
         report_json_path = Path(output_dir) / "report.json"
-
-        # Archive existing report before regeneration
         if report_json_path.exists():
             try:
                 next_version = _next_archive_version(Path(output_dir))
@@ -321,7 +319,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                         try:
                             await report_websockets[session_id].send_json({
                                 "type": "archive_failed",
-                                "message": f"Failed to archive previous report: {archive_err}"
+                                "message": f"Failed to archive previous report: {archive_err}",
                             })
                         except Exception:
                             pass
@@ -338,37 +336,86 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
             except Exception as e:
                 logger.warning(f"Failed to restore supervision log from report.json: {e}")
 
-        report = await supervisor.generate_detailed_report(
-            analysis_state=state,
-            report_model=pi_model,
-            output_dir=output_dir,
-            workspace_dir=workspace_dir,
-            progress_callback=progress_callback,
-            chat_messages=state.chat_messages,
-        )
-        detailed_reports[session_id] = report
+        # Retry loop — only wraps the LLM call
+        MAX_REPORT_RETRIES = 3
+        last_error = None
 
-        # Notify completion via WebSocket
-        if session_id in report_websockets:
+        for attempt in range(MAX_REPORT_RETRIES + 1):  # 4 total attempts
             try:
-                await report_websockets[session_id].send_json({
-                    "type": "complete",
-                    "report": report
-                })
+                if attempt > 0:
+                    logger.info(
+                        f"Retrying report generation for {session_id} "
+                        f"(attempt {attempt + 1}/{MAX_REPORT_RETRIES + 1})"
+                    )
+                    if session_id in report_websockets:
+                        try:
+                            await report_websockets[session_id].send_json({
+                                "type": "retrying",
+                                "attempt": attempt + 1,
+                                "max_attempts": MAX_REPORT_RETRIES + 1,
+                                "message": (
+                                    f"Retrying report generation "
+                                    f"(attempt {attempt + 1}/{MAX_REPORT_RETRIES + 1})..."
+                                ),
+                            })
+                        except Exception:
+                            pass
+                    provider._client_cache.clear()
+                    await asyncio.sleep(min(2 ** attempt + random.uniform(0, 1), 30))
+
+                report = await supervisor.generate_detailed_report(
+                    analysis_state=state,
+                    report_model=pi_model,
+                    output_dir=output_dir,
+                    workspace_dir=workspace_dir,
+                    progress_callback=progress_callback,
+                    chat_messages=state.chat_messages,
+                )
+                detailed_reports[session_id] = report
+
+                if session_id in report_websockets:
+                    try:
+                        await report_websockets[session_id].send_json({
+                            "type": "complete",
+                            "report": report,
+                        })
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to send completion to WebSocket for {session_id}: {e}",
+                            exc_info=True,
+                        )
+                return  # success
+
+            except UpstreamExhaustedError as e:
+                last_error = e
+                logger.error(
+                    f"[{session_id}] Report generation LLM upstream exhausted "
+                    f"(attempt {attempt + 1}/{MAX_REPORT_RETRIES + 1}): "
+                    f"agent={e.agent_name} model={e.model} server={e.llm_server}"
+                )
+                if attempt < MAX_REPORT_RETRIES:
+                    continue
+                # All retries exhausted — fall through to error handling
+
             except Exception as e:
-                logger.warning(f"Failed to send completion to WebSocket for session {session_id}: {e}", exc_info=True)
+                last_error = e
+                logger.exception("Report generation failed")
+                break  # non-LLM error, don't retry
 
-    except Exception as e:
-        logger.exception("Report generation failed")
-
+        # All retries exhausted (or non-LLM error)
         if session_id in report_websockets:
             try:
                 await report_websockets[session_id].send_json({
                     "type": "error",
-                    "message": str(e)
+                    "message": str(last_error) if last_error else "Report generation failed",
+                    "retryable": isinstance(last_error, UpstreamExhaustedError),
                 })
             except Exception as ws_error:
-                logger.warning(f"Failed to send error to WebSocket for session {session_id}: {ws_error}", exc_info=True)
+                logger.warning(
+                    f"Failed to send error to WebSocket for {session_id}: {ws_error}",
+                    exc_info=True,
+                )
+
     finally:
         _report_generation_pending.discard(session_id)
 
