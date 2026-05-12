@@ -9,9 +9,10 @@ interface DataConfigMenuProps {
   exporting?: boolean
   onImportSession?: () => void
   importing?: boolean
+  readOnly?: boolean
 }
 
-export function DataConfigMenu({ sessionId, onImported, onExportSession, exporting, onImportSession, importing }: DataConfigMenuProps) {
+export function DataConfigMenu({ sessionId, onImported, onExportSession, exporting, onImportSession, importing, readOnly }: DataConfigMenuProps) {
   const [open, setOpen] = useState(false)
   const [showExportWarning, setShowExportWarning] = useState(false)
   const [showImportConfirm, setShowImportConfirm] = useState(false)
@@ -72,14 +73,16 @@ export function DataConfigMenu({ sessionId, onImported, onExportSession, exporti
       {open && (
         <div className="absolute bottom-full left-0 mb-1 w-52 bg-white rounded-lg shadow-lg border border-surface-200 py-1 z-50">
           {/* Import Session */}
-          <button
-            onClick={() => { setOpen(false); onImportSession?.() }}
-            disabled={importing}
-            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50 disabled:opacity-50"
-          >
-            {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-            Import session
-          </button>
+          {!readOnly && (
+            <button
+              onClick={() => { setOpen(false); onImportSession?.() }}
+              disabled={importing}
+              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50 disabled:opacity-50"
+            >
+              {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+              Import session
+            </button>
+          )}
           {/* Export Session */}
           <button
             onClick={() => { setOpen(false); onExportSession?.() }}
@@ -89,14 +92,16 @@ export function DataConfigMenu({ sessionId, onImported, onExportSession, exporti
             {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
             Export session
           </button>
-          <div className="border-t border-surface-100 my-1" />
+          {!readOnly && <div className="border-t border-surface-100 my-1" />}
           {/* Import Configure */}
-          <button
-            onClick={() => { setOpen(false); fileInputRef.current?.click() }}
-            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50"
-          >
-            <Upload className="w-4 h-4" /> Import configure
-          </button>
+          {!readOnly && (
+            <button
+              onClick={() => { setOpen(false); fileInputRef.current?.click() }}
+              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-surface-600 hover:bg-surface-50"
+            >
+              <Upload className="w-4 h-4" /> Import configure
+            </button>
+          )}
           {/* Export Configure */}
           <button
             onClick={() => { setOpen(false); setShowExportWarning(true) }}

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.23.6 · **Last updated**: 2026-05-10
+**Version**: 0.23.7 · **Last updated**: 2026-05-12
 
 ## 1. Runtime Architecture
 
@@ -236,13 +236,27 @@ Detailed release notes for every version are available through `git log` and rel
 - Dynamic PI task generation based on detected data types; added GIF/BMP/WebP/SVG image support.
 - Improved LLM prompt caching and cache-hit tracking; round-progress UI uses the real max-rounds setting.
 
-**0.18.x — snapshots, figure review, and providers (2026-03-27 → 2026-04-08)**
+**0.23.7 — frontend refinements (2026-05-12)**
+
+- AnalysisPanel.tsx: improved component with enhanced UI elements.
+- DataConfigMenu.tsx: refined menu for better data configuration.
+- Sidebar.tsx: updated navigation and layout.
+
+**0.22.x — snapshot enhancements (2026-05-10)**
 
 - Snapshot tree view and reliable state restoration with full Jupyter kernel preservation.
 - Supervisor figure review with issue classification; auto-revision with vision-disable fallback.
 - Development / production mode switching; hard limit on code-execution errors.
 - Multiple image-generation providers (DashScope, Zhipu AI); per-agent LLM provider overrides; improved provider compatibility and LLM client caching.
 - Advanced analysis modules: gene signature scoring, trajectory analysis, TF networks, cell-cell communication, stemness, tumor estimation, compositional analysis, immune repertoire.
+
+**0.21.x — provider enhancements (2026-04-25)**
+
+- Multiple image-generation providers (DashScope, Zhipu AI); per-agent LLM provider overrides; improved provider compatibility.
+
+**0.20.x — reliability improvements (2026-04-15)**
+
+- Development / production mode switching; hard limit on code-execution errors; improved error recovery.
 
 **0.17.x — UI redesign and proactive docs (2026-03-26)**
 

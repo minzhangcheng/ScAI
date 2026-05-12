@@ -36,6 +36,7 @@ import {
 } from 'lucide-react'
 
 const API_BASE = '/api'
+const MAX_EXPLORATION_ROUND = 1
 
 // Content shape from backend round_summary messages (snake_case)
 interface RoundSummaryContent {
@@ -586,6 +587,18 @@ export function AnalysisPanel() {
     useAppStore.getState().setShowLlmTimeoutDialog(true)
   }, [])
 
+  const handleReopenDialog = useCallback(() => {
+    if (currentSession?.status === 'waiting_annotation') {
+      setShowAnnotationDialog(true)
+    } else if (currentSession?.status === 'waiting_input') {
+      if (explorationReportData && (currentSession.currentRound ?? 0) <= MAX_EXPLORATION_ROUND) {
+        setShowExplorationDialog(true)
+      } else if (feedbackRoundData) {
+        setShowFeedbackDialog(true)
+      }
+    }
+  }, [currentSession?.status, currentSession?.currentRound, explorationReportData, feedbackRoundData])
+
   // Countdown timer for LLM failure auto-skip
   const { timeRemaining } = useCountdownTimer({
     countdownSeconds: roundWaitSeconds > 0 ? roundWaitSeconds : 0,
@@ -823,18 +836,22 @@ export function AnalysisPanel() {
                   </span>
                 </button>
               ) : (
-                <div className={`flex items-center gap-2 px-3 py-1 rounded-lg ${
-                  currentSession.status === 'waiting_annotation'
-                    ? 'bg-accent-100 text-accent-700'
-                    : 'bg-amber-100 text-amber-700'
-                }`}>
+                <button
+                  onClick={handleReopenDialog}
+                  className={`flex items-center gap-2 px-3 py-1 rounded-lg transition-colors cursor-pointer ${
+                    currentSession.status === 'waiting_annotation'
+                      ? 'bg-accent-100 text-accent-700 hover:bg-accent-200'
+                      : 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                  }`}
+                  title={language === 'zh' ? '点击重新打开交互窗口' : 'Click to reopen interaction dialog'}
+                >
                   <AlertCircle className="w-4 h-4" />
                   <span className="font-medium">
                     {currentSession.status === 'waiting_annotation'
                       ? (language === 'zh' ? '等待注释确认' : 'Waiting for Annotation')
                       : (language === 'zh' ? '等待输入' : 'Waiting for Input')}
                   </span>
-                </div>
+                </button>
               )}
               <button
                 onClick={() => setShowStopDialog(true)}

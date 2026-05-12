@@ -489,8 +489,8 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       </div>
 
       {/* New Session Button */}
-      {!isReadOnly && (
-        <div className="p-3 space-y-2">
+      <div className="p-3 space-y-2">
+        {!isReadOnly && (
           <button
             onClick={() => setShowNewSession(true)}
             className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-accent-500 to-accent-600 text-white rounded-xl font-medium hover:from-accent-600 hover:to-accent-700 transition-all duration-200 shadow-lg shadow-accent-500/25 hover:shadow-accent-500/40 hover:-translate-y-0.5 active:translate-y-0"
@@ -498,16 +498,16 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
             <Plus className="w-5 h-5" />
             {t('newAnalysis')}
           </button>
+        )}
 
-          <button
-            onClick={() => setShowSessionBrowser(true)}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-100 text-surface-800 rounded-xl font-medium hover:bg-surface-200 transition-all"
-          >
-            <FolderOpen className="w-4 h-4" />
-            {language === 'zh' ? '打开已有会话' : 'Open Saved Session'}
-          </button>
-        </div>
-      )}
+        <button
+          onClick={() => setShowSessionBrowser(true)}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-surface-100 text-surface-800 rounded-xl font-medium hover:bg-surface-200 transition-all"
+        >
+          <FolderOpen className="w-4 h-4" />
+          {language === 'zh' ? '打开已有会话' : 'Open Saved Session'}
+        </button>
+      </div>
 
       {/* Session Browser Modal */}
       {showSessionBrowser && (
@@ -597,13 +597,15 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                             )}
                           </div>
                         </div>
-                        <button
-                          onClick={(e) => handleDeleteSavedSession(session.id, e)}
-                          className="p-1.5 text-surface-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                          title={language === 'zh' ? '删除' : 'Delete'}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {!isReadOnly && (
+                          <button
+                            onClick={(e) => handleDeleteSavedSession(session.id, e)}
+                            className="p-1.5 text-surface-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                            title={language === 'zh' ? '删除' : 'Delete'}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -755,13 +757,15 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                       {currentSession.name}
                     </span>
                     <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => setEditingSession(true)}
-                        className="p-1 hover:bg-surface-100 rounded"
-                        title={language === 'zh' ? '编辑' : 'Edit'}
-                      >
-                        <Pencil className="w-3.5 h-3.5 text-surface-500" />
-                      </button>
+                      {!isReadOnly && (
+                        <button
+                          onClick={() => setEditingSession(true)}
+                          className="p-1 hover:bg-surface-100 rounded"
+                          title={language === 'zh' ? '编辑' : 'Edit'}
+                        >
+                          <Pencil className="w-3.5 h-3.5 text-surface-500" />
+                        </button>
+                      )}
                       <button
                         onClick={handleRefreshSession}
                         className="p-1 hover:bg-surface-100 rounded"
@@ -769,13 +773,15 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                       >
                         <RefreshCw className="w-3.5 h-3.5 text-surface-500" />
                       </button>
-                      <button
-                        onClick={handleClearSession}
-                        className="p-1 hover:bg-red-100 rounded"
-                        title={language === 'zh' ? '清除项目' : 'Clear project'}
-                      >
-                        <Trash2 className="w-3.5 h-3.5 text-red-500" />
-                      </button>
+                      {!isReadOnly && (
+                        <button
+                          onClick={handleClearSession}
+                          className="p-1 hover:bg-red-100 rounded"
+                          title={language === 'zh' ? '清除项目' : 'Clear project'}
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                        </button>
+                      )}
                     </div>
                   </div>
                   <p className="text-sm text-surface-700 mt-1 overflow-y-auto min-h-0">
@@ -806,18 +812,17 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
       {/* Bottom Actions */}
       <div className="p-3 border-t border-surface-200 space-y-1">
-        {!isReadOnly && (
-          <DataConfigMenu
-            sessionId={currentSession?.id}
-            onImported={(sid) => {
-              loadSession(sid).then(s => setCurrentSession(s))
-            }}
-            onExportSession={handleExport}
-            exporting={exporting}
-            onImportSession={() => fileInputRef.current?.click()}
-            importing={importing}
-          />
-        )}
+        <DataConfigMenu
+          sessionId={currentSession?.id}
+          onImported={(sid) => {
+            loadSession(sid).then(s => setCurrentSession(s))
+          }}
+          onExportSession={handleExport}
+          exporting={exporting}
+          onImportSession={() => fileInputRef.current?.click()}
+          importing={importing}
+          readOnly={isReadOnly}
+        />
         {/* Hidden file input for session import */}
         <input
           ref={fileInputRef}
@@ -827,14 +832,16 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
           className="hidden"
         />
 
-        <button
-          onClick={onOpenConfig}
-          aria-label={t('apiSettings')}
-          className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 hover:bg-surface-100 rounded-lg"
-        >
-          <Settings className="w-4 h-4" aria-hidden="true" />
-          {t('apiSettings')}
-        </button>
+        {!isReadOnly && (
+          <button
+            onClick={onOpenConfig}
+            aria-label={t('apiSettings')}
+            className="w-full flex items-center gap-3 px-3 py-2.5 text-sm text-surface-800 hover:bg-surface-100 rounded-lg"
+          >
+            <Settings className="w-4 h-4" aria-hidden="true" />
+            {t('apiSettings')}
+          </button>
+        )}
 
         {/* UserMenu + About stacked */}
         <div className="flex flex-col gap-1 pt-1">
