@@ -35,7 +35,7 @@ from backend.state import (
     prepared_exports_lock as _prepared_exports_lock,
 )
 from backend.utils.auth import require_session_ownership
-from backend.utils.files import validate_path_within, validate_session_id
+from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
 from backend.utils.upload import stream_save_file
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
@@ -163,20 +163,19 @@ async def export_state(session_id: str, request: Request):
             # 7. snapshots (JSON state files + session pkl backups)
             _add_snapshots_to_tar(tf, session_id)
 
-    await asyncio.to_thread(_build_tar)
+    async with temp_file_on_error(tmp_path):
+        await asyncio.to_thread(_build_tar)
 
-    # Build safe filename
-    safe_name = "".join(c if c.isalnum() or c in '-_ ' else '' for c in state.name).strip().replace(' ', '_')
-    if not safe_name:
-        safe_name = "session"
-    filename = f"{safe_name}_{session_id[:8]}.tar.gz"
+    # Build safe filename (consistent format with export_prepare)
+    safe_name = slugify_session_name(state.name)
+    filename = f"export_{session_id[:8]}_{safe_name}.tar.gz"
 
     # FileResponse streams from disk; BackgroundTask deletes the temp file after response is sent
     return FileResponse(
         tmp_path,
         media_type="application/gzip",
         filename=filename,
-        background=BackgroundTask(os.unlink, tmp_path)
+        background=BackgroundTask(Path(tmp_path).unlink, missing_ok=True)
     )
 
 
@@ -195,13 +194,11 @@ async def export_prepare(session_id: str, request: Request):
     await async_save_session(session_id, state)
 
     # Build tar to a stable temp file
-    export_dir = get_session_reports(session_id)
+    export_dir = UPLOAD_TEMP_DIR
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_name = "".join(c if c.isalnum() or c in '-_ ' else '' for c in state.name).strip().replace(' ', '_')
-    if not safe_name:
-        safe_name = "session"
-    filename = f"{safe_name}_{session_id[:8]}.tar.gz"
+    safe_name = slugify_session_name(state.name)
+    filename = f"export_{session_id[:8]}_{safe_name}.tar.gz"
     tar_path = export_dir / filename
 
     def _build_tar():
@@ -260,8 +257,6 @@ async def export_prepare(session_id: str, request: Request):
             if rpts_dir.exists():
                 for file_path in rpts_dir.rglob("*"):
                     if file_path.is_file():
-                        if file_path.name == filename:
-                            continue
                         rel = file_path.relative_to(rpts_dir)
                         tf.add(str(file_path), arcname=f"{session_id}/reports/{session_id}/{rel}")
 
@@ -271,7 +266,8 @@ async def export_prepare(session_id: str, request: Request):
             # snapshots (JSON state files + session pkl backups)
             _add_snapshots_to_tar(tf, session_id)
 
-    await asyncio.to_thread(_build_tar)
+    async with temp_file_on_error(str(tar_path)):
+        await asyncio.to_thread(_build_tar)
 
     size_bytes = tar_path.stat().st_size
 

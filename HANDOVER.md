@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.23.5 · **Last updated**: 2026-05-08
+**Version**: 0.23.6 · **Last updated**: 2026-05-10
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,9 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.23.x — report enhancements, chat sections, round tracking (2026-05-08 → 2026-05-08)**
+**0.23.x — report enhancements, chat sections, round tracking (2026-05-08 → 2026-05-10)**
+
+- `0.23.6` — **Report download & export improvements**: Export now saves to `UPLOAD_TEMP_DIR` instead of reports dir; filename format changed to `export_{session_id[:8]}_{safe_name}.tar.gz`; `_should_skip_in_report_zip()` helper excludes report archives and orphan .zip.tmp files from report ZIP downloads; `download_full_report` now uses streaming temp file with background cleanup; frontend shows download errors inline instead of console errors.
 
 - `0.23.5` — **LLM failure intervention & report robustness**: Extracted `_wait_for_llm_intervention()` helper for LLM failure handling; `UpstreamExhaustedError` now propagates from `generate_final_summary`, `generate_detailed_report`, `generate_graphic_abstract`, and report route (with 3 retries + exponential backoff); supervisor report generation also propagates UpstreamExhaustedError; section title safety net replaces placeholder text with descriptive defaults; improved retry messaging via WebSocket (`retrying` type).
 

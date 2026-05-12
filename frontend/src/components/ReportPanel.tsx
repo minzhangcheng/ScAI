@@ -4,6 +4,8 @@ import { useTranslation } from '../i18n/translations'
 import { devLog } from '../utils/logger'
 import { fetchAndDownload } from '../utils/download'
 import { WS_CONNECT_TIMEOUT_MS, apiFetch, useConfig, useUserConfig } from '../hooks/useApi'
+import { useSelfClearingError } from '../hooks/useSelfClearingError'
+import { ErrorBanner } from './shared/ErrorBanner'
 import { getToken } from '../utils/authStorage'
 import { WS_AUTH_SUBPROTOCOL } from '../constants/auth'
 import { ValidationDialog } from './ValidationDialog'
@@ -27,7 +29,9 @@ import {
   MessageSquare
 } from 'lucide-react'
 
-const API_BASE = '/api'
+import { API_BASE } from '../constants/api'
+
+type ReportDownloadEndpoint = 'download-all-figures' | 'download-all-tables' | 'download-full'
 
 interface ReportFigure {
   id: string
@@ -111,6 +115,7 @@ export function ReportPanel() {
   const [error, setError] = useState<string | null>(null)
   const [reportArchives, setReportArchives] = useState<Array<{version: number; filename: string; created_at: string; size_bytes: number; download_url: string}>>([])
   const [archiveWarning, setArchiveWarning] = useState<string | null>(null)
+  const [downloadError, setDownloadError] = useSelfClearingError()
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
   const wsRef = useRef<WebSocket | null>(null)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -341,13 +346,14 @@ export function ReportPanel() {
       await apiFetch(`/session/${currentSession.id}/generate-detailed-report`, {
         method: 'POST'
       })
-    } catch (e: any) {
-      if (e?.message?.includes('already in progress') || e?.message?.includes('409')) {
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (msg.includes('already in progress') || msg.includes('409')) {
         setError(language === 'zh' ? '报告生成已在进行中' : 'Report generation already in progress')
         setGenerating(false)
         return
       }
-      setError(e.message)
+      setError(msg)
       setGenerating(false)
     }
   }
@@ -393,51 +399,26 @@ export function ReportPanel() {
     })
   }
 
+  const safeDownload = async (url: string, filename: string, options?: RequestInit) => {
+    setDownloadError(null)
+    try {
+      await fetchAndDownload(url, filename, options)
+    } catch (e: unknown) {
+      setDownloadError(e instanceof Error ? e.message : 'Download failed')
+    }
+  }
+
+  const downloadReportArtifact = async (endpoint: ReportDownloadEndpoint, label: string) => {
+    if (!report || !currentSession) return
+    await safeDownload(
+      `${API_BASE}/session/${currentSession.id}/report/${endpoint}`,
+      `${currentSession.name}_${label}.zip`,
+      { method: 'POST' }
+    )
+  }
+
   const downloadFile = async (path: string, filename: string) => {
-    try {
-      await fetchAndDownload(`${API_BASE}/download?path=${encodeURIComponent(path)}`, filename)
-    } catch (e) {
-      console.error('Download failed:', e)
-    }
-  }
-
-  const downloadAllFigures = async () => {
-    if (!report || !currentSession) return
-    try {
-      await fetchAndDownload(
-        `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
-        `${currentSession.name}_figures.zip`,
-        { method: 'POST' }
-      )
-    } catch (e) {
-      console.error('Download failed:', e)
-    }
-  }
-
-  const downloadAllTables = async () => {
-    if (!report || !currentSession) return
-    try {
-      await fetchAndDownload(
-        `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
-        `${currentSession.name}_tables.zip`,
-        { method: 'POST' }
-      )
-    } catch (e) {
-      console.error('Download failed:', e)
-    }
-  }
-
-  const downloadFullReport = async () => {
-    if (!report || !currentSession) return
-    try {
-      await fetchAndDownload(
-        `${API_BASE}/session/${currentSession.id}/report/download-full`,
-        `${currentSession.name}_full_report.zip`,
-        { method: 'POST' }
-      )
-    } catch (e) {
-      console.error('Download failed:', e)
-    }
+    await safeDownload(`${API_BASE}/download?path=${encodeURIComponent(path)}`, filename)
   }
 
   const openHtmlInNewTab = () => {
@@ -549,21 +530,21 @@ export function ReportPanel() {
                 )}
 
                 <button
-                  onClick={downloadAllFigures}
+                  onClick={() => downloadReportArtifact('download-all-figures', 'figures')}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-pink-50 text-pink-700 rounded-lg hover:bg-pink-100"
                 >
                   <Image className="w-4 h-4" />
                   {language === 'zh' ? '下载图片' : 'Figures'}
                 </button>
                 <button
-                  onClick={downloadAllTables}
+                  onClick={() => downloadReportArtifact('download-all-tables', 'tables')}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100"
                 >
                   <Table className="w-4 h-4" />
                   {language === 'zh' ? '下载表格' : 'Tables'}
                 </button>
                 <button
-                  onClick={downloadFullReport}
+                  onClick={() => downloadReportArtifact('download-full', 'full_report')}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-accent-50 text-accent-700 rounded-lg hover:bg-accent-100"
                 >
                   <Package className="w-4 h-4" />
@@ -592,6 +573,10 @@ export function ReportPanel() {
           </div>
         </div>
 
+        {downloadError && (
+          <ErrorBanner message={downloadError} onDismiss={() => setDownloadError(null)} />
+        )}
+
         {archiveWarning && (
           <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-sm text-yellow-800">
             {language === 'zh' ? '归档历史报告失败：' : 'Previous report archive failed: '}{archiveWarning}
@@ -607,7 +592,9 @@ export function ReportPanel() {
               {reportArchives.map(archive => (
                 <button
                   key={archive.filename}
-                  onClick={() => fetchAndDownload(`${API_BASE}/${archive.download_url}`, archive.filename)}
+                  onClick={() => {
+                    safeDownload(`${API_BASE}/${archive.download_url}`, archive.filename)
+                  }}
                   className="block text-sm text-blue-600 hover:text-blue-800 hover:underline text-left cursor-pointer"
                 >
                   v{archive.version} — {new Date(archive.created_at).toLocaleString()} ({(archive.size_bytes / 1024 / 1024).toFixed(1)} MB)

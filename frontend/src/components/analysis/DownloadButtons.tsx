@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useAppStore, PublicationFigure, PublicationTable } from '../../stores/appStore'
 import { useTranslation } from '../../i18n/translations'
 import { fetchAndDownload } from '../../utils/download'
+import { useSelfClearingError } from '../../hooks/useSelfClearingError'
+import { ErrorBanner } from '../shared/ErrorBanner'
 import {
   Download,
   Package,
@@ -11,7 +13,7 @@ import {
   CheckCircle2
 } from 'lucide-react'
 
-const API_BASE = '/api'
+import { API_BASE } from '../../constants/api'
 
 interface DownloadButtonsProps {
   figures: PublicationFigure[]
@@ -23,6 +25,7 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
   const { t } = useTranslation(language)
   const [downloading, setDownloading] = useState<string | null>(null)
   const [downloadComplete, setDownloadComplete] = useState<string | null>(null)
+  const [downloadError, setDownloadError] = useSelfClearingError()
 
   if (figures.length === 0 && tables.length === 0) {
     return null
@@ -33,64 +36,70 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
     setTimeout(() => setDownloadComplete(null), 2000)
   }
 
-  const downloadAllFigures = async () => {
+  const downloadType = async (
+    type: string,
+    url: string,
+    filename: string,
+    options?: RequestInit,
+  ) => {
     if (!currentSession) return
-    setDownloading('figures')
+    setDownloadError(null)
+    setDownloading(type)
     try {
-      const ok = await fetchAndDownload(
-        `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
-        `figures_${currentSession.id}.zip`,
-        { method: 'POST' }
-      )
-      if (ok) showSuccess('figures')
+      await fetchAndDownload(url, filename, options)
+      showSuccess(type)
     } catch (e) {
-      console.error('Failed to download figures:', e)
+      setDownloadError(e instanceof Error ? e.message : `Failed to download ${type}`)
     } finally {
       setDownloading(null)
     }
   }
 
-  const downloadAllTables = async () => {
+  const downloadAllFigures = () => {
     if (!currentSession) return
-    setDownloading('tables')
-    try {
-      const ok = await fetchAndDownload(
-        `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
-        `tables_${currentSession.id}.zip`,
-        { method: 'POST' }
-      )
-      if (ok) showSuccess('tables')
-    } catch (e) {
-      console.error('Failed to download tables:', e)
-    } finally {
-      setDownloading(null)
-    }
+    return downloadType(
+      'figures',
+      `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
+      `figures_${currentSession.id}.zip`,
+      { method: 'POST' },
+    )
+  }
+
+  const downloadAllTables = () => {
+    if (!currentSession) return
+    return downloadType(
+      'tables',
+      `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
+      `tables_${currentSession.id}.zip`,
+      { method: 'POST' },
+    )
   }
 
   const downloadAll = async () => {
     if (!currentSession) return
+    setDownloadError(null)
     setDownloading('all')
     try {
       const downloads = [
         fetchAndDownload(
           `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
           `figures_${currentSession.id}.zip`,
-          { method: 'POST' }
-        )
+          { method: 'POST' },
+        ),
       ]
       if (tables.length > 0) {
         downloads.push(
           fetchAndDownload(
             `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
             `tables_${currentSession.id}.zip`,
-            { method: 'POST' }
-          )
+            { method: 'POST' },
+          ),
         )
       }
       await Promise.all(downloads)
       showSuccess('all')
     } catch (e) {
-      console.error('Failed to download all:', e)
+      setDownloadError(e instanceof Error ? e.message : 'Failed to download')
     } finally {
       setDownloading(null)
     }
@@ -181,6 +190,9 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
           ? `共 ${figures.length} 张图片${tables.length > 0 ? `、${tables.length} 个表格` : ''}，PDF 格式适合发表使用`
           : `Total ${figures.length} figures${tables.length > 0 ? `, ${tables.length} tables` : ''}. PDF format suitable for publication.`}
       </p>
+      {downloadError && (
+        <ErrorBanner message={downloadError} onDismiss={() => setDownloadError(null)} />
+      )}
     </div>
   )
 }

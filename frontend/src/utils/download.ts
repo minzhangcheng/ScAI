@@ -17,20 +17,22 @@ export function downloadBlob(blob: Blob, filename: string): void {
 
 /**
  * Fetch a URL with auth, convert the response to a Blob, and trigger a download.
- * Returns true if the download succeeded.
+ * Throws on non-OK responses.
  */
 export async function fetchAndDownload(
   url: string,
   filename: string,
   options?: RequestInit
-): Promise<boolean> {
+): Promise<void> {
   const mergedHeaders = {
     ...authHeaders(),
     ...(options?.headers as Record<string, string> || {}),
   }
   const response = await fetch(url, { ...options, headers: mergedHeaders })
-  if (!response.ok) return false
+  if (!response.ok) {
+    const errorText = (await response.text().catch(() => 'Unknown error')).slice(0, 1000)
+    throw new Error(`Download failed (${response.status}): ${errorText}`)
+  }
   const blob = await response.blob()
   downloadBlob(blob, filename)
-  return true
 }

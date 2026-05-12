@@ -98,3 +98,19 @@ def test_archive_atomic_write_no_partial_files():
         tmp_path = archive_path.with_suffix(".zip.tmp")
         assert not tmp_path.exists(), "Temp file should be cleaned up after atomic write"
         assert archive_path.exists()
+
+
+def test_download_full_report_uses_slugified_name():
+    from backend.utils.files import slugify_session_name
+
+    names_with_special_chars = [
+        ("My Session/Report", "My_SessionReport"),
+        ('Test "Quoted" Name', "Test_Quoted_Name"),
+        ("Session\nWith\nNewlines", "SessionWithNewlines"),
+        ("  Spaces  Everywhere  ", "Spaces_Everywhere"),
+        ("", "session"),
+    ]
+
+    for raw, expected_prefix in names_with_special_chars:
+        result = slugify_session_name(raw)
+        assert expected_prefix == result, f"slugify_session_name({raw!r}) = {result!r}, expected {expected_prefix!r}"

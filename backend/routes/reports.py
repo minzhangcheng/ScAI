@@ -11,7 +11,7 @@ import math
 import os
 import random
 import re
-import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -19,20 +19,33 @@ from typing import Any, Dict, Optional
 from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from backend.config import (
-    SESSION_DIR, REPORTS_DIR, WORKSPACE_DIR, UPLOAD_DIR,
+    SESSION_DIR, REPORTS_DIR, WORKSPACE_DIR, UPLOAD_DIR, UPLOAD_TEMP_DIR,
     get_session_dir, get_session_reports, get_session_workspace, PI_AGENT_NAME,
 )
 from backend.models.schemas import AnalysisState
-from backend.services.session_store import ensure_session_loaded
+
 from backend.state import detailed_reports, report_websockets
 from backend.utils.config_resolver import resolve_config_for_user
-from backend.utils.files import safe_filename, validate_path_within, validate_session_id
+from backend.utils.files import safe_filename, validate_path_within, validate_session_id, slugify_session_name, temp_file_on_error
 from backend.utils.auth import require_session_ownership
 from backend.utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
+
+REPORT_ARCHIVE_PREFIX = "previous_report_v"
+
+
+def _should_skip_in_report_zip(file_path: Path) -> bool:
+    """Exclude report archives and leftover partial archive files."""
+    name = file_path.name
+    if name.startswith(REPORT_ARCHIVE_PREFIX) and name.endswith(".zip"):
+        return True
+    if name.endswith(".zip.tmp"):
+        return True
+    return False
 
 router = APIRouter(prefix="/api/session", tags=["reports"])
 
@@ -72,7 +85,7 @@ def _next_archive_version(reports_dir: Path) -> int:
     if not reports_dir.exists():
         return 1
     existing_versions = []
-    for p in reports_dir.glob("previous_report_v*.zip"):
+    for p in reports_dir.glob(f"{REPORT_ARCHIVE_PREFIX}*.zip"):
         try:
             version = int(p.stem.split("_v")[-1])
             existing_versions.append(version)
@@ -86,15 +99,13 @@ def _create_report_archive(reports_dir: Path, version: int) -> Path:
     
     Uses atomic write (tmp file + os.replace) to avoid self-inclusion race.
     """
-    archive_path = reports_dir / f"previous_report_v{version}.zip"
+    archive_path = reports_dir / f"{REPORT_ARCHIVE_PREFIX}{version}.zip"
     tmp_path = archive_path.with_suffix(".zip.tmp")
     
     with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
         for file_path in reports_dir.rglob("*"):
             if file_path.is_file():
-                if file_path.name.startswith("previous_report_v") and file_path.name.endswith(".zip"):
-                    continue
-                if file_path == tmp_path:
+                if _should_skip_in_report_zip(file_path):
                     continue
                 arcname = file_path.relative_to(reports_dir)
                 zf.write(file_path, arcname)
@@ -106,7 +117,7 @@ def _create_report_archive(reports_dir: Path, version: int) -> Path:
 def _enforce_archive_retention(reports_dir: Path, max_archives: int = 5):
     """Keep only the most recent max_archives archives, delete the rest sorted by mtime."""
     archives = sorted(
-        reports_dir.glob("previous_report_v*.zip"),
+        reports_dir.glob(f"{REPORT_ARCHIVE_PREFIX}*.zip"),
         key=lambda p: p.stat().st_mtime,
     )
     while len(archives) > max_archives:
@@ -508,31 +519,32 @@ async def download_full_report(session_id: str, state: AnalysisState = Depends(r
     """Download full report including figures, tables, and report JSON"""
     validate_session_id(session_id)
     report_dir = get_session_reports(session_id)
-    
+
     if not report_dir.exists():
         raise HTTPException(status_code=404, detail="Report not found")
-    
-    # Create ZIP in memory
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file_path in report_dir.rglob("*"):
-            if file_path.is_file():
-                arcname = file_path.relative_to(report_dir)
-                zf.write(file_path, arcname)
-    
-    zip_buffer.seek(0)
-    
-    state = await ensure_session_loaded(session_id)
-    if state and hasattr(state, 'name'):
-        filename = f"{state.name}_full_report.zip"
-    else:
-        filename = f"{session_id}_full_report.zip"
-    
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
+
+    UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False, dir=str(UPLOAD_TEMP_DIR))
+    tmp_path = tmp.name
+    tmp.close()
+
+    def _build_zip():
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file_path in report_dir.rglob("*"):
+                if file_path.is_file() and not _should_skip_in_report_zip(file_path):
+                    arcname = file_path.relative_to(report_dir)
+                    zf.write(file_path, arcname)
+
+    async with temp_file_on_error(tmp_path):
+        await asyncio.to_thread(_build_zip)
+        safe_name = slugify_session_name(state.name) if state.name else session_id
+        filename = f"{safe_name}_full_report.zip"
+        return FileResponse(
+            tmp_path,
+            media_type="application/zip",
+            filename=filename,
+            background=BackgroundTask(Path(tmp_path).unlink, missing_ok=True),
+        )
 
 
 @router.get("/{session_id}/report/archives")
@@ -547,7 +559,7 @@ async def list_report_archives(session_id: str, request: Request):
         return []
     
     archives = []
-    for archive_path in reports_dir.glob("previous_report_v*.zip"):
+    for archive_path in reports_dir.glob(f"{REPORT_ARCHIVE_PREFIX}*.zip"):
         try:
             version = int(archive_path.stem.split("_v")[-1])
             stat = archive_path.stat()
@@ -575,7 +587,7 @@ async def download_report_archive(session_id: str, filename: str, request: Reque
     archive_path = reports_dir / filename
     validate_path_within(archive_path, reports_dir)
     
-    if not archive_path.exists() or not filename.startswith("previous_report_v") or not filename.endswith(".zip"):
+    if not archive_path.exists() or not filename.startswith(REPORT_ARCHIVE_PREFIX) or not filename.endswith(".zip"):
         raise HTTPException(status_code=404, detail="Archive not found")
     
     return FileResponse(
