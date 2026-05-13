@@ -9,16 +9,19 @@ from enum import Enum
 # ── Node → Agent mapping ───────────────────────────────────────────
 NODE_TO_AGENT: dict[str, str] = {
     "pi_planning": "pi",
+    "planning_dialogue": "pi",
     "pathology_analysis": "pathology",
     "bioinformatics_analysis": "bioinformatics",
     "biochemistry_analysis": "biochemistry",
     "literature_research": "literature",
     "pi_synthesis": "pi",
+    "user_review_gate": "pi",
 }
 
 # ── Node → WorkflowState result key mapping ─────────────────────────
 NODE_TO_RESULT_KEY: dict[str, str] = {
     "pi_planning": "pi_instructions",
+    "planning_dialogue": "planning_result",
     "pathology_analysis": "pathology_result",
     "bioinformatics_analysis": "bioinformatics_result",
     "biochemistry_analysis": "biochemistry_result",

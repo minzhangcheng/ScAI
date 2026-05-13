@@ -330,6 +330,228 @@ Reply in JSON format (include ALL clusters):
 
         return result
 
+    async def review_bioinfo_plan(
+        self,
+        state: AnalysisState,
+        plan: 'AnalysisPlan',
+        dialogue_round: int = 1,
+    ) -> Dict[str, Any]:
+        """Review bioinformatics agent's analysis plan.
+
+        Returns:
+            Dict with keys: decision ("approved"/"revise"/"reject"), feedback (str),
+            modifications (List[Dict] with step_id + suggestion)
+        """
+        steps_text = "\n".join(
+            f"  Step {s.id}: {s.title}\n"
+            f"    Method: {s.method}\n"
+            f"    Input: {s.input}\n"
+            f"    Output: {s.expected_output}\n"
+            f"    Rationale: {s.rationale}\n"
+            f"    Depends on: {s.depends_on}"
+            for s in plan.steps
+        )
+
+        decision_points = "\n".join(f"  - {d}" for d in plan.key_decision_points)
+
+        prompt = f"""You are reviewing a bioinformatics analysis plan for a single-cell RNA-seq study.
+
+## Plan Overview
+{plan.overview}
+
+## Planned Steps
+{steps_text}
+
+## Key Decision Points
+{decision_points}
+
+## Context
+- Phase: {plan.phase}
+- Round: {state.current_round}
+- Data: {state.build_experimental_design_summary()}
+
+## Review Criteria
+1. **Scientific validity**: Are the planned methods appropriate for the data and biological questions?
+2. **Completeness**: Are any critical steps missing?
+3. **Logical order**: Do dependencies make sense? Are steps correctly ordered?
+4. **Redundancy**: Are there unnecessary or duplicate steps?
+5. **Risk**: Are there steps likely to fail or produce unreliable results?
+
+## Decision Options
+- **approved**: Plan is scientifically sound, no changes needed
+- **revise**: Plan needs specific modifications (list them)
+- **reject**: Plan is fundamentally flawed and needs complete redesign (explain why)
+
+Respond in JSON:
+{{
+    "decision": "approved|revise|reject",
+    "feedback": "Overall assessment and reasoning",
+    "modifications": [
+        {{"step_id": 3, "suggestion": "Use harmony for batch correction instead of BBKNN because..."}},
+        ...
+    ]
+}}
+
+IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approve, modifications must be empty. If you reject, explain what the bioinformatics agent should rethink."""
+
+        response = await self.chat(prompt, temperature=0.2)
+        result = self._safe_parse_json(response, default={})
+        
+        if not result:
+            result = {
+                "decision": "approved",
+                "feedback": "Plan accepted (fallback — PI response could not be parsed)",
+                "modifications": [],
+            }
+        
+        result.setdefault("decision", "approved")
+        result.setdefault("feedback", "")
+        result.setdefault("modifications", [])
+        
+        logger.info(f"[PI] Plan review decision: {result['decision']} (round {dialogue_round})")
+        return result
+
+    async def process_user_plan_feedback(
+        self,
+        user_input: str,
+        current_plan: 'AnalysisPlan',
+    ) -> Dict[str, Any]:
+        """Process user feedback on an analysis plan.
+
+        PI first judges the user's intent, then decides next action.
+
+        Returns:
+            Dict with keys: 
+            - intent: "confirm" | "modify" | "unclear"
+            - action: "proceed_to_execution" | "revise_with_bioinfo" | "clarify_with_user"
+            - guidance_for_bioinfo: str (only if action=revise_with_bioinfo)
+            - clarification_question: str (only if action=clarify_with_user)
+        """
+        steps_summary = "\n".join(
+            f"  Step {s.id}: {s.title} — {s.method}"
+            for s in current_plan.steps
+        )
+
+        prompt = f"""A user has reviewed a bioinformatics analysis plan and provided feedback.
+
+## Current Plan Summary
+{steps_summary}
+
+## User's Feedback
+{user_input}
+
+## Your Task
+First, determine the user's INTENT:
+- **confirm**: User explicitly approves the plan (keywords: "确认", "同意", "没问题", "可以", "approve", "confirm", "ok", "good", "looks good") or says to proceed/start
+- **modify**: User wants specific changes to the plan (adding/removing/changing steps, different methods, etc.)
+- **unclear**: You cannot confidently determine if the user is confirming or requesting changes
+
+Then, based on intent, decide your ACTION:
+- If **confirm** → action="proceed_to_execution", no further dialogue with bioinformatics needed
+- If **modify** → action="revise_with_bioinfo", provide guidance_for_bioinfo summarizing what to change
+- If **unclear** → action="clarify_with_user", provide a clarification_question to ask
+
+## CRITICAL RULES
+- If the user says ANYTHING that means "yes/go ahead/proceed/start/execute", treat it as **confirm**
+- Do NOT overthink — if user says "好的" or "可以" or "go", just confirm
+- Only classify as **modify** if the user gives SPECIFIC change requests
+- Only classify as **unclear** if genuinely ambiguous
+
+Respond in JSON:
+{{
+    "intent": "confirm|modify|unclear",
+    "action": "proceed_to_execution|revise_with_bioinfo|clarify_with_user",
+    "guidance_for_bioinfo": "Specific changes to make (only for revise_with_bioinfo, empty otherwise)",
+    "clarification_question": "Question to ask user (only for clarify_with_user, empty otherwise)"
+}}"""
+
+        response = await self.chat(prompt, temperature=0.1)
+        result = self._safe_parse_json(response, default={})
+        
+        if not result:
+            result = {
+                "intent": "confirm",
+                "action": "proceed_to_execution",
+                "guidance_for_bioinfo": "",
+                "clarification_question": "",
+            }
+        
+        result.setdefault("intent", "confirm")
+        result.setdefault("action", "proceed_to_execution")
+        result.setdefault("guidance_for_bioinfo", "")
+        result.setdefault("clarification_question", "")
+        
+        return result
+
+    async def judge_plan_deviation(
+        self,
+        deviation_description: str,
+        current_plan: 'AnalysisPlan',
+        affected_step_ids: List[int],
+    ) -> Dict[str, Any]:
+        """Judge whether a mid-execution deviation is minor or major.
+
+        Returns:
+            Dict with keys:
+            - severity: "minor" | "major"
+            - reasoning: str
+            - suggested_action: str
+            - needs_user_popup: bool
+        """
+        affected_steps = [s for s in current_plan.steps if s.id in affected_step_ids]
+        affected_text = "\n".join(
+            f"  Step {s.id}: {s.title} ({s.method})"
+            for s in affected_steps
+        )
+
+        prompt = f"""During bioinformatics analysis execution, a deviation from the plan was discovered.
+
+## Deviation Description
+{deviation_description}
+
+## Affected Plan Steps
+{affected_text}
+
+## Remaining Plan Overview
+{current_plan.overview}
+
+## Your Task
+Classify this deviation as **minor** or **major**:
+
+**Minor** (no user popup needed):
+- Switching between equivalent analysis methods (e.g., gseapy → clusterProfiler)
+- Adjusting parameters based on data characteristics
+- Adding/removing a visualization step
+- Skipping a step that data genuinely doesn't support
+- Adding a small complementary analysis
+
+**Major** (requires user popup):
+- The core hypothesis/direction needs to change (e.g., "thought it was T cell driven, actually myeloid")
+- A completely new analysis branch is needed (e.g., "need to add trajectory analysis")
+- A core objective of the plan must be removed
+- The fundamental experimental design interpretation has changed
+
+Respond in JSON:
+{{
+    "severity": "minor|major",
+    "reasoning": "Brief explanation of your classification",
+    "suggested_action": "What the bioinformatics agent should do next",
+    "needs_user_popup": true|false
+}}"""
+
+        response = await self.chat(prompt, temperature=0.1)
+        result = self._safe_parse_json(response, default={})
+        
+        if not result:
+            result = {}
+        
+        result.setdefault("severity", "minor")
+        result.setdefault("reasoning", "Unable to classify (fallback)")
+        result.setdefault("suggested_action", "Proceed with best judgment")
+        result.setdefault("needs_user_popup", False)
+        
+        return result
+
     async def generate_annotation_search_query(
         self,
         cluster_markers: Dict[str, List[str]],

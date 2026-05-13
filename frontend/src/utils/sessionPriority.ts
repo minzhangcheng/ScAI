@@ -1,7 +1,7 @@
 import type { SessionListItem } from '../types'
 
 const RUNNING_STATUSES = new Set([
-  'running', 'waiting_input', 'waiting_annotation',
+  'running', 'waiting_input', 'waiting_annotation', 'waiting_plan_review',
   'generating_report', 'paused',
 ])
 
@@ -34,6 +34,7 @@ export function selectPrioritySession(
       case 'waiting_input':
         waitingInput.push(s); break
       case 'waiting_annotation':
+      case 'waiting_plan_review':
       case 'running':
       case 'generating_report':
         normal.push(s); break

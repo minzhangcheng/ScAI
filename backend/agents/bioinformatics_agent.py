@@ -940,6 +940,271 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
         return (None, None)
 
+    async def generate_analysis_plan(
+        self,
+        state: AnalysisState,
+        pi_tasks: List[str],
+        overview: str,
+        phase: str,
+        stage: str = "full",
+        previous_results: Optional[Dict[str, Any]] = None,
+        existing_plan: Optional['AnalysisPlan'] = None,
+    ) -> 'AnalysisPlan':
+        """Generate a method-level analysis plan based on PI's tasks.
+
+        Args:
+            state: Current analysis state
+            pi_tasks: PI's assigned tasks (strings or dicts with task/rationale/expected_outcome)
+            overview: PI's overall strategy description
+            phase: "exploration" or "innovation"
+            stage: "full", "stage1" (QC+clustering+annotation), or "stage2" (downstream)
+            previous_results: Results from stage1 (only for stage2 planning)
+            existing_plan: Existing plan to revise (for mid-execution revision)
+
+        Returns:
+            AnalysisPlan with method-level steps
+        """
+        from ..models.schemas import AnalysisPlan, PlanStep
+
+        tasks_text = "\n".join(f"- {t}" for t in pi_tasks)
+
+        previous_context = ""
+        if previous_results:
+            prev_text = json.dumps(previous_results, indent=2, default=str)
+            previous_context = f"""
+## Previous Stage Results
+{prev_text[:3000]}
+
+Use these results to plan the downstream analysis steps."""
+
+        revision_context = ""
+        if existing_plan:
+            if existing_plan.status == "rejected":
+                revision_context = f"""
+## Previous Plan was REJECTED by PI
+
+The following plan was completely rejected. Generate a COMPLETELY NEW approach. Do NOT reuse any structure or methods from the rejected plan. The PI's feedback will be provided in the dialogue — use it to understand what to avoid.
+
+Rejected plan overview: {existing_plan.overview}
+Rejected plan steps (DO NOT COPY):
+""" + "\n".join(
+    f"  Step {s.id}: {s.title} ({s.method})"
+    for s in existing_plan.steps
+)
+            else:
+                completed_steps = [s for s in existing_plan.steps if s.status == "completed"]
+                remaining_steps = [s for s in existing_plan.steps if s.status != "completed"]
+                completed_text = "\n".join(
+                    f"  [{s.status}] Step {s.id}: {s.title} ({s.method})"
+                    for s in existing_plan.steps
+                )
+                revision_context = f"""
+## Existing Plan (for incremental revision)
+Completed steps MUST NOT be changed:
+{completed_text}
+
+You are REVISING the remaining steps based on new findings."""
+
+        stage_guidance = ""
+        if stage == "stage1":
+            stage_guidance = """
+This is STAGE 1 of exploration. Plan ONLY these steps:
+1. Data loading and initial inspection
+2. Quality control (filter cells/genes)
+3. Doublet detection/assessment
+4. Batch effect assessment and correction
+5. Normalization, HVG selection
+6. Dimensionality reduction (PCA, UMAP)
+7. Clustering (leiden/louvain)
+8. Cell type annotation (via marker genes + annotate_clusters tool)
+
+Do NOT include downstream analysis (DEG, GO/KEGG, cell communication, etc.) — those will be planned in Stage 2 after seeing clustering results."""
+        elif stage == "stage2":
+            stage_guidance = """
+This is STAGE 2 of exploration. Based on Stage 1 results (clustering + annotation above),
+plan downstream analysis including but not limited to:
+1. Condition-level differential expression for relevant clusters
+2. GO/KEGG pathway enrichment for DEG results
+3. Cell-cell communication analysis (liana)
+4. Visualization of key findings
+5. Any additional analyses suggested by the clustering/annotation results"""
+
+        data_desc = state.build_experimental_design_summary()
+        
+        prompt = f"""You are planning a single-cell RNA-seq bioinformatics analysis. Generate a method-level analysis plan.
+
+## Data Context
+{data_desc}
+
+## PI's Analysis Goals
+Overview: {overview}
+
+Tasks:
+{tasks_text}
+{stage_guidance}
+{previous_context}
+{revision_context}
+
+## Instructions
+Generate a detailed, method-level analysis plan. For each step specify:
+- **title**: Short, descriptive name
+- **method**: The specific Python library/method to use (e.g., "scanpy.pp.filter_cells with min_genes=200")
+- **input**: What data/result this step consumes
+- **expected_output**: What this step produces
+- **rationale**: Why this step is needed (biological/analytical justification)
+- **depends_on**: List of step IDs that must complete before this step
+
+Rules:
+- Each step should be ONE distinct analytical action
+- Methods should reference actual scanpy/numpy/pandas/liana/gseapy functions
+- Include ALL steps needed to complete the PI's tasks
+- Steps should form a logical, dependency-ordered pipeline
+- Identify 2-4 key decision points where PI input may be needed
+
+Return the plan as a JSON object:
+{{
+    "overview": "Brief summary of the analytical strategy",
+    "steps": [
+        {{
+            "id": 1,
+            "title": "...",
+            "method": "...",
+            "input": "...",
+            "expected_output": "...",
+            "rationale": "...",
+            "depends_on": []
+        }},
+        ...
+    ],
+    "key_decision_points": ["..."],
+    "expected_runtime": "~N analysis steps"
+}}"""
+
+        response = await self.chat(prompt, temperature=0.3)
+        plan_data = self._safe_parse_json(response, default={})
+
+        steps = []
+        for s in plan_data.get("steps", []):
+            steps.append(PlanStep(
+                id=s.get("id", len(steps) + 1),
+                title=s.get("title", ""),
+                method=s.get("method", ""),
+                input=s.get("input", ""),
+                expected_output=s.get("expected_output", ""),
+                rationale=s.get("rationale", ""),
+                depends_on=s.get("depends_on", []),
+            ))
+
+        plan = AnalysisPlan(
+            phase=phase,
+            stage=stage,
+            overview=plan_data.get("overview", overview),
+            steps=steps,
+            key_decision_points=plan_data.get("key_decision_points", []),
+            expected_runtime=plan_data.get("expected_runtime", f"~{len(steps)} steps"),
+            status="draft",
+            revision_of=existing_plan.id if existing_plan else None,
+        )
+
+        logger.info(f"[Bioinformatics] Generated plan: {len(steps)} steps, phase={phase}, stage={stage}")
+        return plan
+
+    async def revise_plan_incrementally(
+        self,
+        state: AnalysisState,
+        current_plan: 'AnalysisPlan',
+        pi_feedback: str,
+        completed_step_ids: Optional[List[int]] = None,
+    ) -> 'AnalysisPlan':
+        """Incrementally revise a plan based on PI feedback, preserving completed steps.
+
+        Args:
+            state: Current analysis state
+            current_plan: The existing plan to revise
+            pi_feedback: PI's feedback on what to change
+            completed_step_ids: IDs of steps that have been successfully executed (must not change)
+
+        Returns:
+            Revised AnalysisPlan with revision_of pointing to current_plan
+        """
+        from ..models.schemas import AnalysisPlan, PlanStep
+
+        if completed_step_ids is None:
+            completed_step_ids = [s.id for s in current_plan.steps if s.status == "completed"]
+
+        affected_steps = [s for s in current_plan.steps if s.id not in completed_step_ids]
+        completed_steps = [s for s in current_plan.steps if s.id in completed_step_ids]
+
+        completed_text = "\n".join(
+            f"  [COMPLETED - DO NOT CHANGE] Step {s.id}: {s.title} ({s.method})"
+            for s in completed_steps
+        )
+        affected_text = "\n".join(
+            f"  [TO REVISE] Step {s.id}: {s.title} ({s.method})"
+            for s in affected_steps
+        )
+
+        prompt = f"""Revise an analysis plan based on PI feedback. Only modify affected steps — completed steps are locked.
+
+## PI's Feedback
+{pi_feedback}
+
+## Completed Steps (LOCKED)
+{completed_text}
+
+## Steps To Revise
+{affected_text}
+
+## Revision Rules
+- COMPLETED steps: Do NOT change title, method, or rationale. Only update depends_on if a new step is inserted before them.
+- You may modify, remove, or reorder the "TO REVISE" steps.
+- You may insert NEW steps between completed steps and revised steps (give them new IDs).
+- Updated plan must maintain logical dependency order.
+
+Return the FULL revised plan as JSON (include ALL steps, both completed and revised):
+{{
+    "overview": "Updated strategy summary",
+    "steps": [
+        // ALL steps (completed + revised + new), in execution order
+    ],
+    "key_decision_points": ["updated list"],
+    "expected_runtime": "~N steps"
+}}"""
+
+        response = await self.chat(prompt, temperature=0.3)
+        plan_data = self._safe_parse_json(response, default={})
+
+        steps = []
+        for s in plan_data.get("steps", []):
+            sid = s.get("id", len(steps) + 1)
+            original = next((cs for cs in current_plan.steps if cs.id == sid), None)
+            status = "completed" if (original and original.status == "completed") else "pending"
+            
+            steps.append(PlanStep(
+                id=sid,
+                title=s.get("title", ""),
+                method=s.get("method", ""),
+                input=s.get("input", ""),
+                expected_output=s.get("expected_output", ""),
+                rationale=s.get("rationale", ""),
+                depends_on=s.get("depends_on", []),
+                status=status,
+            ))
+
+        revised_plan = AnalysisPlan(
+            phase=current_plan.phase,
+            stage=current_plan.stage,
+            overview=plan_data.get("overview", current_plan.overview),
+            steps=steps,
+            key_decision_points=plan_data.get("key_decision_points", current_plan.key_decision_points),
+            expected_runtime=plan_data.get("expected_runtime", current_plan.expected_runtime),
+            status="draft",
+            revision_of=current_plan.id,
+            revision_reason=pi_feedback[:500],
+        )
+
+        return revised_plan
+
     async def run_autonomous_analysis(
         self,
         state: AnalysisState,
@@ -1121,6 +1386,27 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
                 dynamic_ctx_msg,
                 {"role": "user", "content": f"Analysis instruction: {initial_instruction}"}
             ]
+            # Inject approved analysis plan if available
+            plan_context = ""
+            if state.current_plan and state.current_plan.status == "approved":
+                plan_steps = "\n".join(
+                    f"  [{s.status}] Step {s.id}: {s.title} — {s.method}"
+                    for s in state.current_plan.steps
+                )
+                plan_context = f"""
+
+## APPROVED ANALYSIS PLAN (follow this plan)
+Overview: {state.current_plan.overview}
+
+Steps:
+{plan_steps}
+
+Key Decision Points: {', '.join(state.current_plan.key_decision_points)}
+
+IMPORTANT: Execute the steps in order. For key decision points, use consult_pi.
+If results significantly deviate from plan expectations, report via consult_pi immediately."""
+            if plan_context:
+                messages.append({"role": "user", "content": plan_context})
             all_findings = []
             all_figures = []
             step_count = 0
@@ -1150,6 +1436,9 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         MAX_CONSECUTIVE_ERRORS = 5  # Force report_findings after this many consecutive code errors
         total_errors = 0
         MAX_TOTAL_ERRORS = 50  # Hard limit: force report_findings after this many total errors
+        # Initialize before loop to prevent NameError when max_steps <= 0
+        _plan_revision_needed = False
+        _plan_revision_context: Dict[str, Any] = {}
 
         while step_count < max_steps and not completed:
             step_count += 1
@@ -1298,6 +1587,8 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             has_substantive_work = False   # execute_code/consult_pi/search_literature/annotate_clusters/report_findings
             has_figure_work = False        # generate_publication_figure
             has_register_score = False     # register_score
+            _plan_revision_needed = False  # Set when PI indicates plan needs revision
+            _plan_revision_context = {}
 
             # Add assistant message ONCE before processing tool calls.
             # Using raw_assistant_message preserves provider-specific fields such as
@@ -1643,11 +1934,25 @@ except Exception as _autosave_block_err:
                     else:
                         pi_response = "PI guidance not available. Proceed with standard practices."
                     
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": f"PI Response: {pi_response}"
-                    })
+                    # Check for plan revision signal
+                    if "[__PLAN_REVISION_NEEDED__]" in pi_response:
+                        clean_response = pi_response.replace("[__PLAN_REVISION_NEEDED__]", "").strip()
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": f"PI Response: {clean_response}\n\n[System: A plan revision has been triggered. Pause and wait for updated plan.]"
+                        })
+                        _plan_revision_needed = True
+                        _plan_revision_context = {
+                            "question": question,
+                            "context": context,
+                        }
+                    else:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": f"PI Response: {pi_response}"
+                        })
 
                     # Record consult_pi step in analysis log
                     analysis_log.append(AnalysisStep(
@@ -2250,6 +2555,12 @@ except Exception as _autosave_block_err:
                     logger.warning(f"[Bioinformatics] Supervisor callback error: {e}")
             # === END SUPERVISOR ===
 
+            # Check if plan revision was triggered during this step
+            if _plan_revision_needed:
+                logger.info("[Bioinformatics] Plan revision needed, pausing execution")
+                # Result dict will be populated after the loop exits
+                break
+
             # Metadata-only iterations (no substantive work) don't count toward step budget.
             # When both figure and register_score are present, use the figure budget cap.
             if not has_substantive_work and response.has_tool_calls:
@@ -2266,8 +2577,12 @@ except Exception as _autosave_block_err:
 
         if llm_error:
             status = "error"
+        elif _plan_revision_needed:
+            status = "paused_for_revision"
+        elif completed:
+            status = "completed"
         else:
-            status = "completed" if completed else "max_steps_reached"
+            status = "max_steps_reached"
 
         # Fallback: extract findings from last assistant text if report_findings was never called
         if not all_findings and not completed:
@@ -2298,6 +2613,8 @@ except Exception as _autosave_block_err:
             "analysis_log": analysis_log,
             "success": status != "error",
             **({"error": llm_error} if llm_error else {}),
+            "plan_revision_needed": _plan_revision_needed,
+            "plan_revision_context": _plan_revision_context if _plan_revision_needed else {},
         }
 
     async def execute_step(self, state: AnalysisState, instruction: str) -> Dict[str, Any]:

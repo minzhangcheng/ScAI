@@ -22,6 +22,16 @@ class SnapshotManager:
         """Compute parent_id, branch_label, and name for the next auto-snapshot.
 
         Shared by both workflow and chat snapshot creation to avoid logic drift.
+
+        Valid phase values:
+            "pre_annotation"       - Before annotation HITL
+            "pre_direction"        - Before direction selection HITL
+            "pre_round_wait"       - Before round-end wait
+            "pre_execution_stage1" - Before executing stage 1 plan
+            "pre_execution_stage2" - Before executing stage 2 plan
+            "pre_execution_full"   - Before executing full round plan
+            "pre_major_revision"   - Before major plan revision dialogue
+            "post_report"          - After final report
         """
         parent_id = state.last_restored_snapshot_id
         if parent_id is None and state.snapshots:

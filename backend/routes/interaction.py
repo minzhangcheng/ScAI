@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from backend.models.api_requests import (
     HumanInputRequest, AnnotationConfirmation, SupplementaryAnalysisRequest,
-    DirectionChoice,
+    DirectionChoice, PlanReviewRequest,
 )
 from backend.models.schemas import APIResponse, TaskStatus
 from backend.services.session_store import (
@@ -237,7 +237,27 @@ async def request_human_input(session_id: str, request: Request):
         except Exception:
             logger.warning("Failed to send human_input_requested via WebSocket", exc_info=True)
 
-    return APIResponse(
-        success=True,
-        message="Human input requested"
-    )
+
+@router.post("/{session_id}/plan-review")
+async def submit_plan_review(session_id: str, request: Request, body: PlanReviewRequest):
+    """Submit user's review decision for an analysis plan."""
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    action = body.action
+    user_input = _UNSAFE_PATTERN.sub('', body.user_input) if body.user_input else ""
+
+    async with _state_lock:
+        workflow = workflows.get(session_id)
+    if not workflow:
+        if state.status == TaskStatus.WAITING_PLAN_REVIEW:
+            if action == "approve":
+                state.current_plan.status = "approved"
+                state.current_plan.approved_at = datetime.now()
+            await async_save_session(session_id, state)
+            await _pause_and_restart_ws(session_id, state)
+            return APIResponse(success=True, message="Plan review recorded, restarting")
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    workflow.signal_plan_review(action, user_input)
+    return APIResponse(success=True, message=f"Plan review action '{action}' received")

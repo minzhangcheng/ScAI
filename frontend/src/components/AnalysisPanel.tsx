@@ -7,6 +7,7 @@ import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
 import { AnnotationConfirmationDialog } from './AnnotationConfirmationDialog'
 import { ExplorationReportDialog } from './ExplorationReportDialog'
+import { PlanReviewDialog } from './PlanReviewDialog'
 import { ValidationDialog } from './ValidationDialog'
 import { StopDialog } from './StopDialog'
 import LlmTimeoutDialog from './LlmTimeoutDialog'
@@ -77,7 +78,10 @@ export function AnalysisPanel() {
   // Annotation confirmation dialog state
   const [showAnnotationDialog, setShowAnnotationDialog] = useState(false)
   const [annotationData, setAnnotationData] = useState<any>(null)
+  const [showPlanReviewDialog, setShowPlanReviewDialog] = useState(false)
+  const [planReviewData, setPlanReviewData] = useState<any>(null)
   const lastAnnotationMsgRef = useRef<string>('')
+  const lastPlanReviewMsgRef = useRef<string>('')
 
   // Exploration report dialog state
   const [showExplorationDialog, setShowExplorationDialog] = useState(false)
@@ -263,6 +267,49 @@ export function AnalysisPanel() {
       }
     } catch (e) {
       console.error('Failed to confirm annotations:', e)
+    }
+  }, [currentSession, wsConnected, wsConnect])
+
+  // Plan review handlers
+  const handlePlanApprove = useCallback(async () => {
+    if (!currentSession) return
+    try {
+      await apiFetch(`/session/${currentSession.id}/plan-review`, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'approve' }),
+      })
+      setShowPlanReviewDialog(false)
+      if (!wsConnected) { setTimeout(() => wsConnect?.(), 100) }
+    } catch (e) {
+      console.error('Failed to approve plan:', e)
+    }
+  }, [currentSession, wsConnected, wsConnect])
+
+  const handlePlanSkip = useCallback(async () => {
+    if (!currentSession) return
+    try {
+      await apiFetch(`/session/${currentSession.id}/plan-review`, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'skip' }),
+      })
+      setShowPlanReviewDialog(false)
+      if (!wsConnected) { setTimeout(() => wsConnect?.(), 100) }
+    } catch (e) {
+      console.error('Failed to skip plan review:', e)
+    }
+  }, [currentSession, wsConnected, wsConnect])
+
+  const handlePlanModify = useCallback(async (userInput: string) => {
+    if (!currentSession) return
+    try {
+      await apiFetch(`/session/${currentSession.id}/plan-review`, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'modify', user_input: userInput }),
+      })
+      // Don't close dialog — it will re-show if PI sends plan back for modification
+      if (!wsConnected) { setTimeout(() => wsConnect?.(), 100) }
+    } catch (e) {
+      console.error('Failed to submit plan modification:', e)
     }
   }, [currentSession, wsConnected, wsConnect])
 
@@ -596,6 +643,8 @@ export function AnalysisPanel() {
       } else if (feedbackRoundData) {
         setShowFeedbackDialog(true)
       }
+    } else if (currentSession?.status === 'waiting_plan_review') {
+      setShowPlanReviewDialog(true)
     }
   }, [currentSession?.status, currentSession?.currentRound, explorationReportData, feedbackRoundData])
 
@@ -612,7 +661,7 @@ export function AnalysisPanel() {
   // Uses wsConnect from the store (managed by App.tsx) to avoid duplicate WebSocket instances
   useEffect(() => {
     if (currentSession &&
-        (currentSession.status === 'running' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation') &&
+        (currentSession.status === 'running' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation' || currentSession.status === 'waiting_plan_review') &&
         !wsConnected && wsConnect) {
       wsConnect()
     }
@@ -660,6 +709,43 @@ export function AnalysisPanel() {
     }
   }, [messages, currentSession?.status])
 
+  // Detect plan_review messages and show dialog
+  useEffect(() => {
+    if (currentSession?.status !== 'waiting_plan_review') return
+    let planMsg: typeof messages[number] | undefined
+    for (let i = messages.length - 1; i >= 0; i--) { if (messages[i].type === 'plan_review') { planMsg = messages[i]; break } }
+    if (planMsg && planMsg.id !== lastPlanReviewMsgRef.current) {
+      lastPlanReviewMsgRef.current = planMsg.id
+      setPlanReviewData(planMsg.content)
+      if (!showPlanReviewDialog) {
+        setShowPlanReviewDialog(true)
+      }
+    }
+  }, [messages, currentSession?.status, showPlanReviewDialog])
+
+  // Detect plan_approved messages and close dialog
+  useEffect(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].type === 'plan_approved') {
+        if (showPlanReviewDialog) {
+          setShowPlanReviewDialog(false)
+        }
+        return
+      }
+    }
+  }, [messages])
+
+  // Auto-dismiss plan review dialog when status changes away from waiting_plan_review
+  useEffect(() => {
+    if (currentSession?.status !== 'waiting_plan_review' && currentSession?.status !== 'running') {
+      // Don't dismiss if we're in running state (plan was just approved)
+    } else if (currentSession?.status === 'running') {
+      if (showPlanReviewDialog) {
+        setShowPlanReviewDialog(false)
+      }
+    }
+  }, [currentSession?.status, showPlanReviewDialog])
+
   // Detect exploration_report messages and show dialog (supports data refresh for supplementary analysis)
   useEffect(() => {
     let expMsg: typeof messages[number] | undefined
@@ -704,7 +790,7 @@ export function AnalysisPanel() {
   }
 
   const isPaused = currentSession.status === 'paused'
-  const isWaitingInput = currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation'
+  const isWaitingInput = currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation' || currentSession.status === 'waiting_plan_review'
   const isRunning = currentSession.status === 'running'
   const isCompleted = currentSession.status === 'completed'
   const isFailed = currentSession.status === 'failed'
@@ -1178,6 +1264,22 @@ export function AnalysisPanel() {
           onRequestSupplementary={(text) => handleSupplementaryAnalysis(text, 'annotation')}
           isSupplementaryRunning={isSupplementaryRunning}
           onClose={() => setShowAnnotationDialog(false)}
+        />
+      )}
+
+      {/* Plan Review Dialog — shown when analysis plan needs user approval */}
+      {showPlanReviewDialog && planReviewData && currentSession && (
+        <PlanReviewDialog
+          open={showPlanReviewDialog}
+          plan={planReviewData.plan || null}
+          dialogueHtml={planReviewData.dialogue_html || ''}
+          phase={planReviewData.phase || ''}
+          round={planReviewData.round || currentSession.currentRound || 1}
+          stage={planReviewData.stage || 'full'}
+          countdownSeconds={useAppStore.getState().roundWaitSeconds}
+          onApprove={handlePlanApprove}
+          onSkip={handlePlanSkip}
+          onModify={handlePlanModify}
         />
       )}
 

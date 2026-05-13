@@ -31,7 +31,7 @@ from .models.schemas import (
     WebSocketMessage, AgentMessage, MessageRole, BiochemistryIndicator,
     PublicationFigure, FigureReviewStatus,
     ClusterAnnotation, AnnotationConfirmationState, DetailedReportSegment,
-    GraphicAbstract,
+    GraphicAbstract, AnalysisPlan, PlanStep,
 )
 from .agents.pi_agent import PIAgent
 from .agents.pathology_agent import PathologyAgent
@@ -202,6 +202,16 @@ class WorkflowState(TypedDict, total=False):
     node_retry_count: Dict[str, int]  # Retry count per node
     node_errors: Dict[str, str]  # Error messages per node
     skip_nodes: List[str]  # Nodes to skip on resume
+    # Planning-related fields
+    planning_stage: str  # "full", "stage1", "stage2"
+    plan_approved: bool  # Whether current plan is approved for execution
+    planning_result: Optional[Dict[str, Any]]  # Result from planning_dialogue node
+    planning_context: Optional[Dict[str, Any]]  # Context passed to planning (stage1 results, etc.)
+    user_plan_feedback: Optional[str]  # User's modification feedback for plan revision
+    plan_revision_needed: bool  # True when mid-execution revision is triggered
+    plan_revision_context: Optional[Dict[str, Any]]  # Context for mid-execution revision
+    plan_revision_resume: bool  # True when mid-execution revision is approved, route back to bioinfo
+    pending_plan_revision: Optional[Dict[str, Any]]  # PI's revision judgment data
 
 
 class SingleCellAnalysisWorkflow:
@@ -257,6 +267,10 @@ class SingleCellAnalysisWorkflow:
 
         # Event for blocking during annotation confirmation (exploration phase)
         self._annotation_event = asyncio.Event()
+
+        # Event for blocking during plan review
+        self._plan_review_event = asyncio.Event()
+        self._plan_review_action = None  # "approve" | "skip" | dict with user modifications
 
         # LLM failure intervention — serialized via Lock
         self._llm_failure_lock = asyncio.Lock()
@@ -348,6 +362,16 @@ class SingleCellAnalysisWorkflow:
     def signal_annotation_confirmed(self):
         """Signal that user has confirmed cell type annotations"""
         self._annotation_event.set()
+
+    def signal_plan_review(self, action: str, user_input: Optional[str] = None):
+        """Signal that user has reviewed the plan.
+        
+        Args:
+            action: "approve", "skip", or "modify"
+            user_input: User's modification text (only for "modify")
+        """
+        self._plan_review_action = {"action": action, "user_input": user_input}
+        self._plan_review_event.set()
 
     def signal_llm_failure_action(self, node_name: str, action: str, generation: int) -> bool:
         """Signal the workflow to handle an LLM failure with the given action.
@@ -620,6 +644,8 @@ class SingleCellAnalysisWorkflow:
         # Add nodes
         self.graph.add_node("initialize_round", self._initialize_round)
         self.graph.add_node("pi_planning", self._pi_planning)
+        self.graph.add_node("planning_dialogue", self._planning_dialogue)
+        self.graph.add_node("user_review_gate", self._user_review_gate)
         self.graph.add_node("pathology_analysis", self._pathology_analysis)
         self.graph.add_node("bioinformatics_analysis", self._bioinformatics_analysis)
         self.graph.add_node("biochemistry_analysis", self._biochemistry_analysis)
@@ -641,11 +667,42 @@ class SingleCellAnalysisWorkflow:
             }
         )
 
+        # pi_planning → planning_dialogue or skip to analysis
+        self.graph.add_conditional_edges(
+            "pi_planning",
+            self._should_plan,
+            {
+                "do_planning": "planning_dialogue",
+                "skip_planning": "biochemistry_analysis",
+            }
+        )
+        self.graph.add_edge("planning_dialogue", "user_review_gate")
+
+        self.graph.add_conditional_edges(
+            "user_review_gate",
+            self._after_review,
+            {
+                "approved": "biochemistry_analysis",
+                "approved_stage2": "bioinformatics_analysis",
+                "approved_revision": "bioinformatics_analysis",
+                "revise": "planning_dialogue",
+            }
+        )
+
         # Sequential analysis: biochemistry -> pathology -> bioinformatics -> literature
-        self.graph.add_edge("pi_planning", "biochemistry_analysis")
         self.graph.add_edge("biochemistry_analysis", "pathology_analysis")
         self.graph.add_edge("pathology_analysis", "bioinformatics_analysis")
-        self.graph.add_edge("bioinformatics_analysis", "literature_research")
+
+        # After bioinformatics, may go to planning_dialogue for stage2 or revision
+        self.graph.add_conditional_edges(
+            "bioinformatics_analysis",
+            self._after_bioinformatics,
+            {
+                "continue_to_synthesis": "literature_research",
+                "stage2_planning": "planning_dialogue",
+                "plan_revision": "planning_dialogue",
+            }
+        )
         self.graph.add_edge("literature_research", "pi_synthesis")
 
         # After synthesis, wait for user input (blocks until frontend signals continue)
@@ -745,6 +802,27 @@ class SingleCellAnalysisWorkflow:
         await self._send_message("status", "Bioinformatics consulting PI...", AgentType.BIOINFORMATICS)
         await self._send_message("pi_question", f"Question: {question}\nContext: {context}", AgentType.BIOINFORMATICS)
         
+        # Build plan context if an approved plan exists
+        plan_context = ""
+        analysis_state = getattr(self, '_current_analysis_state', None)
+        if analysis_state and analysis_state.current_plan and analysis_state.current_plan.status == "approved":
+            plan = analysis_state.current_plan
+            steps_summary = "\n".join(
+                f"  [{s.status}] Step {s.id}: {s.title}"
+                for s in plan.steps
+            )
+            plan_context = f"""
+
+## Current Analysis Plan (for reference)
+{steps_summary}
+
+If the question reveals that the current plan cannot be executed as-is, you should:
+1. First, determine if this is a MINOR adjustment (method switch, parameter change, skip step)
+   or MAJOR revision (hypothesis change, new analysis branch, core objective removed)
+2. For MINOR: Provide direct actionable guidance
+3. For MAJOR: State clearly that a plan revision is needed and explain why
+"""
+        
         # Use PI agent to answer the biological question
         prompt = f"""The bioinformatics analyst is asking for your guidance on a biological decision:
 
@@ -752,6 +830,7 @@ QUESTION: {question}
 
 CONTEXT FROM ANALYSIS:
 {context}
+{plan_context}
 
 Please provide clear guidance on:
 1. Your recommended decision/direction
@@ -766,6 +845,53 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         try:
             response = await self.pi_agent.chat_without_history(prompt, temperature=self._settings_provider.get_temperature('pi'))
             await self._send_message("pi_response", response, AgentType.PI)
+            
+            # Check if plan revision is needed based on PI's response
+            if analysis_state and analysis_state.current_plan and analysis_state.current_plan.status == "approved":
+                plan_revision_keywords = ["plan needs revision", "plan revision", "replan",
+                                          "cannot execute", "not applicable", "different approach",
+                                          "rethink", "redesign", "fundamental change",
+                                          "major change", "hypothesis change"]
+                pi_mentions_plan_issue = any(
+                    kw in response.lower() for kw in plan_revision_keywords
+                )
+                
+                if pi_mentions_plan_issue:
+                    # PI hints plan has issues — further judge severity
+                    plan = analysis_state.current_plan
+                    affected_ids = []
+                    for step in plan.steps:
+                        if step.status != "completed":
+                            step_keywords = [step.title.lower(), step.method.lower()]
+                            if any(kw in question.lower() or kw in context.lower() for kw in step_keywords if len(kw) > 3):
+                                affected_ids.append(step.id)
+                    if not affected_ids:
+                        pending = [s.id for s in plan.steps if s.status != "completed"]
+                        if pending:
+                            affected_ids = [pending[0]]
+
+                    try:
+                        judgment = await self.pi_agent.judge_plan_deviation(
+                            deviation_description=f"QUESTION: {question}\nCONTEXT: {context}",
+                            current_plan=plan,
+                            affected_step_ids=affected_ids,
+                        )
+                        
+                        if judgment.get("needs_user_popup"):
+                            response += "\n\n[__PLAN_REVISION_NEEDED__]"
+                            # Create snapshot before major revision
+                            await self._create_auto_snapshot(analysis_state, "pre_major_revision")
+                            gs = getattr(self, '_current_graph_state', None)
+                            if gs is not None:
+                                gs["pending_plan_revision"] = {
+                                    "judgment": judgment,
+                                    "question": question,
+                                    "context": context,
+                                    "affected_step_ids": affected_ids,
+                                }
+                    except Exception as e:
+                        logger.warning(f"[{self.session_id}] Plan deviation judgment failed: {e}")
+            
             return response
         except Exception as e:
             error_msg = f"PI consultation failed: {str(e)}"
@@ -1946,6 +2072,17 @@ Approve if quality_score >= 7."""
         human_guidance = state.get("human_guidance")
         adjusted_instructions = state.get("adjusted_instructions")
 
+        # Reset plan-related state for new round
+        analysis_state.current_plan = None
+        state["plan_approved"] = False
+        state["plan_revision_needed"] = False
+        # Do NOT reset plan_revision_resume here — it's set by _user_review_gate
+        # and must survive until _after_bioinformatics routing reads it
+        if not state.get("plan_revision_resume"):
+            state["plan_revision_resume"] = False
+        state["planning_result"] = None
+        state["user_plan_feedback"] = None
+
         # Reset PI message history at start of each round's planning phase.
         # Dynamic planning calls (plan_agent_tasks) will accumulate context
         # within this round via self.chat(), building a coherent chain of thought.
@@ -2166,6 +2303,12 @@ Approve if quality_score >= 7."""
             AgentType.PI
         )
 
+        # Determine planning stage based on round and phase
+        if analysis_state.analysis_phase == AnalysisPhase.EXPLORATION:
+            state["planning_stage"] = "stage1"
+        else:
+            state["planning_stage"] = "full"
+
         return {
             **state,
             "pi_instructions": instructions,
@@ -2173,6 +2316,361 @@ Approve if quality_score >= 7."""
             "human_guidance_processed": True,
         }
     
+    async def _planning_dialogue(self, state: WorkflowState) -> WorkflowState:
+        """PI ↔ Bioinformatics dialogue to design an analysis plan (max 5 rounds)."""
+        analysis_state = state["analysis_state"]
+        pi_instructions = state.get("pi_instructions", {})
+        bioinf_tasks = pi_instructions.get("bioinformatics_tasks", [])
+        overview = pi_instructions.get("overview", "")
+        stage = state.get("planning_stage", "full")  # "full", "stage1", "stage2"
+        existing_plan = analysis_state.current_plan  # may have a partial plan from revision
+        if existing_plan and existing_plan.stage and existing_plan.stage != stage and stage != "full":
+            existing_plan = None
+
+        phase = analysis_state.analysis_phase.value
+        dialogue_history = []
+
+        MAX_ROUNDS = 5
+        for round_num in range(1, MAX_ROUNDS + 1):
+            await self._send_message(
+                "status",
+                f"Planning dialogue: round {round_num}/{MAX_ROUNDS}",
+                AgentType.PI,
+            )
+
+            # Bioinformatics agent generates/revises plan
+            if round_num == 1 and not existing_plan:
+                # First round, no prior plan — generate from scratch
+                plan = await self.bioinformatics_agent.generate_analysis_plan(
+                    state=analysis_state,
+                    pi_tasks=bioinf_tasks,
+                    overview=overview,
+                    phase=phase,
+                    stage=stage,
+                    previous_results=state.get("planning_context"),
+                )
+            elif existing_plan and existing_plan.status == "rejected":
+                # PI rejected the plan entirely — generate fresh with rejection context
+                plan = await self.bioinformatics_agent.generate_analysis_plan(
+                    state=analysis_state,
+                    pi_tasks=bioinf_tasks,
+                    overview=overview,
+                    phase=phase,
+                    stage=stage,
+                    previous_results=state.get("planning_context"),
+                    existing_plan=existing_plan,  # Pass rejected plan so agent knows what to avoid
+                )
+            else:
+                # PI wants revisions — use incremental revision to preserve completed steps
+                pi_feedback = dialogue_history[-1]["pi_feedback"] if dialogue_history else ""
+                user_feedback = state.get("user_plan_feedback", "")
+                combined_feedback = f"{pi_feedback}\n\nUser feedback: {user_feedback}" if user_feedback else pi_feedback
+                
+                plan = await self.bioinformatics_agent.revise_plan_incrementally(
+                    state=analysis_state,
+                    current_plan=existing_plan,
+                    pi_feedback=combined_feedback,
+                )
+
+            # PI reviews the plan
+            review = await self.pi_agent.review_bioinfo_plan(
+                state=analysis_state,
+                plan=plan,
+                dialogue_round=round_num,
+            )
+
+            dialogue_history.append({
+                "round": round_num,
+                "plan": plan.model_dump(),
+                "pi_decision": review["decision"],
+                "pi_feedback": review["feedback"],
+                "pi_modifications": review.get("modifications", []),
+            })
+
+            if review["decision"] == "approved":
+                plan.status = "pi_reviewing"
+                analysis_state.current_plan = plan
+                analysis_state.plan_dialogue_history = dialogue_history
+                state["planning_result"] = {"plan": plan.model_dump(), "dialogue": dialogue_history}
+                await self._send_message("status", "Plan approved by PI", AgentType.PI)
+                break
+            elif review["decision"] == "reject":
+                # PI wants complete redesign — mark as rejected, pass to next round as context
+                plan.status = "rejected"
+                existing_plan = plan  # Keep rejected plan so agent knows what to avoid
+                await self._send_message(
+                    "status",
+                    f"Plan rejected by PI, redesigning... ({review['feedback'][:200]})",
+                    AgentType.PI,
+                )
+            else:  # revise
+                # PI wants modifications — use this plan as base for next round's incremental revision
+                existing_plan = plan
+                existing_plan.status = "draft"
+                await self._send_message(
+                    "status",
+                    f"Plan needs revision (round {round_num}): {review['feedback'][:200]}",
+                    AgentType.PI,
+                )
+        else:
+            # Max rounds reached — PI takes the last plan as-is
+            logger.warning(f"[{self.session_id}] Planning dialogue reached max rounds ({MAX_ROUNDS})")
+            # PI takes the last plan as-is
+            if existing_plan:
+                existing_plan.status = "pi_reviewing"
+                analysis_state.current_plan = existing_plan
+                analysis_state.plan_dialogue_history = dialogue_history
+                state["planning_result"] = {"plan": existing_plan.model_dump(), "dialogue": dialogue_history}
+            await self._send_message(
+                "status",
+                "Planning dialogue: max rounds reached, proceeding with last version",
+                AgentType.PI,
+            )
+
+        return state
+
+    async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
+        """Present the analysis plan to the user for review and approval.
+
+        Blocks until the user responds (approve/skip/modify).
+        For modification requests, loops back to planning_dialogue.
+        """
+        analysis_state = state["analysis_state"]
+        plan = analysis_state.current_plan
+
+        if not plan:
+            logger.warning(f"[{self.session_id}] No plan to review, skipping gate")
+            return state
+
+        # Main review loop — continues until user approves or skips
+        # Reset event and action at entry to prevent stale state from previous round
+        self._plan_review_event.clear()
+        self._plan_review_action = None
+
+        while True:
+            # Set plan status and notify frontend
+            plan.status = "user_reviewing"
+
+            # Generate dialogue HTML for download
+            dialogue_html = self._build_plan_dialogue_html(
+                analysis_state.plan_dialogue_history
+            )
+
+            # Send plan to frontend
+            await self._send_message("plan_review", {
+                "plan": plan.model_dump(),
+                "dialogue_html": dialogue_html,
+                "phase": analysis_state.analysis_phase.value,
+                "round": analysis_state.current_round,
+                "stage": state.get("planning_stage", "full"),
+            }, AgentType.PI)
+
+            # Set waiting status and sync
+            self._set_status(analysis_state, TaskStatus.WAITING_PLAN_REVIEW)
+            await self._send_state_sync(analysis_state, "plan_review")
+
+            # Block and wait for user (with 1-hour timeout to prevent permanent hang)
+            # Save and reset action before clearing event to close race window
+            # where signal_plan_review arrives between clarify continue and event.clear()
+            prev_action = self._plan_review_action
+            self._plan_review_event.clear()
+            self._plan_review_action = None
+            if not prev_action:
+                logger.info(f"[{self.session_id}] Waiting for user plan review...")
+                try:
+                    await asyncio.wait_for(self._plan_review_event.wait(), timeout=3600)
+                except asyncio.TimeoutError:
+                    logger.warning(f"[{self.session_id}] Plan review timed out, auto-skipping")
+                    self._plan_review_action = {"action": "skip", "user_input": ""}
+                action = self._plan_review_action or {}
+            else:
+                logger.info(f"[{self.session_id}] Plan review action already received, skipping wait")
+                action = prev_action
+            action_type = action.get("action", "skip")
+            user_input = action.get("user_input", "")
+
+            if action_type == "approve":
+                # User explicitly approved → execute
+                plan.status = "approved"
+                plan.approved_at = datetime.now()
+                analysis_state.current_plan = plan
+                await self._send_message("plan_approved", {
+                    "plan_id": plan.id,
+                    "action": "approved",
+                }, AgentType.PI)
+                state["plan_approved"] = True
+                # If this was a mid-execution revision, mark resume
+                if state.get("plan_revision_needed"):
+                    state["plan_revision_resume"] = True
+                    state["plan_revision_needed"] = False
+                break
+
+            elif action_type == "skip":
+                # User skipped → PI decides autonomously
+                plan.status = "approved"
+                plan.approved_at = datetime.now()
+                analysis_state.current_plan = plan
+                await self._send_message("plan_approved", {
+                    "plan_id": plan.id,
+                    "action": "skipped",
+                }, AgentType.PI)
+                state["plan_approved"] = True
+                # If this was a mid-execution revision, mark resume
+                if state.get("plan_revision_needed"):
+                    state["plan_revision_resume"] = True
+                    state["plan_revision_needed"] = False
+                break
+
+            elif action_type == "modify" and user_input:
+                # User wants modifications → PI judges intent
+                pi_judgment = await self.pi_agent.process_user_plan_feedback(
+                    user_input=user_input,
+                    current_plan=plan,
+                )
+
+                if pi_judgment["action"] == "proceed_to_execution":
+                    # User's input was actually confirmation → execute
+                    plan.status = "approved"
+                    plan.approved_at = datetime.now()
+                    analysis_state.current_plan = plan
+                    await self._send_message("plan_approved", {
+                        "plan_id": plan.id,
+                        "action": "approved_after_clarification",
+                    }, AgentType.PI)
+                    state["plan_approved"] = True
+                    # If this was a mid-execution revision, mark resume
+                    if state.get("plan_revision_needed"):
+                        state["plan_revision_resume"] = True
+                        state["plan_revision_needed"] = False
+                    break
+
+                elif pi_judgment["action"] == "clarify_with_user":
+                    # PI needs to clarify — notify user and wait again
+                    await self._send_message("status", 
+                        pi_judgment.get("clarification_question", "Could you clarify?"),
+                        AgentType.PI)
+                    continue  # Re-show the review gate
+
+                else:  # revise_with_bioinfo
+                    # PI will incorporate user feedback into plan revision
+                    guidance = pi_judgment.get("guidance_for_bioinfo", user_input)
+                    state["user_plan_feedback"] = guidance
+                    state["plan_approved"] = False
+                    if state.get("plan_revision_needed"):
+                        state["plan_revision_resume"] = True
+                        state["plan_revision_needed"] = False
+                    break
+
+        return state
+
+    def _build_plan_dialogue_html(self, dialogue_history: List[Dict]) -> str:
+        """Build an HTML document from the PI↔Bioinfo planning dialogue.
+        
+        Includes step-level diff between consecutive rounds to highlight changes.
+        """
+        import html as html_module
+        
+        def esc(text: str) -> str:
+            """Escape HTML to prevent XSS in LLM-generated content."""
+            return html_module.escape(str(text))
+        
+        def _diff_steps(prev_steps: List[Dict], curr_steps: List[Dict]) -> Dict[int, str]:
+            """Compare steps between two plan versions. Returns {step_id: 'added'|'removed'|'modified'|'unchanged'}."""
+            prev_by_id = {s['id']: s for s in prev_steps}
+            curr_by_id = {s['id']: s for s in curr_steps}
+            diff = {}
+            all_ids = set(prev_by_id.keys()) | set(curr_by_id.keys())
+            for sid in all_ids:
+                if sid in curr_by_id and sid not in prev_by_id:
+                    diff[sid] = 'added'
+                elif sid in prev_by_id and sid not in curr_by_id:
+                    diff[sid] = 'removed'
+                elif sid in curr_by_id and sid in prev_by_id:
+                    prev = prev_by_id[sid]
+                    curr = curr_by_id[sid]
+                    if (prev.get('title') != curr.get('title') or
+                        prev.get('method') != curr.get('method')):
+                        diff[sid] = 'modified'
+                    else:
+                        diff[sid] = 'unchanged'
+            return diff
+        
+        DIFF_COLORS = {
+            'added': '#e8f5e9',
+            'removed': '#ffebee',
+            'modified': '#fff3e0',
+            'unchanged': '#f5f5f5',
+        }
+        DIFF_LABELS = {
+            'added': '[ADDED]',
+            'removed': '[REMOVED]',
+            'modified': '[MODIFIED]',
+            'unchanged': '',
+        }
+        
+        html_parts = [
+            "<html><head><meta charset='utf-8'><title>Analysis Plan Dialogue</title>",
+            "<style>body{font-family:sans-serif;max-width:900px;margin:0 auto;padding:20px;}",
+            ".round{border:1px solid #ccc;margin:10px 0;padding:15px;border-radius:8px;}",
+            ".approved{background:#e8f5e9}.revise{background:#fff3e0}.reject{background:#ffebee}",
+            ".step{margin:5px 0;padding:8px;border-radius:4px;}",
+            ".step-added{background:#e8f5e9;border-left:4px solid #4caf50}",
+            ".step-removed{background:#ffebee;border-left:4px solid #f44336;text-decoration:line-through}",
+            ".step-modified{background:#fff3e0;border-left:4px solid #ff9800}",
+            ".step-unchanged{background:#f5f5f5}",
+            "</style></head><body><h1>Analysis Plan Dialogue</h1>",
+        ]
+
+        prev_steps = None
+        for entry in dialogue_history:
+            round_num = entry["round"]
+            decision = esc(entry.get("pi_decision", ""))
+            css_class = {"approved": "approved", "revise": "revise", "reject": "reject"}.get(decision, "")
+            
+            html_parts.append(f"<div class='round {css_class}'>")
+            html_parts.append(f"<h2>Round {round_num} — PI Decision: {decision.upper()}</h2>")
+            html_parts.append(f"<p><strong>PI Feedback:</strong> {esc(entry.get('pi_feedback', ''))}</p>")
+            
+            plan = entry.get("plan", {})
+            curr_steps = plan.get("steps", [])
+            
+            if prev_steps is not None and curr_steps:
+                step_diffs = _diff_steps(prev_steps, curr_steps)
+                has_changes = any(d != 'unchanged' for d in step_diffs.values())
+                if has_changes:
+                    html_parts.append("<h3>Changes from Previous Round:</h3>")
+                    changes = []
+                    for sid, status in step_diffs.items():
+                        if status == 'added':
+                            step_data = next((s for s in curr_steps if s.get('id') == sid), {})
+                            changes.append(f"<span style='color:#4caf50'>+ Added Step {sid}: {esc(step_data.get('title',''))}</span>")
+                        elif status == 'removed':
+                            step_data = next((s for s in prev_steps if s.get('id') == sid), {})
+                            changes.append(f"<span style='color:#f44336'>- Removed Step {sid}: {esc(step_data.get('title',''))}</span>")
+                        elif status == 'modified':
+                            changes.append(f"<span style='color:#ff9800'>~ Modified Step {sid}</span>")
+                    html_parts.append("<br>".join(changes))
+            
+            if curr_steps:
+                html_parts.append("<h3>Plan Steps:</h3>")
+                step_diffs = _diff_steps(prev_steps, curr_steps) if prev_steps else {}
+                for step in curr_steps:
+                    sid = step.get('id', '')
+                    diff_status = step_diffs.get(sid, 'unchanged')
+                    css = f"step-{diff_status}"
+                    label = DIFF_LABELS.get(diff_status, '')
+                    html_parts.append(
+                        f"<div class='step {css}'><strong>Step {esc(str(sid))}: {esc(step.get('title', ''))}</strong> {label}<br>"
+                        f"Method: {esc(step.get('method', ''))}<br>"
+                        f"Rationale: {esc(step.get('rationale', ''))}</div>"
+                    )
+            
+            html_parts.append("</div>")
+            prev_steps = curr_steps
+
+        html_parts.append("</body></html>")
+        return "\n".join(html_parts)
+
     @with_retry("pathology_analysis")
     async def _pathology_analysis(self, state: WorkflowState) -> WorkflowState:
         """Pathology agent analyzes images"""
@@ -2308,6 +2806,21 @@ Approve if quality_score >= 7."""
         if state.get("human_guidance"):
             human_guidance = f"\n\nHuman researcher guidance: {state['human_guidance']}"
         
+        # Planning stage support: filter tasks and adjust instructions based on stage
+        planning_stage = state.get("planning_stage", "full")
+        
+        if planning_stage == "stage1":
+            # Create snapshot before stage1 execution
+            await self._create_auto_snapshot(analysis_state, "pre_execution_stage1")
+            
+        elif planning_stage == "stage2":
+            # Create snapshot before stage2 execution
+            await self._create_auto_snapshot(analysis_state, "pre_execution_stage2")
+            
+        elif planning_stage == "full":
+            # Create snapshot before full execution
+            await self._create_auto_snapshot(analysis_state, "pre_execution_full")
+        
         # Step 1: PI provides analysis goals
         await self._send_message("status", "PI is defining analysis goals...", AgentType.PI)
         
@@ -2316,6 +2829,24 @@ Approve if quality_score >= 7."""
         bioinf_tasks = pi_instructions.get("bioinformatics_tasks", [])
         merge_strategy = pi_instructions.get("merge_strategy", "")
         cluster_comparison_strategy = pi_instructions.get("cluster_comparison_strategy", "")
+
+        # Stage1 task filtering: only QC + clustering + annotation tasks
+        if planning_stage == "stage1":
+            stage1_keywords = ["qc", "quality", "filter", "normaliz",
+                "cluster", "umap", "pca", "dimension", "annotat", "cell type",
+                "doublet", "batch", "harmony", "hvg", "preprocess", "load",
+                "inspect", "merg", "integrat"]
+            def _task_text(t):
+                """Extract searchable text from a task (string or dict)."""
+                if isinstance(t, dict):
+                    return " ".join(str(v) for v in t.values()).lower()
+                return str(t).lower()
+            stage1_tasks = [t for t in bioinf_tasks if any(
+                kw in _task_text(t) for kw in stage1_keywords
+            )]
+            if not stage1_tasks:
+                stage1_tasks = ["Execute scRNA-seq QC, clustering, and cell type annotation"]
+            bioinf_tasks = stage1_tasks
 
         # Dynamic PI planning: refine bioinformatics tasks based on completed results
         overview = pi_instructions.get("overview", "")
@@ -2365,7 +2896,42 @@ Approve if quality_score >= 7."""
         has_bulk = analysis_state.has_bulk_rnaseq()
 
         phase_instruction = ""
-        if analysis_state.analysis_phase == AnalysisPhase.EXPLORATION:
+        if planning_stage == "stage1":
+            # Stage 1: QC + Clustering + Annotation ONLY
+            phase_instruction = """
+## STAGE 1 - EXPLORATION PHASE (QC + Clustering + Annotation ONLY)
+
+You are in STAGE 1 of the exploration phase. Execute ONLY the following analyses:
+
+MANDATORY STEPS:
+1. Load the input data (h5ad file)
+2. Basic QC: filter cells by min_genes, filter genes by min_cells, compute QC metrics
+3. Doublet detection assessment (scrublet or equivalent)
+4. Batch effect assessment: check if multiple samples/batches exist, evaluate need for correction
+5. Normalization (scanpy.pp.normalize_total), log1p
+6. Highly variable gene selection (scanpy.pp.highly_variable_genes)
+7. PCA (scanpy.pp.pca)
+8. UMAP (scanpy.pp.neighbors + scanpy.tl.umap)
+9. Clustering (scanpy.tl.leiden with appropriate resolution)
+10. Cell type annotation: find marker genes per cluster (scanpy.tl.rank_genes_groups), then call annotate_clusters tool
+
+WHAT NOT TO DO (these will be done in Stage 2):
+- Do NOT run condition-level differential expression (DEG)
+- Do NOT run GO/KEGG pathway enrichment
+- Do NOT run cell-cell communication analysis (liana)
+- Do NOT generate publication figures (save that for Stage 2)
+- Do NOT run trajectory/velocity analysis
+
+IMPORTANT: After completing steps 1-10, call report_findings with a summary of:
+- Number of cells/genes after QC
+- Batch effects detected (if any) and correction applied
+- Number of clusters found
+- Key marker genes per cluster
+- Annotation results (cell types identified)
+
+These Stage 1 findings will be used by PI to plan Stage 2 downstream analysis.
+"""
+        elif analysis_state.analysis_phase == AnalysisPhase.EXPLORATION:
             phase_instruction = """
 ## EXPLORATION PHASE INSTRUCTIONS
 This is Round 1 — comprehensive, unbiased exploration. You MUST:
@@ -2506,6 +3072,10 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         if self.supervisor_agent:
             self.supervisor_agent.reset_for_round()
 
+        # Set current state references for _pi_callback plan deviation detection
+        self._current_analysis_state = analysis_state
+        self._current_graph_state = state
+
         result = await self.bioinformatics_agent.run_autonomous_analysis(
             analysis_state,
             instruction,
@@ -2606,11 +3176,33 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             json.dumps({"findings": all_findings, "summary": summary}, ensure_ascii=False)
         )
 
-        return {
+        # Stage transition: if stage1 just completed, set up for stage2
+        result_state = {
             **state,
             "analysis_state": analysis_state,
             "bioinformatics_result": final_result
         }
+
+        if planning_stage == "stage1":
+            result_state["planning_stage"] = "stage2"
+            result_state["plan_approved"] = False  # stage2 needs re-planning
+            result_state["planning_context"] = {
+                "stage1_summary": final_result.get("summary", ""),
+                "stage1_findings": final_result.get("findings", []),
+                "stage1_figures": final_result.get("figures", []),
+                "stage1_steps_executed": final_result.get("steps_executed", 0),
+            }
+            analysis_state.current_plan = None  # Clear stage1 plan so stage2 generates fresh
+        elif planning_stage == "stage2":
+            result_state["planning_stage"] = "full"  # reset
+
+        # Check for mid-execution plan revision from agent result
+        if isinstance(final_result, dict) and final_result.get("plan_revision_needed"):
+            result_state["plan_revision_needed"] = True
+            result_state["plan_revision_context"] = final_result.get("plan_revision_context", {})
+            logger.info(f"[{self.session_id}] Mid-execution plan revision triggered")
+
+        return result_state
     
     @with_retry("biochemistry_analysis")
     async def _biochemistry_analysis(self, state: WorkflowState) -> WorkflowState:
@@ -3241,6 +3833,45 @@ Return ONLY the JSON array, nothing else."""
                 logger.info(f"[{self.session_id}] User input on last round (text={has_real_text}, files={has_uploaded_files}), extending max_rounds to {analysis_state.max_rounds}")
 
         return {**state, "analysis_state": analysis_state}
+
+    def _should_plan(self, state: WorkflowState) -> str:
+        """Determine if planning dialogue is needed."""
+        analysis_state = state["analysis_state"]
+        plan = analysis_state.current_plan
+        # If plan is already approved (from revision), skip to execution
+        if plan and plan.status == "approved":
+            return "skip_planning"
+        return "do_planning"
+
+    def _after_review(self, state: WorkflowState) -> str:
+        """Route after user review gate.
+        
+        Four possible outcomes:
+        1. approved + full/stage1 → biochemistry_analysis (normal flow)
+        2. approved + stage2 → bioinformatics_analysis (skip already-run upstream agents)
+        3. approved + plan_revision_resume → bioinformatics_analysis (mid-execution revision approved)
+        4. not approved → planning_dialogue (user wants changes)
+        """
+        if state.get("plan_approved"):
+            stage = state.get("planning_stage", "full")
+            if stage == "stage2":
+                return "approved_stage2"
+            if state.get("plan_revision_resume"):
+                return "approved_revision"
+            return "approved"
+        return "revise"
+
+    def _after_bioinformatics(self, state: WorkflowState) -> str:
+        """Route after bioinformatics execution."""
+        # Check for mid-execution plan revision
+        if state.get("plan_revision_needed"):
+            return "plan_revision"
+        # Check for stage transition
+        stage = state.get("planning_stage", "full")
+        if stage == "stage2" and not state.get("plan_approved"):
+            # Stage 1 just completed, go to stage 2 planning
+            return "stage2_planning"
+        return "continue_to_synthesis"
 
     def _should_continue_after_init(self, state: WorkflowState) -> str:
         """Route to report generation if user requested stop during round initialization."""

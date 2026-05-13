@@ -169,6 +169,26 @@ async def resume_analysis(session_id: str, request: Request):
                 message="Annotation confirmed, continuing analysis",
                 data={"needs_reconnect": True},
             )
+    elif state.status == TaskStatus.WAITING_PLAN_REVIEW:
+        # Continue from plan review wait — auto-skip
+        state.status = TaskStatus.RUNNING
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if workflow:
+            workflow.signal_plan_review("skip")
+            return APIResponse(
+                success=True,
+                message="Plan review skipped, continuing analysis"
+            )
+        else:
+            await _pause_and_restart_ws(session_id, state)
+            return APIResponse(
+                success=True,
+                message="Plan review skipped, continuing analysis",
+                data={"needs_reconnect": True},
+            )
     elif state.status == TaskStatus.PAUSED:
         state.status = TaskStatus.RUNNING
         await _update_session_cache(session_id, state)
@@ -199,7 +219,7 @@ async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequ
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
-                             TaskStatus.WAITING_ANNOTATION, TaskStatus.GENERATING_REPORT):
+                             TaskStatus.WAITING_ANNOTATION, TaskStatus.WAITING_PLAN_REVIEW, TaskStatus.GENERATING_REPORT):
         if state.status == TaskStatus.PAUSED:
             return APIResponse(success=True, message="Analysis is already paused")
         return APIResponse(success=True, message=f"Analysis is {state.status.value}")
@@ -264,6 +284,14 @@ async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequ
             state.status = TaskStatus.RUNNING
             await _resume_workflow(session_id, state,
                 signal_fn=lambda w: w.signal_annotation_confirmed())
+            return APIResponse(success=True, message="Generating report...")
+        elif state.status == TaskStatus.WAITING_PLAN_REVIEW:
+            # Workflow is blocked at _plan_review_event.wait()
+            # Unblock it by skipping the review and finishing the round
+            state.max_rounds = state.current_round
+            state.status = TaskStatus.RUNNING
+            await _resume_workflow(session_id, state,
+                signal_fn=lambda w: w.signal_plan_review("skip"))
             return APIResponse(success=True, message="Generating report...")
         else:
             # RUNNING - mid-agent execution: cancel task, start report generation

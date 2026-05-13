@@ -158,3 +158,9 @@ class LlmFailureActionRequest(BaseModel):
     generation: int  # monotonic counter from frontend for idempotency
 
 
+class PlanReviewRequest(BaseModel):
+    """Request body for plan review actions."""
+    action: Literal["approve", "skip", "modify"] = "skip"
+    user_input: str = Field(default="", max_length=5000)
+
+

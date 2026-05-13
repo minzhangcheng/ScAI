@@ -184,6 +184,7 @@ pre {
 .status-failed { @apply bg-red-50 text-red-700 border border-red-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
 .status-paused { @apply bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
 .status-waiting_annotation { @apply bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
+.status-waiting_plan_review { @apply bg-purple-50 text-purple-700 border border-purple-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
 .status-waiting_input { @apply bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
 .status-generating_report { @apply bg-accent-50 text-accent-700 border border-accent-200 rounded-full px-2.5 py-0.5 text-xs font-medium inline-block; }
 
