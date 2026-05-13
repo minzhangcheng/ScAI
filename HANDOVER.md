@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.23.7 · **Last updated**: 2026-05-12
+**Version**: 0.24.2 · **Last updated**: 2026-05-13
 
 ## 1. Runtime Architecture
 
@@ -208,6 +208,10 @@ Detailed release notes for every version are available through `git log` and rel
 
 - `0.23.1` — **Report enhancements, chat sections, round tracking**: Added report generation concurrency guard (409 on duplicate requests); automatic report archiving before regeneration (keeps last 5 versions); archive listing/download API endpoints; `round_number` field added to `AnalysisStep` schema for round tracking; supervisor log restored from report.json now groups by round (`all_rounds_log` vs current `supervision_log`); new chat sections generation from chat messages (`chat_sections.py`); config resolver now allows per-user config without global config; new `/user/config/validate-saved` endpoint for validating saved credentials; frontend validation flow: admin validates with frontend config, non-admin validates saved config; validation on report generation (check API key before start); session cleanup clears report generation pending flag.
 
+**0.24.x — collaborative analysis planning (2026-05-13)**
+
+- `0.24.1` — **Collaborative analysis planning**: Bioinformatics agent generates method-level analysis plans (`generate_analysis_plan`, `revise_plan_incrementally`); new `AnalysisPlan`/`PlanStep` Pydantic models with stage-aware planning (stage1: QC+clustering+annotation, stage2: downstream); `WAITING_PLAN_REVIEW` task status for plan review HITL gate; `PlanReviewDialog` frontend component with approve/modify/skip actions; planning dialogue nodes (`planning_dialogue`, `user_review_gate`) in workflow routing; strongly typed `SnapshotPhase` with plan-related phases; plan review API endpoint; lifecycle resume/stop support for plan review; workflow integration injects approved plans into bioinformatics agent context; comprehensive regression tests.
+
 **0.22.x — per-user LLM config, config persistence, reproducibility toggle (2026-05-03 → 2026-05-08)**
 
 - `0.21.5` — Session priority loading & automatic tab sync: new `sessionPriority.ts` utility with intelligent session selection (priority tiers: waiting_input > active > paused > completed > pending); `waiting_input` sessions sorted by deadline urgency; `syncTabToSessionStatus()` auto-switches tab based on session status (pending→data, active→analysis, completed→report); Sidebar auto-loads highest-priority session on startup (via `doPriorityLoad()`); Zustand hydration tracking with `_hydrated` flag in `appStore.ts` (deferred flag flip via `onRehydrateStorage()`); `setActiveTab()` optimized to skip no-ops; backend: `waiting_input_started_at` timestamp in `AnalysisState`; `DEFAULT_ROUND_WAIT_SECONDS` extracted to `schemas.py`; session list API includes `waiting_input_started_at`, `round_wait_seconds`, and `created_at`; user guide fully reorganized and updated (both English and Chinese versions).
@@ -235,6 +239,22 @@ Detailed release notes for every version are available through `git log` and rel
 - Cell-type deconvolution mandatory when bulk + scRNA-seq present; standardized library names (pydeseq2, harmonypy, bbknn, scvi, decoupler) and PyDESeq2 fallback.
 - Dynamic PI task generation based on detected data types; added GIF/BMP/WebP/SVG image support.
 - Improved LLM prompt caching and cache-hit tracking; round-progress UI uses the real max-rounds setting.
+
+**0.24.2 — version bump (2026-05-13)**
+
+- Version bumped to 0.24.2 across all files (backend, frontend AboutDialog, README, user guides, HANDOVER).
+- HANDOVER.md modification history updated with 0.24.1 and 0.24.2 entries.
+
+**0.24.1 — collaborative analysis planning (2026-05-13)**
+
+- Bioinformatics agent: `generate_analysis_plan()` and `revise_plan_incrementally()` methods for method-level analysis planning with stage-aware decomposition (stage1: QC+clustering+annotation, stage2: downstream); plan injected into agent context during autonomous execution.
+- New Pydantic models: `AnalysisPlan`, `PlanStep` with field types (`SnapshotPhase`, `AnalysisPhaseType`, `PlanStage`, `PlanStatus`).
+- New `WAITING_PLAN_REVIEW` task status for plan review HITL gate.
+- Frontend: `PlanReviewDialog` component with expandable steps, countdown auto-skip, approve/modify/skip actions, and dialogue download; integrated into `AnalysisPanel`.
+- Workflow: `planning_dialogue` and `user_review_gate` nodes added to `NODE_TO_AGENT`/`NODE_TO_RESULT_KEY` routing; `current_plan` and `plan_dialogue_history` fields in `AnalysisState`.
+- API: `POST /session/{id}/plan-review` endpoint for approve/skip/modify actions; lifecycle resume/stop extended for `WAITING_PLAN_REVIEW`.
+- Snapshot: strongly typed `SnapshotPhase` with `pre_execution_stage1`, `pre_execution_stage2`, `pre_execution_full`, `pre_major_revision`, `post_report` phases; expanded docstring in `SnapshotManager`.
+- Tests: `test_bugs_confirmed.py` with regression tests for plan review workflow, PlanStep mutable default safety.
 
 **0.23.7 — frontend refinements (2026-05-12)**
 

@@ -13,6 +13,7 @@ from datetime import datetime
 import json
 import operator
 import random
+from html import escape as _html_escape
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -25,6 +26,49 @@ logger = logging.getLogger(__name__)
 # Maximum retry attempts for workflow nodes
 MAX_NODE_RETRIES = 3
 GRAPH_RECURSION_LIMIT = 100
+
+# Stage1 keyword set for filtering bioinformatics tasks
+STAGE1_KEYWORDS = frozenset([
+    "qc", "quality", "filter", "normaliz", "cluster", "umap", "pca",
+    "dimension", "annotat", "cell type", "doublet", "batch", "harmony",
+    "hvg", "preprocess", "load", "inspect", "merg", "integrat",
+])
+
+_DIFF_LABELS = {
+    'added': '[ADDED]',
+    'removed': '[REMOVED]',
+    'modified': '[MODIFIED]',
+    'unchanged': '',
+}
+
+
+def _diff_plan_steps(prev_steps: List[Dict], curr_steps: List[Dict]) -> Dict[int, str]:
+    """Compare steps between two plan versions. Returns {step_id: 'added'|'removed'|'modified'|'unchanged'}."""
+    prev_by_id = {s['id']: s for s in prev_steps}
+    curr_by_id = {s['id']: s for s in curr_steps}
+    diff = {}
+    all_ids = set(prev_by_id.keys()) | set(curr_by_id.keys())
+    for sid in all_ids:
+        if sid in curr_by_id and sid not in prev_by_id:
+            diff[sid] = 'added'
+        elif sid in prev_by_id and sid not in curr_by_id:
+            diff[sid] = 'removed'
+        elif sid in curr_by_id and sid in prev_by_id:
+            prev = prev_by_id[sid]
+            curr = curr_by_id[sid]
+            if (prev.get('title') != curr.get('title') or
+                prev.get('method') != curr.get('method')):
+                diff[sid] = 'modified'
+            else:
+                diff[sid] = 'unchanged'
+    return diff
+
+
+def _get_task_text(t) -> str:
+    """Extract searchable text from a task (string or dict)."""
+    if isinstance(t, dict):
+        return " ".join(str(v) for v in t.values()).lower()
+    return str(t).lower()
 
 from .models.schemas import (
     AnalysisState, AnalysisStep, AnalysisPhase, AgentType, TaskStatus, RoundResult,
@@ -667,31 +711,31 @@ class SingleCellAnalysisWorkflow:
             }
         )
 
-        # pi_planning → planning_dialogue or skip to analysis
-        self.graph.add_conditional_edges(
-            "pi_planning",
-            self._should_plan,
-            {
-                "do_planning": "planning_dialogue",
-                "skip_planning": "biochemistry_analysis",
-            }
-        )
+        # pi_planning always proceeds to wet-lab analysis first
+        self.graph.add_edge("pi_planning", "biochemistry_analysis")
         self.graph.add_edge("planning_dialogue", "user_review_gate")
 
         self.graph.add_conditional_edges(
             "user_review_gate",
             self._after_review,
             {
-                "approved": "biochemistry_analysis",
+                "approved": "bioinformatics_analysis",
                 "approved_stage2": "bioinformatics_analysis",
                 "approved_revision": "bioinformatics_analysis",
                 "revise": "planning_dialogue",
             }
         )
 
-        # Sequential analysis: biochemistry -> pathology -> bioinformatics -> literature
+        # Sequential analysis: biochemistry -> pathology, then planning or direct to bioinformatics
         self.graph.add_edge("biochemistry_analysis", "pathology_analysis")
-        self.graph.add_edge("pathology_analysis", "bioinformatics_analysis")
+        self.graph.add_conditional_edges(
+            "pathology_analysis",
+            self._should_plan,
+            {
+                "do_planning": "planning_dialogue",
+                "skip_planning": "bioinformatics_analysis",
+            }
+        )
 
         # After bioinformatics, may go to planning_dialogue for stage2 or revision
         self.graph.add_conditional_edges(
@@ -1862,6 +1906,35 @@ Approve if quality_score >= 7."""
                 collected[findings_key] = result["findings"]
         return collected
 
+    def _build_planning_context(self, state: WorkflowState) -> Optional[Dict[str, Any]]:
+        """Build combined previous_results for planning_dialogue.
+
+        Merges:
+        - planning_context (stage1 bioinfo results, set after stage1 execution)
+        - Current-round biochemistry and pathology findings (via _collect_current_round_results)
+        - Fallback to previous round findings from round_results if wet-lab agents were skipped
+        """
+        combined = dict(state.get("planning_context") or {})
+
+        # Reuse existing method for current-round wet-lab findings
+        current_findings = self._collect_current_round_results(state)
+        for key in ("biochemistry_findings", "pathology_findings"):
+            if key in current_findings:
+                combined[key] = current_findings[key]
+
+        # Fallback: if wet-lab results are empty, look up previous round findings
+        analysis_state = state["analysis_state"]
+        if analysis_state.round_results:
+            for prev_round in reversed(analysis_state.round_results):
+                if "biochemistry_findings" not in combined and prev_round.biochemistry_findings:
+                    combined["biochemistry_findings"] = prev_round.biochemistry_findings
+                if "pathology_findings" not in combined and prev_round.pathology_findings:
+                    combined["pathology_findings"] = prev_round.pathology_findings
+                if "biochemistry_findings" in combined and "pathology_findings" in combined:
+                    break
+
+        return combined if combined else None
+
     def _build_code_history_summary(
         self,
         analysis_state: AnalysisState,
@@ -2328,6 +2401,7 @@ Approve if quality_score >= 7."""
             existing_plan = None
 
         phase = analysis_state.analysis_phase.value
+        combined_previous = self._build_planning_context(state)
         dialogue_history = []
 
         MAX_ROUNDS = 5
@@ -2347,7 +2421,7 @@ Approve if quality_score >= 7."""
                     overview=overview,
                     phase=phase,
                     stage=stage,
-                    previous_results=state.get("planning_context"),
+                    previous_results=combined_previous,
                 )
             elif existing_plan and existing_plan.status == "rejected":
                 # PI rejected the plan entirely — generate fresh with rejection context
@@ -2357,7 +2431,7 @@ Approve if quality_score >= 7."""
                     overview=overview,
                     phase=phase,
                     stage=stage,
-                    previous_results=state.get("planning_context"),
+                    previous_results=combined_previous,
                     existing_plan=existing_plan,  # Pass rejected plan so agent knows what to avoid
                 )
             else:
@@ -2391,7 +2465,7 @@ Approve if quality_score >= 7."""
                 plan.status = "pi_reviewing"
                 analysis_state.current_plan = plan
                 analysis_state.plan_dialogue_history = dialogue_history
-                state["planning_result"] = {"plan": plan.model_dump(), "dialogue": dialogue_history}
+                state["planning_result"] = {"plan": dialogue_history[-1]["plan"], "dialogue": dialogue_history}
                 await self._send_message("status", "Plan approved by PI", AgentType.PI)
                 break
             elif review["decision"] == "reject":
@@ -2443,18 +2517,13 @@ Approve if quality_score >= 7."""
             return state
 
         # Main review loop — continues until user approves or skips
-        # Reset event and action at entry to prevent stale state from previous round
-        self._plan_review_event.clear()
-        self._plan_review_action = None
-
+        # Generate dialogue HTML once — it doesn't change during the review loop
+        dialogue_html = self._build_plan_dialogue_html(
+            analysis_state.plan_dialogue_history
+        )
         while True:
             # Set plan status and notify frontend
             plan.status = "user_reviewing"
-
-            # Generate dialogue HTML for download
-            dialogue_html = self._build_plan_dialogue_html(
-                analysis_state.plan_dialogue_history
-            )
 
             # Send plan to frontend
             await self._send_message("plan_review", {
@@ -2565,49 +2634,9 @@ Approve if quality_score >= 7."""
 
     def _build_plan_dialogue_html(self, dialogue_history: List[Dict]) -> str:
         """Build an HTML document from the PI↔Bioinfo planning dialogue.
-        
+
         Includes step-level diff between consecutive rounds to highlight changes.
         """
-        import html as html_module
-        
-        def esc(text: str) -> str:
-            """Escape HTML to prevent XSS in LLM-generated content."""
-            return html_module.escape(str(text))
-        
-        def _diff_steps(prev_steps: List[Dict], curr_steps: List[Dict]) -> Dict[int, str]:
-            """Compare steps between two plan versions. Returns {step_id: 'added'|'removed'|'modified'|'unchanged'}."""
-            prev_by_id = {s['id']: s for s in prev_steps}
-            curr_by_id = {s['id']: s for s in curr_steps}
-            diff = {}
-            all_ids = set(prev_by_id.keys()) | set(curr_by_id.keys())
-            for sid in all_ids:
-                if sid in curr_by_id and sid not in prev_by_id:
-                    diff[sid] = 'added'
-                elif sid in prev_by_id and sid not in curr_by_id:
-                    diff[sid] = 'removed'
-                elif sid in curr_by_id and sid in prev_by_id:
-                    prev = prev_by_id[sid]
-                    curr = curr_by_id[sid]
-                    if (prev.get('title') != curr.get('title') or
-                        prev.get('method') != curr.get('method')):
-                        diff[sid] = 'modified'
-                    else:
-                        diff[sid] = 'unchanged'
-            return diff
-        
-        DIFF_COLORS = {
-            'added': '#e8f5e9',
-            'removed': '#ffebee',
-            'modified': '#fff3e0',
-            'unchanged': '#f5f5f5',
-        }
-        DIFF_LABELS = {
-            'added': '[ADDED]',
-            'removed': '[REMOVED]',
-            'modified': '[MODIFIED]',
-            'unchanged': '',
-        }
-        
         html_parts = [
             "<html><head><meta charset='utf-8'><title>Analysis Plan Dialogue</title>",
             "<style>body{font-family:sans-serif;max-width:900px;margin:0 auto;padding:20px;}",
@@ -2624,18 +2653,18 @@ Approve if quality_score >= 7."""
         prev_steps = None
         for entry in dialogue_history:
             round_num = entry["round"]
-            decision = esc(entry.get("pi_decision", ""))
+            decision = _html_escape(entry.get("pi_decision", ""))
             css_class = {"approved": "approved", "revise": "revise", "reject": "reject"}.get(decision, "")
-            
+
             html_parts.append(f"<div class='round {css_class}'>")
             html_parts.append(f"<h2>Round {round_num} — PI Decision: {decision.upper()}</h2>")
-            html_parts.append(f"<p><strong>PI Feedback:</strong> {esc(entry.get('pi_feedback', ''))}</p>")
-            
+            html_parts.append(f"<p><strong>PI Feedback:</strong> {_html_escape(entry.get('pi_feedback', ''))}</p>")
+
             plan = entry.get("plan", {})
             curr_steps = plan.get("steps", [])
-            
+            step_diffs = _diff_plan_steps(prev_steps, curr_steps) if prev_steps else {}
+
             if prev_steps is not None and curr_steps:
-                step_diffs = _diff_steps(prev_steps, curr_steps)
                 has_changes = any(d != 'unchanged' for d in step_diffs.values())
                 if has_changes:
                     html_parts.append("<h3>Changes from Previous Round:</h3>")
@@ -2643,28 +2672,27 @@ Approve if quality_score >= 7."""
                     for sid, status in step_diffs.items():
                         if status == 'added':
                             step_data = next((s for s in curr_steps if s.get('id') == sid), {})
-                            changes.append(f"<span style='color:#4caf50'>+ Added Step {sid}: {esc(step_data.get('title',''))}</span>")
+                            changes.append(f"<span style='color:#4caf50'>+ Added Step {sid}: {_html_escape(step_data.get('title',''))}</span>")
                         elif status == 'removed':
                             step_data = next((s for s in prev_steps if s.get('id') == sid), {})
-                            changes.append(f"<span style='color:#f44336'>- Removed Step {sid}: {esc(step_data.get('title',''))}</span>")
+                            changes.append(f"<span style='color:#f44336'>- Removed Step {sid}: {_html_escape(step_data.get('title',''))}</span>")
                         elif status == 'modified':
                             changes.append(f"<span style='color:#ff9800'>~ Modified Step {sid}</span>")
                     html_parts.append("<br>".join(changes))
-            
+
             if curr_steps:
                 html_parts.append("<h3>Plan Steps:</h3>")
-                step_diffs = _diff_steps(prev_steps, curr_steps) if prev_steps else {}
                 for step in curr_steps:
                     sid = step.get('id', '')
                     diff_status = step_diffs.get(sid, 'unchanged')
                     css = f"step-{diff_status}"
-                    label = DIFF_LABELS.get(diff_status, '')
+                    label = _DIFF_LABELS.get(diff_status, '')
                     html_parts.append(
-                        f"<div class='step {css}'><strong>Step {esc(str(sid))}: {esc(step.get('title', ''))}</strong> {label}<br>"
-                        f"Method: {esc(step.get('method', ''))}<br>"
-                        f"Rationale: {esc(step.get('rationale', ''))}</div>"
+                        f"<div class='step {css}'><strong>Step {_html_escape(str(sid))}: {_html_escape(step.get('title', ''))}</strong> {label}<br>"
+                        f"Method: {_html_escape(step.get('method', ''))}<br>"
+                        f"Rationale: {_html_escape(step.get('rationale', ''))}</div>"
                     )
-            
+
             html_parts.append("</div>")
             prev_steps = curr_steps
 
@@ -2832,17 +2860,8 @@ Approve if quality_score >= 7."""
 
         # Stage1 task filtering: only QC + clustering + annotation tasks
         if planning_stage == "stage1":
-            stage1_keywords = ["qc", "quality", "filter", "normaliz",
-                "cluster", "umap", "pca", "dimension", "annotat", "cell type",
-                "doublet", "batch", "harmony", "hvg", "preprocess", "load",
-                "inspect", "merg", "integrat"]
-            def _task_text(t):
-                """Extract searchable text from a task (string or dict)."""
-                if isinstance(t, dict):
-                    return " ".join(str(v) for v in t.values()).lower()
-                return str(t).lower()
             stage1_tasks = [t for t in bioinf_tasks if any(
-                kw in _task_text(t) for kw in stage1_keywords
+                kw in _get_task_text(t) for kw in STAGE1_KEYWORDS
             )]
             if not stage1_tasks:
                 stage1_tasks = ["Execute scRNA-seq QC, clustering, and cell type annotation"]
@@ -3845,9 +3864,9 @@ Return ONLY the JSON array, nothing else."""
 
     def _after_review(self, state: WorkflowState) -> str:
         """Route after user review gate.
-        
+
         Four possible outcomes:
-        1. approved + full/stage1 → biochemistry_analysis (normal flow)
+        1. approved + full/stage1 → bioinformatics_analysis (wet-lab agents already ran)
         2. approved + stage2 → bioinformatics_analysis (skip already-run upstream agents)
         3. approved + plan_revision_resume → bioinformatics_analysis (mid-execution revision approved)
         4. not approved → planning_dialogue (user wants changes)

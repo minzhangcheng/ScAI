@@ -992,8 +992,6 @@ Rejected plan steps (DO NOT COPY):
     for s in existing_plan.steps
 )
             else:
-                completed_steps = [s for s in existing_plan.steps if s.status == "completed"]
-                remaining_steps = [s for s in existing_plan.steps if s.status != "completed"]
                 completed_text = "\n".join(
                     f"  [{s.status}] Step {s.id}: {s.title} ({s.method})"
                     for s in existing_plan.steps
