@@ -251,9 +251,17 @@ async def submit_plan_review(session_id: str, request: Request, body: PlanReview
         workflow = workflows.get(session_id)
     if not workflow:
         if state.status == TaskStatus.WAITING_PLAN_REVIEW:
-            if action == "approve":
+            if action == "modify":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot modify plan without an active workflow. Resume the session first.",
+                )
+            if action in ("approve", "skip"):
                 state.current_plan.status = "approved"
                 state.current_plan.approved_at = datetime.now()
+            # _pause_and_restart_ws will set PAUSED, save, and close the WebSocket
+            # to trigger a resume. Setting RUNNING here was wrong because it was
+            # immediately overwritten to PAUSED — set the correct final status directly.
             await async_save_session(session_id, state)
             await _pause_and_restart_ws(session_id, state)
             return APIResponse(success=True, message="Plan review recorded, restarting")

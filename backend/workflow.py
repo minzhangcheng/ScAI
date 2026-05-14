@@ -25,7 +25,13 @@ logger = logging.getLogger(__name__)
 
 # Maximum retry attempts for workflow nodes
 MAX_NODE_RETRIES = 3
+MAX_PLANNING_ROUNDS = 5
 GRAPH_RECURSION_LIMIT = 100
+
+
+def _retry_backoff_delay(attempt: int) -> float:
+    """Compute exponential backoff delay with jitter (shared by @with_retry and inline retries)."""
+    return min(2 ** attempt + random.uniform(0, 1), 30)
 
 # Stage1 keyword set for filtering bioinformatics tasks
 STAGE1_KEYWORDS = frozenset([
@@ -87,7 +93,7 @@ from .agents.supervisor_agent import SupervisorAgent
 from .agents.technique_agent import TechniqueAgent
 from .agents.base import AgentConfig
 from .utils.llm_client import LLMManager, OpenAICompatibleClient, UpstreamExhaustedError
-from .constants import LlmFailureAction, WaitInputReason, StateSyncChangeType, NODE_TO_RESULT_KEY
+from .constants import LlmFailureAction, WaitInputReason, StateSyncChangeType, NODE_TO_RESULT_KEY, PLAN_REVISION_NEEDED_TAG
 from .utils.settings_provider import AgentSettingsProvider
 from .utils.sandbox import LocalJupyterSandbox
 from .config import SystemConfig, REPORTS_DIR, WORKSPACE_DIR, get_session_reports, get_session_workspace, get_session_states
@@ -165,8 +171,7 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                             f"Retrying {node_name} (attempt {attempt + 1}/{max_retries + 1})...",
                             AgentType.PI
                         )
-                        delay = min(2 ** attempt + random.uniform(0, 1), 30)
-                        await asyncio.sleep(delay)
+                        await asyncio.sleep(_retry_backoff_delay(attempt))
 
                     result = await func(self, state)
                     return result
@@ -255,7 +260,6 @@ class WorkflowState(TypedDict, total=False):
     plan_revision_needed: bool  # True when mid-execution revision is triggered
     plan_revision_context: Optional[Dict[str, Any]]  # Context for mid-execution revision
     plan_revision_resume: bool  # True when mid-execution revision is approved, route back to bioinfo
-    pending_plan_revision: Optional[Dict[str, Any]]  # PI's revision judgment data
 
 
 class SingleCellAnalysisWorkflow:
@@ -922,17 +926,9 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                         )
                         
                         if judgment.get("needs_user_popup"):
-                            response += "\n\n[__PLAN_REVISION_NEEDED__]"
+                            response += "\n\n" + PLAN_REVISION_NEEDED_TAG
                             # Create snapshot before major revision
                             await self._create_auto_snapshot(analysis_state, "pre_major_revision")
-                            gs = getattr(self, '_current_graph_state', None)
-                            if gs is not None:
-                                gs["pending_plan_revision"] = {
-                                    "judgment": judgment,
-                                    "question": question,
-                                    "context": context,
-                                    "affected_step_ids": affected_ids,
-                                }
                     except Exception as e:
                         logger.warning(f"[{self.session_id}] Plan deviation judgment failed: {e}")
             
@@ -1021,6 +1017,13 @@ IMPORTANT: Respond in English only. Do not use any other language."""
     @staticmethod
     def _make_initial_workflow_state(analysis_state: AnalysisState, current_round: int = 0) -> "WorkflowState":
         """Build a clean WorkflowState for a fresh graph invocation."""
+        # Propagate plan approval from analysis_state if plan is already approved
+        # (e.g., from no-workflow fallback resume). This ensures _pi_planning's
+        # guard can detect the approved plan before resetting it.
+        plan_approved = (
+            analysis_state.current_plan is not None
+            and analysis_state.current_plan.status == "approved"
+        )
         return {
             "analysis_state": analysis_state,
             "current_round": current_round,
@@ -1033,6 +1036,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             "should_continue": True,
             "error": None,
             "messages": [],
+            "plan_approved": plan_approved,
         }
 
     async def _create_auto_snapshot(self, state: AnalysisState, phase: str):
@@ -1041,7 +1045,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         try:
             if self.sandbox:
                 if hasattr(self.sandbox, 'notebook_state') and self.sandbox.notebook_state:
-                    self.sandbox.notebook_state.save()
+                    await asyncio.to_thread(self.sandbox.notebook_state.save)
                 await self.sandbox.save_session()
 
             async def notify(sid, msg_type, content):
@@ -2132,6 +2136,8 @@ Approve if quality_score >= 7."""
             "failed_node": None,
             # Reset skip_nodes so stale values from previous round do not carry over
             "skip_nodes": [],
+            # Reset planning_context so stale stage1 data from previous round doesn't leak
+            "planning_context": None,
             # Reset continuation flags for new round
             "should_continue": True,
             "human_stop_requested": False,
@@ -2144,6 +2150,21 @@ Approve if quality_score >= 7."""
         analysis_state = state["analysis_state"]
         human_guidance = state.get("human_guidance")
         adjusted_instructions = state.get("adjusted_instructions")
+
+        # If a plan is already approved (e.g., from no-workflow fallback resume),
+        # preserve the approval and skip re-planning so downstream routing
+        # (_should_plan, _after_bioinformatics) can act on it.
+        if analysis_state.current_plan and analysis_state.current_plan.status == "approved":
+            logger.info(
+                f"[{self.session_id}] Plan already approved "
+                f"(status={analysis_state.current_plan.status}), skipping re-planning"
+            )
+            state["plan_approved"] = True
+            state["planning_result"] = {
+                "plan": analysis_state.current_plan.model_dump(),
+                "dialogue": analysis_state.plan_dialogue_history or [],
+            }
+            return state
 
         # Reset plan-related state for new round
         analysis_state.current_plan = None
@@ -2404,55 +2425,167 @@ Approve if quality_score >= 7."""
         combined_previous = self._build_planning_context(state)
         dialogue_history = []
 
-        MAX_ROUNDS = 5
-        for round_num in range(1, MAX_ROUNDS + 1):
+        round_num = 1
+        while round_num <= MAX_PLANNING_ROUNDS:
             await self._send_message(
                 "status",
-                f"Planning dialogue: round {round_num}/{MAX_ROUNDS}",
+                f"Planning dialogue: round {round_num}/{MAX_PLANNING_ROUNDS}",
                 AgentType.PI,
             )
 
-            # Bioinformatics agent generates/revises plan
-            if round_num == 1 and not existing_plan:
-                # First round, no prior plan — generate from scratch
-                plan = await self.bioinformatics_agent.generate_analysis_plan(
-                    state=analysis_state,
-                    pi_tasks=bioinf_tasks,
-                    overview=overview,
-                    phase=phase,
-                    stage=stage,
-                    previous_results=combined_previous,
-                )
-            elif existing_plan and existing_plan.status == "rejected":
-                # PI rejected the plan entirely — generate fresh with rejection context
-                plan = await self.bioinformatics_agent.generate_analysis_plan(
-                    state=analysis_state,
-                    pi_tasks=bioinf_tasks,
-                    overview=overview,
-                    phase=phase,
-                    stage=stage,
-                    previous_results=combined_previous,
-                    existing_plan=existing_plan,  # Pass rejected plan so agent knows what to avoid
-                )
-            else:
-                # PI wants revisions — use incremental revision to preserve completed steps
-                pi_feedback = dialogue_history[-1]["pi_feedback"] if dialogue_history else ""
-                user_feedback = state.get("user_plan_feedback", "")
-                combined_feedback = f"{pi_feedback}\n\nUser feedback: {user_feedback}" if user_feedback else pi_feedback
-                
-                plan = await self.bioinformatics_agent.revise_plan_incrementally(
-                    state=analysis_state,
-                    current_plan=existing_plan,
-                    pi_feedback=combined_feedback,
-                )
+            # --- Bioinformatics agent call (with LLM failure intervention) ---
+            while True:
+                try:
+                    if round_num == 1 and not existing_plan:
+                        plan = await self.bioinformatics_agent.generate_analysis_plan(
+                            state=analysis_state,
+                            pi_tasks=bioinf_tasks,
+                            overview=overview,
+                            phase=phase,
+                            stage=stage,
+                            previous_results=combined_previous,
+                        )
+                    elif existing_plan and existing_plan.status == "rejected":
+                        plan = await self.bioinformatics_agent.generate_analysis_plan(
+                            state=analysis_state,
+                            pi_tasks=bioinf_tasks,
+                            overview=overview,
+                            phase=phase,
+                            stage=stage,
+                            previous_results=combined_previous,
+                            existing_plan=existing_plan,
+                        )
+                    else:
+                        pi_feedback = dialogue_history[-1]["pi_feedback"] if dialogue_history else ""
+                        user_feedback = state.get("user_plan_feedback", "")
+                        combined_feedback = f"{pi_feedback}\n\nUser feedback: {user_feedback}" if user_feedback else pi_feedback
+                        plan = await self.bioinformatics_agent.revise_plan_incrementally(
+                            state=analysis_state,
+                            current_plan=existing_plan,
+                            pi_feedback=combined_feedback,
+                        )
+                    break  # success, exit inner retry loop
+                except UpstreamExhaustedError as e:
+                    action = await self._wait_for_llm_intervention(
+                        e, "planning_dialogue", analysis_state
+                    )
+                    if action == LlmFailureAction.RETRY:
+                        continue  # retry same bioinfo call
+                    # SKIP
+                    await self._send_message(
+                        "error",
+                        "Planning dialogue: bioinformatics agent skipped due to LLM failure.",
+                        AgentType.PI,
+                    )
+                    if existing_plan:
+                        existing_plan.status = "pi_reviewing"
+                        analysis_state.current_plan = existing_plan
+                        preserved_history = analysis_state.plan_dialogue_history or dialogue_history
+                        analysis_state.plan_dialogue_history = preserved_history
+                        state["planning_result"] = {
+                            "plan": existing_plan.model_dump(),
+                            "dialogue": preserved_history,
+                        }
+                    else:
+                        state["failed_node"] = "planning_dialogue"
+                        state["planning_result"] = {
+                            "error": str(e),
+                            "findings": [],
+                            "status": "failed",
+                        }
+                    return state
+                # Bioinfo plan generation: no retry on generic Exception.
+                # Unlike PI review below (which retries), bioinfo failures
+                # are typically deterministic — retrying won't help.
+                except Exception as e:
+                    logger.exception(
+                        f"[{self.session_id}] Bioinformatics plan generation failed "
+                        f"in planning dialogue round {round_num}"
+                    )
+                    await self._send_message(
+                        "error",
+                        f"Bioinformatics plan generation failed: {str(e)}",
+                        AgentType.PI,
+                    )
+                    state["failed_node"] = "planning_dialogue"
+                    state["planning_result"] = {
+                        "error": str(e),
+                        "findings": [],
+                        "status": "failed",
+                    }
+                    return state
 
-            # PI reviews the plan
-            review = await self.pi_agent.review_bioinfo_plan(
-                state=analysis_state,
-                plan=plan,
-                dialogue_round=round_num,
-            )
+            # --- PI review call (with LLM failure intervention) ---
+            pi_review_attempt = 0
+            while True:
+                try:
+                    review = await self.pi_agent.review_bioinfo_plan(
+                        state=analysis_state,
+                        plan=plan,
+                        dialogue_round=round_num,
+                    )
+                    break  # success, exit inner retry loop
+                except UpstreamExhaustedError as e:
+                    action = await self._wait_for_llm_intervention(
+                        e, "planning_dialogue", analysis_state
+                    )
+                    if action == LlmFailureAction.RETRY:
+                        continue  # retry same PI review call
+                    # SKIP — plan exists but unreviewed; auto-accept it
+                    await self._send_message(
+                        "error",
+                        "Planning dialogue: PI review skipped due to LLM failure, auto-accepting plan.",
+                        AgentType.PI,
+                    )
+                    plan.status = "pi_reviewing"
+                    analysis_state.current_plan = plan
+                    analysis_state.plan_dialogue_history = dialogue_history + [{
+                        "round": round_num,
+                        "plan": plan.model_dump(),
+                        "pi_decision": "approved",
+                        "pi_feedback": "PI review skipped due to LLM failure — auto-accepted",
+                        "pi_modifications": [],
+                    }]
+                    state["planning_result"] = {
+                        "plan": plan.model_dump(),
+                        "dialogue": analysis_state.plan_dialogue_history,
+                    }
+                    return state
+                except Exception as e:
+                    pi_review_attempt += 1
+                    if pi_review_attempt <= MAX_NODE_RETRIES:
+                        delay = _retry_backoff_delay(pi_review_attempt)
+                        logger.warning(
+                            f"[{self.session_id}] PI review failed in round {round_num} "
+                            f"(attempt {pi_review_attempt}/{MAX_NODE_RETRIES + 1}), "
+                            f"retrying in {delay:.1f}s: {e}"
+                        )
+                        await self._send_message(
+                            "status",
+                            f"PI review failed, retrying ({pi_review_attempt}/{MAX_NODE_RETRIES + 1})...",
+                            AgentType.PI,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    # All retries exhausted — return failed (matches @with_retry)
+                    logger.exception(
+                        f"[{self.session_id}] PI review failed after "
+                        f"{MAX_NODE_RETRIES + 1} attempts in round {round_num}"
+                    )
+                    await self._send_message(
+                        "error",
+                        f"PI review failed after {MAX_NODE_RETRIES + 1} attempts: {str(e)}",
+                        AgentType.PI,
+                    )
+                    state["failed_node"] = "planning_dialogue"
+                    state["planning_result"] = {
+                        "error": str(e),
+                        "findings": [],
+                        "status": "failed",
+                    }
+                    return state
 
+            # --- Process PI review decision ---
             dialogue_history.append({
                 "round": round_num,
                 "plan": plan.model_dump(),
@@ -2469,16 +2602,14 @@ Approve if quality_score >= 7."""
                 await self._send_message("status", "Plan approved by PI", AgentType.PI)
                 break
             elif review["decision"] == "reject":
-                # PI wants complete redesign — mark as rejected, pass to next round as context
                 plan.status = "rejected"
-                existing_plan = plan  # Keep rejected plan so agent knows what to avoid
+                existing_plan = plan
                 await self._send_message(
                     "status",
                     f"Plan rejected by PI, redesigning... ({review['feedback'][:200]})",
                     AgentType.PI,
                 )
             else:  # revise
-                # PI wants modifications — use this plan as base for next round's incremental revision
                 existing_plan = plan
                 existing_plan.status = "draft"
                 await self._send_message(
@@ -2486,15 +2617,22 @@ Approve if quality_score >= 7."""
                     f"Plan needs revision (round {round_num}): {review['feedback'][:200]}",
                     AgentType.PI,
                 )
-        else:
-            # Max rounds reached — PI takes the last plan as-is
-            logger.warning(f"[{self.session_id}] Planning dialogue reached max rounds ({MAX_ROUNDS})")
-            # PI takes the last plan as-is
+
+            round_num += 1
+
+        # Max rounds reached without approval — take last plan as-is
+        if round_num > MAX_PLANNING_ROUNDS:
+            logger.warning(
+                f"[{self.session_id}] Planning dialogue reached max rounds ({MAX_PLANNING_ROUNDS})"
+            )
             if existing_plan:
                 existing_plan.status = "pi_reviewing"
                 analysis_state.current_plan = existing_plan
                 analysis_state.plan_dialogue_history = dialogue_history
-                state["planning_result"] = {"plan": existing_plan.model_dump(), "dialogue": dialogue_history}
+                state["planning_result"] = {
+                    "plan": existing_plan.model_dump(),
+                    "dialogue": dialogue_history,
+                }
             await self._send_message(
                 "status",
                 "Planning dialogue: max rounds reached, proceeding with last version",
@@ -2502,6 +2640,22 @@ Approve if quality_score >= 7."""
             )
 
         return state
+
+    async def _approve_plan(
+        self, state: WorkflowState, plan, analysis_state, action: str
+    ) -> None:
+        """Mark plan as approved and notify frontend."""
+        plan.status = "approved"
+        plan.approved_at = datetime.now()
+        analysis_state.current_plan = plan
+        await self._send_message("plan_approved", {
+            "plan_id": plan.id,
+            "action": action,
+        }, AgentType.PI)
+        state["plan_approved"] = True
+        if state.get("plan_revision_needed"):
+            state["plan_revision_resume"] = True
+            state["plan_revision_needed"] = False
 
     async def _user_review_gate(self, state: WorkflowState) -> WorkflowState:
         """Present the analysis plan to the user for review and approval.
@@ -2559,35 +2713,11 @@ Approve if quality_score >= 7."""
             user_input = action.get("user_input", "")
 
             if action_type == "approve":
-                # User explicitly approved → execute
-                plan.status = "approved"
-                plan.approved_at = datetime.now()
-                analysis_state.current_plan = plan
-                await self._send_message("plan_approved", {
-                    "plan_id": plan.id,
-                    "action": "approved",
-                }, AgentType.PI)
-                state["plan_approved"] = True
-                # If this was a mid-execution revision, mark resume
-                if state.get("plan_revision_needed"):
-                    state["plan_revision_resume"] = True
-                    state["plan_revision_needed"] = False
+                await self._approve_plan(state, plan, analysis_state, "approved")
                 break
 
             elif action_type == "skip":
-                # User skipped → PI decides autonomously
-                plan.status = "approved"
-                plan.approved_at = datetime.now()
-                analysis_state.current_plan = plan
-                await self._send_message("plan_approved", {
-                    "plan_id": plan.id,
-                    "action": "skipped",
-                }, AgentType.PI)
-                state["plan_approved"] = True
-                # If this was a mid-execution revision, mark resume
-                if state.get("plan_revision_needed"):
-                    state["plan_revision_resume"] = True
-                    state["plan_revision_needed"] = False
+                await self._approve_plan(state, plan, analysis_state, "skipped")
                 break
 
             elif action_type == "modify" and user_input:
@@ -2598,19 +2728,7 @@ Approve if quality_score >= 7."""
                 )
 
                 if pi_judgment["action"] == "proceed_to_execution":
-                    # User's input was actually confirmation → execute
-                    plan.status = "approved"
-                    plan.approved_at = datetime.now()
-                    analysis_state.current_plan = plan
-                    await self._send_message("plan_approved", {
-                        "plan_id": plan.id,
-                        "action": "approved_after_clarification",
-                    }, AgentType.PI)
-                    state["plan_approved"] = True
-                    # If this was a mid-execution revision, mark resume
-                    if state.get("plan_revision_needed"):
-                        state["plan_revision_resume"] = True
-                        state["plan_revision_needed"] = False
+                    await self._approve_plan(state, plan, analysis_state, "approved_after_clarification")
                     break
 
                 elif pi_judgment["action"] == "clarify_with_user":
@@ -3213,7 +3331,8 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             }
             analysis_state.current_plan = None  # Clear stage1 plan so stage2 generates fresh
         elif planning_stage == "stage2":
-            result_state["planning_stage"] = "full"  # reset
+            result_state["planning_stage"] = "full"
+            result_state["planning_context"] = None  # Clear stage1 context after stage2 completes  # reset
 
         # Check for mid-execution plan revision from agent result
         if isinstance(final_result, dict) and final_result.get("plan_revision_needed"):
@@ -4866,13 +4985,16 @@ Return ONLY the JSON array, nothing else."""
             if analysis_state:
                 await self.compiled_graph.aupdate_state(config, {"analysis_state": analysis_state})
                 self._current_analysis_state = analysis_state
+                # Keep in-memory graph state in sync with the updated checkpoint
+                self._current_graph_state = {**state.values, "analysis_state": analysis_state}
 
             # Sync skip_nodes from sandbox_state to graph state (retry-node API stores
             # skip decisions in analysis_state.sandbox_state, but with_retry checks
             # the top-level WorkflowState)
             skip_nodes = []
-            if analysis_state and analysis_state.sandbox_state:
-                skip_nodes = analysis_state.sandbox_state.get("skip_nodes", [])
+            effective_analysis = analysis_state or state.values.get("analysis_state")
+            if effective_analysis and effective_analysis.sandbox_state:
+                skip_nodes = effective_analysis.sandbox_state.get("skip_nodes", [])
             if skip_nodes:
                 await self.compiled_graph.aupdate_state(config, {"skip_nodes": skip_nodes})
                 logger.info(f"[{self.session_id}] Injected skip_nodes into graph state: {skip_nodes}")

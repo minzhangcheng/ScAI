@@ -176,11 +176,15 @@ class SnapshotManager:
         state_json = json.dumps(state_dict, ensure_ascii=False, default=str)
         snapshot.size_bytes = len(state_json.encode("utf-8"))
 
-        # Atomic write
+        # Atomic write (run in thread to avoid blocking event loop)
         tmp_path = state_path.with_suffix(".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(state_json)
-        os.replace(str(tmp_path), str(state_path))
+
+        def _atomic_write():
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(state_json)
+            os.replace(str(tmp_path), str(state_path))
+
+        await asyncio.to_thread(_atomic_write)
 
         # Copy kernel session pkl (large file — run in thread to avoid blocking event loop)
         pkl_src = get_session_states(self.session_id) / f"{self.session_id}_session.pkl"

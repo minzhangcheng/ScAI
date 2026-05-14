@@ -9,7 +9,6 @@ import json
 import logging
 import math
 import os
-import random
 import re
 import tempfile
 import zipfile
@@ -26,6 +25,7 @@ from backend.config import (
     get_session_dir, get_session_reports, get_session_workspace, PI_AGENT_NAME,
 )
 from backend.models.schemas import AnalysisState
+from backend.workflow import _retry_backoff_delay
 
 from backend.state import detailed_reports, report_websockets
 from backend.utils.config_resolver import resolve_config_for_user
@@ -372,7 +372,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                         except Exception:
                             pass
                     provider._client_cache.clear()
-                    await asyncio.sleep(min(2 ** attempt + random.uniform(0, 1), 30))
+                    await asyncio.sleep(_retry_backoff_delay(attempt))
 
                 report = await supervisor.generate_detailed_report(
                     analysis_state=state,

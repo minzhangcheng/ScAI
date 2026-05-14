@@ -43,3 +43,8 @@ class WaitInputReason(str, Enum):
 class StateSyncChangeType(str, Enum):
     LLM_FAILURE = "llm_failure"
     LLM_RETRY = "llm_retry"
+
+
+# ── PI-agent signalling constants ──────────────────────────────────
+# Sentinel tag injected into PI responses to signal plan revision is needed
+PLAN_REVISION_NEEDED_TAG = "[__PLAN_REVISION_NEEDED__]"

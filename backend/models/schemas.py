@@ -667,18 +667,16 @@ class AnalysisState(BaseModel):
     @staticmethod
     def _serialize_dialogue_history(history: list) -> list:
         """Serialize plan dialogue history, converting nested datetime objects."""
-        import copy
-        result = copy.deepcopy(history)
-        for entry in result:
-            if isinstance(entry, dict):
-                for key, value in list(entry.items()):
-                    if hasattr(value, 'isoformat'):
-                        entry[key] = value.isoformat()
-                    elif isinstance(value, dict):
-                        for k2, v2 in list(value.items()):
-                            if hasattr(v2, 'isoformat'):
-                                value[k2] = v2.isoformat()
-        return result
+        def _convert(value):
+            if hasattr(value, 'isoformat'):
+                return value.isoformat()
+            if isinstance(value, dict):
+                return {k: _convert(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_convert(v) for v in value]
+            return value
+
+        return [_convert(entry) if isinstance(entry, dict) else entry for entry in history]
 
     def to_api_dict(self, *, strip_message_base64=None) -> dict:
         """Serialize state for the load_session API response.

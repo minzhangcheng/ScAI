@@ -35,6 +35,7 @@ from ..models.schemas import (
     DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError
+from ..constants import PLAN_REVISION_NEEDED_TAG
 from ..utils.error_parsing import strip_ansi, extract_error_type, _TECHNICAL_ERROR_TYPES
 
 # Pre-compiled pattern for detecting manual cell_type assignment in code
@@ -1933,8 +1934,8 @@ except Exception as _autosave_block_err:
                         pi_response = "PI guidance not available. Proceed with standard practices."
                     
                     # Check for plan revision signal
-                    if "[__PLAN_REVISION_NEEDED__]" in pi_response:
-                        clean_response = pi_response.replace("[__PLAN_REVISION_NEEDED__]", "").strip()
+                    if PLAN_REVISION_NEEDED_TAG in pi_response:
+                        clean_response = pi_response.replace(PLAN_REVISION_NEEDED_TAG, "").strip()
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,

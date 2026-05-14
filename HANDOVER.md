@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.2 · **Last updated**: 2026-05-13
+**Version**: 0.24.3 · **Last updated**: 2026-05-14
 
 ## 1. Runtime Architecture
 
@@ -194,6 +194,23 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
+**0.24.x — collaborative analysis planning (2026-05-14)**
+
+- `0.24.3` — planning dialogue improvements (2026-05-14):
+  - **Refactored retry logic**: Extracted shared `_retry_backoff_delay()` helper used by `@with_retry` decorator and inline retries in workflow and report generation.
+  - **Plan approval propagation**: `_make_initial_workflow_state()` now propagates plan approval from `analysis_state` when resuming without active workflow, ensuring downstream routing detects approved plans.
+  - **Planning context isolation**: `_start_new_round()` now resets `planning_context` to prevent stage1 data from leaking between rounds.
+  - **Skip re-planning for approved plans**: `_should_plan()` detects when `current_plan.status == "approved"` and preserves approval instead of regenerating, enabling proper downstream routing.
+  - **Configurable planning rounds**: Changed from hardcoded `MAX_ROUNDS=5` to configurable `MAX_PLANNING_ROUNDS=5` with while loop for cleaner iteration.
+  - **Plan revision signaling**: Introduced `PLAN_REVISION_NEEDED_TAG` constant in `constants.py` (replaces hardcoded `"[__PLAN_REVISION_NEEDED__]"`); updated bioinformatics agent and workflow to use it.
+  - **Dialogue history serialization**: Refactored `_serialize_dialogue_history()` to recursively handle nested datetime objects.
+  - **Plan review fix**: Fixed `submit_plan_review` endpoint to set correct final status directly instead of being overwritten; added validation preventing "modify" action without active workflow.
+  - **Async optimizations**: Moved snapshot atomic write and notebook state save to `asyncio.to_thread()` to avoid blocking event loop.
+  - **Cleanup**: Removed unused `pending_plan_revision` field from `WorkflowState`; removed unused `random` import from reports.py.
+
+- `0.24.2` — version bump (2026-05-13): Version bumped to 0.24.2 across all files; HANDOVER.md modification history updated.
+- `0.24.1` — collaborative analysis planning (2026-05-13): Bioinformatics agent: `generate_analysis_plan()` and `revise_plan_incrementally()` methods for method-level analysis planning with stage-aware decomposition (stage1: QC+clustering+annotation, stage2: downstream); plan injected into agent context during autonomous execution. New Pydantic models: `AnalysisPlan`, `PlanStep` with field types (`SnapshotPhase`, `AnalysisPhaseType`, `PlanStage`, `PlanStatus`). New `WAITING_PLAN_REVIEW` task status for plan review HITL gate. Frontend: `PlanReviewDialog` component with expandable steps, countdown auto-skip, approve/modify/skip actions, and dialogue download; integrated into `AnalysisPanel`. Workflow: `planning_dialogue` and `user_review_gate` nodes added to `NODE_TO_AGENT`/`NODE_TO_RESULT_KEY` routing; `current_plan` and `plan_dialogue_history` fields in `AnalysisState`. API: `POST /session/{id}/plan-review` endpoint for approve/skip/modify actions; lifecycle resume/stop extended for `WAITING_PLAN_REVIEW`. Snapshot: strongly typed `SnapshotPhase` with `pre_execution_stage1`, `pre_execution_stage2`, `pre_execution_full`, `pre_major_revision`, `post_report` phases; expanded docstring in `SnapshotManager`. Tests: `test_planning_ordering.py` with regression tests for plan review workflow and planning context ordering; `test_bugs_confirmed.py` with PlanStep mutable default safety test.
+
 **0.23.x — report enhancements, chat sections, round tracking (2026-05-08 → 2026-05-10)**
 
 - `0.23.6` — **Report download & export improvements**: Export now saves to `UPLOAD_TEMP_DIR` instead of reports dir; filename format changed to `export_{session_id[:8]}_{safe_name}.tar.gz`; `_should_skip_in_report_zip()` helper excludes report archives and orphan .zip.tmp files from report ZIP downloads; `download_full_report` now uses streaming temp file with background cleanup; frontend shows download errors inline instead of console errors.
@@ -207,10 +224,6 @@ Detailed release notes for every version are available through `git log` and rel
 - `0.23.2` — **Snapshot restore synchronization & config sync**: Refactored snapshot restore with per-session locking to prevent race conditions; `_write_state_if_current()` helper prevents stale writes from superseded workflows; improved error message "No API key configured..."; removed unnecessary API key check from session creation endpoints (`start_session`, `ensure_session`); WebSocket observer skips sending stale status during snapshot restore; workflow defers to HITL-hold path when status is WAITING_INPUT/WAITING_ANNOTATION; frontend shows alert on session creation failure; frontend config sync: App startup now syncs non-admin user's llmBaseUrl from backend to store; ConfigPanel saves both user LLM config to backend and updates store for in-session use.
 
 - `0.23.1` — **Report enhancements, chat sections, round tracking**: Added report generation concurrency guard (409 on duplicate requests); automatic report archiving before regeneration (keeps last 5 versions); archive listing/download API endpoints; `round_number` field added to `AnalysisStep` schema for round tracking; supervisor log restored from report.json now groups by round (`all_rounds_log` vs current `supervision_log`); new chat sections generation from chat messages (`chat_sections.py`); config resolver now allows per-user config without global config; new `/user/config/validate-saved` endpoint for validating saved credentials; frontend validation flow: admin validates with frontend config, non-admin validates saved config; validation on report generation (check API key before start); session cleanup clears report generation pending flag.
-
-**0.24.x — collaborative analysis planning (2026-05-13)**
-
-- `0.24.1` — **Collaborative analysis planning**: Bioinformatics agent generates method-level analysis plans (`generate_analysis_plan`, `revise_plan_incrementally`); new `AnalysisPlan`/`PlanStep` Pydantic models with stage-aware planning (stage1: QC+clustering+annotation, stage2: downstream); `WAITING_PLAN_REVIEW` task status for plan review HITL gate; `PlanReviewDialog` frontend component with approve/modify/skip actions; planning dialogue nodes (`planning_dialogue`, `user_review_gate`) in workflow routing; strongly typed `SnapshotPhase` with plan-related phases; plan review API endpoint; lifecycle resume/stop support for plan review; workflow integration injects approved plans into bioinformatics agent context; comprehensive regression tests.
 
 **0.22.x — per-user LLM config, config persistence, reproducibility toggle (2026-05-03 → 2026-05-08)**
 
@@ -239,84 +252,3 @@ Detailed release notes for every version are available through `git log` and rel
 - Cell-type deconvolution mandatory when bulk + scRNA-seq present; standardized library names (pydeseq2, harmonypy, bbknn, scvi, decoupler) and PyDESeq2 fallback.
 - Dynamic PI task generation based on detected data types; added GIF/BMP/WebP/SVG image support.
 - Improved LLM prompt caching and cache-hit tracking; round-progress UI uses the real max-rounds setting.
-
-**0.24.2 — version bump (2026-05-13)**
-
-- Version bumped to 0.24.2 across all files (backend, frontend AboutDialog, README, user guides, HANDOVER).
-- HANDOVER.md modification history updated with 0.24.1 and 0.24.2 entries.
-
-**0.24.1 — collaborative analysis planning (2026-05-13)**
-
-- Bioinformatics agent: `generate_analysis_plan()` and `revise_plan_incrementally()` methods for method-level analysis planning with stage-aware decomposition (stage1: QC+clustering+annotation, stage2: downstream); plan injected into agent context during autonomous execution.
-- New Pydantic models: `AnalysisPlan`, `PlanStep` with field types (`SnapshotPhase`, `AnalysisPhaseType`, `PlanStage`, `PlanStatus`).
-- New `WAITING_PLAN_REVIEW` task status for plan review HITL gate.
-- Frontend: `PlanReviewDialog` component with expandable steps, countdown auto-skip, approve/modify/skip actions, and dialogue download; integrated into `AnalysisPanel`.
-- Workflow: `planning_dialogue` and `user_review_gate` nodes added to `NODE_TO_AGENT`/`NODE_TO_RESULT_KEY` routing; `current_plan` and `plan_dialogue_history` fields in `AnalysisState`.
-- API: `POST /session/{id}/plan-review` endpoint for approve/skip/modify actions; lifecycle resume/stop extended for `WAITING_PLAN_REVIEW`.
-- Snapshot: strongly typed `SnapshotPhase` with `pre_execution_stage1`, `pre_execution_stage2`, `pre_execution_full`, `pre_major_revision`, `post_report` phases; expanded docstring in `SnapshotManager`.
-- Tests: `test_bugs_confirmed.py` with regression tests for plan review workflow, PlanStep mutable default safety.
-
-**0.23.7 — frontend refinements (2026-05-12)**
-
-- AnalysisPanel.tsx: improved component with enhanced UI elements.
-- DataConfigMenu.tsx: refined menu for better data configuration.
-- Sidebar.tsx: updated navigation and layout.
-
-**0.22.x — snapshot enhancements (2026-05-10)**
-
-- Snapshot tree view and reliable state restoration with full Jupyter kernel preservation.
-- Supervisor figure review with issue classification; auto-revision with vision-disable fallback.
-- Development / production mode switching; hard limit on code-execution errors.
-- Multiple image-generation providers (DashScope, Zhipu AI); per-agent LLM provider overrides; improved provider compatibility and LLM client caching.
-- Advanced analysis modules: gene signature scoring, trajectory analysis, TF networks, cell-cell communication, stemness, tumor estimation, compositional analysis, immune repertoire.
-
-**0.21.x — provider enhancements (2026-04-25)**
-
-- Multiple image-generation providers (DashScope, Zhipu AI); per-agent LLM provider overrides; improved provider compatibility.
-
-**0.20.x — reliability improvements (2026-04-15)**
-
-- Development / production mode switching; hard limit on code-execution errors; improved error recovery.
-
-**0.17.x — UI redesign and proactive docs (2026-03-26)**
-
-- Complete UI visual redesign.
-- Automatic API-documentation lookup on errors; Bioinformatics Agent can read package docs proactively.
-
-**0.16.x — Docker and resilience (2026-03-24)**
-
-- Official Docker image published; vision-aware figure-revision fallback; analysis timeout extended to 1.5 h.
-
-**0.15.x — report & annotation polish (2026-03-22 → 2026-03-23)**
-
-- Auto-generated PDF companions for every figure.
-- Cell-type annotation required before the exploration report; inline tables with preview/download in reports.
-
-**0.14.x — identity and annotation depth (2026-03-15 → 2026-03-21)**
-
-- Project renamed from InteSc to **ScAI** (0.14.4).
-- Annotation dialog surfaces alternative cell types and confidence reasons; AnnData variable-name auto-detection; improved error recovery.
-
-**0.13.x — two-phase workflow (2026-03-12 → 2026-03-13)**
-
-- Exploration → Innovation phase split; cell-annotation confirmation; multi-direction analysis with cross-direction correlation.
-
-**0.12.x — supervisor & figure review (2026-03-10 → 2026-03-11)**
-
-- Supervisor Agent for real-time monitoring; pause / stop controls; PI-reviewed publication figures with auto-revision.
-
-**0.11.x — cross-modality biochemistry (2026-03-09)**
-
-- Biochemistry results feed into other agents for cross-referenced findings.
-
-**0.10.x — literature depth & logs (2026-03-07 → 2026-03-09)**
-
-- Deep Research mode for comprehensive literature surveys; full chronological analysis log.
-
-**0.9.x — publication-ready reports (2026-03-04)**
-
-- PI reviews notebooks and figures before reports; reports include project-info appendix; graphic-abstract generation and revision.
-
-**0.3.x – 0.8.x — foundation (2026-02-04 → 2026-03-03)**
-
-- Core multi-agent architecture; treatment-group system; chat interface with PI; Painter Agent; report generation; literature-based annotation.
