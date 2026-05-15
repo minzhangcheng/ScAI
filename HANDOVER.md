@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.3 · **Last updated**: 2026-05-14
+**Version**: 0.24.4 · **Last updated**: 2026-05-15
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,14 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.24.x — collaborative analysis planning (2026-05-14)**
+**0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.4` — custom data type support (2026-05-15):
+  - **Custom data type input**: Added ability to enter custom data type names in file uploads. Users can now type custom values (e.g., "Sirius Red", "IHC") beyond the predefined dropdown options for pathology images.
+  - **New utility functions**: Added `CUSTOM_TYPE_SENTINEL` sentinel value ("Other"), `isCustomDataType()`, and `selectValueForDataType()` in `dataTypes.ts`.
+  - **New CustomTypeInput component**: Created reusable `CustomTypeInput.tsx` component in `components/shared/` that shows a text input when dataType is custom.
+  - **Frontend integration**: Updated `ChatPanel.tsx` and `RoundFeedbackDialog.tsx` to use the new custom type input with proper value derivation.
+  - **Pathology cleanup**: Reorganized imports in `pathology_agent.py`.
 
 - `0.24.3` — planning dialogue improvements (2026-05-14):
   - **Refactored retry logic**: Extracted shared `_retry_backoff_delay()` helper used by `@with_retry` decorator and inline retries in workflow and report generation.

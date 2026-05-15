@@ -8,7 +8,8 @@ import { base64ToDataUri } from '../utils/image'
 import { AGENT_OPTIONS } from '../constants/agents'
 
 // Section-specific data type options
-import { getSection, getTypeOptions } from '../utils/dataTypes'
+import { getSection, getTypeOptions, selectValueForDataType, hasCustomOption, CUSTOM_TYPE_SENTINEL } from '../utils/dataTypes'
+import { CustomTypeInput } from './shared/CustomTypeInput'
 
 const MIN_TEXTAREA_HEIGHT = 72
 
@@ -191,10 +192,21 @@ export function ChatPanel() {
     setSelectedFiles((prev) =>
       prev.map((item, i) => (i === index ? { ...item, dataType } : item))
     )
+    setError(null)
   }
 
   const handleSend = async () => {
     if ((!input.trim() && selectedFiles.length === 0) || !currentSession?.id || chatLoading) return
+
+    // Validate: files with custom type must have a non-empty, non-sentinel value
+    const invalidFile = selectedFiles.find(sf =>
+      hasCustomOption(getTypeOptions(sf.targetAgent)) &&
+      (sf.dataType === CUSTOM_TYPE_SENTINEL || !sf.dataType)
+    )
+    if (invalidFile) {
+      setError(t('customTypeRequired'))
+      return
+    }
 
     // Capture session ID at send time to detect cross-session pollution
     const sendSessionId = currentSession.id
@@ -549,7 +561,7 @@ export function ChatPanel() {
 
                     {/* Data type */}
                     <select
-                      value={sf.dataType || typeOptions[0] || ''}
+                      value={hasCustomOption(typeOptions) ? selectValueForDataType(sf.dataType, typeOptions) : (sf.dataType || typeOptions[0] || '')}
                       onChange={(e) => handleFileTypeChange(i, e.target.value)}
                       className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white max-w-[90px]"
                     >
@@ -557,6 +569,14 @@ export function ChatPanel() {
                         <option key={opt} value={opt}>{opt}</option>
                       ))}
                     </select>
+                    {hasCustomOption(typeOptions) && (
+                      <CustomTypeInput
+                        dataType={sf.dataType || ''}
+                        typeOptions={typeOptions}
+                        onCustomChange={(val) => handleFileTypeChange(i, val)}
+                        language={language}
+                      />
+                    )}
                   </div>
                 )}
               </div>

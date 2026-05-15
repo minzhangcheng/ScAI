@@ -25,7 +25,8 @@ import { useClickOutside } from '../hooks/useClickOutside'
 import { useCountdownTimer } from '../hooks/useCountdownTimer'
 
 // Section-specific data type options (shared with DataPanel)
-import { getSection, getTypeOptions } from '../utils/dataTypes'
+import { getSection, getTypeOptions, selectValueForDataType, hasCustomOption, CUSTOM_TYPE_SENTINEL } from '../utils/dataTypes'
+import { CustomTypeInput } from './shared/CustomTypeInput'
 
 export interface UploadedFileWithAgent {
   file: File
@@ -70,6 +71,7 @@ export function RoundFeedbackDialog({
   const [userInput, setUserInput] = useState('')
   const [files, setFiles] = useState<UploadedFileWithAgent[]>([])
   const [sending, setSending] = useState(false)
+  const [customTypeError, setCustomTypeError] = useState('')
 
   // Timer state
   const [timerPaused, setTimerPaused] = useState(false)
@@ -132,6 +134,16 @@ export function RoundFeedbackDialog({
   const handleSend = useCallback(async () => {
     if (sending) return
     if (!userInput.trim() && files.length === 0) return
+
+    // Validate: files with custom type must have a non-empty, non-sentinel value
+    const invalidFile = files.find(f =>
+      hasCustomOption(getTypeOptions(f.targetAgent)) &&
+      (f.dataType === CUSTOM_TYPE_SENTINEL || !f.dataType)
+    )
+    if (invalidFile) {
+      setCustomTypeError(t('customTypeRequired'))
+      return
+    }
 
     setSending(true)
 
@@ -473,20 +485,32 @@ export function RoundFeedbackDialog({
 
                         {/* Data type */}
                         <select
-                          value={f.dataType || typeOptions[0] || ''}
-                          onChange={(e) => updateFileType(index, e.target.value)}
+                          value={hasCustomOption(typeOptions) ? selectValueForDataType(f.dataType, typeOptions) : (f.dataType || typeOptions[0] || '')}
+                          onChange={(e) => { updateFileType(index, e.target.value); setCustomTypeError('') }}
                           className="px-1 py-0.5 border border-slate-200 rounded text-[11px] bg-white max-w-[90px]"
                         >
                           {typeOptions.map(opt => (
                             <option key={opt} value={opt}>{opt}</option>
                           ))}
                         </select>
+                        {hasCustomOption(typeOptions) && (
+                          <CustomTypeInput
+                            dataType={f.dataType || ''}
+                            typeOptions={typeOptions}
+                            onCustomChange={(val) => { updateFileType(index, val); setCustomTypeError('') }}
+                            language={language}
+                          />
+                        )}
                       </div>
                     )}
                   </div>
                 )
               })}
             </div>
+          )}
+
+          {customTypeError && (
+            <p className="text-xs text-red-500 mt-1">{customTypeError}</p>
           )}
 
           {/* Input row */}

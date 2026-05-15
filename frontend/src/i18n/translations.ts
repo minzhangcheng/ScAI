@@ -211,6 +211,8 @@ export const translations = {
     pas: 'PAS (糖原)',
     other: '其他',
     customType: '自定义类型',
+    customTypePlaceholder: '例如 Sirius Red',
+    customTypeRequired: '请输入自定义类型名称',
 
     // Sequencing types
     scRNASeq: 'scRNA-seq (h5ad/h5)',
@@ -658,6 +660,8 @@ Please provide a detailed literature review report with specific citation inform
     pas: 'PAS (Glycogen)',
     other: 'Other',
     customType: 'Custom type',
+    customTypePlaceholder: 'e.g. Sirius Red',
+    customTypeRequired: 'Please enter a custom type name',
 
     // Sequencing types
     scRNASeq: 'scRNA-seq (h5ad/h5)',

@@ -3,22 +3,20 @@ Pathology Agent - Analyzes histology images
 """
 from typing import Dict, Any, List, Optional
 import json
-import os
-import re
 import logging
+import os
 
 from .base import BaseAgent
-from ..utils.settings_provider import AgentSettingsProvider
-
-# Configure logger
-logger = logging.getLogger(__name__)
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, DataFile
 )
-from ..utils.llm_client import OpenAICompatibleClient
 from ..utils.image_utils import (
     process_pathology_image, create_overview_image, load_image
 )
+from ..utils.llm_client import OpenAICompatibleClient
+from ..utils.settings_provider import AgentSettingsProvider
+
+logger = logging.getLogger(__name__)
 
 
 class PathologyAgent(BaseAgent):
