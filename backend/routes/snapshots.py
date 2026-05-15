@@ -137,7 +137,7 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
             type="annotation_confirmation",
             agent=AgentType.LITERATURE,
             content={
-                "annotations": [a.model_dump() for a in ann.cluster_annotations],
+                "annotations": [a.model_dump(mode="json") for a in ann.cluster_annotations],
                 "tissue": ann.tissue,
                 "organism": ann.organism,
                 "tissue_summary": ann.tissue_summary,
@@ -167,7 +167,7 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
             type="exploration_report",
             agent=AgentType.PI,
             content={
-                "report_a": exp.model_dump(),
+                "report_a": exp.model_dump(mode="json"),
                 "round": last_round.round_number if last_round else 1,
                 "summary": last_round.pi_summary if last_round else "",
                 "html_url": html_url,

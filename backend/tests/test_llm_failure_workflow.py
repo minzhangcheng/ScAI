@@ -33,6 +33,7 @@ class TestWithRetryLlmFailure:
     @pytest.fixture
     def mock_self(self):
         """Create a mock workflow instance with required attributes."""
+        from backend.workflow import SingleCellAnalysisWorkflow
         mock = MagicMock()
         mock.session_id = "test-session"
         mock._llm_failure_lock = asyncio.Lock()
@@ -45,6 +46,8 @@ class TestWithRetryLlmFailure:
         # Mock settings_provider for client cache clearing
         mock._settings_provider = MagicMock()
         mock._settings_provider._client_cache = {}
+        # Bind real async method — MagicMock auto-creates a non-awaitable stub
+        mock._wait_for_llm_intervention = SingleCellAnalysisWorkflow._wait_for_llm_intervention.__get__(mock, type(mock))
         return mock
 
     @pytest.fixture
@@ -348,6 +351,9 @@ class TestBioinformaticsNodeUpstreamPropagation:
         # Mock pi_agent for the PI planning section of _bioinformatics_analysis
         mock.pi_agent = MagicMock()
         mock.pi_agent.plan_agent_tasks = AsyncMock(return_value=["Perform standard scRNA-seq analysis"])
+
+        # Bind real async method — MagicMock auto-creates a non-awaitable stub
+        mock._wait_for_llm_intervention = SingleCellAnalysisWorkflow._wait_for_llm_intervention.__get__(mock, type(mock))
 
         # Bind the real method
         mock._bioinformatics_analysis = SingleCellAnalysisWorkflow._bioinformatics_analysis.__get__(mock, type(mock))

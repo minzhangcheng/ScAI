@@ -76,8 +76,8 @@ class TestPlanningDialogueBioinfoFailure:
 
         result = await wf._planning_dialogue(state)
 
-        # existing_plan.status is changed to "pi_reviewing" by the SKIP handler
-        assert analysis_state.current_plan.status == "pi_reviewing"
+        # existing_plan.status stays "rejected" — we don't reinstate a rejected plan
+        assert analysis_state.current_plan.status == "rejected"
         assert result.get("failed_node") is None
 
     @pytest.mark.asyncio
@@ -195,7 +195,7 @@ class TestPlanningDialoguePIReviewFailure:
 
         assert plan.status == "pi_reviewing"
         assert analysis_state.current_plan == plan
-        assert result["planning_result"]["plan"] == plan.model_dump()
+        assert result["planning_result"]["plan"] == plan.model_dump(mode="json")
         dialogue = result["planning_result"]["dialogue"]
         assert len(dialogue) == 1
         assert dialogue[0]["pi_decision"] == "approved"

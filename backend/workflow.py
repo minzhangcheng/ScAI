@@ -1449,7 +1449,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
                 self._annotation_event.clear()
 
                 await self._send_message("annotation_confirmation", {
-                    "annotations": [a.model_dump() for a in cluster_anns],
+                    "annotations": [a.model_dump(mode="json") for a in cluster_anns],
                     "tissue": tissue,
                     "organism": organism,
                     "tissue_summary": result.get("tissue_summary", ""),
@@ -1915,14 +1915,14 @@ Approve if quality_score >= 7."""
 
         Merges:
         - planning_context (stage1 bioinfo results, set after stage1 execution)
-        - Current-round biochemistry and pathology findings (via _collect_current_round_results)
+        - Current-round biochemistry, pathology, and bioinformatics findings (via _collect_current_round_results)
         - Fallback to previous round findings from round_results if wet-lab agents were skipped
         """
         combined = dict(state.get("planning_context") or {})
 
         # Reuse existing method for current-round wet-lab findings
         current_findings = self._collect_current_round_results(state)
-        for key in ("biochemistry_findings", "pathology_findings"):
+        for key in ("biochemistry_findings", "pathology_findings", "bioinformatics_findings"):
             if key in current_findings:
                 combined[key] = current_findings[key]
 
@@ -1934,7 +1934,9 @@ Approve if quality_score >= 7."""
                     combined["biochemistry_findings"] = prev_round.biochemistry_findings
                 if "pathology_findings" not in combined and prev_round.pathology_findings:
                     combined["pathology_findings"] = prev_round.pathology_findings
-                if "biochemistry_findings" in combined and "pathology_findings" in combined:
+                if "bioinformatics_findings" not in combined and prev_round.bioinformatics_findings:
+                    combined["bioinformatics_findings"] = prev_round.bioinformatics_findings
+                if "biochemistry_findings" in combined and "pathology_findings" in combined and "bioinformatics_findings" in combined:
                     break
 
         return combined if combined else None
@@ -2161,7 +2163,7 @@ Approve if quality_score >= 7."""
             )
             state["plan_approved"] = True
             state["planning_result"] = {
-                "plan": analysis_state.current_plan.model_dump(),
+                "plan": analysis_state.current_plan.model_dump(mode="json"),
                 "dialogue": analysis_state.plan_dialogue_history or [],
             }
             return state
@@ -2456,8 +2458,14 @@ Approve if quality_score >= 7."""
                             existing_plan=existing_plan,
                         )
                     else:
-                        pi_feedback = dialogue_history[-1]["pi_feedback"] if dialogue_history else ""
+                        # Collect PI feedback from all dialogue rounds, not just the last one
+                        all_pi_feedback = "\n".join(
+                            f"Round {d['round']}: {d['pi_feedback']}"
+                            for d in dialogue_history
+                            if d.get("pi_feedback")
+                        )
                         user_feedback = state.get("user_plan_feedback", "")
+                        pi_feedback = all_pi_feedback or (dialogue_history[-1]["pi_feedback"] if dialogue_history else "")
                         combined_feedback = f"{pi_feedback}\n\nUser feedback: {user_feedback}" if user_feedback else pi_feedback
                         plan = await self.bioinformatics_agent.revise_plan_incrementally(
                             state=analysis_state,
@@ -2478,12 +2486,14 @@ Approve if quality_score >= 7."""
                         AgentType.PI,
                     )
                     if existing_plan:
-                        existing_plan.status = "pi_reviewing"
+                        # Don't reinstate a PI-rejected plan as pi_reviewing
+                        if existing_plan.status != "rejected":
+                            existing_plan.status = "pi_reviewing"
                         analysis_state.current_plan = existing_plan
                         preserved_history = analysis_state.plan_dialogue_history or dialogue_history
                         analysis_state.plan_dialogue_history = preserved_history
                         state["planning_result"] = {
-                            "plan": existing_plan.model_dump(),
+                            "plan": existing_plan.model_dump(mode="json"),
                             "dialogue": preserved_history,
                         }
                     else:
@@ -2539,15 +2549,16 @@ Approve if quality_score >= 7."""
                     )
                     plan.status = "pi_reviewing"
                     analysis_state.current_plan = plan
+                    plan_json = plan.model_dump(mode="json")
                     analysis_state.plan_dialogue_history = dialogue_history + [{
                         "round": round_num,
-                        "plan": plan.model_dump(),
+                        "plan": plan_json,
                         "pi_decision": "approved",
                         "pi_feedback": "PI review skipped due to LLM failure — auto-accepted",
                         "pi_modifications": [],
                     }]
                     state["planning_result"] = {
-                        "plan": plan.model_dump(),
+                        "plan": plan_json,
                         "dialogue": analysis_state.plan_dialogue_history,
                     }
                     return state
@@ -2588,7 +2599,7 @@ Approve if quality_score >= 7."""
             # --- Process PI review decision ---
             dialogue_history.append({
                 "round": round_num,
-                "plan": plan.model_dump(),
+                "plan": plan.model_dump(mode="json"),
                 "pi_decision": review["decision"],
                 "pi_feedback": review["feedback"],
                 "pi_modifications": review.get("modifications", []),
@@ -2630,7 +2641,7 @@ Approve if quality_score >= 7."""
                 analysis_state.current_plan = existing_plan
                 analysis_state.plan_dialogue_history = dialogue_history
                 state["planning_result"] = {
-                    "plan": existing_plan.model_dump(),
+                    "plan": existing_plan.model_dump(mode="json"),
                     "dialogue": dialogue_history,
                 }
             await self._send_message(
@@ -2648,6 +2659,8 @@ Approve if quality_score >= 7."""
         plan.status = "approved"
         plan.approved_at = datetime.now()
         analysis_state.current_plan = plan
+        self._set_status(analysis_state, TaskStatus.RUNNING)
+        await self._send_state_sync(analysis_state, "plan_approved")
         await self._send_message("plan_approved", {
             "plan_id": plan.id,
             "action": action,
@@ -2681,7 +2694,7 @@ Approve if quality_score >= 7."""
 
             # Send plan to frontend
             await self._send_message("plan_review", {
-                "plan": plan.model_dump(),
+                "plan": plan.model_dump(mode="json"),
                 "dialogue_html": dialogue_html,
                 "phase": analysis_state.analysis_phase.value,
                 "round": analysis_state.current_round,
@@ -3688,7 +3701,7 @@ Return ONLY the JSON array, nothing else."""
                 await self._create_auto_snapshot(analysis_state, "pre_direction")
 
                 await self._send_message("exploration_report", {
-                    "report_a": exploration_report.model_dump(),
+                    "report_a": exploration_report.model_dump(mode="json"),
                     "round": round_result.round_number,
                     "summary": round_result.pi_summary,
                     "html_url": html_url,
@@ -3905,7 +3918,7 @@ Return ONLY the JSON array, nothing else."""
                             detailed_report_url = f"/api/session/{self.session_id}/detailed-report/html" if analysis_state.detailed_report_html_path else None
 
                             await self._send_message("exploration_report", {
-                                "report_a": exploration_report.model_dump(),
+                                "report_a": exploration_report.model_dump(mode="json"),
                                 "round": last_round.round_number,
                                 "summary": last_round.pi_summary,
                                 "html_url": html_url,
@@ -4006,9 +4019,14 @@ Return ONLY the JSON array, nothing else."""
             return "plan_revision"
         # Check for stage transition
         stage = state.get("planning_stage", "full")
-        if stage == "stage2" and not state.get("plan_approved"):
-            # Stage 1 just completed, go to stage 2 planning
-            return "stage2_planning"
+        if stage == "stage2":
+            if not state.get("plan_approved"):
+                # Stage 1 just completed, go to stage 2 planning
+                return "stage2_planning"
+            else:
+                # plan_approved=True reached unexpectedly in stage2 — don't skip stage2
+                logger.warning(f"[{self.session_id}] stage2 with plan_approved=True unexpectedly, routing to stage2_planning")
+                return "stage2_planning"
         return "continue_to_synthesis"
 
     def _should_continue_after_init(self, state: WorkflowState) -> str:

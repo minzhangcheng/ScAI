@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.4 · **Last updated**: 2026-05-15
+**Version**: 0.24.5 · **Last updated**: 2026-05-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,15 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.5` — model serialization fix & planning improvements (2026-05-15):
+  - **Pydantic model_dump mode="json"**: Changed all `model_dump()` calls to `model_dump(mode="json")` across workflow, bioinformatics_agent, schemas, and snapshots to properly serialize datetime objects and avoid Pydantic serialization warnings.
+  - **Collect all PI feedback**: Planning dialogue now collects PI feedback from all rounds, not just the last one, for better context in plan revisions.
+  - **Plan status guard**: Fixed plan status handling to not reinstate a PI-rejected plan as "pi_reviewing".
+  - **Bioinformatics findings in context**: Added `bioinformatics_findings` to planning context aggregation alongside biochemistry and pathology.
+  - **PlanReviewDialog countdown fix**: Refactored to use `useCountdownTimer` hook with proper submit guards to prevent double-submissions and ensure onSkip triggers correctly.
+  - **stage2 edge case handling**: Added warning and explicit routing when plan_approved=True is unexpectedly reached in stage2.
+  - **Plan approval state sync**: Added `_set_status(analysis_state, TaskStatus.RUNNING)` and `_send_state_sync` when plan is approved to properly update state.
 
 - `0.24.4` — custom data type support (2026-05-15):
   - **Custom data type input**: Added ability to enter custom data type names in file uploads. Users can now type custom values (e.g., "Sirius Red", "IHC") beyond the predefined dropdown options for pathology images.

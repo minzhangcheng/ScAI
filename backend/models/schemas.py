@@ -759,7 +759,7 @@ class AnalysisState(BaseModel):
             "state_version": self.state_version,
             "last_sync_timestamp": _dt(self.last_sync_timestamp),
             "snapshot_count": len(self.snapshots),
-            "current_plan": self.current_plan.model_dump() if self.current_plan else None,
+            "current_plan": self.current_plan.model_dump(mode="json") if self.current_plan else None,
             "plan_dialogue_history": self._serialize_dialogue_history(self.plan_dialogue_history),
             "agent_errors": [
                 {"id": err.id, "agent": _enum(err.agent),

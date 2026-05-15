@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   CheckCircle2,
   Clock,
@@ -7,6 +7,7 @@ import {
   FileDown,
   Edit3,
 } from 'lucide-react'
+import { useCountdownTimer } from '../hooks/useCountdownTimer'
 
 interface PlanStep {
   id: number
@@ -57,37 +58,29 @@ export function PlanReviewDialog({
 }: PlanReviewDialogProps) {
   const [userInput, setUserInput] = useState('')
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
-  const [countdown, setCountdown] = useState(countdownSeconds)
   const [submitting, setSubmitting] = useState(false)
   const [showModifyInput, setShowModifyInput] = useState(false)
+  const expiredRef = useRef(false)
 
+  // Reset expired flag when dialog reopens with a new countdown
   useEffect(() => {
-    setCountdown(countdownSeconds)
-  }, [countdownSeconds, open])
-
-  const countdownRef = useRef<number | null>(null)
-  const submittingRef = useRef(submitting)
-  submittingRef.current = submitting
-
-  useEffect(() => {
-    if (countdown <= 0 || countdownSeconds <= 0) return
-    if (countdownRef.current) clearInterval(countdownRef.current)
-    countdownRef.current = window.setInterval(() => {
-      setCountdown(prev => {
-        if (prev <= 1) {
-          if (countdownRef.current) clearInterval(countdownRef.current)
-          if (open && !submittingRef.current) {
-            onSkip()
-          }
-          return 0
-        }
-        return prev - 1
-      })
-    }, 1000)
-    return () => {
-      if (countdownRef.current) clearInterval(countdownRef.current)
+    if (open) {
+      expiredRef.current = false
     }
-  }, [countdownSeconds, open]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, countdownSeconds])
+
+  const handleAutoSkip = useCallback(() => {
+    if (!submitting && !expiredRef.current) {
+      expiredRef.current = true
+      onSkip()
+    }
+  }, [onSkip, submitting])
+
+  const { timeRemaining: countdown } = useCountdownTimer({
+    countdownSeconds,
+    onExpire: handleAutoSkip,
+    resetKey: `${open}-${countdownSeconds}`,
+  })
 
   const phaseLabel = phase === 'exploration' ? '探索阶段' : '创新阶段'
   const stageLabel = stage === 'stage1' ? '阶段 1: QC+聚类+注释'
@@ -117,6 +110,8 @@ export function PlanReviewDialog({
   }
 
   const handleApprove = async () => {
+    if (expiredRef.current || submitting) return
+    expiredRef.current = true
     setSubmitting(true)
     try {
       await onApprove()
@@ -126,6 +121,8 @@ export function PlanReviewDialog({
   }
 
   const handleSkip = async () => {
+    if (expiredRef.current || submitting) return
+    expiredRef.current = true
     setSubmitting(true)
     try {
       await onSkip()

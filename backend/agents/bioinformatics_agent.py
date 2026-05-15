@@ -1454,8 +1454,8 @@ If results significantly deviate from plan expectations, report via consult_pi i
                         'messages': messages,
                         'findings': all_findings,
                         'figures': all_figures,
-                        'code_history': [ce.model_dump() for ce in self.code_history],
-                        'analysis_log': [step.model_dump() for step in analysis_log],
+                        'code_history': [ce.model_dump(mode="json") for ce in self.code_history],
+                        'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
                         'analysis_context': self.analysis_context,
                         'completed': False
                     }
