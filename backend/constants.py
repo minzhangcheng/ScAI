@@ -48,3 +48,15 @@ class StateSyncChangeType(str, Enum):
 # ── PI-agent signalling constants ──────────────────────────────────
 # Sentinel tag injected into PI responses to signal plan revision is needed
 PLAN_REVISION_NEEDED_TAG = "[__PLAN_REVISION_NEEDED__]"
+PI_REVIEW_FALLBACK_DECISION = "revise"
+
+# TODO(brittleness): Substring matching is inherently fragile — PI natural-language
+# responses like "I cannot execute this step because X" will trigger false positives
+# on "cannot execute". Consider replacing with structured signals (e.g. a dedicated
+# tool call or a prefixed tag like [PLAN_REVISION]) so that intent is unambiguous.
+PLAN_REVISION_KEYWORDS = frozenset([
+    "plan needs revision", "plan revision", "replan",
+    "cannot execute", "not applicable", "different approach",
+    "rethink", "redesign", "fundamental change",
+    "major change", "hypothesis change",
+])

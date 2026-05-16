@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.6 · **Last updated**: 2026-05-15
+**Version**: 0.24.7 · **Last updated**: 2026-05-15
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,15 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.7` — stage-aware planning & stop/resume fixes (2026-05-15):
+  - **PI stage context**: Added stage context to PI callback prompts so PI knows whether agent is in stage1 (QC+clustering+annotation only) or stage2 (downstream analysis).
+  - **PLAN_REVISION_KEYWORDS**: Extracted plan revision keyword list to constants.py for reuse across codebase.
+  - **Frontend countdown refactor**: AnalysisPanel now uses captured `roundWaitSeconds` and `maxRounds` from store hooks instead of calling `useAppStore.getState()` directly in JSX.
+  - **Stop/resume max_rounds restoration**: Added `original_max_rounds` field to save original value during stop, restored on resume. Fixes round limit being permanently reduced after stop operations.
+  - **PI_REVIEW_FALLBACK_DECISION**: Added constant for default PI review decision when LLM fails.
+
+- `0.24.6` — (skipped — consolidated into 0.24.7)
 
 - `0.24.5` — model serialization fix & planning improvements (2026-05-15):
   - **Pydantic model_dump mode="json"**: Changed all `model_dump()` calls to `model_dump(mode="json")` across workflow, bioinformatics_agent, schemas, and snapshots to properly serialize datetime objects and avoid Pydantic serialization warnings.

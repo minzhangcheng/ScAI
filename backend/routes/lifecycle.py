@@ -96,6 +96,11 @@ async def resume_analysis(session_id: str, request: Request):
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
+    # Restore original max_rounds if it was saved during a stop operation
+    if state.original_max_rounds is not None:
+        state.max_rounds = state.original_max_rounds
+        state.original_max_rounds = None
+
     if state.status == TaskStatus.COMPLETED:
         # Re-analysis: reset for a new round while keeping existing data
         state.status = TaskStatus.RUNNING
@@ -262,6 +267,8 @@ async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequ
         if state.status == TaskStatus.WAITING_INPUT:
             if state.wait_input_reason == WaitInputReason.LLM_FAILURE.value:
                 # LLM failure wait — signal skip to unblock @with_retry
+                if state.original_max_rounds is None:
+                    state.original_max_rounds = state.max_rounds
                 state.max_rounds = state.current_round
                 state.status = TaskStatus.RUNNING
                 info = state.llm_failure_info
@@ -272,6 +279,8 @@ async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequ
                 return APIResponse(success=True, message="Skipping failed LLM call, generating report...")
             else:
                 # Round completion wait — existing behavior
+                if state.original_max_rounds is None:
+                    state.original_max_rounds = state.max_rounds
                 state.max_rounds = state.current_round
                 state.status = TaskStatus.RUNNING
                 await _resume_workflow(session_id, state,
@@ -280,6 +289,8 @@ async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequ
         elif state.status == TaskStatus.WAITING_ANNOTATION:
             # Workflow is blocked at _annotation_event.wait() inside callback
             # Unblock it and let the round finish, then route to report gen
+            if state.original_max_rounds is None:
+                state.original_max_rounds = state.max_rounds
             state.max_rounds = state.current_round
             state.status = TaskStatus.RUNNING
             await _resume_workflow(session_id, state,
@@ -288,6 +299,8 @@ async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequ
         elif state.status == TaskStatus.WAITING_PLAN_REVIEW:
             # Workflow is blocked at _plan_review_event.wait()
             # Unblock it by skipping the review and finishing the round
+            if state.original_max_rounds is None:
+                state.original_max_rounds = state.max_rounds
             state.max_rounds = state.current_round
             state.status = TaskStatus.RUNNING
             await _resume_workflow(session_id, state,

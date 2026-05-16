@@ -237,6 +237,8 @@ async def request_human_input(session_id: str, request: Request):
         except Exception:
             logger.warning("Failed to send human_input_requested via WebSocket", exc_info=True)
 
+    return APIResponse(success=True, message="Human input requested")
+
 
 @router.post("/{session_id}/plan-review")
 async def submit_plan_review(session_id: str, request: Request, body: PlanReviewRequest):
@@ -257,6 +259,11 @@ async def submit_plan_review(session_id: str, request: Request, body: PlanReview
                     detail="Cannot modify plan without an active workflow. Resume the session first.",
                 )
             if action in ("approve", "skip"):
+                if state.current_plan is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="No plan available to approve. Resume the session first.",
+                    )
                 state.current_plan.status = "approved"
                 state.current_plan.approved_at = datetime.now()
             # _pause_and_restart_ws will set PAUSED, save, and close the WebSocket

@@ -158,8 +158,8 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
 
   const phaseLabel = (phase: string) => {
     const labels: Record<string, string> = isZh
-      ? { pre_annotation: '注释前', post_annotation: '注释后', pre_direction: '选方向前', post_direction: '选方向后', pre_round_wait: '轮次结束', manual: '手动' }
-      : { pre_annotation: 'Pre-Annotation', post_annotation: 'Post-Annotation', pre_direction: 'Pre-Direction', post_direction: 'Post-Direction', pre_round_wait: 'Round Complete', manual: 'Manual' }
+      ? { pre_annotation: '注释前', post_annotation: '注释后', pre_direction: '选方向前', post_direction: '选方向后', pre_round_wait: '轮次结束', pre_execution_stage1: 'Stage1执行前', pre_execution_stage2: 'Stage2执行前', pre_execution_full: '全量执行前', pre_major_revision: '重大修订前', post_report: '报告后', manual: '手动' }
+      : { pre_annotation: 'Pre-Annotation', post_annotation: 'Post-Annotation', pre_direction: 'Pre-Direction', post_direction: 'Post-Direction', pre_round_wait: 'Round Complete', pre_execution_stage1: 'Pre-Execution Stage1', pre_execution_stage2: 'Pre-Execution Stage2', pre_execution_full: 'Pre-Execution Full', pre_major_revision: 'Pre-Major Revision', post_report: 'Post Report', manual: 'Manual' }
     return labels[phase] || phase
   }
 

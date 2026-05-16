@@ -66,6 +66,7 @@ export function AnalysisPanel() {
   const setShowLlmTimeoutDialog = useAppStore(s => s.setShowLlmTimeoutDialog)
   const llmModifySaved = useAppStore(s => s.llmModifySaved)
   const roundWaitSeconds = useAppStore(s => s.roundWaitSeconds)
+  const maxRounds = useAppStore(s => s.maxRounds)
 
   // Round results state
   const [expandedRound, setExpandedRound] = useState<number | null>(null)
@@ -1259,7 +1260,7 @@ export function AnalysisPanel() {
           reportHtmlUrl={annotationData.report_html_url || undefined}
           detailedReportUrl={annotationData.detailed_report_url || undefined}
           language={language}
-          countdownSeconds={useAppStore.getState().roundWaitSeconds}
+          countdownSeconds={roundWaitSeconds}
           onConfirm={handleConfirmAnnotations}
           onRequestSupplementary={(text) => handleSupplementaryAnalysis(text, 'annotation')}
           isSupplementaryRunning={isSupplementaryRunning}
@@ -1276,7 +1277,7 @@ export function AnalysisPanel() {
           phase={planReviewData.phase || ''}
           round={planReviewData.round || currentSession.currentRound || 1}
           stage={planReviewData.stage || 'full'}
-          countdownSeconds={useAppStore.getState().roundWaitSeconds}
+          countdownSeconds={roundWaitSeconds}
           onApprove={handlePlanApprove}
           onSkip={handlePlanSkip}
           onModify={handlePlanModify}
@@ -1291,7 +1292,7 @@ export function AnalysisPanel() {
           explorationReportUrl={explorationReportData.html_url || undefined}
           detailedReportUrl={explorationReportData.detailed_report_url || undefined}
           language={language}
-          countdownSeconds={useAppStore.getState().roundWaitSeconds}
+          countdownSeconds={roundWaitSeconds}
           onChooseDirections={handleChooseDirections}
           onLetPiDecide={handleLetPiDecide}
           onRequestSupplementary={(text) => handleSupplementaryAnalysis(text, 'direction')}
@@ -1304,10 +1305,10 @@ export function AnalysisPanel() {
       {showFeedbackDialog && !showExplorationDialog && feedbackRoundData && currentSession && !llmFailureInfo && (
         <RoundFeedbackDialog
           roundNumber={feedbackRoundData.round}
-          maxRounds={useAppStore.getState().maxRounds}
+          maxRounds={maxRounds}
           roundSummary={feedbackRoundData}
           language={language}
-          countdownSeconds={useAppStore.getState().roundWaitSeconds}
+          countdownSeconds={roundWaitSeconds}
           treatmentGroups={currentSession.treatmentGroups || []}
           onSend={handleDialogSend}
           onSkip={handleDialogSkip}

@@ -37,11 +37,12 @@ class TestPlanModelDumpJsonSerializable:
             overview="test plan",
             steps=[PlanStep(id=1, title="QC", method="scanpy")],
             status="approved",
+            created_at=datetime(2026, 5, 15, 3, 5, 2),
             approved_at=datetime(2026, 5, 15, 3, 5, 2),
         )
         safe = plan.model_dump(mode="json")
         json.dumps(safe)
-        assert "2026-05-15" in safe["created_at"]  # default_factory=datetime.now, exact value varies
+        assert safe["created_at"] == "2026-05-15T03:05:02"
         assert safe["approved_at"] == "2026-05-15T03:05:02"
 
     def test_plan_step_executed_at_is_serializable_with_mode_json(self):

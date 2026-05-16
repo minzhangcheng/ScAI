@@ -8,6 +8,8 @@ import {
   Edit3,
 } from 'lucide-react'
 import { useCountdownTimer } from '../hooks/useCountdownTimer'
+import { useTranslation } from '../i18n/translations'
+import { useAppStore } from '../stores/appStore'
 
 interface PlanStep {
   id: number
@@ -57,6 +59,8 @@ export function PlanReviewDialog({
   onModify,
 }: PlanReviewDialogProps) {
   const [userInput, setUserInput] = useState('')
+  const language = useAppStore(s => s.language)
+  const { t } = useTranslation(language)
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
   const [submitting, setSubmitting] = useState(false)
   const [showModifyInput, setShowModifyInput] = useState(false)
@@ -82,9 +86,9 @@ export function PlanReviewDialog({
     resetKey: `${open}-${countdownSeconds}`,
   })
 
-  const phaseLabel = phase === 'exploration' ? '探索阶段' : '创新阶段'
-  const stageLabel = stage === 'stage1' ? '阶段 1: QC+聚类+注释'
-                     : stage === 'stage2' ? '阶段 2: 下游分析' : '全量分析'
+  const phaseLabel = phase === 'exploration' ? t('planReviewStageExplore') : t('planReviewStageInnovate')
+  const stageLabel = stage === 'stage1' ? t('planReviewStage1')
+                     : stage === 'stage2' ? t('planReviewStage2') : t('planReviewStageFull')
 
   const toggleStep = (stepId: number) => {
     setExpandedSteps(prev => {
@@ -115,6 +119,8 @@ export function PlanReviewDialog({
     setSubmitting(true)
     try {
       await onApprove()
+    } catch {
+      expiredRef.current = false
     } finally {
       setSubmitting(false)
     }
@@ -126,11 +132,16 @@ export function PlanReviewDialog({
     setSubmitting(true)
     try {
       await onSkip()
+    } catch {
+      expiredRef.current = false
     } finally {
       setSubmitting(false)
     }
   }
 
+  // Note: modify intentionally omits expiredRef guard — the user is typing
+  // free-form text, so there's no race with a countdown expiry. approve/skip
+  // use expiredRef because a countdown expiry could make those actions stale.
   const handleSubmitModify = async () => {
     if (!userInput.trim()) return
     setSubmitting(true)
@@ -151,7 +162,7 @@ export function PlanReviewDialog({
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold text-gray-900">
-              分析计划审核 — {phaseLabel} — Round {round} — {stageLabel}
+              {t('planReviewTitle')} — {phaseLabel} — Round {round} — {stageLabel}
             </h2>
             {countdown > 0 && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-sm font-medium">
@@ -165,7 +176,7 @@ export function PlanReviewDialog({
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
           >
             <FileDown className="w-4 h-4" />
-            下载对话记录
+            {t('planReviewDownloadLog')}
           </button>
         </div>
 
@@ -174,7 +185,7 @@ export function PlanReviewDialog({
           {/* Overview */}
           {plan.overview && (
             <div className="bg-blue-50 rounded-lg p-4">
-              <h3 className="text-sm font-medium text-blue-900 mb-1">概述</h3>
+              <h3 className="text-sm font-medium text-blue-900 mb-1">{t('planReviewOverview')}</h3>
               <p className="text-sm text-blue-800">{plan.overview}</p>
             </div>
           )}
@@ -182,7 +193,7 @@ export function PlanReviewDialog({
           {/* Steps */}
           <div>
             <h3 className="text-sm font-medium text-gray-900 mb-2">
-              分析步骤 ({plan.steps.length} 步)
+              {t('planReviewSteps', { n: plan.steps.length })}
             </h3>
             <div className="space-y-2">
               {plan.steps.map((step) => {
@@ -218,30 +229,30 @@ export function PlanReviewDialog({
                     {isExpanded && (
                       <div className="px-4 pb-3 space-y-2 text-sm">
                         <div>
-                          <span className="text-gray-500">方法：</span>
+                          <span className="text-gray-500">{t('planReviewMethod')}</span>
                           <span className="text-gray-900">{step.method}</span>
                         </div>
                         {step.input && (
                           <div>
-                            <span className="text-gray-500">输入：</span>
+                            <span className="text-gray-500">{t('planReviewInput')}</span>
                             <span className="text-gray-900">{step.input}</span>
                           </div>
                         )}
                         {step.expected_output && (
                           <div>
-                            <span className="text-gray-500">预期输出：</span>
+                            <span className="text-gray-500">{t('planReviewExpectedOutput')}</span>
                             <span className="text-gray-900">{step.expected_output}</span>
                           </div>
                         )}
                         {step.rationale && (
                           <div>
-                            <span className="text-gray-500">理由：</span>
+                            <span className="text-gray-500">{t('planReviewRationale')}</span>
                             <span className="text-gray-900">{step.rationale}</span>
                           </div>
                         )}
                         {step.depends_on.length > 0 && (
                           <div>
-                            <span className="text-gray-500">依赖步骤：</span>
+                            <span className="text-gray-500">{t('planReviewDependsOn')}</span>
                             <span className="text-gray-900">{step.depends_on.join(', ')}</span>
                           </div>
                         )}
@@ -256,7 +267,7 @@ export function PlanReviewDialog({
           {/* Key Decision Points */}
           {plan.key_decision_points.length > 0 && (
             <div>
-              <h3 className="text-sm font-medium text-gray-900 mb-2">关键决策点</h3>
+              <h3 className="text-sm font-medium text-gray-900 mb-2">{t('planReviewKeyDecisions')}</h3>
               <div className="flex flex-wrap gap-2">
                 {plan.key_decision_points.map((dp, i) => (
                   <span key={i} className="inline-flex items-center px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-medium">
@@ -270,7 +281,7 @@ export function PlanReviewDialog({
           {/* Expected Runtime */}
           {plan.expected_runtime && (
             <div className="text-sm text-gray-500">
-              预计运行时间: {plan.expected_runtime}
+              {t('planReviewEstimatedTime')} {plan.expected_runtime}
             </div>
           )}
 
@@ -280,7 +291,7 @@ export function PlanReviewDialog({
               <textarea
                 value={userInput}
                 onChange={(e) => setUserInput(e.target.value)}
-                placeholder="输入对计划的修改建议..."
+                placeholder={t('planReviewPlaceholder')}
                 rows={3}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-none"
               />
@@ -289,14 +300,14 @@ export function PlanReviewDialog({
                   onClick={() => { setShowModifyInput(false); setUserInput('') }}
                   className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 transition-colors"
                 >
-                  取消
+                  {t('planReviewCancel')}
                 </button>
                 <button
                   onClick={handleSubmitModify}
                   disabled={submitting || !userInput.trim()}
                   className="px-4 py-1.5 text-sm bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
-                  {submitting ? '提交中...' : '提交修改意见'}
+                  {submitting ? t('planReviewSubmitting') : t('planReviewSubmitFeedback')}
                 </button>
               </div>
             </div>
@@ -311,7 +322,7 @@ export function PlanReviewDialog({
               className="flex items-center gap-1.5 px-4 py-2 text-sm text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
             >
               <Edit3 className="w-4 h-4" />
-              修改
+              {t('planReviewModify')}
             </button>
           )}
           <button
@@ -319,7 +330,7 @@ export function PlanReviewDialog({
             disabled={submitting}
             className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
           >
-            跳过（让 PI 自行决定）
+            {t('planReviewSkip')}
           </button>
           <button
             onClick={handleApprove}
@@ -327,7 +338,7 @@ export function PlanReviewDialog({
             className="flex items-center gap-1.5 px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
           >
             <CheckCircle2 className="w-4 h-4" />
-            批准方案
+            {t('planReviewApprove')}
           </button>
         </div>
       </div>

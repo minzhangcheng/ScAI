@@ -18,6 +18,7 @@ from ..models.schemas import (
     DATA_TYPE_SCRNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient
+from ..constants import PI_REVIEW_FALLBACK_DECISION
 
 
 def _build_default_bio_tasks(state: AnalysisState, detailed: bool = False) -> list:
@@ -399,12 +400,12 @@ IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approv
         
         if not result:
             result = {
-                "decision": "approved",
-                "feedback": "Plan accepted (fallback — PI response could not be parsed)",
+                "decision": PI_REVIEW_FALLBACK_DECISION,
+                "feedback": "Plan needs review (fallback — PI response could not be parsed)",
                 "modifications": [],
             }
-        
-        result.setdefault("decision", "approved")
+
+        result.setdefault("decision", PI_REVIEW_FALLBACK_DECISION)
         result.setdefault("feedback", "")
         result.setdefault("modifications", [])
         

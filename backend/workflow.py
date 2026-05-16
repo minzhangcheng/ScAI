@@ -15,6 +15,7 @@ import operator
 import random
 from html import escape as _html_escape
 
+from backend.constants import PLAN_REVISION_KEYWORDS
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -917,10 +918,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             
             # Check if plan revision is needed based on PI's response
             if analysis_state and analysis_state.current_plan and analysis_state.current_plan.status == "approved":
-                plan_revision_keywords = ["plan needs revision", "plan revision", "replan",
-                                          "cannot execute", "not applicable", "different approach",
-                                          "rethink", "redesign", "fundamental change",
-                                          "major change", "hypothesis change"]
+                plan_revision_keywords = PLAN_REVISION_KEYWORDS
                 pi_mentions_plan_issue = any(
                     kw in response.lower() for kw in plan_revision_keywords
                 )
@@ -3358,7 +3356,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             analysis_state.current_plan = None  # Clear stage1 plan so stage2 generates fresh
         elif planning_stage == "stage2":
             result_state["planning_stage"] = "full"
-            result_state["planning_context"] = None  # Clear stage1 context after stage2 completes  # reset
+            result_state["planning_context"] = None  # Clear stage1 context after stage2 completes
 
         # Check for mid-execution plan revision from agent result
         if isinstance(final_result, dict) and final_result.get("plan_revision_needed"):
@@ -4033,13 +4031,9 @@ Return ONLY the JSON array, nothing else."""
         # Check for stage transition
         stage = state.get("planning_stage", "full")
         if stage == "stage2":
-            if not state.get("plan_approved"):
-                # Stage 1 just completed, go to stage 2 planning
-                return "stage2_planning"
-            else:
-                # plan_approved=True reached unexpectedly in stage2 — don't skip stage2
-                logger.warning(f"[{self.session_id}] stage2 with plan_approved=True unexpectedly, routing to stage2_planning")
-                return "stage2_planning"
+            if state.get("plan_approved"):
+                return "continue_to_synthesis"
+            return "stage2_planning"
         return "continue_to_synthesis"
 
     def _should_continue_after_init(self, state: WorkflowState) -> str:

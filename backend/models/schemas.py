@@ -49,9 +49,11 @@ class AnalysisPhase(str, Enum):
     INNOVATION = "innovation"
 
 SnapshotPhase = Literal[
-    "pre_annotation", "pre_direction", "pre_round_wait",
+    "pre_annotation", "post_annotation", "pre_direction", "post_direction",
+    "pre_round_wait",
     "pre_execution_stage1", "pre_execution_stage2", "pre_execution_full",
-    "pre_major_revision", "post_report"
+    "pre_major_revision", "post_report",
+    "manual",
 ]
 
 AnalysisPhaseType = Literal["exploration", "innovation"]
@@ -390,6 +392,7 @@ class AnalysisState(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     current_round: int = 0
     max_rounds: int = 3  # User-configurable maximum rounds
+    original_max_rounds: Optional[int] = Field(default=None)  # Preserved during stop to avoid clobbering max_rounds
     round_wait_seconds: int = DEFAULT_ROUND_WAIT_SECONDS  # Countdown seconds between rounds (-1=manual, 0=no wait)
     waiting_input_started_at: Optional[datetime] = None
 
