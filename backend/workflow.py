@@ -870,7 +870,27 @@ If the question reveals that the current plan cannot be executed as-is, you shou
 2. For MINOR: Provide direct actionable guidance
 3. For MAJOR: State clearly that a plan revision is needed and explain why
 """
-        
+        # Build stage context so PI knows the agent's current constraints
+        stage_context = ""
+        graph_state = self._current_graph_state
+        if graph_state:
+            ps = graph_state.get("planning_stage", "full")
+            if ps == "stage1":
+                stage_context = (
+                    "\n\nCURRENT STAGE: Stage 1 (QC + Clustering + Cell Type Annotation ONLY). "
+                    "The bioinformatics agent should ONLY perform basic QC, clustering, and annotation. "
+                    "Downstream analyses (DEG, GO/KEGG, cell communication, trajectory) are reserved "
+                    "for Stage 2 and should NOT be performed now. "
+                    "If the agent asks about downstream analysis, advise them to complete Stage 1 first "
+                    "by calling report_findings."
+                )
+            elif ps == "stage2":
+                stage_context = (
+                    "\n\nCURRENT STAGE: Stage 2 (Downstream Analysis). "
+                    "Stage 1 (QC + clustering + annotation) has been completed. "
+                    "The agent is now executing the approved Stage 2 analysis plan."
+                )
+
         # Use PI agent to answer the biological question
         prompt = f"""The bioinformatics analyst is asking for your guidance on a biological decision:
 
@@ -879,6 +899,7 @@ QUESTION: {question}
 CONTEXT FROM ANALYSIS:
 {context}
 {plan_context}
+{stage_context}
 
 Please provide clear guidance on:
 1. Your recommended decision/direction
@@ -2444,7 +2465,7 @@ Approve if quality_score >= 7."""
                             pi_tasks=bioinf_tasks,
                             overview=overview,
                             phase=phase,
-                            stage=stage,
+                            planning_stage=stage,
                             previous_results=combined_previous,
                         )
                     elif existing_plan and existing_plan.status == "rejected":
@@ -2453,7 +2474,7 @@ Approve if quality_score >= 7."""
                             pi_tasks=bioinf_tasks,
                             overview=overview,
                             phase=phase,
-                            stage=stage,
+                            planning_stage=stage,
                             previous_results=combined_previous,
                             existing_plan=existing_plan,
                         )
@@ -2968,17 +2989,8 @@ Approve if quality_score >= 7."""
         # Planning stage support: filter tasks and adjust instructions based on stage
         planning_stage = state.get("planning_stage", "full")
         
-        if planning_stage == "stage1":
-            # Create snapshot before stage1 execution
-            await self._create_auto_snapshot(analysis_state, "pre_execution_stage1")
-            
-        elif planning_stage == "stage2":
-            # Create snapshot before stage2 execution
-            await self._create_auto_snapshot(analysis_state, "pre_execution_stage2")
-            
-        elif planning_stage == "full":
-            # Create snapshot before full execution
-            await self._create_auto_snapshot(analysis_state, "pre_execution_full")
+        # Create snapshot before execution
+        await self._create_auto_snapshot(analysis_state, f"pre_execution_{planning_stage}")
         
         # Step 1: PI provides analysis goals
         await self._send_message("status", "PI is defining analysis goals...", AgentType.PI)
@@ -3220,7 +3232,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
 
         # Reset supervisor state for this round
         if self.supervisor_agent:
-            self.supervisor_agent.reset_for_round()
+            self.supervisor_agent.reset_for_round(planning_stage=planning_stage)
 
         # Set current state references for _pi_callback plan deviation detection
         self._current_analysis_state = analysis_state
@@ -3232,6 +3244,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             max_steps=200,  # Allow sufficient steps for full analysis + figure review loops
             figure_review_callback=self._figure_review_callback,
             supervisor_callback=self._supervisor_callback,
+            planning_stage=planning_stage,  # Pass stage context to agent
         )
 
         # Collect supervisor stats

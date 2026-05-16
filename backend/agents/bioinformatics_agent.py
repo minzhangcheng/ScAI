@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 from ..models.schemas import (
     AgentType, AnalysisPhase, AnalysisState, MessageRole, CodeExecution,
-    PublicationFigure, FigureReviewStatus, AnalysisStep,
+    PublicationFigure, FigureReviewStatus, AnalysisStep, PlanStage,
     DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError
@@ -947,7 +947,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         pi_tasks: List[str],
         overview: str,
         phase: str,
-        stage: str = "full",
+        planning_stage: PlanStage = "full",
         previous_results: Optional[Dict[str, Any]] = None,
         existing_plan: Optional['AnalysisPlan'] = None,
     ) -> 'AnalysisPlan':
@@ -958,7 +958,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             pi_tasks: PI's assigned tasks (strings or dicts with task/rationale/expected_outcome)
             overview: PI's overall strategy description
             phase: "exploration" or "innovation"
-            stage: "full", "stage1" (QC+clustering+annotation), or "stage2" (downstream)
+            planning_stage: "full", "stage1" (QC+clustering+annotation), or "stage2" (downstream)
             previous_results: Results from stage1 (only for stage2 planning)
             existing_plan: Existing plan to revise (for mid-execution revision)
 
@@ -1005,7 +1005,7 @@ Completed steps MUST NOT be changed:
 You are REVISING the remaining steps based on new findings."""
 
         stage_guidance = ""
-        if stage == "stage1":
+        if planning_stage == "stage1":
             stage_guidance = """
 This is STAGE 1 of exploration. Plan ONLY these steps:
 1. Data loading and initial inspection
@@ -1018,7 +1018,7 @@ This is STAGE 1 of exploration. Plan ONLY these steps:
 8. Cell type annotation (via marker genes + annotate_clusters tool)
 
 Do NOT include downstream analysis (DEG, GO/KEGG, cell communication, etc.) — those will be planned in Stage 2 after seeing clustering results."""
-        elif stage == "stage2":
+        elif planning_stage == "stage2":
             stage_guidance = """
 This is STAGE 2 of exploration. Based on Stage 1 results (clustering + annotation above),
 plan downstream analysis including but not limited to:
@@ -1211,7 +1211,8 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
         max_steps: int = 200,
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
         supervisor_callback: Optional[Callable] = None,
-        resume_from_checkpoint: bool = True
+        resume_from_checkpoint: bool = True,
+        planning_stage: PlanStage = "full",  # "stage1", "stage2", or "full"
     ) -> Dict[str, Any]:
         """
         Run analysis with autonomous technical steps, PI consultation, and step-level checkpointing.
@@ -1418,6 +1419,12 @@ If results significantly deviate from plan expectations, report via consult_pi i
 
         completed = False
         annotation_completed = False  # Mandatory step tracker for exploration phase
+        # Restore annotation_completed from analysis_log to avoid
+        # Gate 0 falsely rejecting report_findings after resume
+        if analysis_log and any(
+            s.step_type == "annotate_clusters" for s in analysis_log
+        ):
+            annotation_completed = True
         annotation_retry_required = False
         annotation_retry_attempts = 0
         integration_reject_count = 0  # Track rejections for bulk/scRNA-seq integration gate
@@ -2122,7 +2129,16 @@ except Exception as _autosave_block_err:
                     # Build a code-friendly response
                     result_lines = []
                     if annotation_result.get("already_confirmed"):
-                        result_lines.append("[NOTE: These annotations were already confirmed by the user. No re-annotation needed. Proceed to downstream analysis.]\n")
+                        if planning_stage == "stage1":
+                            result_lines.append(
+                                "[NOTE: These annotations were already confirmed by the user. "
+                                "No re-annotation needed. Stage 1 is complete — call report_findings now.]\n"
+                            )
+                        else:
+                            result_lines.append(
+                                "[NOTE: These annotations were already confirmed by the user. "
+                                "No re-annotation needed. Proceed to downstream analysis.]\n"
+                            )
                     if tissue_summary:
                         result_lines.append(f"Tissue context: {tissue_summary}\n")
                     result_lines.append("Cluster annotations:")
@@ -2205,6 +2221,19 @@ except Exception as _autosave_block_err:
                     annotation_completed = True
                     annotation_retry_required = False
                     annotation_retry_attempts = 0
+                    # In stage1, explicitly instruct agent that stage is complete
+                    if planning_stage == "stage1":
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "STAGE 1 COMPLETE. Cell annotation is done and confirmed by the user. "
+                                "You MUST now call report_findings immediately. "
+                                "Do NOT run differential expression, pathway enrichment, "
+                                "cell communication, trajectory analysis, or any other downstream analysis. "
+                                "These will be done in Stage 2 after PI reviews your Stage 1 results "
+                                "and creates a new analysis plan."
+                            )
+                        })
 
                 elif tool_name == "report_findings":
                     # Enforce mandatory pipeline in exploration phase
@@ -2233,8 +2262,9 @@ except Exception as _autosave_block_err:
                     has_bulk_data = state.has_bulk_rnaseq()
                     lowered_codes = [ce.code.lower() for ce in self.code_history if ce.code]
 
-                    # Enforce mandatory analysis gates in exploration phase
-                    if state.analysis_phase == AnalysisPhase.EXPLORATION:
+                    # Gate 0 (mandatory annotate_clusters) always applies in exploration;
+                    # Gates 1-3 are Stage 2 tasks, skip in stage1.
+                    if state.analysis_phase == AnalysisPhase.EXPLORATION and planning_stage != "stage1":
 
                         # Gate 1: Bulk RNA-seq analysis
                         if has_bulk_data:

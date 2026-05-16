@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 from openai import APIConnectionError
 
-from ..models.schemas import AgentType, AnalysisState, AnalysisStep
+from ..models.schemas import AgentType, AnalysisState, AnalysisStep, PlanStage
 from ..utils.error_parsing import API_ERROR_TYPES, CODE_GEN_ERROR_TYPES, extract_error_type, _TECHNICAL_ERROR_TYPES
 from ..services.report import get_agent_stats_html
 from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
@@ -205,6 +205,7 @@ class SupervisorAgent:
         self._recent_errors: List[str] = []
         self._pi_question_hashes: set = set()  # De-duplicate PI escalations
         self._recent_rule_feedback_hashes: set = set()  # De-duplicate rule-based feedback
+        self.planning_stage: PlanStage = "full"
 
         # All rounds archive
         self.all_rounds_log: List[List[SupervisorRecord]] = []
@@ -443,9 +444,20 @@ class SupervisorAgent:
             )
             if not already_annotated:
                 record.checkpoint_type = "annotate_clusters"
+                if self.planning_stage == "stage1":
+                    escalation_msg = (
+                        "Cell type annotation has been completed. "
+                        "Please confirm the annotations are biologically reasonable. "
+                        "Stage 1 is now complete — the agent should call report_findings "
+                        "to finalize Stage 1 before Stage 2 downstream analysis begins."
+                    )
+                else:
+                    escalation_msg = (
+                        "Cell type annotation has been completed. Please review the annotation results "
+                        "and provide guidance on whether they are biologically reasonable."
+                    )
                 pi_resp = await self._escalate_to_pi(
-                    "Cell type annotation has been completed. Please review the annotation results "
-                    "and provide guidance on whether they are biologically reasonable.",
+                    escalation_msg,
                     self._build_checkpoint_context(step),
                 )
                 if pi_resp:
@@ -489,7 +501,7 @@ class SupervisorAgent:
         self.supervision_log.append(record)
         return feedback
 
-    def reset_for_round(self):
+    def reset_for_round(self, planning_stage: PlanStage = "full"):
         """Archive current round log and reset for a new round."""
         if self.supervision_log:
             self.all_rounds_log.append(self.supervision_log.copy())
@@ -497,6 +509,7 @@ class SupervisorAgent:
         self._step_count = 0
         self._recent_errors = []
         self._pi_question_hashes = set()
+        self.planning_stage = planning_stage
 
     def restore_log_from_saved(self, records: List[Dict]):
         """Restore supervision log from saved analysis_log dicts, grouping by round_number.
