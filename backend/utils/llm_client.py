@@ -534,12 +534,18 @@ class OpenAICompatibleClient:
                                 p.get("text", "") if isinstance(p, dict) else str(p)
                                 for p in raw
                             )
-                    # Reasoning model fallback: content in reasoning/reasoning_content
+                    # Reasoning model fallback: content in reasoning/reasoning_content/thinking/thought
                     if not content:
-                        for key in ("reasoning", "reasoning_content"):
+                        for key in ("reasoning", "reasoning_content", "thinking", "thought"):
                             val = msg_data.get(key)
-                            if val and isinstance(val, str):
+                            if not val:
+                                continue
+                            if isinstance(val, str):
                                 content = val
+                                break
+                            if isinstance(val, list):
+                                parts = [p.get("text", "") if isinstance(p, dict) else str(p) for p in val]
+                                content = "\n".join(parts)
                                 break
             except Exception as e:
                 logger.debug(f"[{self.agent_name}] model_dump extraction failed: {e}")
@@ -549,10 +555,16 @@ class OpenAICompatibleClient:
                 content = message.text or ""
             # Fallback: check reasoning attribute directly on the object
             if not content:
-                for attr in ("reasoning", "reasoning_content"):
+                for attr in ("reasoning", "reasoning_content", "thinking", "thought"):
                     val = getattr(message, attr, None)
-                    if val and isinstance(val, str):
+                    if not val:
+                        continue
+                    if isinstance(val, str):
                         content = val
+                        break
+                    if isinstance(val, list):
+                        parts = [p.get("text", "") if isinstance(p, dict) else str(p) for p in val]
+                        content = "\n".join(parts)
                         break
 
         # Case 4: Other types — convert to string
@@ -565,39 +577,7 @@ class OpenAICompatibleClient:
             logger.warning(f"[{self.agent_name}] Request was refused: {message.refusal}")
 
         # Debug logging: tokens generated but content empty
-        completion_tokens = 0
-        has_tool_calls = False
-        if not content and response and response.usage:
-            completion_tokens = response.usage.completion_tokens or 0
-            if completion_tokens > 0:
-                # Skip warning when the response is a tool call — no text content is expected
-                has_tool_calls = bool(getattr(message, "tool_calls", None))
-                if not has_tool_calls:
-                    # Dump raw message object for debugging
-                    try:
-                        if hasattr(message, "model_dump"):
-                            raw_dump = message.model_dump()
-                            logger.info(
-                                f"[{self.agent_name}] Empty content with {completion_tokens} tokens. "
-                                f"Raw message keys: {list(raw_dump.keys())}, "
-                                f"values preview: {str(raw_dump)[:2000]}"
-                            )
-                    except Exception as e:
-                        logger.debug(f"[{self.agent_name}] Failed to dump raw message for debugging: {e}")
-                    msg_dict = {}
-                    for attr_name in ("content", "refusal", "role", "reasoning", "reasoning_content"):
-                        if hasattr(message, attr_name):
-                            val = getattr(message, attr_name)
-                            msg_dict[attr_name] = str(val)[:200] if val else None
-                    try:
-                        if hasattr(message, "model_dump"):
-                            msg_dict["_all_keys"] = list(message.model_dump().keys())
-                    except Exception as e:
-                        logger.debug(f"[{self.agent_name}] Failed to extract message keys: {e}")
-                    logger.warning(
-                        f"[{self.agent_name}] Response has {completion_tokens} completion tokens "
-                        f"but empty content. Message fields: {msg_dict}"
-                    )
+        completion_tokens, has_tool_calls = self._log_empty_content_diagnostic(message, response)
 
         # If tokens were generated but content extraction failed, return an error
         # message instead of empty string so downstream agents can detect the failure.
@@ -609,6 +589,52 @@ class OpenAICompatibleClient:
             return "[Error: LLM generated a response but content extraction failed. Please retry.]"
 
         return content
+
+    def _log_empty_content_diagnostic(self, message, response) -> tuple:
+        """Log diagnostic info when content extraction yielded empty string.
+
+        Returns (completion_tokens, has_tool_calls) so the caller can decide
+        whether to return an error placeholder.
+        """
+        completion_tokens = 0
+        has_tool_calls = False
+        if not response or not response.usage:
+            return completion_tokens, has_tool_calls
+        completion_tokens = response.usage.completion_tokens or 0
+        if completion_tokens <= 0:
+            return completion_tokens, has_tool_calls
+
+        has_tool_calls = bool(getattr(message, "tool_calls", None))
+        if has_tool_calls:
+            return completion_tokens, has_tool_calls
+
+        try:
+            if hasattr(message, "model_dump"):
+                raw_dump = message.model_dump()
+                logger.info(
+                    f"[{self.agent_name}] Empty content with {completion_tokens} tokens. "
+                    f"Raw message keys: {list(raw_dump.keys())}, "
+                    f"values preview: {str(raw_dump)[:2000]}"
+                )
+        except Exception as e:
+            logger.debug(f"[{self.agent_name}] Failed to dump raw message for debugging: {e}")
+
+        msg_dict = {}
+        for attr_name in ("content", "refusal", "role", "reasoning", "reasoning_content", "thinking", "thought"):
+            if hasattr(message, attr_name):
+                val = getattr(message, attr_name)
+                msg_dict[attr_name] = str(val)[:200] if val else None
+        try:
+            if hasattr(message, "model_dump"):
+                msg_dict["_all_keys"] = list(message.model_dump().keys())
+        except Exception as e:
+            logger.debug(f"[{self.agent_name}] Failed to extract message keys: {e}")
+
+        logger.warning(
+            f"[{self.agent_name}] Response has {completion_tokens} completion tokens "
+            f"but empty content. Message fields: {msg_dict}"
+        )
+        return completion_tokens, has_tool_calls
 
     async def chat(
         self,

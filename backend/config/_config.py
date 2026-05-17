@@ -9,6 +9,7 @@ import logging
 import logging.handlers
 from datetime import datetime
 from backend.config.agent_prompts import AgentPrompts  # noqa: F811
+from backend.models.schemas import AgentType
 
 
 # Data directories - stored outside the code directory for better separation
@@ -226,6 +227,9 @@ class SystemConfig(BaseModel):
     
     # Local Jupyter kernel settings
     sandbox_timeout: int = 5400  # Code execution timeout in seconds (1.5 hours)
+
+    # Bioinformatics agent settings
+    bioinfo_max_steps: int = 200  # Max autonomous analysis steps per execution
     
     # Session settings
     max_rounds: int = 3  # Maximum analysis rounds
@@ -245,5 +249,5 @@ class SystemConfig(BaseModel):
 default_config = SystemConfig()
 
 # Shared agent identifier — single source of truth.
-# Used across routes/agents to avoid string-typo drift.
-PI_AGENT_NAME = "pi"
+# Derived from the canonical enum so the string value can never drift.
+PI_AGENT_NAME = AgentType.PI.value

@@ -116,10 +116,12 @@ class LiteratureAgent(BaseAgent):
         self,
         state: AnalysisState,
         instruction: str,
+        mode_override: Optional[str] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """Process literature research instruction"""
-        if self.literature_mode == "disabled":
+        effective_mode = mode_override if mode_override is not None else self.literature_mode
+        if effective_mode == "disabled":
             logger.info("[Literature] Literature agent is disabled, skipping")
             return {"report": "", "status": "disabled"}
 
@@ -129,11 +131,11 @@ class LiteratureAgent(BaseAgent):
 
         logger.info(
             f"[Literature] Processing topic: {topic[:100]}... "
-            f"(mode={self.literature_mode}, deep={use_deep_research})"
+            f"(mode={effective_mode}, deep={use_deep_research})"
         )
 
         if use_deep_research:
-            return await self._do_research(topic, state, current_round_findings=current_round_findings)
+            return await self._do_research(topic, state, current_round_findings=current_round_findings, mode_override=mode_override)
         else:
             return await self._quick_search(topic, state)
 
@@ -146,7 +148,8 @@ class LiteratureAgent(BaseAgent):
         topic: str,
         state: Optional[AnalysisState] = None,
         pubmed_max_results: Optional[int] = None,
-        current_round_findings: Optional[List[str]] = None
+        current_round_findings: Optional[List[str]] = None,
+        mode_override: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Route to configured research mode with fallback chain.
@@ -158,8 +161,9 @@ class LiteratureAgent(BaseAgent):
             state: Optional analysis state for context
             pubmed_max_results: Override max articles per PubMed search round (default 20)
             current_round_findings: Findings from current round's other agents
+            mode_override: Override self.literature_mode for this call
         """
-        mode = self.literature_mode
+        mode = mode_override if mode_override is not None else self.literature_mode
         actual_mode = mode  # Track which mode actually produced results
 
         try:

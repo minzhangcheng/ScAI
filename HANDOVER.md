@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.8 · **Last updated**: 2026-05-17
+**Version**: 0.24.9 · **Last updated**: 2026-05-17
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,14 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.9` — reasoning field expansion & API serialization refactor (2026-05-17):
+  - **LLM reasoning field expansion**: Added "thinking" and "thought" keys to content extraction for DeepSeek/Claude compatibility; also handles list values in reasoning fields.
+  - **to_api_dict refactor**: Replaced manual snake_case → camelCase mapping with `model_dump(mode="json")` + `_API_KEY_MAP` dictionary for maintainability; fields not in map are excluded from API response.
+  - **Empty content diagnostic extraction**: Extracted `_log_empty_content_diagnostic()` helper from `llm_client.py` for reusability.
+  - **Literature mode_override refactor**: Pass mode_override as parameter instead of mutating agent state directly.
+  - **Config cleanup**: Removed dead config code from `main.py`; updated `_config.py`.
+  - **New tests**: Added test files for content extraction reasoning, error parsing, literature mode_override, to_api_dict coverage, and base agent history.
 
 - `0.24.8` — workflow modularization (2026-05-17):
   - **Workflow package refactoring**: Split the monolithic `backend/workflow.py` (~4000 lines) into a modular `backend/workflow/` package with 13+ specialized modules:

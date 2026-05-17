@@ -173,3 +173,20 @@ class TestConfigRoundtrip:
         state = apply_config_to_session(config, user_id="u1")
         # Fallback when max_search_rounds not set: should be 5
         assert state.literature_config["max_search_rounds"] == 5
+
+
+def test_bioinfo_max_steps_default():
+    """bioinfo_max_steps defaults to 200 and roundtrips correctly."""
+    from backend.config._config import SystemConfig
+    cfg = SystemConfig()
+    assert cfg.bioinfo_max_steps == 200
+    data = cfg.model_dump(mode="json")
+    restored = SystemConfig.model_validate(data)
+    assert restored.bioinfo_max_steps == 200
+
+
+def test_bioinfo_max_steps_custom():
+    """bioinfo_max_steps can be overridden."""
+    from backend.config._config import SystemConfig
+    cfg = SystemConfig(bioinfo_max_steps=500)
+    assert cfg.bioinfo_max_steps == 500

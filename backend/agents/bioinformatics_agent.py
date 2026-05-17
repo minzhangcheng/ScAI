@@ -36,7 +36,7 @@ from ..models.schemas import (
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError
 from ..constants import PLAN_REVISION_NEEDED_TAG
-from ..utils.error_parsing import strip_ansi, extract_error_type, _TECHNICAL_ERROR_TYPES
+from ..utils.error_parsing import strip_ansi, extract_error_type, TECHNICAL_ERROR_TYPES
 
 # Pre-compiled pattern for detecting manual cell_type assignment in code
 _DYNAMIC_CONTEXT_PREFIX = "[Analysis Context]"
@@ -1096,7 +1096,7 @@ Return the plan as a JSON object:
 
         plan = AnalysisPlan(
             phase=phase,
-            stage=stage,
+            stage=planning_stage,
             overview=plan_data.get("overview", overview),
             steps=steps,
             key_decision_points=plan_data.get("key_decision_points", []),
@@ -1105,7 +1105,7 @@ Return the plan as a JSON object:
             revision_of=existing_plan.id if existing_plan else None,
         )
 
-        logger.info(f"[Bioinformatics] Generated plan: {len(steps)} steps, phase={phase}, stage={stage}")
+        logger.info(f"[Bioinformatics] Generated plan: {len(steps)} steps, phase={phase}, stage={planning_stage}")
         return plan
 
     async def revise_plan_incrementally(
@@ -3057,7 +3057,7 @@ except Exception as _save_err:
                     extra_context = ""
                     if self.technique_agent:
                         err_type = extract_error_type(error_msg)
-                        if err_type in _TECHNICAL_ERROR_TYPES:
+                        if err_type in TECHNICAL_ERROR_TYPES:
                             logger.info(f"[Bioinformatics] Looking up docs for {err_type} error")
                             doc_hint = await self.technique_agent.lookup_from_error(
                                 self.sandbox, error_msg, revised_code

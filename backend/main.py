@@ -145,7 +145,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.24.8",
+    version="0.24.9",
     lifespan=lifespan,
 )
 
@@ -184,12 +184,9 @@ app.add_middleware(
 # Note: websockets are in backend.state; config is accessed via backend.state.system_config
 
 
-# Workflow runner service (extracted to backend/services/workflow_runner.py)
-
 # Log the data directory location (directories are created in config.py)
 logger.info(f"Data directory: {DATA_BASE_DIR.resolve()}")
 
-# Request/Response models — extracted to backend/models/api_requests.py
 from .models.api_requests import (
     ConfigRequest, ValidateKeyRequest, StartRequest, VALID_AGENTS,
     PromptUpdateRequest, ModelUpdateRequest, TemperatureUpdateRequest,
@@ -199,9 +196,6 @@ from .models.api_requests import (
     HumanInputRequest, AnnotationConfirmation,
 )
 
-
-# Interaction routes extracted to backend/routes/interaction.py
-# Exploration report HTML route is in reports router
 
 
 

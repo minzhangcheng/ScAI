@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..constants import NODE_TO_RESULT_KEY
-from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, TaskStatus
+from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
 from .helpers import _get_task_text, _normalize_tasks, STAGE1_KEYWORDS
 from .retry import with_retry
 
@@ -407,10 +407,11 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         self._current_analysis_state = analysis_state
         self._current_graph_state = state
 
+        max_steps = self.config.bioinfo_max_steps
         result = await self.bioinformatics_agent.run_autonomous_analysis(
             analysis_state,
             instruction,
-            max_steps=200,  # Allow sufficient steps for full analysis + figure review loops
+            max_steps=max_steps,
             figure_review_callback=self._figure_review_callback,
             supervisor_callback=self._supervisor_callback,
             planning_stage=planning_stage,  # Pass stage context to agent
@@ -637,7 +638,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 topics = [f"single cell sequencing {' '.join(short_findings)}"]
             else:
                 # No findings from other agents — build topic from research objective and treatment groups
-                objective = analysis_state.research_objective or ""
+                objective = analysis_state.initial_instruction or ""
                 group_names = [g.name for g in (analysis_state.treatment_groups or []) if g.name]
                 if objective:
                     topics = [f"single cell sequencing {objective[:120]}"]
@@ -689,20 +690,16 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                     await self._send_message("status", f"Supplementing {len(gaps)} topic(s) via PubMed...", AgentType.LITERATURE)
                     # Temporarily switch to PubMed mode so _do_research() routes
                     # to _multi_round_pubmed() instead of retrying Deep Research
-                    original_mode = self.literature_agent.literature_mode
-                    self.literature_agent.literature_mode = "pubmed_llm"
-                    try:
-                        for gap_topic in gaps:
-                            enriched = gap_topic
-                            if previous_lit_context:
-                                enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
-                            gap_result = await self.literature_agent.process(
-                                analysis_state, enriched, use_deep_research=True,
-                                current_round_findings=current_round_findings
-                            )
-                            results.append(gap_result)
-                    finally:
-                        self.literature_agent.literature_mode = original_mode
+                    for gap_topic in gaps:
+                        enriched = gap_topic
+                        if previous_lit_context:
+                            enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
+                        gap_result = await self.literature_agent.process(
+                            analysis_state, enriched, use_deep_research=True,
+                            current_round_findings=current_round_findings,
+                            mode_override="pubmed_llm",
+                        )
+                        results.append(gap_result)
         else:
             # === PubMed mode: per-topic search ===
             results = []

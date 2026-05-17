@@ -492,7 +492,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
     async def _create_auto_snapshot(self, state: AnalysisState, phase: str):
         """Create an automatic snapshot at a key analysis point."""
-        from .utils.snapshot import SnapshotManager
+        from ..utils.snapshot import SnapshotManager
         try:
             if self.sandbox:
                 if hasattr(self.sandbox, 'notebook_state') and self.sandbox.notebook_state:

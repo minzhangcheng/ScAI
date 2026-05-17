@@ -586,6 +586,11 @@ class PlanningMixin:
             # Block and wait for user (with 1-hour timeout to prevent permanent hang)
             # Save and reset action before clearing event to close race window
             # where signal_plan_review arrives between clarify continue and event.clear()
+            #
+            # TOCTOU note: The clear() → None → wait() sequence (lines below) is safe
+            # in asyncio because lines 589-591 are synchronous (no `await`), so no
+            # other coroutine can interleave between event.clear() and event.wait().
+            # The only yield point is the `await` in wait_for() on the line after.
             prev_action = self._plan_review_action
             self._plan_review_event.clear()
             self._plan_review_action = None

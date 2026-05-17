@@ -520,6 +520,39 @@ class AnalysisState(BaseModel):
     # Error tracking for parallel analysis
     agent_errors: List[AgentError] = Field(default_factory=list)
 
+    _API_KEY_MAP: Dict[str, str] = {
+        "id": "session_id",
+        "user_id": "user_id",
+        "name": "name",
+        "status": "status",
+        "current_round": "current_round",
+        "max_rounds": "max_rounds",
+        "round_wait_seconds": "round_wait_seconds",
+        "waiting_input_started_at": "waiting_input_started_at",
+        "created_at": "created_at",
+        "updated_at": "updated_at",
+        "initial_instruction": "initial_instruction",
+        "treatment_groups": "treatment_groups",
+        "data_files": "data_files",
+        "biochemistry_indicators": "biochemistry_indicators",
+        "round_results": "round_results",
+        "final_summary": "final_summary",
+        "analysis_phase": "analysis_phase",
+        "realtime_messages": "messages",
+        "custom_prompts": "custom_prompts",
+        "custom_models": "custom_models",
+        "custom_temperatures": "custom_temperatures",
+        "state_version": "state_version",
+        "last_sync_timestamp": "last_sync_timestamp",
+        "current_plan": "current_plan",
+        "plan_dialogue_history": "plan_dialogue_history",
+        "agent_errors": "agent_errors",
+        "publication_figures": "publication_figures",
+        "publication_tables": "publication_tables",
+        "graphic_abstract": "graphic_abstract",
+        "integrated_report": "integrated_report",
+    }
+
     # --- Data helper methods ---
 
     def get_files_by_section(self, section: str) -> List[DataFile]:
@@ -684,122 +717,151 @@ class AnalysisState(BaseModel):
     def to_api_dict(self, *, strip_message_base64=None) -> dict:
         """Serialize state for the load_session API response.
 
-        Centralizes the snake_case → camelCase mapping and enum/datetime
-        conversions that the frontend expects, so the route handler is a
-        one-liner and field additions only need updating here.
+        Uses model_dump(mode="json") as baseline, then applies snake_case →
+        camelCase key renaming via _API_KEY_MAP and special transformations.
+        Fields not in _API_KEY_MAP are excluded from the API response.
 
         Args:
             strip_message_base64: Optional callable(msg_type, content) -> content
                 to strip large base64 data from messages before sending.
         """
-        def _dt(v) -> str:
-            return v.isoformat() if v else ""
+        dumped = self.model_dump(mode="json")
 
-        def _enum(v) -> str:
-            return v.value if hasattr(v, 'value') else str(v)
+        result = {}
+        for field_name, api_key in self._API_KEY_MAP.items():
+            if field_name not in dumped:
+                continue
+            val = dumped[field_name]
+            if field_name == "treatment_groups":
+                result[api_key] = self._serialize_treatment_groups(val)
+            elif field_name == "data_files":
+                result[api_key] = self._serialize_data_files(val)
+            elif field_name == "biochemistry_indicators":
+                result[api_key] = self._serialize_biochemistry_indicators(val)
+            elif field_name == "round_results":
+                result[api_key] = self._serialize_round_results(val)
+            elif field_name == "agent_errors":
+                result[api_key] = self._serialize_agent_errors(val)
+            elif field_name == "publication_figures":
+                result[api_key] = self._serialize_publication_figures(val)
+            elif field_name == "publication_tables":
+                result[api_key] = self._serialize_publication_tables(val)
+            elif field_name == "graphic_abstract":
+                result[api_key] = self._serialize_graphic_abstract(val)
+            elif field_name == "plan_dialogue_history":
+                result[api_key] = self._serialize_dialogue_history(self.plan_dialogue_history)
+            elif field_name == "realtime_messages":
+                result[api_key] = self._serialize_messages(strip_message_base64)
+            else:
+                result[api_key] = val
 
-        result = {
-            "session_id": self.id,
-            "user_id": self.user_id,
-            "name": self.name,
-            "status": _enum(self.status),
-            "current_round": self.current_round,
-            "max_rounds": self.max_rounds,
-            "round_wait_seconds": self.round_wait_seconds,
-            "waiting_input_started_at": _dt(self.waiting_input_started_at),
-            "created_at": _dt(self.created_at),
-            "updated_at": _dt(self.updated_at),
-            "initial_instruction": self.initial_instruction,
-            "treatment_groups": [
-                {"id": g.id, "name": g.name, "description": g.description,
-                 "sampleCount": g.sample_count, "order": g.order}
-                for g in self.treatment_groups
-            ],
-            "data_files": [
-                {"id": f.id, "filename": f.filename, "filePath": f.file_path,
-                 "section": f.section, "dataType": f.data_type,
-                 "groupId": f.group_id, "sampleNumber": f.sample_number,
-                 "description": f.description, "timestamp": _dt(f.timestamp)}
-                for f in self.data_files
-            ],
-            "biochemistry_indicators": [
-                {"id": r.id, "indicator": r.indicator, "value": r.value, "unit": r.unit,
-                 "referenceRange": r.reference_range, "interpretation": r.interpretation,
-                 "groupId": r.group_id, "sampleNumber": r.sample_number}
-                for r in self.biochemistry_indicators
-            ],
-            "round_results": [
-                {"round": r.round_number, "pi_summary": r.pi_summary,
-                 "pathology_findings": r.pathology_findings,
-                 "bioinformatics_findings": r.bioinformatics_findings,
-                 "biochemistry_findings": r.biochemistry_findings,
-                 "literature_findings": r.literature_findings,
-                 "next_steps": r.next_steps, "conflicts": r.conflicts,
-                 "timestamp": _dt(r.timestamp)}
-                for r in self.round_results
-            ],
-            "final_summary": self.final_summary,
-            "exploration_report_url": (
-                f"/api/session/{self.id}/exploration-report/html"
-                if getattr(self, 'exploration_report_html_path', None) else None
-            ),
-            "annotation_report_url": (
-                f"/api/session/{self.id}/annotation-report/html"
-                if getattr(self, 'annotation_report_html_path', None) else None
-            ),
-            "analysis_phase": self.analysis_phase,
-            "messages": [
-                {"id": msg.id, "type": msg.type,
-                 "agent": _enum(msg.agent) if msg.agent else None,
-                 "content": (strip_message_base64(msg.type, msg.content)
-                             if strip_message_base64 else msg.content),
-                 "timestamp": _dt(msg.timestamp)}
-                for msg in self.realtime_messages
-            ],
-            "custom_prompts": self.custom_prompts,
-            "custom_models": self.custom_models,
-            "custom_temperatures": self.custom_temperatures,
-            "state_version": self.state_version,
-            "last_sync_timestamp": _dt(self.last_sync_timestamp),
-            "snapshot_count": len(self.snapshots),
-            "current_plan": self.current_plan.model_dump(mode="json") if self.current_plan else None,
-            "plan_dialogue_history": self._serialize_dialogue_history(self.plan_dialogue_history),
-            "agent_errors": [
-                {"id": err.id, "agent": _enum(err.agent),
-                 "error_type": err.error_type, "message": err.message,
-                 "details": err.details, "round_number": err.round_number,
-                 "timestamp": _dt(err.timestamp),
-                 "resolved": err.resolved, "resolution": err.resolution}
-                for err in self.agent_errors
-            ],
-            "publication_figures": [
-                {"id": fig.id, "name": fig.name, "description": fig.description,
-                 "figure_type": fig.figure_type, "png_path": fig.png_path,
-                 "pdf_path": fig.pdf_path, "png_base64": fig.png_base64,
-                 "review_status": _enum(fig.review_status) if fig.review_status else None,
-                 "pi_feedback": fig.pi_feedback, "revision_count": fig.revision_count,
-                 "created_at": _dt(fig.created_at)}
-                for fig in self.publication_figures
-            ],
-            "publication_tables": [
-                {"id": tbl.id, "name": tbl.name, "description": tbl.description,
-                 "csv_path": tbl.csv_path, "columns": tbl.columns,
-                 "preview_data": tbl.preview_data,
-                 "review_status": _enum(tbl.review_status) if tbl.review_status else None,
-                 "pi_feedback": tbl.pi_feedback, "created_at": _dt(tbl.created_at)}
-                for tbl in self.publication_tables
-            ],
-            "graphic_abstract": (
-                {"id": self.graphic_abstract.id, "prompt": self.graphic_abstract.prompt,
-                 "image_base64": self.graphic_abstract.image_base64,
-                 "text_diagram": self.graphic_abstract.text_diagram,
-                 "is_text_mode": self.graphic_abstract.is_text_mode,
-                 "created_at": _dt(self.graphic_abstract.created_at)}
-                if self.graphic_abstract else None
-            ),
-            "integrated_report": self.integrated_report,
-        }
+        result["exploration_report_url"] = (
+            f"/api/session/{self.id}/exploration-report/html"
+            if getattr(self, 'exploration_report_html_path', None) else None
+        )
+        result["annotation_report_url"] = (
+            f"/api/session/{self.id}/annotation-report/html"
+            if getattr(self, 'annotation_report_html_path', None) else None
+        )
+        result["snapshot_count"] = len(self.snapshots)
+
         return result
+
+    @staticmethod
+    def _serialize_treatment_groups(groups):
+        return [
+            {"id": g["id"], "name": g["name"], "description": g["description"],
+             "sampleCount": g["sample_count"], "order": g["order"]}
+            for g in groups
+        ]
+
+    @staticmethod
+    def _serialize_data_files(files):
+        return [
+            {"id": f["id"], "filename": f["filename"], "filePath": f["file_path"],
+             "section": f["section"], "dataType": f["data_type"],
+             "groupId": f["group_id"], "sampleNumber": f["sample_number"],
+             "description": f["description"], "timestamp": f["timestamp"]}
+            for f in files
+        ]
+
+    @staticmethod
+    def _serialize_biochemistry_indicators(indicators):
+        return [
+            {"id": r["id"], "indicator": r["indicator"], "value": r["value"], "unit": r["unit"],
+             "referenceRange": r["reference_range"], "interpretation": r["interpretation"],
+             "groupId": r["group_id"], "sampleNumber": r["sample_number"]}
+            for r in indicators
+        ]
+
+    @staticmethod
+    def _serialize_round_results(results):
+        return [
+            {"round": r["round_number"], "pi_summary": r["pi_summary"],
+             "pathology_findings": r["pathology_findings"],
+             "bioinformatics_findings": r["bioinformatics_findings"],
+             "biochemistry_findings": r["biochemistry_findings"],
+             "literature_findings": r["literature_findings"],
+             "next_steps": r["next_steps"], "conflicts": r["conflicts"],
+             "timestamp": r["timestamp"]}
+            for r in results
+        ]
+
+    @staticmethod
+    def _serialize_agent_errors(errors):
+        return [
+            {"id": e["id"], "agent": e["agent"],
+             "error_type": e["error_type"], "message": e["message"],
+             "details": e["details"], "round_number": e["round_number"],
+             "timestamp": e["timestamp"],
+             "resolved": e["resolved"], "resolution": e["resolution"]}
+            for e in errors
+        ]
+
+    @staticmethod
+    def _serialize_publication_figures(figures):
+        return [
+            {"id": f["id"], "name": f["name"], "description": f["description"],
+             "figure_type": f["figure_type"], "png_path": f["png_path"],
+             "pdf_path": f["pdf_path"], "png_base64": f["png_base64"],
+             "review_status": f["review_status"],
+             "pi_feedback": f["pi_feedback"], "revision_count": f["revision_count"],
+             "created_at": f["created_at"]}
+            for f in figures
+        ]
+
+    @staticmethod
+    def _serialize_publication_tables(tables):
+        return [
+            {"id": t["id"], "name": t["name"], "description": t["description"],
+             "csv_path": t["csv_path"], "columns": t["columns"],
+             "preview_data": t["preview_data"],
+             "review_status": t["review_status"],
+             "pi_feedback": t["pi_feedback"], "created_at": t["created_at"]}
+            for t in tables
+        ]
+
+    @staticmethod
+    def _serialize_graphic_abstract(ga):
+        if not ga:
+            return None
+        return {
+            "id": ga["id"], "prompt": ga["prompt"],
+            "image_base64": ga["image_base64"],
+            "text_diagram": ga["text_diagram"],
+            "is_text_mode": bool(ga.get("text_diagram") and not ga.get("image_base64")),
+            "created_at": ga["created_at"],
+        }
+
+    def _serialize_messages(self, strip_message_base64):
+        return [
+            {"id": msg.id, "type": msg.type,
+             "agent": msg.agent.value if msg.agent else None,
+             "content": (strip_message_base64(msg.type, msg.content)
+                         if strip_message_base64 else msg.content),
+             "timestamp": msg.timestamp.isoformat() if msg.timestamp else ""}
+            for msg in self.realtime_messages
+        ]
 
 class APIRequest(BaseModel):
     """Request to start or resume analysis"""

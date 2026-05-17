@@ -1,10 +1,7 @@
 """Graph construction mixin — builds the LangGraph StateGraph and compiles it."""
 import logging
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from .state import WorkflowState
-
+from .state import WorkflowState
 from langgraph.graph import StateGraph, END
 
 logger = logging.getLogger(__name__)
@@ -60,6 +57,9 @@ class GraphMixin:
             {
                 "approved": "bioinformatics_analysis",
                 "approved_stage2": "bioinformatics_analysis",
+                # approved_revision currently routes to the same node as approved.
+                # The distinct route name is preserved for future differentiation
+                # (e.g., skipping upstream agents after mid-execution revision).
                 "approved_revision": "bioinformatics_analysis",
                 "revise": "planning_dialogue",
             }

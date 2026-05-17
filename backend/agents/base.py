@@ -132,8 +132,8 @@ class BaseAgent(ABC):
         messages = [
             {"role": "system", "content": self.system_prompt}
         ]
-        # Limit history to the most recent 20 exchange pairs to prevent unbounded growth
-        _MAX_HISTORY_PAIRS = 20
+        # Limit history to the most recent 60 exchange pairs (models with 1M+ token context can handle more)
+        _MAX_HISTORY_PAIRS = 60
         history = self.message_history
         if len(history) > _MAX_HISTORY_PAIRS * 2:
             dropped = len(history) - _MAX_HISTORY_PAIRS * 2

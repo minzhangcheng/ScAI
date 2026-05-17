@@ -1,11 +1,8 @@
 """Pure routing functions for the workflow graph. Stateless except for logging."""
 import logging
-from typing import TYPE_CHECKING
 
 from ..models.schemas import TaskStatus
-
-if TYPE_CHECKING:
-    from .state import WorkflowState
+from .state import WorkflowState
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +30,10 @@ class RoutingMixin:
         2. approved + stage2 → bioinformatics_analysis (skip already-run upstream agents)
         3. approved + plan_revision_resume → bioinformatics_analysis (mid-execution revision approved)
         4. not approved → planning_dialogue (user wants changes)
+
+        Note: outcomes 1-3 currently all route to bioinformatics_analysis in graph.py.
+        The distinct route names (approved / approved_stage2 / approved_revision) are
+        preserved for future differentiation and for observability in LangGraph traces.
         """
         if state.get("plan_approved"):
             stage = state.get("planning_stage", "full")

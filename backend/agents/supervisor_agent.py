@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 from openai import APIConnectionError
 
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep, PlanStage
-from ..utils.error_parsing import API_ERROR_TYPES, CODE_GEN_ERROR_TYPES, extract_error_type, _TECHNICAL_ERROR_TYPES
+from ..utils.error_parsing import API_ERROR_TYPES, CODE_GEN_ERROR_TYPES, extract_error_type, TECHNICAL_ERROR_TYPES
 from ..services.report import get_agent_stats_html
 from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..utils.settings_provider import AgentSettingsProvider
@@ -827,7 +827,7 @@ class SupervisorAgent:
         if not code_error:
             return False
         err_type = extract_error_type(code_error)
-        return err_type in _TECHNICAL_ERROR_TYPES
+        return err_type in TECHNICAL_ERROR_TYPES
 
     # ------------------------------------------------------------------
     # Internal: Rule-based checks

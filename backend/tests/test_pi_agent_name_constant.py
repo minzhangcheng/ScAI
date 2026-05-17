@@ -5,11 +5,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend import config as cfg
+from backend.models.schemas import AgentType
 from backend.routes import chat, session_config, reports
 
 
-def test_pi_agent_name_constant_value():
-    assert cfg.PI_AGENT_NAME == "pi"
+def test_pi_agent_name_equals_agent_type_value():
+    """PI_AGENT_NAME must be derived from AgentType.PI.value — single source of truth."""
+    assert cfg.PI_AGENT_NAME == AgentType.PI.value
 
 
 def test_routes_import_from_config():

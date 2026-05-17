@@ -13,7 +13,7 @@ CODE_GEN_ERROR_TYPES: FrozenSet[str] = frozenset({
 })
 
 # Error types that indicate purely technical failures (no PI guidance needed)
-_TECHNICAL_ERROR_TYPES: FrozenSet[str] = frozenset({
+TECHNICAL_ERROR_TYPES: FrozenSet[str] = frozenset({
     "KeyError", "TypeError", "IndexError", "ValueError",
     "ModuleNotFoundError", "AttributeError", "NameError",
     "SyntaxError", "ImportError", "FileNotFoundError",
