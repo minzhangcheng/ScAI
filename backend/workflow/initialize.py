@@ -1,0 +1,181 @@
+"""Round initialization logic."""
+import asyncio
+import logging
+from typing import TYPE_CHECKING
+
+from ..models.schemas import AgentType, AnalysisPhase, BiochemistryIndicator, TaskStatus
+
+if TYPE_CHECKING:
+    from .state import WorkflowState
+else:
+    WorkflowState = dict
+
+logger = logging.getLogger(__name__)
+
+
+class InitializeMixin:
+    """Mixin providing round-initialization method. Composed into SingleCellAnalysisWorkflow."""
+
+    async def _initialize_round(self, state: WorkflowState) -> WorkflowState:
+        """Initialize a new analysis round, processing any pending user input"""
+        analysis_state = state["analysis_state"]
+        # Update current analysis state for callbacks (e.g., literature_callback)
+        self._current_analysis_state = analysis_state
+        self._current_graph_state = state
+        logger.info(f"[{self.session_id}] Initializing round {analysis_state.current_round + 1}")
+        
+        # Process pending human input (if any)
+        human_guidance = None
+        user_action = None
+        new_data_files = []
+        adjusted_instructions = None
+        
+        if analysis_state.pending_human_input or analysis_state.pending_uploaded_files:
+            human_message = analysis_state.pending_human_input or ""
+            uploaded_files = analysis_state.pending_uploaded_files or []
+            
+            await self._send_message(
+                "human_input_received",
+                f"Processing user input: {human_message[:100]}{'...' if len(human_message) > 100 else ''}" + 
+                (f" ({len(uploaded_files)} files)" if uploaded_files else ""),
+                AgentType.PI
+            )
+            
+            # Let PI Agent process the user input
+            pi_response = await self.pi_agent.process_user_input(
+                analysis_state,
+                human_message,
+                uploaded_files
+            )
+            
+            user_action = pi_response.get("action", "continue")
+            human_guidance = human_message
+            
+            await self._send_message(
+                "response",
+                pi_response.get("response", "Acknowledged"),
+                AgentType.PI
+            )
+            
+            # Check if user requested to stop
+            if user_action == "stop":
+                await self._send_message(
+                    "status",
+                    "User requested to conclude analysis. Generating final report...",
+                    AgentType.PI
+                )
+                # Clear pending input
+                analysis_state.pending_human_input = None
+                analysis_state.pending_uploaded_files = []
+                
+                return {
+                    **state,
+                    "analysis_state": analysis_state,
+                    "should_continue": False,
+                    "human_stop_requested": True
+                }
+            
+            # Process file assignments from PI
+            file_assignments = pi_response.get("file_assignments", {})
+
+            # Track new data files for prioritized analysis
+            if file_assignments.get("pathology"):
+                for file_info in file_assignments["pathology"]:
+                    if file_info:
+                        new_data_files.append({
+                            "section": "pathology",
+                            "filename": file_info.get("filename"),
+                            "data_type": file_info.get("image_type", "user_upload"),
+                            "reason": file_info.get("reason", "")
+                        })
+
+            # Extract and add biochemistry values from user input
+            biochemistry_values = pi_response.get("biochemistry_values", {})
+            if biochemistry_values and isinstance(biochemistry_values, dict):
+                for indicator, data in biochemistry_values.items():
+                    if isinstance(data, dict) and "value" in data:
+                        try:
+                            value = float(data["value"])
+                            result = BiochemistryIndicator(
+                                indicator=indicator,
+                                value=value,
+                                unit=data.get("unit", ""),
+                                interpretation=data.get("interpretation")
+                            )
+                            analysis_state.biochemistry_indicators.append(result)
+                            logger.info(f"[{self.session_id}] Added biochemistry value: {indicator}={value} {data.get('unit', '')}")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"[{self.session_id}] Failed to parse biochemistry value for {indicator}: {e}")
+
+            # Track biochemistry data in new_data_files for agent activation logic
+            if biochemistry_values:
+                new_data_files.append({
+                    "section": "biochemistry",
+                    "filename": None,
+                    "data_type": "indicator_values",
+                    "reason": "User-provided biochemistry indicators"
+                })
+
+            # Track biochemistry files from file_assignments (reuse from line 1793)
+            if file_assignments.get("biochemistry"):
+                for file_info in file_assignments["biochemistry"]:
+                    if file_info:
+                        new_data_files.append({
+                            "section": "biochemistry",
+                            "filename": file_info.get("filename"),
+                            "data_type": file_info.get("image_type", "user_upload"),
+                            "reason": file_info.get("reason", "")
+                        })
+
+            # Get adjusted instructions
+            adjusted_instructions = pi_response.get("adjusted_instructions")
+            
+            # Clear pending input
+            analysis_state.pending_human_input = None
+            analysis_state.pending_uploaded_files = []
+        
+        # Increment round counter (skip if resuming from snapshot restore,
+        # since current_round is already correct from the snapshot)
+        if not analysis_state.last_restored_snapshot_id:
+            analysis_state.current_round += 1
+        self._set_status(analysis_state, TaskStatus.RUNNING)
+
+        # Clear residual should_continue from previous convergence check
+        # to prevent stale False value from terminating an extended round
+        state["should_continue"] = True
+
+        await self._send_message(
+            "status",
+            f"Starting round {analysis_state.current_round} analysis"
+        )
+
+        # Send state sync for round initialization
+        await self._send_state_sync(analysis_state, "round_start")
+
+        return {
+            **state,
+            "analysis_state": analysis_state,
+            "current_round": analysis_state.current_round,
+            "human_guidance": human_guidance,
+            "user_action": user_action,
+            "new_data_files": new_data_files,
+            "adjusted_instructions": adjusted_instructions,
+            "pathology_result": None,
+            "bioinformatics_result": None,
+            "biochemistry_result": None,
+            "literature_result": None,
+            "round_result": None,
+            # Clear retry-related state for new round
+            "node_retry_count": {},
+            "node_errors": {},
+            "failed_node": None,
+            # Reset skip_nodes so stale values from previous round do not carry over
+            "skip_nodes": [],
+            # Reset planning_context so stale stage1 data from previous round doesn't leak
+            "planning_context": None,
+            # Reset continuation flags for new round
+            "should_continue": True,
+            "human_stop_requested": False,
+            "human_guidance_processed": False
+        }
+

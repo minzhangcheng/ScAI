@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.7 · **Last updated**: 2026-05-15
+**Version**: 0.24.8 · **Last updated**: 2026-05-17
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,26 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.8` — workflow modularization (2026-05-17):
+  - **Workflow package refactoring**: Split the monolithic `backend/workflow.py` (~4000 lines) into a modular `backend/workflow/` package with 13+ specialized modules:
+    - `core.py` — Main workflow class preserving backward-compatible API
+    - `agents.py` — Bioinformatics, PI, supervisor agent orchestration
+    - `planning.py` — Plan generation, revision, and PI review dialogue
+    - `annotation.py` — Cluster annotation and confirmation flow
+    - `callbacks.py` — PI callback, figure review, supervisor callbacks
+    - `synthesis.py` — Round synthesis and supervisor integration
+    - `reporting.py` — Exploration report and report generation
+    - `routing.py` — Node routing logic (after_bioinformatics, should_continue, etc.)
+    - `initialize.py` — Round initialization and plan checking
+    - `state.py` — WorkflowState TypedDict definition
+    - `retry.py` — @with_retry decorator and backoff logic
+    - `helpers.py` — Shared utility functions
+    - `context.py` — Planning context building
+    - `graph.py` — LangGraph state graph definition
+    - `messaging.py` — WebSocket message sending
+  - **Backward compatibility**: The `__init__.py` exports `SingleCellAnalysisWorkflow`, `WorkflowState`, `with_retry`, and `_retry_backoff_delay` to preserve existing import paths.
+  - **New tests**: Added `test_workflow_helpers.py` and `test_workflow_routing.py` for the refactored code.
 
 - `0.24.7` — stage-aware planning & stop/resume fixes (2026-05-15):
   - **PI stage context**: Added stage context to PI callback prompts so PI knows whether agent is in stage1 (QC+clustering+annotation only) or stage2 (downstream analysis).

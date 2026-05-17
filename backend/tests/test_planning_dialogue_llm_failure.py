@@ -238,7 +238,7 @@ class TestPlanningDialoguePIReviewFailure:
         assert wf.pi_agent.review_bioinfo_plan.call_count == 2
 
     @pytest.mark.asyncio
-    @patch('backend.workflow.asyncio.sleep', new_callable=AsyncMock)
+    @patch('backend.workflow.core.asyncio.sleep', new_callable=AsyncMock)
     async def test_generic_exception_in_pi_review_retries_then_returns_failed(self, mock_sleep):
         """Generic Exception in PI review retries up to MAX_NODE_RETRIES (3) times,
         matching @with_retry behavior. Returns failed state after all retries fail."""
@@ -277,7 +277,7 @@ class TestPlanningDialoguePIReviewFailure:
         assert "parse error" in result["planning_result"]["error"]
 
     @pytest.mark.asyncio
-    @patch('backend.workflow.asyncio.sleep', new_callable=AsyncMock)
+    @patch('backend.workflow.core.asyncio.sleep', new_callable=AsyncMock)
     async def test_generic_exception_in_pi_review_retry_succeeds(self, mock_sleep):
         """Generic Exception in PI review that succeeds on a retry should continue normally."""
         wf = _make_workflow()

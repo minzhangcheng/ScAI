@@ -1,0 +1,103 @@
+"""Retry decorator for workflow nodes."""
+import asyncio
+import logging
+import traceback
+from functools import wraps
+
+from ..constants import LlmFailureAction, NODE_TO_RESULT_KEY
+from ..models.schemas import AgentType
+from ..utils.llm_client import UpstreamExhaustedError
+from .helpers import _retry_backoff_delay
+
+logger = logging.getLogger(__name__)
+
+MAX_NODE_RETRIES = 3
+
+
+def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
+    """Decorator to add retry logic to workflow nodes.
+
+    When UpstreamExhaustedError exhausts all retries (LLM timeout/5xx),
+    blocks the workflow and waits for user intervention.
+
+    Uses a while loop (not for) so that on 'retry' the attempt counter
+    truly resets to 0.  Python's for-loop rebinds the variable each
+    iteration, making in-loop assignment ineffective.
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(self, state: 'WorkflowState') -> 'WorkflowState':
+            # Check skip_nodes
+            if node_name in state.get("skip_nodes", []):
+                logger.info(f"[{self.session_id}] Skipping node {node_name} (not activated by PI)")
+                if hasattr(self, '_send_message'):
+                    await self._send_message(
+                        "status",
+                        f"{node_name} skipped this round (not needed)",
+                        None
+                    )
+                result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
+                return {**state, "failed_node": None, result_key: {"findings": [], "status": "skipped"}}
+
+            last_error = None
+            attempt = 0  # manual counter — while loop, not for
+
+            while attempt <= max_retries:
+                try:
+                    if attempt > 0:
+                        await self._send_message(
+                            "status",
+                            f"Retrying {node_name} (attempt {attempt + 1}/{max_retries + 1})...",
+                            AgentType.PI
+                        )
+                        await asyncio.sleep(_retry_backoff_delay(attempt))
+
+                    result = await func(self, state)
+                    return result
+
+                except UpstreamExhaustedError as e:
+                    last_error = e
+                    action = await self._wait_for_llm_intervention(
+                        e, node_name, state["analysis_state"]
+                    )
+                    if action == LlmFailureAction.RETRY:
+                        attempt = 0
+                        continue  # re-enter while loop
+                    # skip
+                    result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
+                    return {
+                        **state,
+                        "failed_node": node_name,
+                        result_key: {
+                            "error": str(last_error),
+                            "findings": [],
+                            "status": "failed"
+                        }
+                    }
+
+                except Exception as e:
+                    last_error = e
+                    error_detail = traceback.format_exc()
+                    logger.error(
+                        f"[{self.session_id}] Node {node_name} failed "
+                        f"(attempt {attempt + 1}/{max_retries + 1}): {error_detail}"
+                    )
+                    await self._send_message(
+                        "error",
+                        f"Node {node_name} failed (attempt {attempt + 1}/{max_retries + 1}): {str(e)}",
+                        AgentType.PI
+                    )
+                    attempt += 1
+
+            # All retries exhausted for non-LLM error
+            logger.error(
+                f"[{self.session_id}] Node {node_name} failed after {max_retries + 1} attempts"
+            )
+            result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
+            return {
+                **state,
+                "failed_node": node_name,
+                result_key: {"error": str(last_error), "findings": [], "status": "failed"}
+            }
+        return wrapper
+    return decorator
