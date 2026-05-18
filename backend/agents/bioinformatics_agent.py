@@ -550,7 +550,7 @@ class BioinformaticsAgent(BaseAgent):
 
 You are conducting single-cell RNA-seq analysis. You have access to tools:
 1. execute_code - Run Python code (scanpy, anndata, numpy, pandas, matplotlib available)
-   When writing plotting code, do NOT call plt.close() or plt.show() - the system handles figure saving and cleanup automatically.
+   For plotting code: use `plt.savefig('name.jpg')` (or `sc.pl.*(save='_name.jpg')`) to save figures — the system intercepts this and auto-generates a companion high-res PDF, so do NOT save a separate PDF yourself. Do NOT call plt.close() or plt.show() — the system handles figure cleanup automatically.
 2. consult_pi - Ask PI for biological decisions (analysis direction, pathway selection, interpretation)
 3. search_literature - Search for marker genes, pathways, biological knowledge
 4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
@@ -563,7 +563,7 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
    Example: lookup_documentation(function_path="decoupler.op.collectri")
    IMPORTANT: Figure code MUST use actual analysis data from the sandbox (e.g., adata object).
    NEVER generate dummy/fabricated data. Only plot groups that exist in the experimental design.
-   Do NOT include plt.close(), plt.show(), or plt.savefig() in the figure code - the system handles saving automatically.
+   Inside the `code` parameter of THIS tool (generate_publication_figure): do NOT include plt.close(), plt.show(), or plt.savefig() — this tool wraps saving internally with its own filename. (Note: the separate execute_code tool DOES allow plt.savefig — the two tools have different conventions.)
 
    **PUBLICATION FIGURE MANDATORY CHECKLIST:**
    - When using sc.pl.umap/tsne, ALWAYS set show=False and capture the axes: `ax = sc.pl.umap(adata, ..., show=False, return_fig=True)`
@@ -571,7 +571,7 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
    - If UMAP legends overlap data, use legend_loc='right margin' — NEVER manually set legend coordinates
    - All text elements must have fontsize >= 12pt (title >= 14pt)
    - Legend must NOT overlap data — place outside plot or use bbox_to_anchor
-   - Use consistent naming across ALL panels (e.g., always 'Cholangiocyte', never abbreviate in some panels)
+   - Use consistent naming across ALL panels (e.g., pick one canonical label per cell type and reuse it everywhere — never abbreviate it in some panels and spell it out in others)
    - No grid lines unless explicitly needed for the figure type
    - Always call ax.set_xticks() BEFORE ax.set_xticklabels() to ensure label count matches tick count
 
@@ -590,9 +590,9 @@ You are conducting single-cell RNA-seq analysis. You have access to tools:
    - Always log the recovery action so the PI agent can see what was retried and why.
 
    **COMPOSITION / PROPORTION BARPLOT RULES:**
-   - When plotting cell type proportions across conditions (e.g., WT vs DKO):
-     1. The cell type categories on the y-axis must be CONDITION-INDEPENDENT (e.g., 'Hepatocyte', not 'Hepatocyte_WT')
-     2. If cell types in adata.obs contain condition suffixes (e.g., 'Hepatocyte_WT', 'Hepatocyte_DKO'), you MUST strip/merge them first
+   - When plotting cell type proportions across conditions (e.g., Treatment vs Control, or any two experimental groups):
+     1. The cell type categories on the y-axis must be CONDITION-INDEPENDENT (e.g., 'CellType_A', not 'CellType_A_Treatment')
+     2. If cell types in adata.obs contain condition suffixes (e.g., 'CellType_A_Treatment', 'CellType_A_Control'), you MUST strip/merge them first
      3. Compute proportions as: (cells of type X in condition A) / (total cells in condition A)
      4. A correct composition plot should show MIXED colors in each bar — if any bar is 100% one color, check for tautological grouping
    - For pandas Categorical columns: call .cat.add_categories('NewCat') BEFORE assigning a new category value
@@ -731,7 +731,7 @@ CELL TYPE ANNOTATION WORKFLOW:
 Your Jupyter kernel is running in: {self.sandbox.working_dir}
 A variable `_WORKSPACE_DIR` (pathlib.Path) is pre-defined in the kernel and points to this directory.
 All output files MUST be saved using `_WORKSPACE_DIR` as the root. NEVER use relative paths like './' or '../'.
-- Figures: saved automatically by the system — do NOT call plt.savefig() yourself.
+- Figures: in execute_code, call `plt.savefig('name.jpg')` or `sc.pl.*(save='_name.jpg')` — files land under `_WORKSPACE_DIR` automatically and a companion PDF is generated. Do NOT manually save a separate PDF. (Inside generate_publication_figure's `code`, the tool wraps saving — see that tool's notes.)
 - Tables/CSV results: save to `_WORKSPACE_DIR / 'tables'`
 - H5AD files: save to `_WORKSPACE_DIR`
 When writing files, ALWAYS use the `_WORKSPACE_DIR` variable for the path:

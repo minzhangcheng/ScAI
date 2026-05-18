@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.16 · **Last updated**: 2026-05-18
+**Version**: 0.24.17 · **Last updated**: 2026-05-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,14 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.17` — prompt template improvements (2026-05-18):
+  - **Figure saving clarification**: Clarified that execute_code tool allows `plt.savefig('name.jpg')` and `sc.pl.*(save='_name.jpg')` for figure saving, while generate_prompts_figure tool wraps saving internally with different rules.
+  - **Template placeholders in PI prompts**: Updated PI agent prompts to use template placeholders (e.g., `<pathway>`, `<cell type>`, `<condition>`) instead of hardcoded examples for research questions, literature topics, and graphic abstract feedback.
+  - **Stage split note**: Added note in PI agent about Stage 1 vs Stage 2 task splitting to prevent task compression.
+  - **MeSH tissue guidance**: Updated PubMed query guidance to include tissue MeSH terms (e.g., "Liver"[MeSH], "Kidney"[MeSH]).
+  - **Organism-specific pathway libraries**: Updated agent_prompts.py to use organism-specific gene set libraries for pathway enrichment (Human: KEGG_2021_Human, Mouse: KEGG_2019_Mouse, Other: query gseapy).
+  - **GO libraries cross-species**: Added guidance that GO libraries work across species when gene symbols match the organism convention.
 
 - `0.24.16` — stage scope validation in planning (2026-05-18):
   - **Enhanced Stage 1 guidance**: Expanded `_STAGE1_GUIDANCE` in bioinformatics agent to explicitly exclude loading/preprocessing data for Stage 2 analyses, including: Loom files (RNA velocity), trajectory inputs, cell-cell communication preprocessing, and pre-staging gene sets for Stage 2 enrichment.

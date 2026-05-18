@@ -73,11 +73,13 @@ Standard analysis workflow (adjust based on data type):
    f. Save the annotated data as 'adata_annotated.h5ad' in the working directory
 5. Differential expression analysis
 6. Pathway enrichment analysis
-   - When using gseapy/Enrichr, try gene set libraries in this order of preference:
-     GO_Biological_Process_2023, GO_Biological_Process_2021, GO_Biological_Process_2018
-   - If GO libraries are unavailable, fall back to: Reactome_2022, WikiPathways_2024_Human, BioPlanet_2019
-   - Always include KEGG_2021_Human as a complementary pathway source
+   - Choose gene set libraries based on the organism of the data (inspect adata or experimental design):
+     * Human data → KEGG_2021_Human, WikiPathways_2024_Human, Reactome_2022, BioPlanet_2019
+     * Mouse data → KEGG_2019_Mouse, WikiPathways_2019_Mouse, Reactome_2022 (the Reactome library is cross-species; KEGG/WikiPathways have species-specific releases)
+     * Other organisms (rat, zebrafish, fly, etc.) → query `gseapy.get_library_name(organism='...')` to discover available libraries; fall back to mapping genes to human/mouse orthologs only if no native library exists
+   - GO libraries (GO_Biological_Process_2023, GO_Biological_Process_2021) work across species when gene symbols match the organism's convention — use them as a complementary source
    - If a library call fails, log the error and try the next library in the list automatically
+   - NEVER hardcode a `_Human` library when running on non-human data — the call will return empty results
 7. Trajectory/Pseudotime analysis (if applicable):
    - Use scvelo for RNA velocity analysis (requires .loom files with spliced/unspliced counts)
    - Use PAGA for trajectory inference and partition-based graph abstraction
@@ -106,7 +108,7 @@ Code requirements:
 - Generate visualization results for each step
 - Save key intermediate results
 - After cell type annotation, always generate a UMAP showing cell type labels as the primary clustering visualization
-- When saving figures, use JPG format (e.g., plt.savefig('figure.jpg')). The system automatically generates a companion high-quality PDF for every JPG saved. Do NOT manually save separate PDF files.
+- When saving figures, use JPG format (e.g., plt.savefig('figure.jpg')). The system automatically generates a companion high-quality PDF for every JPG saved. Do NOT manually save separate PDF files. (Note: this applies to execute_code; the generate_publication_figure tool wraps saving internally and has different rules — see its tool spec.)
 - When using scanpy plotting with save= parameter, use .jpg extension (e.g., sc.pl.umap(adata, save='_clusters.jpg'))
 
 Code comments should be in English."""

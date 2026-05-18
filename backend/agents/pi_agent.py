@@ -147,7 +147,7 @@ Please assign specific tasks for each direction (listed in execution order):
 2. Pathology analysis: Analyze the available histology images. What morphological features and pathological changes should be evaluated?
 3. Bioinformatics analysis: Analyze the available sequencing data. Standard workflow plus cell types and pathways to focus on.
 4. Literature research: What specific topics should be searched in PubMed?
-   - Each topic should be a focused research question (e.g., "Role of TGF-beta signaling in liver fibrosis progression")
+   - Each topic should be a focused research question (e.g., "Role of <pathway> signaling in <cell type> state transitions under <condition>")
    - Avoid overly broad or overly specific topics
    - Include 2-4 topics covering different aspects (mechanism, phenotype, therapeutic relevance)
 
@@ -216,13 +216,15 @@ CRITICAL CONSTRAINTS:
 5. Clustering (leiden/louvain)
 6. Cell type annotation via annotate_clusters tool
 7. Condition-level DEG (treatment vs control) + GO/KEGG enrichment for all cell types
-   (merge similar subtypes/states into unified groups first, e.g., merge stress hepatocytes with hepatocytes)
+   (merge similar subtypes/states into unified groups first, e.g., merge activated/exhausted states of the same lineage back into the parent cell type)
 8. Cell-cell communication analysis (liana)
 9. If bulk RNA-seq data is available:
    a. Load bulk expression matrix and perform differential expression analysis (pydeseq2)
    b. Cross-validate bulk DEG with scRNA-seq pseudobulk DEG
    c. Generate comparison visualizations (Venn diagram, correlation plot)
    d. Perform cell-type deconvolution on the bulk RNA-seq data using the annotated scRNA-seq data as a reference to estimate cell-type proportions (prioritize pure Python NNLS).
+
+Note: These tasks span both Stage 1 (steps 1–6: QC through cell type annotation) and Stage 2 (steps 7–9: DEG, enrichment, cell-cell communication, bulk integration). The bioinformatics agent will automatically split and schedule them across the appropriate stages — do NOT try to compress everything into a single stage.
 
 ## Your Additional Planning (UNBIASED exploration)
 Beyond the fixed pipeline, plan these additional analyses:
@@ -629,7 +631,7 @@ that will help annotate these clusters. The query should retrieve articles about
 - Cell type classification and identification
 
 Rules for PubMed query:
-1. Use MeSH terms where appropriate (e.g., "Single-Cell Analysis"[MeSH], "Liver"[MeSH])
+1. Use MeSH terms where appropriate (e.g., "Single-Cell Analysis"[MeSH], plus a tissue MeSH term matching the dataset's organ such as "Liver"[MeSH], "Kidney"[MeSH], "Lung"[MeSH], "Brain"[MeSH])
 2. Use Boolean operators (AND, OR, NOT)
 3. Keep the query focused but not overly restrictive — aim for 20-200 results
 4. Include species and tissue/organ as filters
@@ -843,7 +845,7 @@ Generate a comprehensive structured report in JSON:
     "pi_direction_assessment": "Your overall assessment of the most promising research directions based on ALL the data",
     "research_direction_candidates": [
         {{
-            "direction": "A specific research question, e.g., 'Macrophage polarization shift in disease group'",
+            "direction": "A specific research question, e.g., 'Subtype-specific state shift of <cell type> between conditions, driven by <candidate pathway>'",
             "rationale": "Why this is interesting based on the data (cite specific findings)",
             "expected_innovation": "High/Medium/Low — Is this a well-studied area (Low) or an emerging/under-explored area (High)? Provide brief evidence.",
             "expected_novelty": "High/Medium/Low — Is this finding expected (Low) or surprising/counter-intuitive (High)? Explain WHY.",
@@ -1773,7 +1775,7 @@ IMPORTANT: When generating next_* tasks:
 - Focus next_* on specific hypotheses, pathway analyses, or validation tasks based on current findings
 
 IMPORTANT for next_literature topics:
-- Each topic should be a specific, searchable research question (e.g., "Role of macrophage polarization in NASH liver fibrosis")
+- Each topic should be a specific, searchable research question (e.g., "Role of <cell type> state transition in <tissue> under <condition>")
 - Include biological context (disease name, tissue, species) in each topic
 - Focus on filling knowledge GAPS identified in this round's literature findings
 - Avoid overly broad topics or raw gene lists
@@ -2545,7 +2547,7 @@ Objective: {state.initial_instruction[:500] if state.initial_instruction else 'B
 **Review instructions:**
 - Your feedback will be used by an image generation model to revise the graphic abstract. Describe visual changes clearly.
 - BAD: "The figure is not informative enough"
-- GOOD: "The graphic abstract should include a visual representation of the TGF-beta signaling pathway connecting fibroblasts to immune cells"
+- GOOD: "The graphic abstract should include a visual representation of the <key signaling pathway> connecting <source cell type> to <target cell type> as identified in the analysis"
 - BAD: "Colors need improvement"
 - GOOD: "Use distinct colors for tumor cells (red/pink) vs immune cells (blue/green) to improve visual differentiation"
 {"- Since this is round " + str(len(revision_history) + 1) + ", focus on whether previous issues were addressed. Be more lenient on minor aesthetic issues." if revision_history else ""}
@@ -3054,7 +3056,7 @@ Exclude figures that are:
 - Redundant older versions (prefer _v2 or _final over earlier versions of the same figure)
 
 Return ONLY a JSON array of the selected figure names, with no other text.
-Example: ["umap_cell_types", "cell_type_proportions", "volcano_hepatocytes_dko_vs_wt"]
+Example: ["umap_cell_types", "cell_type_proportions", "volcano_<celltype>_<condition>_vs_<control>"]
 """
 
         try:
