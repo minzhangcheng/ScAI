@@ -11,6 +11,7 @@ from backend.models.schemas import AnalysisState
 
 _EXCLUDED_FIELDS = {
     "original_max_rounds",
+    "pre_pause_status",
     "annotation_state",
     "exploration_report",
     "user_chosen_direction",

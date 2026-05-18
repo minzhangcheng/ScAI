@@ -180,7 +180,17 @@ class InitializeMixin:
             "planning_context": None,
             # Reset plan approval so the new round runs planning_dialogue;
             # paired with clearing analysis_state.current_plan above.
-            "plan_approved": False,
+            # On snapshot restore, current_plan is preserved but plan_approved
+            # was unconditionally reset — causing planning_dialogue to re-run
+            # for an already-approved plan.  Guard: if current_plan exists and
+            # is approved on snapshot restore, preserve plan_approved = True.
+            "plan_approved": (
+                bool(analysis_state.last_restored_snapshot_id
+                     and analysis_state.current_plan
+                     and analysis_state.current_plan.status == "approved")
+                if analysis_state.last_restored_snapshot_id
+                else False
+            ),
             "plan_revision_needed": False,
             "plan_revision_resume": False,
             # Reset continuation flags for new round

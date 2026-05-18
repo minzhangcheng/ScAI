@@ -390,6 +390,7 @@ class AnalysisState(BaseModel):
 
     # Status
     status: TaskStatus = TaskStatus.PENDING
+    pre_pause_status: Optional[TaskStatus] = None
     current_round: int = 0
     max_rounds: int = 3  # User-configurable maximum rounds
     original_max_rounds: Optional[int] = Field(default=None)  # Preserved during stop to avoid clobbering max_rounds

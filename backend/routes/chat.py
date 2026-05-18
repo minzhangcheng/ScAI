@@ -25,6 +25,7 @@ from backend.utils.auth import require_session_ownership
 from backend.utils.files import safe_filename, validate_session_id
 from backend.utils.upload import stream_save_file
 from backend.utils.settings_provider import AgentSettingsProvider
+from backend.utils.sandbox import _TPL_NOOP_INSTALL
 
 logger = logging.getLogger(__name__)
 
@@ -170,40 +171,7 @@ async def _generate_figures_in_chat(
                 "import matplotlib.pyplot as plt\n"
                 "import io as _io\n"
                 "from IPython.display import display as _display, Image as _Image\n"
-                "# Neutralize plt.show() and plt.close() to keep figures alive.\n"
-                "# Unwind any leftover SCAI no-op stubs from prior chat executions\n"
-                "# before re-installing, so wrappers never stack across runs.\n"
-                "_unwrap_close_guard = 0\n"
-                "while getattr(plt.close, '_scai_noop', False) and _unwrap_close_guard < 64:\n"
-                "    plt.close = getattr(plt.close, '_scai_prev', plt.close)\n"
-                "    _unwrap_close_guard += 1\n"
-                "_unwrap_show_guard = 0\n"
-                "while getattr(plt.show, '_scai_noop', False) and _unwrap_show_guard < 64:\n"
-                "    plt.show = getattr(plt.show, '_scai_prev', plt.show)\n"
-                "    _unwrap_show_guard += 1\n"
-                "# Defensive baseline restore for legacy unmarked stubs.\n"
-                "try:\n"
-                "    if '_original_plt_close' in globals() and plt.close is not _original_plt_close \\\n"
-                "            and not getattr(plt.close, '_scai_noop', False):\n"
-                "        plt.close = _original_plt_close\n"
-                "except Exception:\n"
-                "    pass\n"
-                "try:\n"
-                "    if '_capturing_show' in globals() and plt.show is not _capturing_show \\\n"
-                "            and not getattr(plt.show, '_scai_noop', False):\n"
-                "        plt.show = _capturing_show\n"
-                "except Exception:\n"
-                "    pass\n"
-                "_orig_show = plt.show\n"
-                "_orig_close_func = plt.close\n"
-                "def _noop_show(*a, **kw): return None\n"
-                "_noop_show._scai_noop = True\n"
-                "_noop_show._scai_prev = _orig_show\n"
-                "def _noop_close(*a, **kw): return None\n"
-                "_noop_close._scai_noop = True\n"
-                "_noop_close._scai_prev = _orig_close_func\n"
-                "plt.show = _noop_show\n"
-                "plt.close = _noop_close\n"
+                + _TPL_NOOP_INSTALL +
                 "_code_error = None\n"
                 "try:\n"
                 f"    {code.replace(chr(10), chr(10) + '    ')}\n"
@@ -213,7 +181,7 @@ async def _generate_figures_in_chat(
                 "    import traceback; traceback.print_exc()\n"
                 "finally:\n"
                 "    plt.show = _orig_show\n"
-                "    plt.close = _orig_close_func\n"
+                "    plt.close = _orig_close\n"
                 "# Capture all open figures as PNG + save PDF for download\n"
                 "_fignums = plt.get_fignums()\n"
                 "for _fn in _fignums:\n"

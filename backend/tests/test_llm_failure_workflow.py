@@ -336,6 +336,8 @@ class TestBioinformaticsNodeUpstreamPropagation:
         mock._figure_review_callback = None
         mock._supervisor_callback = None
         mock.supervisor_agent = None
+        mock.config = MagicMock()
+        mock.config.bioinfo_max_steps = 10
 
         # Mock the bioinformatics agent so run_autonomous_analysis raises UpstreamExhaustedError
         mock.bioinformatics_agent = MagicMock()

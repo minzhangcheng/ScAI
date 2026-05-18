@@ -354,6 +354,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             technique_agent=self.technique_agent,
         )
         self.bioinformatics_agent.set_session(self.session_id)
+        self.bioinformatics_agent._pause_event = self._pause_event
 
         # Initialize optional agents — disabled if model is empty
         pathology_model = self._settings_provider.get_model("pathology")
@@ -842,6 +843,12 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # Block waiters before doing anything else — once cleared, the next time
         # the agent loop or a node entry checks the event it will await here.
         self._pause_event.clear()
+        # Also clear the HITL gate the workflow is actually blocked on, so
+        # resume() can re-set the correct one.  Without this, resume() only
+        # sets _pause_event but the workflow stays stuck on the HITL event.
+        self._continue_event.clear()
+        self._annotation_event.clear()
+        self._plan_review_event.clear()
 
         config = {"configurable": {"thread_id": thread_id}}
         state = await self.compiled_graph.aget_state(config)

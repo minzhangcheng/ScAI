@@ -519,6 +519,46 @@ class NotebookState:
         return self.session_path.exists()
 
 
+# Template for unwinding any stale SCAI no-op stubs from plt.close/plt.show
+# and installing fresh ones.  Embedded into f-string code templates via
+# {_TPL_NOOP_INSTALL}.  The string must NOT contain { or } to be f-string safe.
+_TPL_NOOP_INSTALL = (
+    "# Temporarily disable plt.close/plt.show to keep figures alive.\n"
+    "# Unwind any leftover SCAI no-op stubs from prior runs before installing fresh ones.\n"
+    "_unwrap_close_guard = 0\n"
+    "while getattr(plt.close, '_scai_noop', False) and _unwrap_close_guard < 64:\n"
+    "    plt.close = getattr(plt.close, '_scai_prev', plt.close)\n"
+    "    _unwrap_close_guard += 1\n"
+    "_unwrap_show_guard = 0\n"
+    "while getattr(plt.show, '_scai_noop', False) and _unwrap_show_guard < 64:\n"
+    "    plt.show = getattr(plt.show, '_scai_prev', plt.show)\n"
+    "    _unwrap_show_guard += 1\n"
+    "# Defensive baseline restore for legacy sessions with unmarked stubs.\n"
+    "try:\n"
+    "    if '_original_plt_close' in globals() and plt.close is not _original_plt_close \\\n"
+    "            and not getattr(plt.close, '_scai_noop', False):\n"
+    "        plt.close = _original_plt_close\n"
+    "except Exception:\n"
+    "    pass\n"
+    "try:\n"
+    "    if '_capturing_show' in globals() and plt.show is not _capturing_show \\\n"
+    "            and not getattr(plt.show, '_scai_noop', False):\n"
+    "        plt.show = _capturing_show\n"
+    "except Exception:\n"
+    "    pass\n"
+    "_orig_close = plt.close\n"
+    "_orig_show = plt.show\n"
+    "def _noop_close(*a, **kw): return None\n"
+    "_noop_close._scai_noop = True\n"
+    "_noop_close._scai_prev = _orig_close\n"
+    "def _noop_show(*a, **kw): return None\n"
+    "_noop_show._scai_noop = True\n"
+    "_noop_show._scai_prev = _orig_show\n"
+    "plt.close = _noop_close\n"
+    "plt.show = _noop_show\n"
+)
+
+
 class LocalJupyterSandbox:
     """
     Local Jupyter kernel executor with full session persistence using dill.
@@ -771,7 +811,7 @@ _original_plt_close = plt.close
 # This patch saves all open figures as inline PNG images via IPython.display,
 # so the Jupyter kernel emits display_data messages that get captured.
 import io as _io
-_original_plt_show = plt.show
+_original_plt_show = plt.show  # Baseline before any SCAI patches (symmetric with _original_plt_close)
 
 def _capturing_show(*args, **kwargs):
     '''Capture all open figures as inline images, then close them.'''
@@ -793,7 +833,7 @@ def _capturing_show(*args, **kwargs):
         _buf.close()
     _plt.close('all')
 
-plt.show = _capturing_show
+plt.show = _capturing_show  # Baseline capturing_show; referenced by defensive restore in _TPL_NOOP_INSTALL
 
 # Try importing common bioinformatics packages
 try:

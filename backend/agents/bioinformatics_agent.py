@@ -4,6 +4,7 @@ Supports autonomous technical steps and PI consultation for biological decisions
 With step-level checkpointing for recovery from interruptions
 """
 from typing import Dict, Any, List, Optional, Callable, Awaitable, Tuple
+import asyncio
 import functools
 import json
 import logging
@@ -21,7 +22,7 @@ from .base import BaseAgent, AgentConfig
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.sandbox import (
     validate_code_safety, DANGEROUS_PATTERNS, extract_code_from_markdown,
-    LocalJupyterSandbox, CodeExecutionResult,
+    LocalJupyterSandbox, CodeExecutionResult, _TPL_NOOP_INSTALL,
 )
 from ..utils.checkpoint import CheckpointManager
 from ..utils.formatting import format_revision_history, truncate_for_llm
@@ -365,7 +366,7 @@ class BioinformaticsAgent(BaseAgent):
 
         # Cooperative pause gate, populated by the workflow before each run.
         # When CLEAR, the autonomous loop blocks between steps until SET.
-        self._pause_event: Optional['asyncio.Event'] = None
+        self._pause_event: Optional[asyncio.Event] = None
 
     @staticmethod
     def _check_gate_keyword(lowered_codes, keywords, reject_count, max_rejections, gate_label):
@@ -1772,41 +1773,7 @@ _tracking_savefig._scai_tracking = True
 _tracking_savefig._scai_prev = _prev_fig_savefig
 _mpl_figure.Figure.savefig = _tracking_savefig
 
-# Temporarily disable plt.close/plt.show to keep figures alive for auto-save.
-# Unwind any leftover SCAI no-op stubs from prior runs (e.g. a previous cell's
-# finally was skipped, or dill restore brought back a stale closure) so we
-# never re-install on top of an already-stubbed function.
-_unwrap_close_guard = 0
-while getattr(plt.close, '_scai_noop', False) and _unwrap_close_guard < 64:
-    plt.close = getattr(plt.close, '_scai_prev', plt.close)
-    _unwrap_close_guard += 1
-_unwrap_show_guard = 0
-while getattr(plt.show, '_scai_noop', False) and _unwrap_show_guard < 64:
-    plt.show = getattr(plt.show, '_scai_prev', plt.show)
-    _unwrap_show_guard += 1
-# Defensive baseline restore for legacy sessions with unmarked stubs.
-try:
-    if '_original_plt_close' in globals() and plt.close is not _original_plt_close \
-            and not getattr(plt.close, '_scai_noop', False):
-        plt.close = _original_plt_close
-except Exception:
-    pass
-try:
-    if '_capturing_show' in globals() and plt.show is not _capturing_show \
-            and not getattr(plt.show, '_scai_noop', False):
-        plt.show = _capturing_show
-except Exception:
-    pass
-_orig_close = plt.close
-_orig_show = plt.show
-def _noop_close(*a, **kw): return None
-_noop_close._scai_noop = True
-_noop_close._scai_prev = _orig_close
-def _noop_show(*a, **kw): return None
-_noop_show._scai_noop = True
-_noop_show._scai_prev = _orig_show
-plt.close = _noop_close
-plt.show = _noop_show
+{_TPL_NOOP_INSTALL}
 
 # Execute user code (with try-finally to guarantee restore)
 try:
@@ -2892,40 +2859,7 @@ plt.rcParams.update({{
 _figures_dir = {figures_dir_repr}
 Path(_figures_dir).mkdir(exist_ok=True)
 
-# Temporarily disable plt.close/plt.show to keep figures alive.
-# Unwind any leftover SCAI no-op stubs from prior runs before installing fresh
-# wrappers (prevents stacking when a previous finally was skipped).
-_unwrap_close_guard = 0
-while getattr(plt.close, '_scai_noop', False) and _unwrap_close_guard < 64:
-    plt.close = getattr(plt.close, '_scai_prev', plt.close)
-    _unwrap_close_guard += 1
-_unwrap_show_guard = 0
-while getattr(plt.show, '_scai_noop', False) and _unwrap_show_guard < 64:
-    plt.show = getattr(plt.show, '_scai_prev', plt.show)
-    _unwrap_show_guard += 1
-# Defensive baseline restore for legacy sessions with unmarked stubs.
-try:
-    if '_original_plt_close' in globals() and plt.close is not _original_plt_close \
-            and not getattr(plt.close, '_scai_noop', False):
-        plt.close = _original_plt_close
-except Exception:
-    pass
-try:
-    if '_capturing_show' in globals() and plt.show is not _capturing_show \
-            and not getattr(plt.show, '_scai_noop', False):
-        plt.show = _capturing_show
-except Exception:
-    pass
-_orig_close = plt.close
-_orig_show = plt.show
-def _noop_close(*a, **kw): return None
-_noop_close._scai_noop = True
-_noop_close._scai_prev = _orig_close
-def _noop_show(*a, **kw): return None
-_noop_show._scai_noop = True
-_noop_show._scai_prev = _orig_show
-plt.close = _noop_close
-plt.show = _noop_show
+{_TPL_NOOP_INSTALL}
 
 # Execute the plotting code (with try-finally to guarantee restore)
 try:
