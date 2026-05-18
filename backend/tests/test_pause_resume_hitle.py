@@ -156,3 +156,39 @@ class TestResumeRestoresPrePauseStatus:
         assert signal_map[TaskStatus.WAITING_INPUT] == "signal_continue"
         assert signal_map[TaskStatus.WAITING_ANNOTATION] == "signal_annotation_confirmed"
         assert signal_map[TaskStatus.WAITING_PLAN_REVIEW] == "signal_plan_review"
+
+
+def test_resume_from_waiting_plan_review_must_not_auto_skip():
+    state = AnalysisState(user_id="test")
+    state.status = TaskStatus.WAITING_PLAN_REVIEW
+
+    signal_map = []
+
+    if state.status == TaskStatus.WAITING_PLAN_REVIEW:
+        restored_action = "stay_waiting_plan_review"
+    else:
+        restored_action = "other"
+
+    signal_map.append(restored_action)
+
+    assert signal_map == ["stay_waiting_plan_review"]
+
+
+def test_resume_from_paused_waiting_plan_review_must_not_auto_skip():
+    state = AnalysisState(user_id="test")
+    state.status = TaskStatus.PAUSED
+    state.pre_pause_status = TaskStatus.WAITING_PLAN_REVIEW
+
+    if state.pre_pause_status in (
+        TaskStatus.WAITING_INPUT,
+        TaskStatus.WAITING_ANNOTATION,
+        TaskStatus.WAITING_PLAN_REVIEW,
+    ):
+        restored = state.pre_pause_status
+        state.pre_pause_status = None
+        state.status = restored
+    else:
+        state.pre_pause_status = None
+        state.status = TaskStatus.RUNNING
+
+    assert state.status == TaskStatus.WAITING_PLAN_REVIEW

@@ -26,17 +26,14 @@ class RoutingMixin:
         """Route after user review gate.
 
         Outcomes:
-        0. abort → generate_final_report (planning failed unrecoverably, e.g. bioinfo
-           LLM exhausted with no existing plan and user picked Skip — must not loop
-           back into planning_dialogue).
-        1. approved + full/stage1 → bioinformatics_analysis (wet-lab agents already ran)
-        2. approved + stage2 → bioinformatics_analysis (skip already-run upstream agents)
-        3. approved + plan_revision_resume → bioinformatics_analysis (mid-execution revision approved)
-        4. not approved → planning_dialogue (user wants changes)
+        0. abort → generate_final_report
+        1. approved + full/stage1 → bioinformatics_analysis
+        2. approved + stage2 → bioinformatics_analysis
+        3. approved + plan_revision_resume → bioinformatics_analysis
+        4. not approved → planning_dialogue
 
-        Note: outcomes 1-3 currently all route to bioinformatics_analysis in graph.py.
-        The distinct route names (approved / approved_stage2 / approved_revision) are
-        preserved for future differentiation and for observability in LangGraph traces.
+        plan_revision_resume is a one-shot flag: cleared as soon as we route on
+        it so a stale True doesn't mis-route subsequent re-entries.
         """
         if state.get("should_continue") is False and not state.get("plan_approved"):
             logger.info(
@@ -46,9 +43,12 @@ class RoutingMixin:
             return "abort"
         if state.get("plan_approved"):
             stage = state.get("planning_stage", "full")
+            revision_resume = state.get("plan_revision_resume", False)
+            if revision_resume:
+                state["plan_revision_resume"] = False
             if stage == "stage2":
                 return "approved_stage2"
-            if state.get("plan_revision_resume"):
+            if revision_resume:
                 return "approved_revision"
             return "approved"
         return "revise"

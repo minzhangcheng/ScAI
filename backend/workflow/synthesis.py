@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..constants import LlmFailureAction, WaitInputReason, StateSyncChangeType
-from ..models.schemas import AgentType, AnalysisPhase, TaskStatus
+from ..models.schemas import AgentType, AnalysisPhase, AnalysisState, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
 
 if TYPE_CHECKING:
@@ -14,6 +14,30 @@ else:
     WorkflowState = dict
 
 logger = logging.getLogger(__name__)
+
+
+def _should_force_next_round(analysis_state: AnalysisState) -> bool:
+    """Return True when workflow must honor pending work instead of stopping on convergence.
+
+    Priority order:
+    1. Real human text input (not synthetic continue markers)
+    2. Newly uploaded files
+    3. Remaining multi-direction queue entries
+    """
+    has_real_text = bool(
+        analysis_state.pending_human_input
+        and analysis_state.pending_human_input.strip() not in ("", "[CONTINUE]", "[PI_DECIDE]")
+    )
+    has_uploaded_files = bool(analysis_state.pending_uploaded_files)
+    has_remaining_directions = bool(
+        analysis_state.directions_queue
+        and any(d.get("direction", "").strip() for d in analysis_state.directions_queue)
+    )
+    return has_real_text or has_uploaded_files or has_remaining_directions
+
+
+def _consume_signal_then_clear(event: asyncio.Event) -> None:
+    event.clear()
 
 
 class SynthesisMixin:
@@ -288,17 +312,16 @@ class SynthesisMixin:
             # No-wait mode: proceed immediately
             logger.info(f"[{self.session_id}] No-wait mode, proceeding immediately (round {analysis_state.current_round})")
         elif wait_seconds == -1:
-            # Manual mode: wait for user signal (with supplementary analysis support)
             if analysis_state.status != TaskStatus.WAITING_INPUT:
                 self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
                 await self._send_state_sync(analysis_state, "waiting_input")
 
+            self._continue_event.clear()
             while True:
-                self._continue_event.clear()
                 logger.info(f"[{self.session_id}] Manual mode, waiting for user input (round {analysis_state.current_round})")
                 await self._continue_event.wait()
+                _consume_signal_then_clear(self._continue_event)
 
-                # Check: supplementary analysis requested?
                 if self._supplementary_request and self._supplementary_target == "direction":
                     req = self._supplementary_request
                     self._supplementary_request = None
@@ -308,7 +331,6 @@ class SynthesisMixin:
 
                     await self._run_supplementary_analysis(analysis_state, req, "direction")
 
-                    # Regenerate exploration report with supplementary data
                     try:
                         last_round = analysis_state.round_results[-1] if analysis_state.round_results else None
                         if last_round and analysis_state.exploration_report:
@@ -396,19 +418,34 @@ class SynthesisMixin:
     async def _check_convergence(self, state: WorkflowState) -> WorkflowState:
         """Check if analysis has converged.
 
-        Note: This node is only reached when _should_continue() returns "continue",
-        meaning hard-stop conditions (human stop, max_rounds, paused) have already
-        been checked. Here we only evaluate soft convergence (repeated findings).
+        Hard-stop conditions are handled before this node. Here we only decide
+        whether soft convergence should end the workflow, unless pending user work
+        explicitly requires another round.
         """
         analysis_state = state["analysis_state"]
 
+        if _should_force_next_round(analysis_state):
+            logger.info(
+                f"[{self.session_id}] Convergence overridden by pending user work: "
+                f"text={bool(analysis_state.pending_human_input)}, "
+                f"files={bool(analysis_state.pending_uploaded_files)}, "
+                f"queue={len(analysis_state.directions_queue)}"
+            )
+            return {
+                **state,
+                "should_continue": True,
+            }
+
         should_stop = analysis_state.should_stop(self.config.convergence_rounds)
 
-        logger.info(f"[{self.session_id}] Convergence check: round={analysis_state.current_round}, should_stop={should_stop}")
+        logger.info(
+            f"[{self.session_id}] Convergence check: "
+            f"round={analysis_state.current_round}, should_stop={should_stop}"
+        )
 
         return {
             **state,
-            "should_continue": not should_stop
+            "should_continue": not should_stop,
         }
     
 

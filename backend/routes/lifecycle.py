@@ -199,25 +199,13 @@ async def resume_analysis(session_id: str, request: Request):
                 data={"needs_reconnect": True},
             )
     elif state.status == TaskStatus.WAITING_PLAN_REVIEW:
-        # Continue from plan review wait — auto-skip
-        state.status = TaskStatus.RUNNING
-        await _update_session_cache(session_id, state)
-        await async_save_session(session_id, state)
-        async with _state_lock:
-            workflow = workflows.get(session_id)
-        if workflow:
-            workflow.signal_plan_review("skip")
-            return APIResponse(
-                success=True,
-                message="Plan review skipped, continuing analysis"
-            )
-        else:
-            await _pause_and_restart_ws(session_id, state)
-            return APIResponse(
-                success=True,
-                message="Plan review skipped, continuing analysis",
-                data={"needs_reconnect": True},
-            )
+        # Plan review requires an explicit approve/skip/modify action via /plan-review.
+        # Generic resume must not silently convert the gate into "skip".
+        return APIResponse(
+            success=True,
+            message="Session is waiting for plan review. Submit /plan-review to approve, skip, or modify the plan.",
+            data={"needs_reconnect": False},
+        )
     elif state.status == TaskStatus.PAUSED:
         if state.pre_pause_status in (
             TaskStatus.WAITING_INPUT,
@@ -241,7 +229,7 @@ async def resume_analysis(session_id: str, request: Request):
             elif state.status == TaskStatus.WAITING_ANNOTATION:
                 workflow.signal_annotation_confirmed()
             elif state.status == TaskStatus.WAITING_PLAN_REVIEW:
-                workflow.signal_plan_review("skip")
+                pass
             return APIResponse(
                 success=True,
                 message="Analysis resumed",

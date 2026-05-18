@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.13 · **Last updated**: 2026-05-18
+**Version**: 0.24.14 · **Last updated**: 2026-05-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,16 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.14` — lifecycle & routing fixes (2026-05-18):
+  - **Plan review resume requires explicit action**: Lifecycle resume endpoint no longer auto-skips plan review. Instead returns message directing user to `/plan-review` endpoint for approve/skip/modify.
+  - **Reset pi_instructions on stage1→stage2 transition**: Added `_reset_pi_instructions_for_stage2()` to clear bioinformatics/pathology/biochemistry/literature tasks when transitioning from stage1 to stage2.
+  - **SHA-1 for code_history dedup**: Replaced Python's built-in `hash()` with `hashlib.sha1()` for stable code content deduplication across sessions/restarts.
+  - **plan_revision_resume one-shot**: Cleared `plan_revision_resume` flag immediately after routing to prevent stale True from mis-routing subsequent re-entries.
+  - **Honor pending user work over convergence**: Added `_should_force_next_round()` in synthesis to override convergence when there's real human text input, uploaded files, or remaining directions queue.
+  - **Clear user_plan_feedback after planning**: Planning now clears `user_plan_feedback` after consuming it to prevent stale feedback persisting.
+  - **Close signal-loss race in manual mode**: Fixed `_continue_event` clearing/waiting order in `wait_for_user_input` to prevent signal loss.
+  - **Test additions**: Added tests for code_history dedup hash, convergence override, resume plan review flow, stage transition instructions, user review gate abort signal, and wait for user input signal.
 
 - `0.24.13` — empty workflow short-circuit & planning abort handling (2026-05-18):
   - **Empty workflow short-circuit**: Added early exit in `generate_final_report`, `generate_graphic_abstract`, and `generate_detailed_report` when `analysis_log` and `code_history` are empty (no analysis work recorded). Prevents generating empty reports when user stops before any analysis runs.

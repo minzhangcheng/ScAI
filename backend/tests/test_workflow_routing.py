@@ -147,3 +147,19 @@ def test_check_convergence_condition_missing_key_defaults_stop():
     s = _Stub()
     state = {}
     assert s._check_convergence_condition(state) == "stop"
+
+
+def test_after_review_clears_plan_revision_resume_after_routing():
+    s = _Stub()
+    state = {"plan_approved": True, "planning_stage": "full", "plan_revision_resume": True}
+    route = s._after_review(state)
+    assert route == "approved_revision"
+    assert state.get("plan_revision_resume") is False, "Flag must be cleared after routing"
+
+
+def test_after_review_clears_plan_revision_resume_even_on_stage2():
+    s = _Stub()
+    state = {"plan_approved": True, "planning_stage": "stage2", "plan_revision_resume": True}
+    route = s._after_review(state)
+    assert route == "approved_stage2"
+    assert state.get("plan_revision_resume") is False

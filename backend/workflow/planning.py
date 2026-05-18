@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 MAX_PLANNING_ROUNDS = 5
 
 
+def _consume_user_plan_feedback(state: dict) -> str:
+    value = state.get("user_plan_feedback") or ""
+    state["user_plan_feedback"] = None
+    return value
+
+
 class PlanningMixin:
     """Mixin providing planning-dialogue methods. Composed into SingleCellAnalysisWorkflow."""
     @with_retry("pi_planning")
@@ -82,7 +88,9 @@ class PlanningMixin:
                 **state,
                 "pi_instructions": adjusted_instructions,
                 "skip_nodes": [],
-                "human_guidance_processed": True
+                "human_guidance_processed": True,
+                "planning_stage": "stage1",
+                "plan_approved": False,
             }
         
         # Normal planning without pre-processed instructions
@@ -343,7 +351,7 @@ class PlanningMixin:
                             for d in dialogue_history
                             if d.get("pi_feedback")
                         )
-                        user_feedback = state.get("user_plan_feedback", "")
+                        user_feedback = _consume_user_plan_feedback(state)
                         pi_feedback = all_pi_feedback or (dialogue_history[-1]["pi_feedback"] if dialogue_history else "")
                         combined_feedback = f"{pi_feedback}\n\nUser feedback: {user_feedback}" if user_feedback else pi_feedback
                         plan = await self.bioinformatics_agent.revise_plan_incrementally(
@@ -567,7 +575,15 @@ class PlanningMixin:
         plan = analysis_state.current_plan
 
         if not plan:
-            logger.warning(f"[{self.session_id}] No plan to review, skipping gate")
+            logger.warning(
+                f"[{self.session_id}] No plan to review; planning aborted, "
+                f"routing to final report"
+            )
+            await self._send_message(
+                "status",
+                "Planning aborted: no plan available. Skipping to final report.",
+                AgentType.PI,
+            )
             return state
 
         # Main review loop — continues until user approves or skips

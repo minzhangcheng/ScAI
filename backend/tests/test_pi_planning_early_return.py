@@ -49,3 +49,26 @@ async def test_pi_planning_early_return_propagates_full():
     state = {"analysis_state": s}
     out = await h.call_pi_planning(state)
     assert out["planning_stage"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_round1_adjusted_instructions_preserve_stage1():
+    s = AnalysisState(session_id="t", user_id="u", initial_instruction="x")
+    s.current_round = 1
+    h = _Harness()
+    state = {
+        "analysis_state": s,
+        "adjusted_instructions": {
+            "bioinformatics_tasks": ["focus on macrophages"],
+            "pathology_tasks": [],
+            "biochemistry_tasks": [],
+            "literature_topics": [],
+        },
+    }
+
+    out = await h.call_pi_planning(state)
+
+    assert out["pi_instructions"]["bioinformatics_tasks"] == ["focus on macrophages"]
+    assert out["human_guidance_processed"] is True
+    assert out["planning_stage"] == "stage1"
+    assert out["plan_approved"] is False

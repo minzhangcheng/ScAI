@@ -1,5 +1,6 @@
 """Agent node methods: pathology, bioinformatics, biochemistry, literature."""
 import asyncio
+import hashlib
 import json
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -15,6 +16,20 @@ else:
     WorkflowState = dict
 
 logger = logging.getLogger(__name__)
+
+
+def _reset_pi_instructions_for_stage2(pi_instructions: Dict[str, Any]) -> Dict[str, Any]:
+    cleared = dict(pi_instructions)
+    cleared["bioinformatics_tasks"] = []
+    cleared["pathology_tasks"] = []
+    cleared["biochemistry_tasks"] = []
+    cleared["literature_topics"] = []
+    cleared["overview"] = ""
+    return cleared
+
+
+def _stable_code_hash(code: str) -> str:
+    return hashlib.sha1(code.encode("utf-8")).hexdigest()
 
 
 class AgentNodesMixin:
@@ -440,12 +455,10 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         all_findings = result.get("findings", [])
         all_figures = result.get("figures", [])
 
-        # Store code executions (dedup by id AND code content hash to handle
-        # both node retries and session restores that assign new UUIDs)
         existing_code_ids = {c.id for c in analysis_state.code_history}
-        existing_code_hashes = {hash(c.code) for c in analysis_state.code_history}
+        existing_code_hashes = {_stable_code_hash(c.code) for c in analysis_state.code_history}
         for code_exec in result.get("code_history", []):
-            code_hash = hash(code_exec.code)
+            code_hash = _stable_code_hash(code_exec.code)
             if code_exec.id not in existing_code_ids and code_hash not in existing_code_hashes:
                 analysis_state.code_history.append(code_exec)
                 existing_code_ids.add(code_exec.id)
@@ -518,14 +531,17 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
 
         if planning_stage == "stage1":
             result_state["planning_stage"] = "stage2"
-            result_state["plan_approved"] = False  # stage2 needs re-planning
+            result_state["plan_approved"] = False
+            result_state["pi_instructions"] = _reset_pi_instructions_for_stage2(
+                state.get("pi_instructions", {})
+            )
             result_state["planning_context"] = {
                 "stage1_summary": final_result.get("summary", ""),
                 "stage1_findings": final_result.get("findings", []),
                 "stage1_figures": final_result.get("figures", []),
                 "stage1_steps_executed": final_result.get("steps_executed", 0),
             }
-            analysis_state.current_plan = None  # Clear stage1 plan so stage2 generates fresh
+            analysis_state.current_plan = None
         elif planning_stage == "stage2":
             result_state["planning_stage"] = "full"
             result_state["planning_context"] = None  # Clear stage1 context after stage2 completes
