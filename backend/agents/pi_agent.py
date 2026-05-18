@@ -355,10 +355,32 @@ Reply in JSON format (include ALL clusters):
 
         decision_points = "\n".join(f"  - {d}" for d in plan.key_decision_points)
 
+        stage_label = (plan.stage or "full")
+        stage_scope_section = ""
+        if stage_label == "stage1":
+            stage_scope_section = """
+## Stage Scope (Stage 1)
+This plan is for **Stage 1** only. Stage 1 covers: data loading of count matrices, QC, doublet handling, normalization / HVG, batch correction, dimensionality reduction, clustering, and cell type annotation.
+
+Stage 1 must NOT contain steps whose only purpose is to feed Stage 2 analyses, including:
+- Loading Loom files or assigning spliced / unspliced layers (RNA velocity belongs to Stage 2)
+- Trajectory / pseudotime inputs (e.g. diffusion maps staged for Slingshot / Monocle)
+- Cell-cell communication preprocessing (CellChat / liana / NicheNet ligand-receptor tables)
+- Pre-staging DEG contrasts, gene signatures, or pathway databases for Stage 2 enrichment
+
+If any step's method, input, or rationale references "for downstream", "to support Stage 2", "for velocity", "for trajectory", "for communication", or any Stage 2 analysis by name, you MUST mark the plan as **revise** and list that step under modifications with the suggestion to defer it to Stage 2."""
+        elif stage_label == "stage2":
+            stage_scope_section = """
+## Stage Scope (Stage 2)
+This plan is for **Stage 2**. Stage 2 covers downstream analyses (DEG, GO/KEGG, cell communication, RNA velocity, trajectory, etc.) and may load any data those analyses need. Do NOT flag Stage 2-specific steps as out of scope here."""
+
         prompt = f"""You are reviewing a bioinformatics analysis plan for a single-cell RNA-seq study.
 
 ## Plan Overview
 {plan.overview}
+
+## Plan Stage
+{stage_label}
 
 ## Planned Steps
 {steps_text}
@@ -370,17 +392,19 @@ Reply in JSON format (include ALL clusters):
 - Phase: {plan.phase}
 - Round: {state.current_round}
 - Data: {state.build_experimental_design_summary()}
+{stage_scope_section}
 
 ## Review Criteria
-1. **Scientific validity**: Are the planned methods appropriate for the data and biological questions?
-2. **Completeness**: Are any critical steps missing?
-3. **Logical order**: Do dependencies make sense? Are steps correctly ordered?
-4. **Redundancy**: Are there unnecessary or duplicate steps?
-5. **Risk**: Are there steps likely to fail or produce unreliable results?
+1. **Stage scope**: Does every step belong in the declared stage? See "Stage Scope" above. Steps that prep data for a later stage are out of scope and require **revise**.
+2. **Scientific validity**: Are the planned methods appropriate for the data and biological questions?
+3. **Completeness**: Are any critical steps missing for THIS stage?
+4. **Logical order**: Do dependencies make sense? Are steps correctly ordered?
+5. **Redundancy**: Are there unnecessary or duplicate steps?
+6. **Risk**: Are there steps likely to fail or produce unreliable results?
 
 ## Decision Options
-- **approved**: Plan is scientifically sound, no changes needed
-- **revise**: Plan needs specific modifications (list them)
+- **approved**: Plan is in-scope and scientifically sound, no changes needed
+- **revise**: Plan needs specific modifications (list them; scope-leak steps must be called out by step_id)
 - **reject**: Plan is fundamentally flawed and needs complete redesign (explain why)
 
 Respond in JSON:

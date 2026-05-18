@@ -55,7 +55,7 @@ except Exception:
 
 _STAGE1_GUIDANCE = """
 This is STAGE 1 of exploration. Plan ONLY these steps:
-1. Data loading and initial inspection
+1. Data loading and initial inspection (count matrices only — see exclusions below)
 2. Quality control (filter cells/genes)
 3. Doublet detection/assessment
 4. Batch effect assessment and correction
@@ -64,7 +64,14 @@ This is STAGE 1 of exploration. Plan ONLY these steps:
 7. Clustering (leiden/louvain)
 8. Cell type annotation (via marker genes + annotate_clusters tool)
 
-Do NOT include downstream analysis (DEG, GO/KEGG, cell communication, etc.) — those will be planned in Stage 2 after seeing clustering results."""
+Do NOT include downstream analysis (DEG, GO/KEGG, cell communication, RNA velocity, trajectory/pseudotime, etc.) — those will be planned in Stage 2 after seeing clustering results.
+
+Do NOT load, read, merge, or preprocess any data whose ONLY purpose is to feed a Stage 2 analysis. In particular:
+- Do NOT load Loom files or assign spliced / unspliced layers (these belong to Stage 2 RNA velocity).
+- Do NOT compute or store inputs for trajectory / pseudotime, cell-cell communication (CellChat / liana / NicheNet ligand-receptor tables), or DEG contrasts.
+- Do NOT pre-stage gene sets, signatures, or pathway databases for Stage 2 enrichment.
+
+If a step's rationale references "for downstream", "to support Stage 2", "for velocity", "for trajectory", "for communication", or any Stage 2 analysis by name, the step does NOT belong in Stage 1. Defer it to Stage 2 where the loading can happen alongside the analysis."""
 
 _STAGE2_GUIDANCE = """
 This is STAGE 2 of exploration. Based on Stage 1 results (clustering + annotation above),

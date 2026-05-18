@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.15 · **Last updated**: 2026-05-18
+**Version**: 0.24.16 · **Last updated**: 2026-05-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.16` — stage scope validation in planning (2026-05-18):
+  - **Enhanced Stage 1 guidance**: Expanded `_STAGE1_GUIDANCE` in bioinformatics agent to explicitly exclude loading/preprocessing data for Stage 2 analyses, including: Loom files (RNA velocity), trajectory inputs, cell-cell communication preprocessing, and pre-staging gene sets for Stage 2 enrichment.
+  - **PI plan review stage scope validation**: Added "Plan Stage" field and "Stage Scope" section to PI plan review prompt. Stage 1 reviews now reject steps that prep data for Stage 2; Stage 2 reviews allow Stage 2-specific steps.
+  - **Stage scope as #1 review criterion**: PI plan review now evaluates stage scope first, with explicit criteria for detecting "scope leak" steps (methods referencing "for downstream", "for velocity", "for trajectory", etc.).
+  - **Test additions**: Added `test_stage1_guid ance_scope.py` and `test_pi_review_stage_scope.py` for stage scope validation coverage.
 
 - `0.24.15` — plan review action leak fix (2026-05-18):
   - **Planning action leak fix**: Clear `_plan_review_action` and `_plan_review_event` at the start of `_user_review_gate` to prevent stale actions from previous gate invocations (e.g., stage1's approve still sitting in the slot when stage2's gate is entered).
