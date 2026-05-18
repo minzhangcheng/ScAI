@@ -586,8 +586,15 @@ class PlanningMixin:
             )
             return state
 
-        # Main review loop — continues until user approves or skips
-        # Generate dialogue HTML once — it doesn't change during the review loop
+        # Wipe any action/event left behind by a previous gate invocation in the
+        # same workflow (e.g. stage1's approve still sitting in the slot when
+        # stage2's gate is entered). Without this, the `prev_action` capture
+        # below would consume the stale value and skip waiting for the user.
+        self._plan_review_action = None
+        self._plan_review_event.clear()
+
+        # Main review loop — continues until user approves or skips.
+        # Generate dialogue HTML once — it doesn't change during the review loop.
         dialogue_html = self._build_plan_dialogue_html(
             analysis_state.plan_dialogue_history
         )
@@ -630,6 +637,12 @@ class PlanningMixin:
             else:
                 logger.info(f"[{self.session_id}] Plan review action already received, skipping wait")
                 action = prev_action
+
+            # Consume: clear the slot + event so the next loop iteration (clarify
+            # path) or the next gate invocation starts from a clean state.
+            self._plan_review_action = None
+            self._plan_review_event.clear()
+
             action_type = action.get("action", "skip")
             user_input = action.get("user_input", "")
 

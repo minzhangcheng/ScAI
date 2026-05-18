@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.14 · **Last updated**: 2026-05-18
+**Version**: 0.24.15 · **Last updated**: 2026-05-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.15` — plan review action leak fix (2026-05-18):
+  - **Planning action leak fix**: Clear `_plan_review_action` and `_plan_review_event` at the start of `_user_review_gate` to prevent stale actions from previous gate invocations (e.g., stage1's approve still sitting in the slot when stage2's gate is entered).
+  - **Consume after action**: Clear the slot and event after consuming the action so the next loop iteration (clarify path) or the next gate invocation starts from a clean state.
+  - **Test additions**: Added `test_user_review_gate_action_leak.py` (142 lines) to test the action leak fix.
 
 - `0.24.14` — lifecycle & routing fixes (2026-05-18):
   - **Plan review resume requires explicit action**: Lifecycle resume endpoint no longer auto-skips plan review. Instead returns message directing user to `/plan-review` endpoint for approve/skip/modify.
