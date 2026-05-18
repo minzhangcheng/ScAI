@@ -40,6 +40,7 @@ class PlanningMixin:
                 f"(status={analysis_state.current_plan.status}), skipping re-planning"
             )
             state["plan_approved"] = True
+            state["planning_stage"] = analysis_state.current_plan.stage or "full"
             state["planning_result"] = {
                 "plan": analysis_state.current_plan.model_dump(mode="json"),
                 "dialogue": analysis_state.plan_dialogue_history or [],

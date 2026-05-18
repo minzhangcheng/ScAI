@@ -45,10 +45,9 @@ class WorkflowState(TypedDict, total=False):
 
 def make_initial_workflow_state(analysis_state: AnalysisState, current_round: int = 0) -> "WorkflowState":
     """Build a clean WorkflowState for a fresh graph invocation."""
-    plan_approved = (
-        analysis_state.current_plan is not None
-        and analysis_state.current_plan.status == "approved"
-    )
+    plan = analysis_state.current_plan
+    plan_approved = plan is not None and plan.status == "approved"
+    planning_stage = plan.stage if plan and plan.stage else "full"
     return {
         "analysis_state": analysis_state,
         "current_round": current_round,
@@ -62,4 +61,5 @@ def make_initial_workflow_state(analysis_state: AnalysisState, current_round: in
         "error": None,
         "messages": [],
         "plan_approved": plan_approved,
+        "planning_stage": planning_stage,
     }

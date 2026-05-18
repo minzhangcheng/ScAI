@@ -1437,10 +1437,14 @@ If results significantly deviate from plan expectations, report via consult_pi i
 
         completed = False
         annotation_completed = False  # Mandatory step tracker for exploration phase
-        # Restore annotation_completed from analysis_log to avoid
-        # Gate 0 falsely rejecting report_findings after resume
+        # Restore annotation_completed from analysis_log to avoid Gate 0
+        # falsely rejecting report_findings after resume. Failed annotation
+        # attempts also write an annotate_clusters step (with summary prefixed
+        # "[ANNOTATION FAILED]"), so exclude those.
         if analysis_log and any(
-            s.step_type == "annotate_clusters" for s in analysis_log
+            s.step_type == "annotate_clusters"
+            and not (s.annotation_result_summary or "").startswith("[ANNOTATION FAILED]")
+            for s in analysis_log
         ):
             annotation_completed = True
         annotation_retry_required = False
