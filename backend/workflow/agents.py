@@ -408,6 +408,9 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         self._current_graph_state = state
 
         max_steps = self.config.bioinfo_max_steps
+        # Wire the workflow's cooperative pause gate into the agent so its
+        # autonomous tool-call loop can block between steps on pause.
+        self.bioinformatics_agent._pause_event = self._pause_event
         result = await self.bioinformatics_agent.run_autonomous_analysis(
             analysis_state,
             instruction,

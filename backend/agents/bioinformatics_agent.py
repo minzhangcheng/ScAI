@@ -51,6 +51,37 @@ try:
 except Exception:
     pass"""
 
+
+_STAGE1_GUIDANCE = """
+This is STAGE 1 of exploration. Plan ONLY these steps:
+1. Data loading and initial inspection
+2. Quality control (filter cells/genes)
+3. Doublet detection/assessment
+4. Batch effect assessment and correction
+5. Normalization, HVG selection
+6. Dimensionality reduction (PCA, UMAP)
+7. Clustering (leiden/louvain)
+8. Cell type annotation (via marker genes + annotate_clusters tool)
+
+Do NOT include downstream analysis (DEG, GO/KEGG, cell communication, etc.) — those will be planned in Stage 2 after seeing clustering results."""
+
+_STAGE2_GUIDANCE = """
+This is STAGE 2 of exploration. Based on Stage 1 results (clustering + annotation above),
+plan downstream analysis including but not limited to:
+1. Condition-level differential expression for relevant clusters
+2. GO/KEGG pathway enrichment for DEG results
+3. Cell-cell communication analysis (liana)
+4. Visualization of key findings
+5. Any additional analyses suggested by the clustering/annotation results"""
+
+
+def _stage_guidance_text(planning_stage: str) -> str:
+    if planning_stage == "stage1":
+        return _STAGE1_GUIDANCE
+    if planning_stage == "stage2":
+        return _STAGE2_GUIDANCE
+    return ""
+
 # Define the tools for bioinformatics agent
 TOOLS = [
     {
@@ -331,6 +362,10 @@ class BioinformaticsAgent(BaseAgent):
         self.last_result: Optional[CodeExecutionResult] = None
         self.analysis_context: Dict[str, Any] = {}
         self._recent_sup_feedback: set = set()
+
+        # Cooperative pause gate, populated by the workflow before each run.
+        # When CLEAR, the autonomous loop blocks between steps until SET.
+        self._pause_event: Optional['asyncio.Event'] = None
 
     @staticmethod
     def _check_gate_keyword(lowered_codes, keywords, reject_count, max_rejections, gate_label):
@@ -1004,29 +1039,7 @@ Completed steps MUST NOT be changed:
 
 You are REVISING the remaining steps based on new findings."""
 
-        stage_guidance = ""
-        if planning_stage == "stage1":
-            stage_guidance = """
-This is STAGE 1 of exploration. Plan ONLY these steps:
-1. Data loading and initial inspection
-2. Quality control (filter cells/genes)
-3. Doublet detection/assessment
-4. Batch effect assessment and correction
-5. Normalization, HVG selection
-6. Dimensionality reduction (PCA, UMAP)
-7. Clustering (leiden/louvain)
-8. Cell type annotation (via marker genes + annotate_clusters tool)
-
-Do NOT include downstream analysis (DEG, GO/KEGG, cell communication, etc.) — those will be planned in Stage 2 after seeing clustering results."""
-        elif planning_stage == "stage2":
-            stage_guidance = """
-This is STAGE 2 of exploration. Based on Stage 1 results (clustering + annotation above),
-plan downstream analysis including but not limited to:
-1. Condition-level differential expression for relevant clusters
-2. GO/KEGG pathway enrichment for DEG results
-3. Cell-cell communication analysis (liana)
-4. Visualization of key findings
-5. Any additional analyses suggested by the clustering/annotation results"""
+        stage_guidance = _stage_guidance_text(planning_stage)
 
         data_desc = state.build_experimental_design_summary()
         
@@ -1143,6 +1156,8 @@ Return the plan as a JSON object:
             for s in affected_steps
         )
 
+        stage_guidance = _stage_guidance_text(current_plan.stage or "full")
+
         prompt = f"""Revise an analysis plan based on PI feedback. Only modify affected steps — completed steps are locked.
 
 ## PI's Feedback
@@ -1153,8 +1168,10 @@ Return the plan as a JSON object:
 
 ## Steps To Revise
 {affected_text}
+{stage_guidance}
 
 ## Revision Rules
+- Stay strictly within the stage scope above — do NOT introduce steps that belong to a different stage.
 - COMPLETED steps: Do NOT change title, method, or rationale. Only update depends_on if a new step is inserted before them.
 - You may modify, remove, or reorder the "TO REVISE" steps.
 - You may insert NEW steps between completed steps and revised steps (give them new IDs).
@@ -1447,6 +1464,25 @@ If results significantly deviate from plan expectations, report via consult_pi i
         _plan_revision_context: Dict[str, Any] = {}
 
         while step_count < max_steps and not completed:
+            # Cooperative pause: block here between steps when the workflow has
+            # been paused. The Jupyter kernel naturally serializes against
+            # sandbox.save_session(), so any in-flight execute() finishes first.
+            if self._pause_event is not None and not self._pause_event.is_set():
+                logger.info(
+                    f"[Bioinformatics] Pause requested at step {step_count}, "
+                    f"waiting for resume"
+                )
+                try:
+                    await self._notify("status", "Analysis paused, awaiting resume...")
+                except Exception:
+                    pass
+                await self._pause_event.wait()
+                logger.info(f"[Bioinformatics] Resumed at step {step_count}")
+                try:
+                    await self._notify("status", "Analysis resumed")
+                except Exception:
+                    pass
+
             step_count += 1
 
             # Save checkpoint periodically
@@ -1704,6 +1740,25 @@ _figures_dir.mkdir(exist_ok=True)
 
 # Track figures explicitly saved by user code: map fig_number → list of saved paths
 _explicitly_saved_figs = {{}}
+# Unwind any leftover tracking wrappers from prior executions (e.g. a previous
+# cell raised before its finally restored, or a dill session restore brought
+# back a stale closure). Without this, each new wrap stacks one recursion level
+# deeper and eventually hits Python's recursion limit.
+_unwrap_guard = 0
+while getattr(_mpl_figure.Figure.savefig, '_scai_tracking', False) and _unwrap_guard < 64:
+    _mpl_figure.Figure.savefig = getattr(
+        _mpl_figure.Figure.savefig, '_scai_prev', _mpl_figure.Figure.savefig
+    )
+    _unwrap_guard += 1
+# Defensive: legacy sessions started before the marker-unwind fix have stacked
+# unmarked closures that the loop above can't peel. Force-restore to the known
+# baseline (_combined_savefig from sandbox init) if it's not already there.
+try:
+    if '_combined_savefig' in globals() and _mpl_figure.Figure.savefig is not _combined_savefig:
+        _mpl_figure.Figure.savefig = _combined_savefig
+        print("[Auto-save] Reset Figure.savefig to baseline (legacy stack cleared)")
+except Exception:
+    pass
 _prev_fig_savefig = _mpl_figure.Figure.savefig
 def _tracking_savefig(self, fname=None, *_a, **_kw):
     try:
@@ -1713,13 +1768,45 @@ def _tracking_savefig(self, fname=None, *_a, **_kw):
     except Exception as _track_err:
         print(f"[Auto-save] Debug: figure tracking failed: {{_track_err}}")
     return _prev_fig_savefig(self, fname, *_a, **_kw)
+_tracking_savefig._scai_tracking = True
+_tracking_savefig._scai_prev = _prev_fig_savefig
 _mpl_figure.Figure.savefig = _tracking_savefig
 
-# Temporarily disable plt.close/plt.show to keep figures alive for auto-save
+# Temporarily disable plt.close/plt.show to keep figures alive for auto-save.
+# Unwind any leftover SCAI no-op stubs from prior runs (e.g. a previous cell's
+# finally was skipped, or dill restore brought back a stale closure) so we
+# never re-install on top of an already-stubbed function.
+_unwrap_close_guard = 0
+while getattr(plt.close, '_scai_noop', False) and _unwrap_close_guard < 64:
+    plt.close = getattr(plt.close, '_scai_prev', plt.close)
+    _unwrap_close_guard += 1
+_unwrap_show_guard = 0
+while getattr(plt.show, '_scai_noop', False) and _unwrap_show_guard < 64:
+    plt.show = getattr(plt.show, '_scai_prev', plt.show)
+    _unwrap_show_guard += 1
+# Defensive baseline restore for legacy sessions with unmarked stubs.
+try:
+    if '_original_plt_close' in globals() and plt.close is not _original_plt_close \
+            and not getattr(plt.close, '_scai_noop', False):
+        plt.close = _original_plt_close
+except Exception:
+    pass
+try:
+    if '_capturing_show' in globals() and plt.show is not _capturing_show \
+            and not getattr(plt.show, '_scai_noop', False):
+        plt.show = _capturing_show
+except Exception:
+    pass
 _orig_close = plt.close
 _orig_show = plt.show
-plt.close = lambda *a, **kw: None
-plt.show = lambda *a, **kw: None
+def _noop_close(*a, **kw): return None
+_noop_close._scai_noop = True
+_noop_close._scai_prev = _orig_close
+def _noop_show(*a, **kw): return None
+_noop_show._scai_noop = True
+_noop_show._scai_prev = _orig_show
+plt.close = _noop_close
+plt.show = _noop_show
 
 # Execute user code (with try-finally to guarantee restore)
 try:
@@ -2805,11 +2892,40 @@ plt.rcParams.update({{
 _figures_dir = {figures_dir_repr}
 Path(_figures_dir).mkdir(exist_ok=True)
 
-# Temporarily disable plt.close/plt.show to keep figures alive
+# Temporarily disable plt.close/plt.show to keep figures alive.
+# Unwind any leftover SCAI no-op stubs from prior runs before installing fresh
+# wrappers (prevents stacking when a previous finally was skipped).
+_unwrap_close_guard = 0
+while getattr(plt.close, '_scai_noop', False) and _unwrap_close_guard < 64:
+    plt.close = getattr(plt.close, '_scai_prev', plt.close)
+    _unwrap_close_guard += 1
+_unwrap_show_guard = 0
+while getattr(plt.show, '_scai_noop', False) and _unwrap_show_guard < 64:
+    plt.show = getattr(plt.show, '_scai_prev', plt.show)
+    _unwrap_show_guard += 1
+# Defensive baseline restore for legacy sessions with unmarked stubs.
+try:
+    if '_original_plt_close' in globals() and plt.close is not _original_plt_close \
+            and not getattr(plt.close, '_scai_noop', False):
+        plt.close = _original_plt_close
+except Exception:
+    pass
+try:
+    if '_capturing_show' in globals() and plt.show is not _capturing_show \
+            and not getattr(plt.show, '_scai_noop', False):
+        plt.show = _capturing_show
+except Exception:
+    pass
 _orig_close = plt.close
 _orig_show = plt.show
-plt.close = lambda *a, **kw: None
-plt.show = lambda *a, **kw: None
+def _noop_close(*a, **kw): return None
+_noop_close._scai_noop = True
+_noop_close._scai_prev = _orig_close
+def _noop_show(*a, **kw): return None
+_noop_show._scai_noop = True
+_noop_show._scai_prev = _orig_show
+plt.close = _noop_close
+plt.show = _noop_show
 
 # Execute the plotting code (with try-finally to guarantee restore)
 try:

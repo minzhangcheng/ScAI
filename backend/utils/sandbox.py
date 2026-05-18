@@ -760,6 +760,12 @@ def _combined_savefig(self, fname, *args, **kwargs):
 
 _mpl_figure.Figure.savefig = _combined_savefig
 
+# Capture the true matplotlib.pyplot.close baseline before any wrapper installs
+# stubs over it. Used by per-execution wrappers to defensively force-restore
+# when a previous run left a stale no-op behind (e.g. legacy unmarked stubs
+# from sessions started before the unwind-on-install fix).
+_original_plt_close = plt.close
+
 # === Monkey-patch plt.show() to capture figures as display_data ===
 # With Agg backend, plt.show() is a no-op — figures are silently lost.
 # This patch saves all open figures as inline PNG images via IPython.display,

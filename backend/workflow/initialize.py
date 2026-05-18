@@ -138,6 +138,11 @@ class InitializeMixin:
         # since current_round is already correct from the snapshot)
         if not analysis_state.last_restored_snapshot_id:
             analysis_state.current_round += 1
+            # Clear the previous round's approved plan so the new round
+            # actually runs planning_dialogue. Without this, _pi_planning's
+            # "already approved" early-return short-circuits the next round.
+            # Skip on snapshot restore — the restored plan must be preserved.
+            analysis_state.current_plan = None
         self._set_status(analysis_state, TaskStatus.RUNNING)
 
         # Clear residual should_continue from previous convergence check
@@ -173,6 +178,11 @@ class InitializeMixin:
             "skip_nodes": [],
             # Reset planning_context so stale stage1 data from previous round doesn't leak
             "planning_context": None,
+            # Reset plan approval so the new round runs planning_dialogue;
+            # paired with clearing analysis_state.current_plan above.
+            "plan_approved": False,
+            "plan_revision_needed": False,
+            "plan_revision_resume": False,
             # Reset continuation flags for new round
             "should_continue": True,
             "human_stop_requested": False,

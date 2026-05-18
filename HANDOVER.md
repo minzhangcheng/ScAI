@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.9 · **Last updated**: 2026-05-17
+**Version**: 0.24.10 · **Last updated**: 2026-05-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,13 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.10` — cooperative pause gate & matplotlib stub fixes (2026-05-18):
+  - **Cooperative pause gate**: Added `_pause_event` asyncio.Event to workflow for cooperative pausing. Cleared on `pause()` to block bioinformatics agent's autonomous loop between steps; set on `signal_resume()` to release. Wired into bioinformatics agent via `_pause_event` attribute.
+  - **Lifecycle pause improvements**: Pause endpoint now accepts RUNNING and all WAITING_* states; added idempotent check for already-paused state (double-click safe); clear cooperative gate first before snapshot.
+  - **Lifecycle resume improvements**: Resume now releases cooperative pause gate in-place when workflow is alive (no frontend reconnect needed); only cold reload when workflow was lost (server restart).
+  - **Matplotlib stub unwinding**: Chat code generation now unwinds any leftover SCAI no-op stubs before re-installing to prevent wrapper stacking; marks stubs with `_scai_noop` and `_scai_prev` attributes for clean unwinding.
+  - **Original plt.close capture**: Saved baseline `_original_plt_close` before any monkey-patching in sandbox for defensive restore.
 
 - `0.24.9` — reasoning field expansion & API serialization refactor (2026-05-17):
   - **LLM reasoning field expansion**: Added "thinking" and "thought" keys to content extraction for DeepSeek/Claude compatibility; also handles list values in reasoning fields.

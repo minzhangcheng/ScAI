@@ -72,8 +72,24 @@ async def pause_analysis(session_id: str, request: Request):
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    if state.status != TaskStatus.RUNNING:
-        raise HTTPException(status_code=400, detail="Analysis not running")
+    # Idempotent: already paused → no-op success (rapid double-click safe).
+    if state.status == TaskStatus.PAUSED:
+        return APIResponse(success=True, message="Analysis already paused")
+
+    # Accept RUNNING and any WAITING_* state. Pausing while waiting for HITL
+    # input still snapshots sandbox and clears the cooperative gate so when
+    # the user later resumes from the gate, the agent loop also honors pause.
+    _pausable = {
+        TaskStatus.RUNNING,
+        TaskStatus.WAITING_INPUT,
+        TaskStatus.WAITING_ANNOTATION,
+        TaskStatus.WAITING_PLAN_REVIEW,
+    }
+    if state.status not in _pausable:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot pause from status '{state.status}'"
+        )
 
     state.status = TaskStatus.PAUSED
     await async_save_session(session_id, state)
@@ -198,6 +214,19 @@ async def resume_analysis(session_id: str, request: Request):
         state.status = TaskStatus.RUNNING
         await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
+        # If the workflow is still alive (paused mid-node), release the
+        # cooperative pause gate so the agent loop / node entry can proceed
+        # in place. Only ask the frontend to reconnect when the workflow has
+        # been lost (e.g. server restart) and a cold reload is required.
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if workflow:
+            workflow.signal_resume()
+            return APIResponse(
+                success=True,
+                message="Analysis resumed",
+                data={"needs_reconnect": False}
+            )
         return APIResponse(
             success=True,
             message="Analysis resumed",

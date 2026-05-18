@@ -102,6 +102,14 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self._current_analysis_state: Optional[AnalysisState] = None
         self._current_graph_state: Optional[WorkflowState] = None
 
+        # Cooperative pause gate. SET = running (await passes immediately);
+        # CLEAR = pause requested (waiters block until resume).
+        # Checked by @with_retry at node entry and by the bioinformatics agent's
+        # autonomous tool-call loop between steps. Cleared in pause(), set in
+        # signal_resume(). Defaults to running so first run() is not blocked.
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()
+
         # Event for blocking between rounds (wait for user input or continue signal)
         self._continue_event = asyncio.Event()
 
@@ -198,6 +206,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     def signal_continue(self):
         """Signal the workflow to continue from wait_for_user_input"""
         self._continue_event.set()
+
+    def signal_resume(self):
+        """Release the cooperative pause gate so blocked nodes/agent loops can proceed."""
+        self._pause_event.set()
 
     def signal_annotation_confirmed(self):
         """Signal that user has confirmed cell type annotations"""
@@ -819,16 +831,28 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         return final_state["analysis_state"]
 
     async def pause(self, thread_id: str):
-        """Pause the workflow and save sandbox state including Python session"""
+        """Pause the workflow and save sandbox state including Python session.
+
+        Clears the cooperative pause gate FIRST so the bioinformatics agent's
+        autonomous loop and the @with_retry wrapper block at their next check,
+        then waits for any in-flight sandbox.execute to drain (kernel
+        serializes execute and save_session naturally) before persisting state.
+        """
         logger.info(f"[{self.session_id}] Pausing workflow for thread {thread_id}")
+        # Block waiters before doing anything else — once cleared, the next time
+        # the agent loop or a node entry checks the event it will await here.
+        self._pause_event.clear()
+
         config = {"configurable": {"thread_id": thread_id}}
         state = await self.compiled_graph.aget_state(config)
 
         if state and state.values:
             analysis_state = state.values["analysis_state"]
             self._set_status(analysis_state, TaskStatus.PAUSED)
-            
-            # Save sandbox state including Python session using dill
+
+            # Save sandbox state including Python session using dill.
+            # The Jupyter kernel is single-threaded, so this queues behind any
+            # in-flight execute() and captures a clean post-step snapshot.
             if self.sandbox:
                 await self.sandbox.save_session()
                 self.sandbox.notebook_state.save()

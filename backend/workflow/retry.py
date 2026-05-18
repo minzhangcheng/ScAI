@@ -27,6 +27,20 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
     def decorator(func):
         @wraps(func)
         async def wrapper(self, state: 'WorkflowState') -> 'WorkflowState':
+            # Cooperative pause gate: if the workflow was paused, block here
+            # before doing any work for this node. signal_resume() releases it.
+            pause_event = getattr(self, '_pause_event', None)
+            if pause_event is not None and not pause_event.is_set():
+                logger.info(
+                    f"[{getattr(self, 'session_id', '?')}] Node {node_name} "
+                    f"pausing at entry, awaiting resume"
+                )
+                await pause_event.wait()
+                logger.info(
+                    f"[{getattr(self, 'session_id', '?')}] Node {node_name} "
+                    f"resumed"
+                )
+
             # Check skip_nodes
             if node_name in state.get("skip_nodes", []):
                 logger.info(f"[{self.session_id}] Skipping node {node_name} (not activated by PI)")
