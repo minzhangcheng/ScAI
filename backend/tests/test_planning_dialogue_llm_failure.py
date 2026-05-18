@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.utils.llm_client import UpstreamExhaustedError
 from backend.constants import LlmFailureAction
-from backend.models.schemas import AnalysisState, AnalysisPlan, PlanStep
+from backend.models.schemas import AnalysisState, AnalysisPlan, PlanStep, TaskStatus
 
 
 def _make_workflow():
@@ -83,7 +83,7 @@ class TestPlanningDialogueBioinfoFailure:
     @pytest.mark.asyncio
     async def test_bioinfo_upstream_exhausted_skip_no_existing_plan(self):
         """When bioinfo fails on round 1 with no existing plan and user SKIPs,
-        return failed state."""
+        workflow terminates gracefully (should_continue=False, status=FAILED)."""
         wf = _make_workflow()
         wf._wait_for_llm_intervention = AsyncMock(return_value=LlmFailureAction.SKIP)
 
@@ -103,6 +103,9 @@ class TestPlanningDialogueBioinfoFailure:
         assert result["failed_node"] == "planning_dialogue"
         assert result["planning_result"]["status"] == "failed"
         assert "test error" in result["planning_result"]["error"]
+        assert result["should_continue"] is False
+        assert analysis_state.status == TaskStatus.FAILED
+        wf._send_state_sync.assert_called()
 
     @pytest.mark.asyncio
     async def test_bioinfo_upstream_exhausted_retry_then_succeed(self):

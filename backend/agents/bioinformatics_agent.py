@@ -2011,6 +2011,7 @@ except Exception as _autosave_block_err:
                             "question": question,
                             "context": context,
                         }
+                        break
                     else:
                         messages.append({
                             "role": "tool",

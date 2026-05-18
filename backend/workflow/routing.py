@@ -25,7 +25,10 @@ class RoutingMixin:
     def _after_review(self, state: "WorkflowState") -> str:
         """Route after user review gate.
 
-        Four possible outcomes:
+        Outcomes:
+        0. abort → generate_final_report (planning failed unrecoverably, e.g. bioinfo
+           LLM exhausted with no existing plan and user picked Skip — must not loop
+           back into planning_dialogue).
         1. approved + full/stage1 → bioinformatics_analysis (wet-lab agents already ran)
         2. approved + stage2 → bioinformatics_analysis (skip already-run upstream agents)
         3. approved + plan_revision_resume → bioinformatics_analysis (mid-execution revision approved)
@@ -35,6 +38,12 @@ class RoutingMixin:
         The distinct route names (approved / approved_stage2 / approved_revision) are
         preserved for future differentiation and for observability in LangGraph traces.
         """
+        if state.get("should_continue") is False and not state.get("plan_approved"):
+            logger.info(
+                f"[{self.session_id}] Planning aborted (should_continue=False, no plan), "
+                "routing to final report"
+            )
+            return "abort"
         if state.get("plan_approved"):
             stage = state.get("planning_stage", "full")
             if stage == "stage2":

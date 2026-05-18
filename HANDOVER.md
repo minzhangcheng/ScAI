@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.10 · **Last updated**: 2026-05-18
+**Version**: 0.24.13 · **Last updated**: 2026-05-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,23 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.13` — empty workflow short-circuit & planning abort handling (2026-05-18):
+  - **Empty workflow short-circuit**: Added early exit in `generate_final_report`, `generate_graphic_abstract`, and `generate_detailed_report` when `analysis_log` and `code_history` are empty (no analysis work recorded). Prevents generating empty reports when user stops before any analysis runs.
+  - **Planning abort handling**: When bioinformatics LLM fails unrecoverably during planning and there's no existing plan to fall back to, planning now sets `should_continue=False` and `status=FAILED` instead of letting `failed_node` loop indefinitely. Added `_after_review` routing to handle "abort" case.
+  - **Graph abort edge**: Added `abort → generate_final_report` edge in graph routing for the new abort flow.
+  - **Test additions**: Added `test_reporting_shortcircuit.py` for empty workflow report short-circuit.
+
+- `0.24.12` — report generation LLM failure handling (2026-05-18):
+  - **Report generation LLM retry loop**: Wrapped `generate_integrated_report` in retry loop with `UpstreamExhaustedError` handling, similar to other LLM-calling methods. Uses `_wait_for_llm_intervention()` for consistent failure recovery.
+  - **Test additions**: Added `test_generate_final_report_llm_failure.py`, `test_annotation_completed_restore.py`, `test_pi_planning_early_return.py`, `test_workflow_state_init.py`.
+  - **State field cleanup**: Removed unused `skip_nodes` from WorkflowState TypedDict.
+
+- `0.24.11` — HITL pause/resume with state restoration (2026-05-18):
+  - **pre_pause_status field**: Added `pre_pause_status` field to save original status when pausing from WAITING_INPUT/WAITING_ANNOTATION/WAITING_PLAN_REVIEW states.
+  - **Resume signal restoration**: Resume now properly signals continue/annotation/plan_review events based on restored status, allowing HITL-gated workflows to resume in place without frontend reconnection.
+  - **Template noop install**: Extracted matplotlib stub unwinding logic into `_TPL_NOOP_INSTALL` template string for reuse across sandbox and chat code generation; ensures clean unwinding of stale stubs.
+  - **Test additions**: Added `test_pause_resume_hitle.py` for HITL pause/resume coverage, `test_tpl_noop_install.py` for template installation, `test_initialize_plan_consistency.py`.
 
 - `0.24.10` — cooperative pause gate & matplotlib stub fixes (2026-05-18):
   - **Cooperative pause gate**: Added `_pause_event` asyncio.Event to workflow for cooperative pausing. Cleared on `pause()` to block bioinformatics agent's autonomous loop between steps; set on `signal_resume()` to release. Wired into bioinformatics agent via `_pause_event` attribute.

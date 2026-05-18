@@ -376,6 +376,14 @@ class PlanningMixin:
                             "dialogue": preserved_history,
                         }
                     else:
+                        state["should_continue"] = False
+                        analysis_state.status = TaskStatus.FAILED
+                        await self._send_state_sync(analysis_state, "planning_aborted")
+                        await self._send_message(
+                            "error",
+                            "Planning aborted: bioinformatics LLM unavailable. Workflow terminating.",
+                            AgentType.PI,
+                        )
                         state["failed_node"] = "planning_dialogue"
                         state["planning_result"] = {
                             "error": str(e),

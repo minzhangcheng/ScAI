@@ -52,6 +52,22 @@ def test_after_review_revise():
     assert s._after_review(state) == "revise"
 
 
+def test_after_review_abort_when_should_continue_false_and_no_approval():
+    """Planning aborted (e.g. bioinfo LLM exhausted with no existing plan, user
+    skipped) — must route to terminal sink, not loop back to planning_dialogue."""
+    s = _Stub()
+    state = {"plan_approved": False, "should_continue": False}
+    assert s._after_review(state) == "abort"
+
+
+def test_after_review_approval_wins_over_abort_flag():
+    """Defensive: if plan was approved before someone flipped should_continue,
+    honour the approval — the planning subgraph already finished its job."""
+    s = _Stub()
+    state = {"plan_approved": True, "should_continue": False, "planning_stage": "full"}
+    assert s._after_review(state) == "approved"
+
+
 def test_after_bioinformatics_plan_revision():
     s = _Stub()
     state = {"plan_revision_needed": True, "planning_stage": "full"}

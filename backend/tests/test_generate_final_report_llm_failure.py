@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from backend.constants import LlmFailureAction
-from backend.models.schemas import AnalysisState
+from backend.models.schemas import AnalysisState, AnalysisStep
 from backend.utils.llm_client import UpstreamExhaustedError
 from backend.workflow.reporting import ReportingMixin
 
@@ -23,6 +23,11 @@ class _Harness(ReportingMixin):
 
 def _state():
     s = AnalysisState(session_id="t", user_id="u", initial_instruction="x")
+    s.current_round = 1
+    # Report short-circuit predicate is now log/history-based — these tests
+    # exercise the LLM-failure retry path inside the real report pipeline,
+    # so we must record at least one analysis step to bypass the short-circuit.
+    s.analysis_log.append(AnalysisStep(step_number=1, step_type="execute_code", code="x=1"))
     return {"analysis_state": s}
 
 

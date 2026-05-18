@@ -40,6 +40,16 @@ class ReportingMixin:
         """Generate final analysis report including integrated report with figures"""
         analysis_state = state["analysis_state"]
 
+        if not analysis_state.analysis_log and not analysis_state.code_history:
+            # current_round may be >0 even when no work happened (initialize_round
+            # increments before the early-stop check), so use the log/history as
+            # the real "did anything run" predicate.
+            logger.info(f"[{self.session_id}] No analysis work recorded, short-circuiting report generation")
+            self._set_status(analysis_state, TaskStatus.COMPLETED)
+            await self._send_message("completed", {"reason": "stopped_before_execution"}, AgentType.PI)
+            await self._send_state_sync(analysis_state, "analysis_complete")
+            return {**state, "analysis_state": analysis_state}
+
         # Mark status so interrupted report generation can be detected on resume
         self._set_status(analysis_state, TaskStatus.GENERATING_REPORT)
         await self._send_state_sync(analysis_state, "report_generation_start")
@@ -253,6 +263,12 @@ class ReportingMixin:
         """Dispatcher: try image mode first when Painter is available; on failure (or when
         Painter is disabled) fall back to text-mode ASCII diagram drawn by the Bio agent.
         """
+        analysis_state = state["analysis_state"]
+
+        if not analysis_state.analysis_log and not analysis_state.code_history:
+            logger.info(f"[{self.session_id}] No analysis work recorded, skipping graphic abstract")
+            return {**state, "analysis_state": analysis_state}
+
         if self.painter_agent:
             try:
                 return await self._generate_image_graphic_abstract(state)
@@ -698,6 +714,13 @@ class ReportingMixin:
     async def _generate_detailed_report(self, state: WorkflowState) -> WorkflowState:
         """Generate detailed report with figures and tables"""
         analysis_state = state["analysis_state"]
+
+        if not analysis_state.analysis_log and not analysis_state.code_history:
+            logger.info(f"[{self.session_id}] No analysis work recorded, skipping detailed report")
+            self._set_status(analysis_state, TaskStatus.COMPLETED)
+            await self._send_message("completed", {"reason": "stopped_before_execution"}, AgentType.PI)
+            await self._send_state_sync(analysis_state, "analysis_complete")
+            return {**state, "analysis_state": analysis_state}
 
         logger.info(f"[{self.session_id}] Generating detailed report")
         await self._send_message(

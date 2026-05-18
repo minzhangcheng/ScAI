@@ -62,6 +62,7 @@ class GraphMixin:
                 # (e.g., skipping upstream agents after mid-execution revision).
                 "approved_revision": "bioinformatics_analysis",
                 "revise": "planning_dialogue",
+                "abort": "generate_final_report",
             }
         )
 
