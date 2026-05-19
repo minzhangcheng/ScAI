@@ -5,9 +5,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from ..constants import NODE_TO_RESULT_KEY
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
-from .helpers import _get_task_text, _normalize_tasks, STAGE1_KEYWORDS
+from .helpers import _get_task_text, _normalize_tasks, cache_hit, cache_invalidate, cache_store, STAGE1_KEYWORDS
 from .retry import with_retry
 
 if TYPE_CHECKING:
@@ -38,11 +37,25 @@ class AgentNodesMixin:
     @with_retry("pathology_analysis")
     async def _pathology_analysis(self, state: WorkflowState) -> WorkflowState:
         """Pathology agent analyzes images"""
+        analysis_state = state["analysis_state"]
+
+        cached = cache_hit(analysis_state, AgentType.PATHOLOGY)
+        if cached is not None:
+            logger.info(f"[{self.session_id}] pathology cache hit, skipping re-execution")
+            await self._send_message("result", cached, AgentType.PATHOLOGY)
+            return {
+                **state,
+                "analysis_state": analysis_state,
+                "pathology_result": cached,
+                "failed_node": None,
+            }
+
         if not self.pathology_agent:
             logger.info(f"[{self.session_id}] Pathology agent disabled, skipping")
-            return {**state, "failed_node": None, "pathology_result": {"findings": [], "status": "skipped"}}
+            skipped_result = {"findings": [], "status": "skipped"}
+            cache_store(analysis_state, AgentType.PATHOLOGY, skipped_result)
+            return {**state, "failed_node": None, "pathology_result": skipped_result}
 
-        analysis_state = state["analysis_state"]
         instructions = state["pi_instructions"]
 
         tasks = instructions.get("pathology_tasks", [])
@@ -55,6 +68,7 @@ class AgentNodesMixin:
         
         # Check if images are available
         if not pathology_files:
+            no_data_result = {"findings": [], "status": "no_data"}
             await self._send_message(
                 "result",
                 {
@@ -64,10 +78,11 @@ class AgentNodesMixin:
                 },
                 AgentType.PATHOLOGY
             )
+            cache_store(analysis_state, AgentType.PATHOLOGY, no_data_result)
             return {
                 **state,
                 "analysis_state": analysis_state,
-                "pathology_result": {"findings": [], "status": "no_data"}
+                "pathology_result": no_data_result
             }
         
         # Log image count
@@ -126,6 +141,7 @@ class AgentNodesMixin:
             json.dumps(result, ensure_ascii=False)
         )
 
+        cache_store(analysis_state, AgentType.PATHOLOGY, result)
         return {
             **state,
             "analysis_state": analysis_state,
@@ -146,6 +162,25 @@ class AgentNodesMixin:
         self._current_graph_state = state
         analysis_state = state["analysis_state"]
 
+        cached = cache_hit(analysis_state, AgentType.BIOINFORMATICS)
+        if cached is not None:
+            logger.info(f"[{self.session_id}] bioinformatics cache hit, skipping re-execution")
+            await self._send_message("result", cached, AgentType.BIOINFORMATICS)
+            # If the cached result was from stage2, the normal path would have
+            # transitioned planning_stage to "full". Carry that forward here so
+            # downstream routing (_after_bioinformatics) sees the correct stage.
+            result_state = {
+                **state,
+                "analysis_state": analysis_state,
+                "bioinformatics_result": cached,
+                "failed_node": None,
+            }
+            planning_stage = state.get("planning_stage", "full")
+            if planning_stage == "stage2":
+                result_state["planning_stage"] = "full"
+                result_state["planning_context"] = None
+            return result_state
+
         logger.info(f"[{self.session_id}] Starting bioinformatics analysis")
         seq_files = analysis_state.get_files_by_section("sequencing")
         logger.info(f"[{self.session_id}] Sequencing files: {len(seq_files)}")
@@ -154,15 +189,17 @@ class AgentNodesMixin:
         
         # Check if data is available
         if not analysis_state.has_sequencing_data():
+            waiting_result = {"findings": [], "status": "waiting_data"}
             await self._send_message(
                 "result",
                 {"message": "Please upload sequencing data first", "findings": []},
                 AgentType.BIOINFORMATICS
             )
+            cache_store(analysis_state, AgentType.BIOINFORMATICS, waiting_result)
             return {
                 **state,
                 "analysis_state": analysis_state,
-                "bioinformatics_result": {"findings": [], "status": "waiting_data"}
+                "bioinformatics_result": waiting_result
             }
         
         # Incorporate human guidance from workflow state (set by _initialize_round)
@@ -530,6 +567,9 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         }
 
         if planning_stage == "stage1":
+            # Don't cache the stage1 result — stage2 re-enters this node and
+            # must run fresh. Biochem/pathology/literature cache survives so
+            # stage2 reuses them.
             result_state["planning_stage"] = "stage2"
             result_state["plan_approved"] = False
             result_state["pi_instructions"] = _reset_pi_instructions_for_stage2(
@@ -542,9 +582,12 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 "stage1_steps_executed": final_result.get("steps_executed", 0),
             }
             analysis_state.current_plan = None
-        elif planning_stage == "stage2":
-            result_state["planning_stage"] = "full"
-            result_state["planning_context"] = None  # Clear stage1 context after stage2 completes
+            cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
+        else:
+            cache_store(analysis_state, AgentType.BIOINFORMATICS, final_result)
+            if planning_stage == "stage2":
+                result_state["planning_stage"] = "full"
+                result_state["planning_context"] = None  # Clear stage1 context after stage2 completes
 
         # Check for mid-execution plan revision from agent result
         if isinstance(final_result, dict) and final_result.get("plan_revision_needed"):
@@ -557,11 +600,25 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
     @with_retry("biochemistry_analysis")
     async def _biochemistry_analysis(self, state: WorkflowState) -> WorkflowState:
         """Biochemistry agent analyzes experimental results"""
+        analysis_state = state["analysis_state"]
+
+        cached = cache_hit(analysis_state, AgentType.BIOCHEMISTRY)
+        if cached is not None:
+            logger.info(f"[{self.session_id}] biochemistry cache hit, skipping re-execution")
+            await self._send_message("result", cached, AgentType.BIOCHEMISTRY)
+            return {
+                **state,
+                "analysis_state": analysis_state,
+                "biochemistry_result": cached,
+                "failed_node": None,
+            }
+
         if not self.biochemistry_agent:
             logger.info(f"[{self.session_id}] Biochemistry agent disabled, skipping")
-            return {**state, "failed_node": None, "biochemistry_result": {"findings": [], "status": "skipped"}}
+            skipped_result = {"findings": [], "status": "skipped"}
+            cache_store(analysis_state, AgentType.BIOCHEMISTRY, skipped_result)
+            return {**state, "failed_node": None, "biochemistry_result": skipped_result}
 
-        analysis_state = state["analysis_state"]
         instructions = state["pi_instructions"]
 
         tasks = instructions.get("biochemistry_tasks", [])
@@ -601,6 +658,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             json.dumps(result, ensure_ascii=False)
         )
 
+        cache_store(analysis_state, AgentType.BIOCHEMISTRY, result)
         return {
             **state,
             "analysis_state": analysis_state,
@@ -618,6 +676,18 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         PubMed mode: searches each topic individually (up to 3).
         """
         analysis_state = state["analysis_state"]
+
+        cached = cache_hit(analysis_state, AgentType.LITERATURE)
+        if cached is not None:
+            logger.info(f"[{self.session_id}] literature cache hit, skipping re-execution")
+            await self._send_message("result", cached, AgentType.LITERATURE)
+            return {
+                **state,
+                "analysis_state": analysis_state,
+                "literature_result": cached,
+                "failed_node": None,
+            }
+
         instructions = state["pi_instructions"]
 
         topics = _normalize_tasks(instructions.get("literature_topics", []))
@@ -759,6 +829,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             json.dumps({"findings": combined_result["findings"]}, ensure_ascii=False)
         )
 
+        cache_store(analysis_state, AgentType.LITERATURE, combined_result)
         return {
             **state,
             "analysis_state": analysis_state,

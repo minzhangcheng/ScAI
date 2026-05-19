@@ -41,6 +41,7 @@ _EXCLUDED_FIELDS = {
     "literature_config",
     "chat_messages",
     "score_definitions",
+    "current_round_cache",
     "messages",
     "revision_history",
     "all_candidates",

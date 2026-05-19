@@ -2,7 +2,9 @@
 import asyncio
 import logging
 import random
-from typing import Dict, List
+from typing import Dict, List, Optional, Union
+
+from ..models.schemas import AgentRoundCache, AgentType
 
 logger = logging.getLogger(__name__)
 
@@ -123,3 +125,39 @@ def _normalize_tasks(tasks: list) -> List[str]:
         else:
             result.append(str(t))
     return result
+
+
+# === Per-round agent result cache ===
+# Lives in AnalysisState (snapshot-persisted) so a snapshot-restored round can
+# short-circuit nodes whose results are already known.
+
+_AgentKey = Union[AgentType, str]
+
+
+def _key(agent: _AgentKey) -> str:
+    return agent.value if isinstance(agent, AgentType) else agent
+
+
+def cache_hit(analysis_state, agent: _AgentKey) -> Optional[dict]:
+    """Return the cached result dict for this agent in the current round, or None on miss/stale."""
+    cache = analysis_state.current_round_cache
+    if cache is None or cache.round_number != analysis_state.current_round:
+        return None
+    return cache.results.get(_key(agent))
+
+
+def cache_store(analysis_state, agent: _AgentKey, result: dict) -> None:
+    """Store an agent's canonical node-return dict into the current-round cache."""
+    cache = analysis_state.current_round_cache
+    if cache is None or cache.round_number != analysis_state.current_round:
+        cache = AgentRoundCache(round_number=analysis_state.current_round)
+        analysis_state.current_round_cache = cache
+    cache.results[_key(agent)] = result
+
+
+def cache_invalidate(analysis_state, agent: _AgentKey) -> None:
+    """Drop a single agent's entry from the current-round cache (no-op if absent)."""
+    cache = analysis_state.current_round_cache
+    if cache is None:
+        return
+    cache.results.pop(_key(agent), None)

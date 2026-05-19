@@ -143,6 +143,8 @@ class InitializeMixin:
             # "already approved" early-return short-circuits the next round.
             # Skip on snapshot restore — the restored plan must be preserved.
             analysis_state.current_plan = None
+            # Snapshot-restore path preserves it by skipping this whole block.
+            analysis_state.current_round_cache = None
         self._set_status(analysis_state, TaskStatus.RUNNING)
 
         # Clear residual should_continue from previous convergence check

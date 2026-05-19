@@ -433,7 +433,7 @@ Please provide a detailed literature review report with specific citation inform
     viewDetailedReport: '查看详细报告',
 
     // Snapshots
-    snapshots: '快照',
+    snapshots: '快照 (实验性)',
     createSnapshot: '创建快照',
     restoreSnapshot: '恢复快照',
     deleteSnapshot: '删除快照',
@@ -907,7 +907,7 @@ Please provide a detailed literature review report with specific citations.`,
     viewDetailedReport: 'View Detailed Report',
 
     // Snapshots
-    snapshots: 'Snapshots',
+    snapshots: 'Snapshots (Experimental)',
     createSnapshot: 'Create Snapshot',
     restoreSnapshot: 'Restore',
     deleteSnapshot: 'Delete',

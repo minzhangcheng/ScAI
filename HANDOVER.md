@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.18 · **Last updated**: 2026-05-18
+**Version**: 0.24.19 · **Last updated**: 2026-05-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,15 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.19` — per-round agent result cache (2026-05-18):
+  - **AgentRoundCache model**: Added new Pydantic model in schemas.py for per-round per-agent intermediate result caching. Lives in AnalysisState so snapshot/restore captures it automatically.
+  - **cache_hit/cache_store helpers**: Added functions in helpers.py for checking and storing agent results in the current round cache. Returns None if no cache exists or cache is for a different round.
+  - **Pathology agent caching**: Added cache hit check at start of `_pathology_analysis` to skip re-execution if result already exists. Stores result on completion.
+  - **Bioinformatics agent caching**: Added cache hit check at start of `_bioinformatics_analysis` to skip re-execution if result already exists. Preserves planning_stage transition on cache hit.
+  - **Cache lifecycle management**: Clear `current_round_cache` on new round start in `_start_new_round` and after appending to `round_results` in `_synthesize_round` to prevent stale cache on snapshot restore.
+  - **Snapshot labeling**: Updated translation to mark snapshots as "Experimental" in both Chinese and English.
+  - **Test additions**: Added `test_agent_round_cache.py` and `test_snapshot_rollback_idempotency.py`.
 
 - `0.24.18` — unified HITL wait gate (2026-05-18):
   - **wait_with_skip_time helper**: Added unified `wait_with_skip_time()` function in helpers.py that provides consistent HITL wait gate behavior across all gates (plan review, annotation, direction selection, round wait). Semantics: -1=manual (block forever), 0=no-wait (immediate), >0=countdown (wait_seconds + 60s buffer).

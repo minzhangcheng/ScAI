@@ -153,6 +153,9 @@ class SynthesisMixin:
             logger.info(f"[{self.session_id}] Transitioning to innovation phase")
 
         analysis_state.round_results.append(round_result)
+        # Round is now canonical in round_results; clear the per-round cache
+        # so a later snapshot-restored round can't replay stale agent outputs.
+        analysis_state.current_round_cache = None
 
         # Multi-direction correlation analysis: trigger when queue is empty and multiple directions were selected
         if (

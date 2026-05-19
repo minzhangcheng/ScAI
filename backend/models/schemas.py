@@ -245,6 +245,17 @@ class AnnotationConfirmationState(BaseModel):
     pending: bool = False
     confirmed: bool = False
 
+class AgentRoundCache(BaseModel):
+    """Per-round agent-result cache for snapshot-restore idempotency.
+
+    Lives in AnalysisState (so snapshot/restore captures it), keyed by
+    AgentType value, holding each node's canonical return dict. Cleared at
+    the start of a genuinely-new round; preserved on snapshot restore so a
+    replayed workflow can short-circuit nodes whose results are already known.
+    """
+    round_number: int
+    results: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
 class DetailedReportSegment(BaseModel):
     """One segment of the incrementally-built detailed report at each HITL checkpoint"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -453,7 +464,8 @@ class AnalysisState(BaseModel):
     
     # Round results
     round_results: List[RoundResult] = Field(default_factory=list)
-    
+    current_round_cache: Optional[AgentRoundCache] = None
+
     # Final summary
     final_summary: Optional[str] = None
 
