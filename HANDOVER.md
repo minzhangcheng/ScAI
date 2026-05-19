@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.19 · **Last updated**: 2026-05-18
+**Version**: 0.24.20 · **Last updated**: 2026-05-19
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.20` — PlanReviewDialog countdown UI improvements (2026-05-19):
+  - **Countdown color change**: Added dynamic color change for countdown timer - turns red when <= 30 seconds remaining to alert users of time running out.
+  - **Layout refactor**: Restructured PlanReviewDialog header to organize countdown timer and download button in a horizontal flex layout alongside the title.
 
 - `0.24.19` — per-round agent result cache (2026-05-18):
   - **AgentRoundCache model**: Added new Pydantic model in schemas.py for per-round per-agent intermediate result caching. Lives in AnalysisState so snapshot/restore captures it automatically.

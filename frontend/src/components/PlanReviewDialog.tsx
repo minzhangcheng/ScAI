@@ -164,20 +164,24 @@ export function PlanReviewDialog({
             <h2 className="text-lg font-semibold text-gray-900">
               {t('planReviewTitle')} — {phaseLabel} — Round {round} — {stageLabel}
             </h2>
+          </div>
+          <div className="flex items-center gap-3">
             {countdown > 0 && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-sm font-medium">
+              <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium ${
+                countdown <= 30 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-800'
+              }`}>
                 <Clock className="w-4 h-4" />
                 {countdown}s
               </span>
             )}
+            <button
+              onClick={handleDownloadDialogue}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+            >
+              <FileDown className="w-4 h-4" />
+              {t('planReviewDownloadLog')}
+            </button>
           </div>
-          <button
-            onClick={handleDownloadDialogue}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
-          >
-            <FileDown className="w-4 h-4" />
-            {t('planReviewDownloadLog')}
-          </button>
         </div>
 
         {/* Content */}
