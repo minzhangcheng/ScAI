@@ -59,6 +59,7 @@ def _make_state():
     analysis_state.plan_dialogue_history = []
     analysis_state.analysis_phase = SimpleNamespace(value="exploration")
     analysis_state.current_round = 1
+    analysis_state.round_wait_seconds = -1
     state = {
         "analysis_state": analysis_state,
         "planning_stage": "stage1",

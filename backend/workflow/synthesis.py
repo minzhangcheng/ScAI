@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from ..constants import LlmFailureAction, WaitInputReason, StateSyncChangeType
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisState, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
+from .helpers import wait_with_skip_time
 
 if TYPE_CHECKING:
     from .state import WorkflowState
@@ -283,11 +284,15 @@ class SynthesisMixin:
     async def _wait_for_user_input(self, state: WorkflowState) -> WorkflowState:
         """Block between rounds, waiting for user input or continue signal from frontend.
 
-        Behavior depends on analysis_state.round_wait_seconds:
+        Behavior depends on analysis_state.round_wait_seconds (the user-facing
+        "skip time" setting, unified across all HITL gates):
           -1  = manual mode: wait indefinitely for user signal
            0  = no-wait mode: proceed immediately without waiting
-          >0  = countdown mode: frontend shows countdown timer, backend uses
-                countdown + 60s buffer as safety timeout
+          >0  = countdown mode: frontend shows countdown timer, backend waits
+                `wait_seconds + 60s` then auto-skips (60s buffer for client lag)
+
+        Auto-skip semantics for the post-exploration direction-selection gate:
+        equivalent to "let PI decide" (sets user_chosen_direction = [PI_DECIDE]).
         """
         analysis_state = state["analysis_state"]
 
@@ -295,31 +300,44 @@ class SynthesisMixin:
         # status is announced, to prevent a race condition with signal_continue().
 
         wait_seconds = analysis_state.round_wait_seconds  # -1=manual, 0=no wait, >0=countdown
+        is_direction_gate = (
+            analysis_state.current_round == 1
+            and analysis_state.analysis_phase == AnalysisPhase.INNOVATION
+        )
 
         # Filter out empty/whitespace-only directions from queue
         if analysis_state.directions_queue:
             analysis_state.directions_queue = [
                 d for d in analysis_state.directions_queue if d and d.get("direction", "").strip()
             ]
-        # Note: no auto-skip for multi-direction mode — fall through to normal wait logic
-
-        # After exploration phase (Round 1), force manual wait so user must choose direction
-        if analysis_state.current_round == 1 and analysis_state.analysis_phase == AnalysisPhase.INNOVATION:
-            wait_seconds = -1
-            logger.info(f"[{self.session_id}] Exploration phase complete, forcing manual wait for direction selection")
 
         if wait_seconds == 0:
-            # No-wait mode: proceed immediately
+            # No-wait mode: proceed immediately (with let-PI-decide for direction gate)
             logger.info(f"[{self.session_id}] No-wait mode, proceeding immediately (round {analysis_state.current_round})")
-        elif wait_seconds == -1:
+            if is_direction_gate and not analysis_state.user_chosen_direction:
+                analysis_state.user_chosen_direction = "[PI_DECIDE]"
+                analysis_state.pending_human_input = "[PI_DECIDE]"
+        else:
             if analysis_state.status != TaskStatus.WAITING_INPUT:
                 self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
                 await self._send_state_sync(analysis_state, "waiting_input")
 
             self._continue_event.clear()
             while True:
-                logger.info(f"[{self.session_id}] Manual mode, waiting for user input (round {analysis_state.current_round})")
-                await self._continue_event.wait()
+                signaled = await wait_with_skip_time(
+                    self._continue_event,
+                    wait_seconds,
+                    self.session_id,
+                    "direction_selection" if is_direction_gate else "round_wait",
+                )
+                if not signaled:
+                    # Auto-skip on timeout
+                    if is_direction_gate and not analysis_state.user_chosen_direction:
+                        analysis_state.user_chosen_direction = "[PI_DECIDE]"
+                        analysis_state.pending_human_input = "[PI_DECIDE]"
+                    self._set_status(analysis_state, TaskStatus.RUNNING)
+                    await self._send_state_sync(analysis_state, "auto_continue")
+                    break
                 _consume_signal_then_clear(self._continue_event)
 
                 if self._supplementary_request and self._supplementary_target == "direction":
@@ -376,21 +394,6 @@ class SynthesisMixin:
                 else:
                     logger.info(f"[{self.session_id}] Continue signal received")
                     break
-        else:
-            # Countdown mode: backend safety timeout = frontend countdown + 60s buffer
-            # Guard: ensure WAITING_INPUT status is synced before blocking
-            if analysis_state.status != TaskStatus.WAITING_INPUT:
-                self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
-                await self._send_state_sync(analysis_state, "waiting_input")
-            backend_timeout = wait_seconds + 60
-            logger.info(f"[{self.session_id}] Waiting for user input (round {analysis_state.current_round}, timeout={backend_timeout}s)")
-            try:
-                await asyncio.wait_for(self._continue_event.wait(), timeout=backend_timeout)
-                logger.info(f"[{self.session_id}] Continue signal received")
-            except asyncio.TimeoutError:
-                logger.info(f"[{self.session_id}] Wait timeout ({backend_timeout}s), auto-proceeding")
-                self._set_status(analysis_state, TaskStatus.RUNNING)
-                await self._send_state_sync(analysis_state, "auto_continue")
 
         # If user provided real input (text or files) on the last round, extend max_rounds to allow one more
         has_real_text = (

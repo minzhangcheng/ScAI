@@ -1,6 +1,45 @@
 """Pure helper functions for the workflow — no side effects, no class dependencies."""
+import asyncio
+import logging
 import random
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
+
+
+async def wait_with_skip_time(
+    event: asyncio.Event,
+    wait_seconds: int,
+    session_id: str,
+    gate_name: str,
+) -> bool:
+    """Unified HITL wait gate honoring user-configured `round_wait_seconds`.
+
+    Semantics (same as round-wait):
+      -1  manual  → block forever for the event
+       0  no-wait → return immediately as if timed out
+      >0  countdown → wait `wait_seconds + 60` seconds (60s buffer for client lag),
+                     then return as timed out
+
+    Returns:
+        True  if the event was signaled (user responded)
+        False if timed out / no-wait → caller should apply its default auto-skip action
+    """
+    if wait_seconds == 0:
+        logger.info(f"[{session_id}] {gate_name}: skip time = 0, auto-skipping")
+        return False
+    if wait_seconds == -1:
+        logger.info(f"[{session_id}] {gate_name}: manual mode, waiting indefinitely")
+        await event.wait()
+        return True
+    timeout = wait_seconds + 60
+    logger.info(f"[{session_id}] {gate_name}: waiting up to {timeout}s (skip time {wait_seconds}s + 60s buffer)")
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        logger.warning(f"[{session_id}] {gate_name}: timed out after {timeout}s, auto-skipping")
+        return False
 
 
 def _retry_backoff_delay(attempt: int) -> float:

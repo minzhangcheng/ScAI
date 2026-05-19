@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from ..constants import LlmFailureAction
 from ..models.schemas import AgentType, AnalysisPhase, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
-from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS
+from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
 from .retry import MAX_NODE_RETRIES, _retry_backoff_delay, with_retry
 
 if TYPE_CHECKING:
@@ -627,11 +627,13 @@ class PlanningMixin:
             self._plan_review_event.clear()
             self._plan_review_action = None
             if not prev_action:
-                logger.info(f"[{self.session_id}] Waiting for user plan review...")
-                try:
-                    await asyncio.wait_for(self._plan_review_event.wait(), timeout=3600)
-                except asyncio.TimeoutError:
-                    logger.warning(f"[{self.session_id}] Plan review timed out, auto-skipping")
+                signaled = await wait_with_skip_time(
+                    self._plan_review_event,
+                    analysis_state.round_wait_seconds,
+                    self.session_id,
+                    "plan_review",
+                )
+                if not signaled:
                     self._plan_review_action = {"action": "skip", "user_input": ""}
                 action = self._plan_review_action or {}
             else:

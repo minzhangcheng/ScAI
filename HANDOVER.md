@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.17 · **Last updated**: 2026-05-18
+**Version**: 0.24.18 · **Last updated**: 2026-05-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.18` — unified HITL wait gate (2026-05-18):
+  - **wait_with_skip_time helper**: Added unified `wait_with_skip_time()` function in helpers.py that provides consistent HITL wait gate behavior across all gates (plan review, annotation, direction selection, round wait). Semantics: -1=manual (block forever), 0=no-wait (immediate), >0=countdown (wait_seconds + 60s buffer).
+  - **Planning integration**: Updated `_user_review_gate` to use `wait_with_skip_time` instead of hardcoded timeout.
+  - **Synthesis integration**: Updated `_wait_for_user_input` to use `wait_with_skip_time` for both direction selection gate and round wait. Auto-skip now sets user_chosen_direction to "[PI_DECIDE]".
+  - **Annotation integration**: Updated `_annotation_confirmation` to use `wait_with_skip_time`. Auto-skip now accepts PI annotations as-is and marks them as confirmed.
 
 - `0.24.17` — prompt template improvements (2026-05-18):
   - **Figure saving clarification**: Clarified that execute_code tool allows `plt.savefig('name.jpg')` and `sc.pl.*(save='_name.jpg')` for figure saving, while generate_prompts_figure tool wraps saving internally with different rules.

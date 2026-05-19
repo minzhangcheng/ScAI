@@ -6,6 +6,7 @@ from ..models.schemas import (
     AgentType, AnalysisState, AnnotationConfirmationState,
     ClusterAnnotation, TaskStatus,
 )
+from .helpers import wait_with_skip_time
 
 if TYPE_CHECKING:
     from .state import WorkflowState
@@ -373,8 +374,20 @@ class AnnotationMixin:
                 self._set_status(state, TaskStatus.WAITING_ANNOTATION)
                 await self._send_state_sync(state, "annotation_confirmation")
 
-                logger.info(f"[{self.session_id}] Waiting for user annotation confirmation...")
-                await self._annotation_event.wait()
+                signaled = await wait_with_skip_time(
+                    self._annotation_event,
+                    state.round_wait_seconds,
+                    self.session_id,
+                    "annotation_confirmation",
+                )
+                if not signaled:
+                    # Auto-skip: accept PI annotations as-is, mark as confirmed
+                    if state.annotation_state:
+                        state.annotation_state.confirmed = True
+                        state.annotation_state.pending = False
+                    state.status = original_status
+                    await self._send_state_sync(state, "annotation_auto_skipped")
+                    break
 
                 if self._supplementary_request and self._supplementary_target == "annotation":
                     req = self._supplementary_request
