@@ -189,9 +189,6 @@ _HEAD_POST_CSS_BODY = """\
             <!-- Score Definitions -->
             {score_definitions_html}
 
-            <!-- Agent LLM Statistics -->
-            {agent_stats_html}
-
             <!-- Appendix: Analysis Settings & Records -->
             {appendix_html}
         </div>

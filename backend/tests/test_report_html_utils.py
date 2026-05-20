@@ -66,7 +66,6 @@ class TestHtmlTemplate:
         required_placeholders = [
             "{title}",
             "{sections_html}",
-            "{agent_stats_html}",
             "{score_definitions_html}",
             "{appendix_html}",
             "{toc_items}",  # Note: template uses toc_items, not toc_html

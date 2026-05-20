@@ -29,7 +29,6 @@ from openai import APIConnectionError
 
 from ..models.schemas import AgentType, AnalysisState, AnalysisStep, PlanStage
 from ..utils.error_parsing import API_ERROR_TYPES, CODE_GEN_ERROR_TYPES, extract_error_type, TECHNICAL_ERROR_TYPES
-from ..services.report import get_agent_stats_html
 from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..utils.settings_provider import AgentSettingsProvider
 
@@ -2146,9 +2145,6 @@ Report generation model call failed due to API connection error. Please refer to
 
         generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-        # Build agent LLM statistics HTML
-        agent_stats_html = get_agent_stats_html(self.session_id)
-
         html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2184,8 +2180,6 @@ Report generation model call failed due to API connection error. Please refer to
         </div>
 
         {self._build_score_definitions_html(report)}
-
-        {agent_stats_html}
 
         {self._build_appendix_html_section(report)}
     </div>
@@ -2285,10 +2279,14 @@ Report generation model call failed due to API connection error. Please refer to
             </div>
         </div>"""
 
-    @staticmethod
-    def _build_appendix_html_section(report: Dict) -> str:
+    def _build_appendix_html_section(self, report: Dict) -> str:
         """Build appendix HTML section from report data."""
         import html as html_module
+        from ..services.report.regenerator import (
+            get_agent_llm_stats,
+            render_agent_config_table_html,
+            AGENT_DISPLAY_NAMES,
+        )
         appendix = report.get("appendix")
         if not appendix:
             return ""
@@ -2312,20 +2310,15 @@ Report generation model call failed due to API connection error. Please refer to
                          f'<td>{esc(report.get("generated_at", "-"))}</td></tr>')
         parts.append('</table>')
 
-        # Agent Configuration
         models = appendix.get("agent_models", {})
         temps = appendix.get("agent_temperatures", {})
         if models:
-            parts.append('<h3>Agent Configuration</h3>')
-            parts.append('<table>')
-            parts.append('<thead><tr><th>Agent</th>'
-                         '<th>Model</th>'
-                         '<th>Temperature</th></tr></thead><tbody>')
-            for key in sorted(models.keys()):
-                parts.append(f'<tr><td>{esc(key.title())}</td>'
-                             f'<td><code>{esc(str(models[key]))}</code></td>'
-                             f'<td>{temps.get(key, "-")}</td></tr>')
-            parts.append('</tbody></table>')
+            stats = get_agent_llm_stats(self.session_id) if self.session_id else {}
+            config_rows = [
+                (AGENT_DISPLAY_NAMES.get(key, key.title()), key, models[key], temps.get(key, "-"))
+                for key in sorted(models.keys())
+            ]
+            parts.append(render_agent_config_table_html(config_rows, stats))
 
         # Data Files
         data_files = appendix.get("data_files", [])

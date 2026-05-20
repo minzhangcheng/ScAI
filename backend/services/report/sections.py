@@ -246,6 +246,7 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         Pure data extraction — no LLM calls.
         """
         from backend.config import ModelConfig, AgentTemperatures
+        from .regenerator import get_agent_llm_stats, render_agent_config_table_html
 
         esc = html_module.escape
         default_models = ModelConfig()
@@ -275,12 +276,6 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         </table>
         """
 
-        # ── 2. Agent Configuration ──────────────────────────────────
-        agent_title = "Agent Configuration"
-        lbl_agent = "Agent"
-        lbl_model = "Model"
-        lbl_temp = "Temperature"
-
         agent_keys = [
             ("PI", "pi", "pi_model"),
             ("Pathology", "pathology", "pathology_model"),
@@ -289,20 +284,16 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             ("Literature", "literature", "literature_model"),
             ("Painter", "painter", "painter_model"),
         ]
-
-        agent_rows = ""
-        for display_name, key, model_attr in agent_keys:
-            model = state.custom_models.get(key, getattr(default_models, model_attr, "-"))
-            temp = state.custom_temperatures.get(key, getattr(default_temps, key, "-"))
-            agent_rows += f"<tr><td>{esc(display_name)}</td><td>{esc(str(model))}</td><td>{temp}</td></tr>\n"
-
-        agent_html = f"""
-        <h3>{agent_title}</h3>
-        <table>
-            <thead><tr><th>{lbl_agent}</th><th>{lbl_model}</th><th>{lbl_temp}</th></tr></thead>
-            <tbody>{agent_rows}</tbody>
-        </table>
-        """
+        config_rows = [
+            (
+                display_name,
+                key,
+                state.custom_models.get(key, getattr(default_models, model_attr, "-")),
+                state.custom_temperatures.get(key, getattr(default_temps, key, "-")),
+            )
+            for display_name, key, model_attr in agent_keys
+        ]
+        agent_html = render_agent_config_table_html(config_rows, get_agent_llm_stats(state.id))
 
         # ── 3. Uploaded Data ────────────────────────────────────────
         data_title = "Uploaded Data"

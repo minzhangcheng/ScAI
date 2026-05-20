@@ -27,6 +27,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["websockets"])
 
 
+async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> None:
+    """Re-emit state_sync for pending HITL gates after a reconnect.
+
+    The LlmTimeoutDialog and disabled-agent dialog are driven exclusively by
+    state_sync messages (useApi.ts). On page reload, the workflow may already
+    be parked in _wait_for_llm_intervention with llm_failure_info set, but the
+    reconnect path only replays message_history — which does not feed the
+    state_sync handler. Without this resend the dialog never reopens.
+    """
+    reason = getattr(state, "wait_input_reason", None)
+    if reason not in ("llm_failure", "agent_disabled"):
+        return
+    payload = {
+        "change_type": reason,
+        "version": getattr(state, "state_version", 0),
+        "status": state.status.value if hasattr(state.status, "value") else state.status,
+        "current_round": getattr(state, "current_round", 0),
+        "analysis_phase": getattr(state, "analysis_phase", None),
+        "timestamp": datetime.now().isoformat(),
+        "unresolved_errors": len(state.get_unresolved_errors()) if hasattr(state, "get_unresolved_errors") else 0,
+        "wait_input_reason": reason,
+        "llm_failure_info": getattr(state, "llm_failure_info", None),
+        "agent_disabled_info": getattr(state, "agent_disabled_info", None),
+    }
+    try:
+        await websocket.send_json({
+            "type": "state_sync",
+            "agent": None,
+            "content": payload,
+            "timestamp": datetime.now().isoformat(),
+        })
+        logger.info(f"[{session_id}] Re-sent state_sync for pending {reason} on reconnect")
+    except Exception:
+        logger.warning(f"[{session_id}] Failed to resend wait-input state_sync", exc_info=True)
+
+
 def _serialize_realtime_messages(messages):
     """Serialize a list of WebSocketMessage to JSON-safe dicts."""
     msg_data_list = []
@@ -117,6 +153,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     })
                 except Exception as e:
                     logger.warning(f"Failed to send history to observer: {e}")
+
+            # Re-emit pending HITL state_sync so the frontend can reopen the
+            # LlmTimeoutDialog / disabled-agent dialog after a page reload.
+            # message_history alone doesn't drive the state_sync handler, so
+            # llmFailureInfo would otherwise stay null until the next event.
+            await _resend_wait_input_state_sync(websocket, state, session_id)
 
         # Wait for workflow to complete AND restore to finish
         try:
@@ -228,6 +270,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     },
                     "timestamp": datetime.now().isoformat()
                 })
+            await _resend_wait_input_state_sync(websocket, state, session_id)
             # Hold connection until user action triggers close
             while True:
                 try:

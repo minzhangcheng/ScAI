@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.22 · **Last updated**: 2026-05-19
+**Version**: 0.24.23 · **Last updated**: 2026-05-19
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.23` — report config table & websocket reconnect fix (2026-05-19):
+  - **Agent config table with LLM stats**: Added `render_agent_config_table_html()` in regenerator.py for building agent configuration table with LLM usage statistics (calls, input/output tokens, avg response time). Updated `sections.py` to use this new function instead of manual HTML construction.
+  - **WebSocket reconnect state sync**: Added `_resend_wait_input_state_sync()` in websockets.py to re-emit state_sync for pending HITL gates (llm_failure, agent_disabled) after a reconnect. Without this, LlmTimeoutDialog and disabled-agent dialog would not reopen on page reload.
+  - **AGENT_DISPLAY_NAMES mapping**: Added display name mapping for all agents (pi, pathology, bioinformatics, biochemistry, literature, painter, supervisor, technique) in regenerator.py.
+  - **Cleanup**: Removed unused `llm_server` field from agent stats and dead code in supervisor_agent.py.
 
 - `0.24.22` — snapshot label consistency (2026-05-19):
   - **Snapshot "Experimental" label**: Added "(Experimental)" suffix to SnapshotPanel title and translation key `analysisSnapshots` in both English and Chinese for consistency with other experimental features.

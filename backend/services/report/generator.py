@@ -29,7 +29,6 @@ from backend.utils.llm_client import OpenAICompatibleClient
 from backend.utils.checkpoint import CheckpointManager
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
 from backend.config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir, get_session_workspace, get_session_uploads, default_config
-from .regenerator import get_agent_stats_html
 from .variants import _build_score_definitions_html_section
 from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, _make_figure_block, _safe_parse_json, _build_figure_description_map, render_report_html
 from .analysis_log import AnalysisLogMixin
@@ -872,11 +871,6 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 f'<span class="section-type specific">{"Appendix"}</span></li>'
             )
 
-        # Build agent LLM statistics HTML
-        agent_stats_html = ""
-        if state is not None:
-            agent_stats_html = get_agent_stats_html(state.id)
-
         # Escape curly braces in content to prevent str.format() crash on LLM output
         def _safe_format_value(v: str) -> str:
             return v.replace("{", "{{").replace("}", "}}")
@@ -898,7 +892,6 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 "conclusions": _safe_format_value(conclusions_html),
                 "analysis_log_html": _safe_format_value(analysis_log_html),
                 "score_definitions_html": _safe_format_value(score_definitions_html),
-                "agent_stats_html": _safe_format_value(agent_stats_html),
                 "appendix_html": _safe_format_value(appendix_html),
             })
         except (KeyError, ValueError, IndexError) as e:

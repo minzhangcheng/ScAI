@@ -7,7 +7,7 @@ from .variants import (
     generate_combined_detailed_report_html,
     generate_annotation_context_report_html,
 )
-from .regenerator import get_agent_stats_html, generate_html_report
+from .regenerator import generate_html_report
 
 __all__ = [
     "DetailedReportGenerator",
@@ -16,6 +16,5 @@ __all__ = [
     "generate_detailed_report_segment_html",
     "generate_combined_detailed_report_html",
     "generate_annotation_context_report_html",
-    "get_agent_stats_html",
     "generate_html_report",
 ]
