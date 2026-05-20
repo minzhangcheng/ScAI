@@ -606,10 +606,23 @@ export function AnalysisPanel() {
     useAppStore.getState().setActiveTab('prompts')
   }, [])
 
-  const handleLlmTerminate = useCallback(() => {
-    setShowLlmTimeoutDialog(false)
-    setShowStopDialog(true)
-  }, [])
+  const handleLlmTerminate = useCallback(async () => {
+    const info = useAppStore.getState().llmFailureInfo
+    if (!currentSession || !info) return
+    try {
+      await apiFetch(`/session/${currentSession.id}/llm-failure-action`, {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'terminate',
+          node_name: info.nodeName,
+          generation: info.generation,
+        }),
+      })
+      setShowLlmTimeoutDialog(false)
+    } catch (e) {
+      console.error('Failed to signal LLM terminate:', e)
+    }
+  }, [currentSession])
 
   // StopDialog cancel callback: close StopDialog, reopen LlmTimeoutDialog if LLM failure in progress
   const handleStopDialogCancel = useCallback(() => {

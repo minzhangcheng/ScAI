@@ -57,6 +57,7 @@ class MessagingMixin:
                     "unresolved_errors": len(analysis_state.get_unresolved_errors()),
                     "wait_input_reason": analysis_state.wait_input_reason,
                     "llm_failure_info": analysis_state.llm_failure_info,
+                    "agent_disabled_info": analysis_state.agent_disabled_info,
                 }
             )
             try:
@@ -78,7 +79,7 @@ class MessagingMixin:
 
     async def _supervisor_callback(self, step: AnalysisStep, figures: Optional[List[str]] = None) -> Optional[str]:
         """Bridge bioinformatics agent's supervisor_callback to SupervisorAgent."""
-        if not self.supervisor_agent:
+        if not self.supervisor_agent or not self._settings_provider.get_model("supervisor"):
             return None
         try:
             return await self.supervisor_agent.evaluate_step(step, figures or [])

@@ -175,6 +175,7 @@ async def test_literature_cache_hit_skips_agent(analysis_state):
     wf._collect_current_round_results = MagicMock(return_value={})
     wf._build_previous_findings_context = MagicMock(return_value="")
     wf.pi_agent = AsyncMock()
+    wf._require_core_agent = AgentNodesMixin._require_core_agent.__get__(wf)
     wf._literature_research = AgentNodesMixin._literature_research.__get__(wf)
 
     cache_store(analysis_state, AgentType.LITERATURE, {"topics": ["t"], "findings": ["cached_lit"], "reports": []})
@@ -205,6 +206,7 @@ async def test_bioinformatics_cache_hit_skips_agent(analysis_state):
     )
     wf._send_message = AsyncMock()
     wf._current_graph_state = None
+    wf._require_core_agent = AgentNodesMixin._require_core_agent.__get__(wf)
     wf._bioinformatics_analysis = AgentNodesMixin._bioinformatics_analysis.__get__(wf)
 
     cache_store(analysis_state, AgentType.BIOINFORMATICS, {
@@ -239,6 +241,7 @@ async def test_bioinformatics_waiting_data_path_caches_skipped(analysis_state):
     wf.bioinformatics_agent = AsyncMock()
     wf._send_message = AsyncMock()
     wf._current_graph_state = None
+    wf._require_core_agent = AgentNodesMixin._require_core_agent.__get__(wf)
     wf._bioinformatics_analysis = AgentNodesMixin._bioinformatics_analysis.__get__(wf)
 
     # analysis_state has no sequencing data by default → triggers waiting_data branch
@@ -279,6 +282,7 @@ async def test_bioinformatics_stage2_cache_hit_transitions_planning_stage_to_ful
     wf.bioinformatics_agent = AsyncMock()
     wf._send_message = AsyncMock()
     wf._current_graph_state = None
+    wf._require_core_agent = AgentNodesMixin._require_core_agent.__get__(wf)
     wf._bioinformatics_analysis = AgentNodesMixin._bioinformatics_analysis.__get__(wf)
 
     cache_store(analysis_state, AgentType.BIOINFORMATICS, {

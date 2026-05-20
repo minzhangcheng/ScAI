@@ -34,6 +34,11 @@ class PlanningMixin:
     async def _pi_planning(self, state: WorkflowState) -> WorkflowState:
         """PI agent plans the round, incorporating human guidance and adjusted instructions"""
         analysis_state = state["analysis_state"]
+
+        skip = await self._require_core_agent(state, "pi", "pi_planning")
+        if skip is not None:
+            return skip
+
         human_guidance = state.get("human_guidance")
         adjusted_instructions = state.get("adjusted_instructions")
 
@@ -302,6 +307,12 @@ class PlanningMixin:
     async def _planning_dialogue(self, state: WorkflowState) -> WorkflowState:
         """PI ↔ Bioinformatics dialogue to design an analysis plan (max 5 rounds)."""
         analysis_state = state["analysis_state"]
+
+        for agent_name, node in [("pi", "planning_dialogue"), ("bioinformatics", "planning_dialogue")]:
+            skip = await self._require_core_agent(state, agent_name, node)
+            if skip is not None:
+                return skip
+
         pi_instructions = state.get("pi_instructions", {})
         bioinf_tasks = pi_instructions.get("bioinformatics_tasks", [])
         overview = pi_instructions.get("overview", "")

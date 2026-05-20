@@ -5,9 +5,10 @@ import pytest
 
 from backend.models.schemas import AnalysisState, AnalysisPlan
 from backend.workflow.planning import PlanningMixin
+from backend.workflow.agents import AgentNodesMixin
 
 
-class _Harness(PlanningMixin):
+class _Harness(AgentNodesMixin, PlanningMixin):
     """Minimal harness exposing the mixin method under test."""
     def __init__(self):
         self.session_id = "t"

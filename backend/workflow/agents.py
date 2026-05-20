@@ -34,6 +34,54 @@ def _stable_code_hash(code: str) -> str:
 class AgentNodesMixin:
     """Mixin providing agent-node execution methods. Composed into SingleCellAnalysisWorkflow."""
 
+    async def _require_core_agent(
+        self,
+        state: 'WorkflowState',
+        agent_name: str,
+        node_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Block until the named core agent is configured.
+
+        Returns None to indicate the caller may proceed. If the user chose to
+        skip, returns a partial state dict the caller should `return` immediately
+        (the corresponding result_key set to {'status': 'skipped'}). If the user
+        chose to terminate, raises WorkflowTerminatedError.
+        """
+        from ..constants import CORE_AGENTS, LlmFailureAction, NODE_TO_RESULT_KEY
+        from .core import WorkflowTerminatedError
+
+        if agent_name not in CORE_AGENTS:
+            return None
+
+        provider = getattr(self, "_settings_provider", None)
+        if provider is None:
+            return None
+
+        while True:
+            model = provider.get_model(agent_name)
+            if model:
+                return None
+            action = await self._wait_for_disabled_agent_intervention(
+                agent_name, node_name, state["analysis_state"]
+            )
+            if action == LlmFailureAction.RETRY:
+                continue
+            if action == LlmFailureAction.TERMINATE:
+                raise WorkflowTerminatedError(
+                    f"User terminated workflow due to disabled {agent_name}"
+                )
+            # SKIP
+            result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
+            skip_nodes = list(state.get("skip_nodes", []))
+            if node_name not in skip_nodes:
+                skip_nodes.append(node_name)
+            return {
+                **state,
+                "skip_nodes": skip_nodes,
+                "failed_node": None,
+                result_key: {"findings": [], "status": "skipped"},
+            }
+
     @with_retry("pathology_analysis")
     async def _pathology_analysis(self, state: WorkflowState) -> WorkflowState:
         """Pathology agent analyzes images"""
@@ -50,7 +98,7 @@ class AgentNodesMixin:
                 "failed_node": None,
             }
 
-        if not self.pathology_agent:
+        if not self.pathology_agent or not self._settings_provider.get_model("pathology"):
             logger.info(f"[{self.session_id}] Pathology agent disabled, skipping")
             skipped_result = {"findings": [], "status": "skipped"}
             cache_store(analysis_state, AgentType.PATHOLOGY, skipped_result)
@@ -161,6 +209,10 @@ class AgentNodesMixin:
         """
         self._current_graph_state = state
         analysis_state = state["analysis_state"]
+
+        skip = await self._require_core_agent(state, "bioinformatics", "bioinformatics_analysis")
+        if skip is not None:
+            return skip
 
         cached = cache_hit(analysis_state, AgentType.BIOINFORMATICS)
         if cached is not None:
@@ -613,7 +665,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 "failed_node": None,
             }
 
-        if not self.biochemistry_agent:
+        if not self.biochemistry_agent or not self._settings_provider.get_model("biochemistry"):
             logger.info(f"[{self.session_id}] Biochemistry agent disabled, skipping")
             skipped_result = {"findings": [], "status": "skipped"}
             cache_store(analysis_state, AgentType.BIOCHEMISTRY, skipped_result)
@@ -676,6 +728,10 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         PubMed mode: searches each topic individually (up to 3).
         """
         analysis_state = state["analysis_state"]
+
+        skip = await self._require_core_agent(state, "literature", "literature_research")
+        if skip is not None:
+            return skip
 
         cached = cache_hit(analysis_state, AgentType.LITERATURE)
         if cached is not None:

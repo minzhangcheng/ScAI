@@ -370,10 +370,13 @@ async def llm_failure_action(session_id: str, request: Request, req: LlmFailureA
             status_code=409,
             detail=f"Session is {state.status.value}, expected waiting_input"
         )
-    if state.wait_input_reason != WaitInputReason.LLM_FAILURE.value:
+    if state.wait_input_reason not in (
+        WaitInputReason.LLM_FAILURE.value,
+        WaitInputReason.AGENT_DISABLED.value,
+    ):
         raise HTTPException(
             status_code=409,
-            detail=f"Session wait_input_reason is {state.wait_input_reason}, expected llm_failure"
+            detail=f"Session wait_input_reason is {state.wait_input_reason}, expected llm_failure or agent_disabled"
         )
 
     workflow = workflows.get(session_id)

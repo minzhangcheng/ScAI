@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.20 · **Last updated**: 2026-05-19
+**Version**: 0.24.21 · **Last updated**: 2026-05-19
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,14 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.21` — core agent disabled handling (2026-05-19):
+  - **Core agents concept**: Added `CORE_AGENTS` constant in constants.py (pi, bioinformatics, literature) - these agents must be enabled for workflow to proceed.
+  - **Agent disabled intervention**: Added `AGENT_DISABLED` reason and `TERMINATE` action for LLM failure handling. When a core agent is disabled, workflow blocks and shows intervention dialog instead of silently skipping.
+  - **Settings provider fix**: Fixed agent disabled detection logic - now checks if key exists in custom_models/custom_prompts (including empty/whitespace values) instead of just checking truthiness.
+  - **Workflow intervention method**: Added `_require_core_agent()` method in agents.py that blocks until core agent is configured, with retry/skip/terminate options.
+  - **LlmTimeoutDialog integration**: Updated frontend LlmTimeoutDialog to handle "agent_disabled" reason - shows different title, body message, and removes model/server fields.
+  - **Test additions**: Added `test_core_agent_disabled_intervention.py`, `test_disabled_agent_e2e.py`, `test_optional_agent_hot_reload.py`, `test_settings_provider_disable.py`.
 
 - `0.24.20` — PlanReviewDialog countdown UI improvements (2026-05-19):
   - **Countdown color change**: Added dynamic color change for countdown timer - turns red when <= 30 seconds remaining to alert users of time running out.

@@ -931,7 +931,25 @@ export function useWebSocket() {
                 generation: info.generation,
               })
               store.setShowLlmTimeoutDialog(true)
+            } else if (
+              syncContent.change_type === 'agent_disabled' &&
+              syncContent.agent_disabled_info
+            ) {
+              const info = syncContent.agent_disabled_info
+              const store = useAppStore.getState()
+              store.setLlmFailureInfo({
+                agent: info.agent,
+                model: '',
+                llmServer: '',
+                error: `Agent "${info.agent}" is disabled but required by step "${info.node_name}".`,
+                nodeName: info.node_name,
+                generation: info.generation,
+                reason: 'agent_disabled',
+              })
+              store.setShowLlmTimeoutDialog(true)
             } else if (syncContent.change_type === 'llm_retry') {
+              useAppStore.getState().clearLlmFailureState()
+            } else if (syncContent.change_type === 'agent_resumed') {
               useAppStore.getState().clearLlmFailureState()
             }
 

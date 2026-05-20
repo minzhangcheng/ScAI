@@ -48,6 +48,10 @@ class SynthesisMixin:
         """PI synthesizes all results and prepares round summary for user"""
         analysis_state = state["analysis_state"]
 
+        skip = await self._require_core_agent(state, "pi", "pi_synthesis")
+        if skip is not None:
+            return skip
+
         logger.info(f"[{self.session_id}] PI synthesis for round {analysis_state.current_round}")
 
         await self._send_message("status", "PI is synthesizing analysis results...", AgentType.PI)

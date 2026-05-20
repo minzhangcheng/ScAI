@@ -34,15 +34,24 @@ NODE_TO_RESULT_KEY: dict[str, str] = {
 class LlmFailureAction(str, Enum):
     RETRY = "retry"
     SKIP = "skip"
+    TERMINATE = "terminate"
 
 
 class WaitInputReason(str, Enum):
     LLM_FAILURE = "llm_failure"
+    AGENT_DISABLED = "agent_disabled"
 
 
 class StateSyncChangeType(str, Enum):
     LLM_FAILURE = "llm_failure"
     LLM_RETRY = "llm_retry"
+    AGENT_DISABLED = "agent_disabled"
+    AGENT_RESUMED = "agent_resumed"
+
+
+# Core agents whose absence blocks the workflow. Disabling any of these
+# must surface a user-intervention dialog rather than silently skipping.
+CORE_AGENTS = frozenset({"pi", "bioinformatics", "literature"})
 
 
 # ── PI-agent signalling constants ──────────────────────────────────

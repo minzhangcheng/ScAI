@@ -153,7 +153,7 @@ class DirectionChoice(BaseModel):
 
 class LlmFailureActionRequest(BaseModel):
     """Request to handle an LLM timeout/failure after user intervention."""
-    action: Literal["retry", "skip"]
+    action: Literal["retry", "skip", "terminate"]
     node_name: str
     generation: int  # monotonic counter from frontend for idempotency
 

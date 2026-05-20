@@ -61,9 +61,10 @@ class AgentSettingsProvider:
         return self._state
 
     def get_model(self, agent_name: str) -> str:
-        custom = (self._get_state().custom_models or {}).get(agent_name)
-        if custom:
-            return custom
+        # Explicit override (including empty / whitespace -> disabled) wins over default.
+        custom_models = self._get_state().custom_models or {}
+        if agent_name in custom_models:
+            return (custom_models[agent_name] or "").strip()
         return getattr(self._config.models, f"{agent_name}_model", "")
 
     def get_temperature(self, agent_name: str) -> float:
@@ -73,9 +74,9 @@ class AgentSettingsProvider:
         return getattr(self._config.temperatures, agent_name, 0.5)
 
     def get_system_prompt(self, agent_name: str) -> str:
-        custom = (self._get_state().custom_prompts or {}).get(agent_name)
-        if custom:
-            return custom
+        custom_prompts = self._get_state().custom_prompts or {}
+        if agent_name in custom_prompts:
+            return (custom_prompts[agent_name] or "").strip()
         return getattr(self._config.prompts, f"{agent_name}_prompt", "")
 
     def get_vision_setting(self, agent_name: str) -> bool:

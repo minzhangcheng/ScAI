@@ -230,6 +230,7 @@ export interface LlmFailureInfo {
   error: string
   nodeName: string
   generation: number
+  reason?: 'llm_failure' | 'agent_disabled'
 }
 
 interface AppState {

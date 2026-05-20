@@ -36,6 +36,7 @@ _EXCLUDED_FIELDS = {
     "human_messages",
     "wait_input_reason",
     "llm_failure_info",
+    "agent_disabled_info",
     "agent_server_configs",
     "agent_vision_settings",
     "literature_config",

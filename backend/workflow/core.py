@@ -52,6 +52,9 @@ from ..utils.sandbox import LocalJupyterSandbox
 from ..config import SystemConfig, get_session_workspace, get_session_states
 
 
+class WorkflowTerminatedError(RuntimeError):
+    """Raised when the user chooses Terminate in a disabled-agent dialog."""
+    pass
 
 
 class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, CallbacksMixin, AnnotationMixin, PlanningMixin, AgentNodesMixin, SynthesisMixin, InitializeMixin, GraphMixin, ReportingMixin):
@@ -201,6 +204,72 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             if self._settings_provider is not None:
                 self._settings_provider._client_cache.clear()
             return LlmFailureAction.RETRY
+        return LlmFailureAction.SKIP
+
+    async def _wait_for_disabled_agent_intervention(
+        self,
+        agent_name: str,
+        node_name: str,
+        analysis_state: AnalysisState,
+    ) -> LlmFailureAction:
+        """Block workflow until the user reconfigures, skips, or terminates.
+
+        Mirrors _wait_for_llm_intervention but for the case where a core agent
+        is required by `node_name` but its model is empty (disabled). Uses the
+        same event/lock/generation infrastructure; the frontend disambiguates
+        via state_sync change_type='agent_disabled'.
+        """
+        async with self._llm_failure_lock:
+            logger.warning(
+                f"[{self.session_id}] Node {node_name} requires {agent_name} "
+                f"agent but its model is empty (disabled)."
+            )
+            await self._send_message(
+                "error",
+                f"Node {node_name} requires {agent_name} agent which is disabled.",
+                AgentType.PI,
+            )
+            self._llm_failure_generation += 1
+            gen = self._llm_failure_generation
+            if node_name not in self._llm_failure_events:
+                self._llm_failure_events[node_name] = asyncio.Event()
+            event = self._llm_failure_events[node_name]
+            event.clear()
+
+            analysis_state.wait_input_reason = WaitInputReason.AGENT_DISABLED.value
+            analysis_state.agent_disabled_info = {
+                "agent": agent_name,
+                "node_name": node_name,
+                "generation": gen,
+            }
+            self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+            await self._send_state_sync(analysis_state, StateSyncChangeType.AGENT_DISABLED.value)
+
+            logger.info(
+                f"[{self.session_id}] Waiting for user to resolve disabled "
+                f"agent (agent={agent_name}, node={node_name}, generation={gen})"
+            )
+
+        try:
+            await event.wait()
+            action = self._llm_failure_actions.pop(node_name, None)
+            analysis_state.wait_input_reason = None
+            analysis_state.agent_disabled_info = None
+            self._set_status(analysis_state, TaskStatus.RUNNING)
+            await self._send_state_sync(analysis_state, StateSyncChangeType.AGENT_RESUMED.value)
+        except asyncio.CancelledError:
+            analysis_state.wait_input_reason = None
+            analysis_state.agent_disabled_info = None
+            raise
+        finally:
+            self._llm_failure_events.pop(node_name, None)
+
+        if action == LlmFailureAction.RETRY.value:
+            if self._settings_provider is not None:
+                self._settings_provider._client_cache.clear()
+            return LlmFailureAction.RETRY
+        if action == LlmFailureAction.TERMINATE.value:
+            return LlmFailureAction.TERMINATE
         return LlmFailureAction.SKIP
 
     def signal_continue(self):
@@ -657,7 +726,14 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             )
             logger.info(f"Workflow completed for {thread_id}")
             return final_state["analysis_state"]
-            
+
+        except WorkflowTerminatedError as e:
+            logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
+            self._set_status(initial_state, TaskStatus.STOPPED)
+            initial_state.wait_input_reason = None
+            await self._send_state_sync(initial_state, StateSyncChangeType.LLM_RETRY.value)
+            return initial_state
+
         except Exception as e:
             import traceback
             error_detail = traceback.format_exc()
@@ -792,12 +868,20 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
             # Resume from checkpoint
             logger.info(f"[{self.session_id}] Found saved state, resuming execution")
-            final_state = await self.compiled_graph.ainvoke(
-                None,
-                config
-            )
-            logger.info(f"[{self.session_id}] Workflow resumed and completed")
-            return final_state["analysis_state"]
+            try:
+                final_state = await self.compiled_graph.ainvoke(
+                    None,
+                    config
+                )
+                logger.info(f"[{self.session_id}] Workflow resumed and completed")
+                return final_state["analysis_state"]
+            except WorkflowTerminatedError as e:
+                logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
+                effective = analysis_state or state.values.get("analysis_state")
+                if effective:
+                    self._set_status(effective, TaskStatus.STOPPED)
+                    effective.wait_input_reason = None
+                return effective or analysis_state or state.values["analysis_state"]
 
         # No checkpoint found — start a fresh run from initialize_round.
         # This is the expected path after snapshot restore (checkpoint was deleted).
@@ -827,9 +911,16 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         workflow_state = self._make_initial_workflow_state(
             analysis_state, current_round=analysis_state.current_round
         )
-        final_state = await self.compiled_graph.ainvoke(workflow_state, config)
-        logger.info(f"[{self.session_id}] Fresh run after restore completed")
-        return final_state["analysis_state"]
+        try:
+            final_state = await self.compiled_graph.ainvoke(workflow_state, config)
+            logger.info(f"[{self.session_id}] Fresh run after restore completed")
+            return final_state["analysis_state"]
+        except WorkflowTerminatedError as e:
+            logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
+            if analysis_state:
+                self._set_status(analysis_state, TaskStatus.STOPPED)
+                analysis_state.wait_input_reason = None
+            return analysis_state
 
     async def pause(self, thread_id: str):
         """Pause the workflow and save sandbox state including Python session.

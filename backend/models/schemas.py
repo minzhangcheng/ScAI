@@ -520,7 +520,7 @@ class AnalysisState(BaseModel):
     human_messages: List[Dict[str, Any]] = Field(default_factory=list)  # History of human interventions
 
     # LLM failure user intervention
-    wait_input_reason: Optional[str] = None    # None | "llm_failure"
+    wait_input_reason: Optional[str] = None    # None | "llm_failure" | "agent_disabled"
     llm_failure_info: Optional[Dict[str, Any]] = None
     # llm_failure_info keys when set:
     #   "agent": str       — agent name (e.g. "pathology")
@@ -529,6 +529,12 @@ class AnalysisState(BaseModel):
     #   "error": str       — error message
     #   "node_name": str   — workflow node name
     #   "generation": int  — monotonic counter
+
+    agent_disabled_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Info about a disabled core agent the workflow is waiting on. "
+                    "Keys: agent (str), node_name (str), generation (int).",
+    )
 
     # Error tracking for parallel analysis
     agent_errors: List[AgentError] = Field(default_factory=list)

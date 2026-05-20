@@ -354,8 +354,9 @@ class TestBioinformaticsNodeUpstreamPropagation:
         mock.pi_agent = MagicMock()
         mock.pi_agent.plan_agent_tasks = AsyncMock(return_value=["Perform standard scRNA-seq analysis"])
 
-        # Bind real async method — MagicMock auto-creates a non-awaitable stub
+        # Bind real async methods — MagicMock auto-creates a non-awaitable stub
         mock._wait_for_llm_intervention = SingleCellAnalysisWorkflow._wait_for_llm_intervention.__get__(mock, type(mock))
+        mock._require_core_agent = SingleCellAnalysisWorkflow._require_core_agent.__get__(mock, type(mock))
 
         # Bind the real method
         mock._bioinformatics_analysis = SingleCellAnalysisWorkflow._bioinformatics_analysis.__get__(mock, type(mock))

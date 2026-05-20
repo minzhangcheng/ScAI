@@ -102,7 +102,9 @@ export default function LlmTimeoutDialog({
               <AlertTriangle className="w-5 h-5 text-red-600" aria-hidden="true" />
             </div>
             <h2 className="text-lg font-semibold text-gray-900">
-              {t('llmCallFailed')}
+              {llmFailureInfo.reason === 'agent_disabled'
+                ? t('agentDisabledTitle')
+                : t('llmCallFailed')}
             </h2>
           </div>
           <button
@@ -122,18 +124,27 @@ export default function LlmTimeoutDialog({
               {t(agentLabelKey as any)}
             </span>
           </div>
-          <div className="flex justify-between text-sm">
-            <span className="text-gray-500">{t('llmModel')}</span>
-            <span className="font-medium text-gray-900 font-mono text-xs">
-              {llmFailureInfo.model}
-            </span>
-          </div>
-          <div className="flex justify-between text-sm">
-            <span className="text-gray-500">{t('llmServer')}</span>
-            <span className="font-medium text-gray-900 font-mono text-xs truncate max-w-[200px]">
-              {llmFailureInfo.llmServer}
-            </span>
-          </div>
+          {llmFailureInfo.reason === 'agent_disabled' && (
+            <div className="text-sm text-gray-600 bg-amber-50 p-3 rounded-lg">
+              {t('agentDisabledBody', { agent: t(agentLabelKey as any) })}
+            </div>
+          )}
+          {llmFailureInfo.reason !== 'agent_disabled' && (
+            <>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-500">{t('llmModel')}</span>
+                <span className="font-medium text-gray-900 font-mono text-xs">
+                  {llmFailureInfo.model}
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-500">{t('llmServer')}</span>
+                <span className="font-medium text-gray-900 font-mono text-xs truncate max-w-[200px]">
+                  {llmFailureInfo.llmServer}
+                </span>
+              </div>
+            </>
+          )}
 
           {/* Expandable Error Detail */}
           <div>
@@ -158,42 +169,74 @@ export default function LlmTimeoutDialog({
 
         {/* Action Buttons */}
         <div className="px-6 pb-4 space-y-2">
-          <button
-            onClick={onRetry}
-            data-autofocus
-            className="w-full flex items-center justify-between px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors"
-          >
-            <span>{t('llmRetry')}</span>
-            <span className="text-xs text-blue-200">
-              {t('llmRetryHint')}
-            </span>
-          </button>
-
-          <button
-            onClick={onModifyAgent}
-            className="w-full px-4 py-3 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-xl font-medium transition-colors border border-amber-200 text-left"
-          >
-            {t('llmModifyAgent')}
-          </button>
-
-          <button
-            onClick={onTerminate}
-            className="w-full px-4 py-3 bg-red-50 hover:bg-red-100 text-red-700 rounded-xl font-medium transition-colors border border-red-200 text-left"
-          >
-            {t('llmTerminate')}
-          </button>
-
-          <button
-            onClick={onSkip}
-            className="w-full flex items-center justify-between px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors"
-          >
-            <span>{t('llmSkip')}</span>
-            {hasCountdown && (
-              <span className="text-xs text-gray-500" aria-live="polite">
-                {t('llmAutoSkip', { seconds: timeRemaining })}
-              </span>
-            )}
-          </button>
+          {llmFailureInfo.reason === 'agent_disabled' ? (
+            <>
+              <button
+                onClick={onModifyAgent}
+                data-autofocus
+                className="w-full flex items-center justify-between px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors"
+              >
+                <span>{t('agentDisabledModifyAgent')}</span>
+                <span className="text-xs text-blue-200">
+                  {t('llmRetryHint')}
+                </span>
+              </button>
+              <button
+                onClick={onRetry}
+                className="w-full px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors"
+              >
+                {t('llmRetry')}
+              </button>
+              <button
+                onClick={onSkip}
+                className="w-full px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors"
+              >
+                {t('llmSkip')}
+              </button>
+              <button
+                onClick={onTerminate}
+                className="w-full px-4 py-3 bg-red-50 hover:bg-red-100 text-red-700 rounded-xl font-medium transition-colors border border-red-200 text-left"
+              >
+                {t('llmTerminate')}
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={onRetry}
+                data-autofocus
+                className="w-full flex items-center justify-between px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors"
+              >
+                <span>{t('llmRetry')}</span>
+                <span className="text-xs text-blue-200">
+                  {t('llmRetryHint')}
+                </span>
+              </button>
+              <button
+                onClick={onModifyAgent}
+                className="w-full px-4 py-3 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-xl font-medium transition-colors border border-amber-200 text-left"
+              >
+                {t('llmModifyAgent')}
+              </button>
+              <button
+                onClick={onTerminate}
+                className="w-full px-4 py-3 bg-red-50 hover:bg-red-100 text-red-700 rounded-xl font-medium transition-colors border border-red-200 text-left"
+              >
+                {t('llmTerminate')}
+              </button>
+              <button
+                onClick={onSkip}
+                className="w-full flex items-center justify-between px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors"
+              >
+                <span>{t('llmSkip')}</span>
+                {hasCountdown && (
+                  <span className="text-xs text-gray-500" aria-live="polite">
+                    {t('llmAutoSkip', { seconds: timeRemaining })}
+                  </span>
+                )}
+              </button>
+            </>
+          )}
         </div>
 
         <div className="px-6 pb-4 text-center text-xs text-gray-400">
