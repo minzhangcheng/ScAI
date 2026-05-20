@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.21 · **Last updated**: 2026-05-19
+**Version**: 0.24.22 · **Last updated**: 2026-05-19
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,9 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.24.x — collaborative analysis planning (2026-05-15)**
+
+- `0.24.22` — snapshot label consistency (2026-05-19):
+  - **Snapshot "Experimental" label**: Added "(Experimental)" suffix to SnapshotPanel title and translation key `analysisSnapshots` in both English and Chinese for consistency with other experimental features.
 
 - `0.24.21` — core agent disabled handling (2026-05-19):
   - **Core agents concept**: Added `CORE_AGENTS` constant in constants.py (pi, bioinformatics, literature) - these agents must be enabled for workflow to proceed.

@@ -443,7 +443,7 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
           <div className="flex items-center gap-2">
             <Camera className="w-5 h-5 text-accent-600" />
             <h2 className="text-lg font-semibold text-slate-900">
-              {isZh ? '分析快照' : 'Analysis Snapshots'}
+              {isZh ? '分析快照 (实验性)' : 'Analysis Snapshots (Experimental)'}
             </h2>
             {snapshots.length > 0 && (
               <span className="text-xs text-slate-400 ml-1">({snapshots.length})</span>

@@ -451,7 +451,7 @@ Please provide a detailed literature review report with specific citation inform
     phasePreDirection: '选方向前',
     phasePostDirection: '选方向后',
     phaseManual: '手动',
-    analysisSnapshots: '分析快照',
+    analysisSnapshots: '分析快照 (实验性)',
     creating: '创建中...',
 
     // Plan Review Dialog
@@ -928,7 +928,7 @@ Please provide a detailed literature review report with specific citations.`,
     phasePreDirection: 'Pre-Direction',
     phasePostDirection: 'Post-Direction',
     phaseManual: 'Manual',
-    analysisSnapshots: 'Analysis Snapshots',
+    analysisSnapshots: 'Analysis Snapshots (Experimental)',
     creating: 'Creating...',
 
     // Plan Review Dialog
