@@ -6,6 +6,8 @@ import {
   ChevronUp,
   FileDown,
   Edit3,
+  Pause,
+  Play,
 } from 'lucide-react'
 import { useCountdownTimer } from '../hooks/useCountdownTimer'
 import { useTranslation } from '../i18n/translations'
@@ -80,11 +82,21 @@ export function PlanReviewDialog({
     }
   }, [onSkip, submitting])
 
-  const { timeRemaining: countdown } = useCountdownTimer({
+  const { timeRemaining: countdown, isPaused, pause, resume, hasCountdown } = useCountdownTimer({
     countdownSeconds,
     onExpire: handleAutoSkip,
     resetKey: `${open}-${countdownSeconds}`,
   })
+
+  const minutes = Math.floor(countdown / 60)
+  const seconds = countdown % 60
+  const timerDisplay = `${minutes}:${seconds.toString().padStart(2, '0')}`
+  const timerUrgent = countdown > 0 && countdown <= 30
+
+  const toggleTimerPause = useCallback(() => {
+    if (isPaused) resume()
+    else pause()
+  }, [isPaused, pause, resume])
 
   const phaseLabel = phase === 'exploration' ? t('planReviewStageExplore') : t('planReviewStageInnovate')
   const stageLabel = stage === 'stage1' ? t('planReviewStage1')
@@ -166,13 +178,28 @@ export function PlanReviewDialog({
             </h2>
           </div>
           <div className="flex items-center gap-3">
-            {countdown > 0 && (
-              <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium ${
-                countdown <= 30 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-800'
-              }`}>
-                <Clock className="w-4 h-4" />
-                {countdown}s
-              </span>
+            {hasCountdown && (
+              <>
+                <div className="flex items-center gap-2">
+                  <Clock className={`w-4 h-4 ${timerUrgent ? 'text-red-500' : 'text-slate-500'}`} />
+                  <span className={`font-mono text-lg tabular-nums ${
+                    timerUrgent ? 'text-red-600 animate-pulse' :
+                    isPaused ? 'text-amber-600' : 'text-slate-700'
+                  }`}>
+                    {timerDisplay}
+                  </span>
+                  {isPaused && (
+                    <span className="text-xs text-amber-600 font-medium">{t('timerPaused')}</span>
+                  )}
+                </div>
+                <button
+                  onClick={toggleTimerPause}
+                  className="p-1.5 rounded-lg hover:bg-gray-100 text-slate-600 hover:text-slate-800 transition-colors"
+                  title={isPaused ? t('resumeTimer') : t('pauseTimer')}
+                >
+                  {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+                </button>
+              </>
             )}
             <button
               onClick={handleDownloadDialogue}
