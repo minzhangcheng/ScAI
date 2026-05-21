@@ -44,6 +44,33 @@ def _consume_signal_then_clear(event: asyncio.Event) -> None:
 class SynthesisMixin:
     """Mixin providing synthesis, user-input, and convergence methods. Composed into SingleCellAnalysisWorkflow."""
 
+    def _exploration_round_succeeded(self, state) -> bool:
+        """Return True when this round's bioinformatics phase succeeded
+        enough to declare the exploration phase complete.
+
+        Used by _pi_synthesis to decide whether to generate Report A and
+        transition analysis_phase EXPLORATION -> INNOVATION. We block
+        advancement when:
+          - @with_retry recorded failed_node == "bioinformatics_analysis"
+            (LLM-failure HITL Skip path), OR
+          - bioinformatics_result.status is "failed" / "error", OR
+          - the loop ran out of steps ("max_steps_reached") without
+            producing any findings.
+
+        Other statuses ("completed", "completed_with_fallback", "skipped",
+        or missing entirely when the agent is disabled) are treated as
+        success so the workflow proceeds normally.
+        """
+        if state.get("failed_node") == "bioinformatics_analysis":
+            return False
+        bio = state.get("bioinformatics_result") or {}
+        status = bio.get("status")
+        if status in ("failed", "error"):
+            return False
+        if status == "max_steps_reached" and not bio.get("findings"):
+            return False
+        return True
+
     async def _pi_synthesis(self, state: WorkflowState) -> WorkflowState:
         """PI synthesizes all results and prepares round summary for user"""
         analysis_state = state["analysis_state"]
@@ -97,8 +124,15 @@ class SynthesisMixin:
         round_result.phase = analysis_state.analysis_phase
         round_result.direction = analysis_state.current_round_direction or ""
 
-        # Exploration phase: generate structured Report A and transition to innovation
-        if analysis_state.analysis_phase == AnalysisPhase.EXPLORATION:
+        # Exploration phase: generate structured Report A and transition to innovation.
+        # Skip both the Report A generation and the phase transition when this
+        # round's bioinformatics analysis failed — otherwise we'd produce an
+        # exploration report from empty findings and lock the user into
+        # INNOVATION phase next round with no path to retry stage 1.
+        if (
+            analysis_state.analysis_phase == AnalysisPhase.EXPLORATION
+            and self._exploration_round_succeeded(state)
+        ):
             await self._send_message(
                 "status",
                 "Generating exploration report (Report A)...",

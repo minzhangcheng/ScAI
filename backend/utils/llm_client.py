@@ -164,6 +164,21 @@ def is_temperature_error(error: Exception) -> bool:
     return any(kw in error_str for kw in temperature_keywords)
 
 
+def is_tool_choice_error(error: Exception) -> bool:
+    """Check if a BadRequestError is related to the tool_choice parameter.
+
+    Some OpenAI-compatible providers reject `tool_choice="required"` (or
+    a specific-function dict) with a BadRequestError mentioning the
+    parameter by name. Match conservatively: only the explicit
+    `tool_choice` / `tool choice` token, not the unrelated legacy
+    `function_call` surface.
+    """
+    if not isinstance(error, BadRequestError):
+        return False
+    error_str = str(error).lower()
+    return "tool_choice" in error_str or "tool choice" in error_str
+
+
 async def retry_with_backoff(
     func,
     max_retries: int = MAX_RETRIES,
@@ -329,6 +344,11 @@ class OpenAICompatibleClient:
         # Session-level cache of models that rejected temperature parameter
         # Key is model name (extracted), value is True
         self._temp_unsupported_models: set[str] = set()
+
+        # Session-level cache of models that rejected non-"auto" tool_choice.
+        # Key is the extracted model name; when present, chat_with_tools demotes
+        # tool_choice to "auto" pre-emptively to avoid the round-trip.
+        self._toolchoice_unsupported_models: set[str] = set()
 
         # Always create an explicit HTTP client with tuned timeouts and pool settings,
         # so both proxy and non-proxy scenarios get the same configuration.
@@ -769,7 +789,21 @@ class OpenAICompatibleClient:
         start_time = time.time()
 
         model_key = _extract_model_name(model)
-        base_params = {"model": model, "messages": messages, "tools": tools, "tool_choice": tool_choice}
+
+        # Pre-emptive demotion: if this model has previously rejected non-"auto"
+        # tool_choice, skip the round-trip and demote now.
+        effective_tool_choice = tool_choice
+        if (
+            effective_tool_choice not in (None, "auto", "none")
+            and model_key in self._toolchoice_unsupported_models
+        ):
+            logger.warning(
+                f"[{self.agent_name}] tool_choice={effective_tool_choice!r} demoted to 'auto' "
+                f"for {model_key} (cached as tool-choice-unsupported)"
+            )
+            effective_tool_choice = "auto"
+
+        base_params = {"model": model, "messages": messages, "tools": tools, "tool_choice": effective_tool_choice}
         _make_request, _make_request_no_temp = self._build_request_pair(
             base_params, model, temperature, max_tokens
         )
@@ -777,9 +811,31 @@ class OpenAICompatibleClient:
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat_with_tools request to {model}")
-            response = await self._call_with_temp_fallback(
-                _make_request, _make_request_no_temp, model_key, retry_kwargs
-            )
+            try:
+                response = await self._call_with_temp_fallback(
+                    _make_request, _make_request_no_temp, model_key, retry_kwargs
+                )
+            except BadRequestError as tc_err:
+                # Reactive fallback: the provider rejected our tool_choice on
+                # the wire. Cache and retry once with tool_choice="auto".
+                if (
+                    is_tool_choice_error(tc_err)
+                    and effective_tool_choice not in (None, "auto", "none")
+                ):
+                    logger.warning(
+                        f"[{self.agent_name}] tool_choice rejected by {model_key}, "
+                        f"caching as unsupported and retrying with 'auto'"
+                    )
+                    self._toolchoice_unsupported_models.add(model_key)
+                    base_params["tool_choice"] = "auto"
+                    _make_request, _make_request_no_temp = self._build_request_pair(
+                        base_params, model, temperature, max_tokens
+                    )
+                    response = await self._call_with_temp_fallback(
+                        _make_request, _make_request_no_temp, model_key, retry_kwargs
+                    )
+                else:
+                    raise
 
             # Safely extract message from response
             message = None

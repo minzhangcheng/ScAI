@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.24 · **Last updated**: 2026-05-21
+**Version**: 0.24.25 · **Last updated**: 2026-05-21
 
 ## 1. Runtime Architecture
 
@@ -312,6 +312,13 @@ Detailed release notes for every version are available through `git log` and rel
     - `messaging.py` — WebSocket message sending
   - **Backward compatibility**: The `__init__.py` exports `SingleCellAnalysisWorkflow`, `WorkflowState`, `with_retry`, and `_retry_backoff_delay` to preserve existing import paths.
   - **New tests**: Added `test_workflow_helpers.py` and `test_workflow_routing.py` for the refactored code.
+
+- `0.24.25` — tool-choice fallback & exploration failure guard (2026-05-21):
+  - **tool_choice BadRequestError fallback**: Added `is_tool_choice_error()` detection and `_toolchoice_unsupported_models` cache in `OpenAICompatibleClient`. When a provider rejects `tool_choice="required"`, the client caches the model and retries with `tool_choice="auto"`; subsequent calls are pre-emptively demoted. Fixes crashes on providers that don't support forced tool calling.
+  - **Text-only exhaustion escalates properly**: Bioinformatics agent now raises `UpstreamExhaustedError` instead of silently fabricating fallback findings when MAX_TEXT_RESPONSES consecutive text-only responses occur. A checkpoint is saved before escalation so Retry from the HITL gate resumes the conversation rather than starting fresh.
+  - **Last-chance tool forcing**: `_compute_tool_choice()` returns `"required"` on the last text-only budget attempt to nudge models (especially Gemini-3.x-Pro) into actually calling a tool instead of replying with prose.
+  - **Exploration round success guard**: Added `_exploration_round_succeeded()` predicate — blocks Report A generation and EXPLORATION→INNOVATION phase transition when bioinformatics failed/errored or exhausted steps without findings. Prevents empty exploration reports and lost retry opportunities.
+  - **Tests**: Added `test_bioinfo_text_only_exit.py`, `test_exploration_round_succeeded.py`, and `test_tool_choice_fallback.py` with unit and integration tests covering all paths.
 
 - `0.24.24` — plan review timer pause/resume (2026-05-21):
   - **Timer pause/resume**: PlanReviewDialog now supports pausing and resuming the countdown timer. Users can pause the timer during plan review and resume when ready.

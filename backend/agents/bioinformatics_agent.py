@@ -376,6 +376,44 @@ class BioinformaticsAgent(BaseAgent):
         self._pause_event: Optional[asyncio.Event] = None
 
     @staticmethod
+    def _compute_tool_choice(text_response_count: int, max_text_responses: int) -> str:
+        """Decide the tool_choice for the next chat_with_tools call.
+
+        When the agent has already burned its text-only budget down to its
+        last attempt (text_response_count >= max - 1), force a tool call by
+        returning "required". Otherwise return "auto" and let the model
+        decide naturally. This is the Gemini-3.x-Pro safety net: that family
+        frequently replies with "I will now do X..." prose instead of
+        actually calling execute_code/report_findings.
+        """
+        if text_response_count >= max_text_responses - 1:
+            return "required"
+        return "auto"
+
+    def _raise_text_only_exhausted(self, text_response_count: int) -> None:
+        """Raise UpstreamExhaustedError when consecutive text-only LLM
+        responses have exhausted the budget.
+
+        The autonomous loop calls this instead of silently `break`-ing so
+        that the workflow's @with_retry decorator can catch
+        UpstreamExhaustedError and route the user to the LLM-failure HITL
+        dialog (Retry / Skip). Skipping marks the node as failed instead
+        of fabricating a "[Fallback extraction]" success that would push
+        the workflow into Stage 2 with no marker genes or annotation.
+        """
+        base_url = getattr(self.llm_client, "base_url", "") or ""
+        raise UpstreamExhaustedError(
+            message=(
+                f"Bioinformatics agent returned {text_response_count} consecutive "
+                "text-only responses without calling any tool. The model is refusing "
+                "to use tools; aborting autonomous loop so the user can intervene."
+            ),
+            agent_name="bioinformatics",
+            model=self.model,
+            llm_server=base_url,
+        )
+
+    @staticmethod
     def _check_gate_keyword(lowered_codes, keywords, reject_count, max_rejections, gate_label):
         """Check if any keyword appears in lowered code history.
 
@@ -1596,6 +1634,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     model=self.model,
                     messages=messages,
                     tools=TOOLS,
+                    tool_choice=self._compute_tool_choice(text_response_count, MAX_TEXT_RESPONSES),
                     temperature=self.config.temperature,  # Use configured temperature
                     max_tokens=32768
                 )
@@ -1625,8 +1664,31 @@ If results significantly deviate from plan expectations, report via consult_pi i
 
                 text_response_count += 1
                 if text_response_count >= MAX_TEXT_RESPONSES:
-                    logger.info(f"[Bioinformatics] {MAX_TEXT_RESPONSES} text-only responses, exiting loop")
-                    break
+                    logger.error(
+                        f"[Bioinformatics] {MAX_TEXT_RESPONSES} consecutive text-only "
+                        f"responses; escalating to LLM-failure HITL via UpstreamExhaustedError"
+                    )
+                    # Save checkpoint so a Retry from the HITL gate resumes
+                    # from the current conversation state instead of starting fresh.
+                    try:
+                        checkpoint_data = {
+                            'step_name': f'step_{step_count}',
+                            'session_id': state.id,
+                            'round_number': state.current_round,
+                            'step_number': step_count,
+                            'total_steps': max_steps,
+                            'messages': messages,
+                            'findings': all_findings,
+                            'figures': all_figures,
+                            'code_history': [ce.model_dump(mode="json") for ce in self.code_history],
+                            'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
+                            'analysis_context': self.analysis_context,
+                            'completed': False,
+                        }
+                        await checkpoint_mgr.save(checkpoint_data)
+                    except Exception as e:
+                        logger.warning(f"[Bioinformatics] Pre-escalation checkpoint save failed: {e}")
+                    self._raise_text_only_exhausted(text_response_count)
 
                 # Ask the LLM to continue with tools instead of text
                 messages.append({
@@ -2679,8 +2741,13 @@ except Exception as _autosave_block_err:
         else:
             status = "max_steps_reached"
 
-        # Fallback: extract findings from last assistant text if report_findings was never called
-        if not all_findings and not completed:
+        # Fallback: extract findings from last assistant text if report_findings
+        # was never called AND we ran out of step budget. We deliberately do NOT
+        # fall back for text-only exhaustion (that path now raises
+        # UpstreamExhaustedError and never reaches here) or for `llm_error`
+        # exits, where fabricated findings would mask real failures and push
+        # the workflow into the next stage with empty Stage-1 results.
+        if not all_findings and not completed and status == "max_steps_reached":
             logger.warning("[Bioinformatics] No findings reported, attempting fallback extraction...")
             last_assistant_content = None
             for msg in reversed(messages):
