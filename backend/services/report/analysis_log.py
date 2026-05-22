@@ -229,7 +229,7 @@ class AnalysisLogMixin:
             if stripped.startswith("#"):
                 is_key = True
             # Scanpy / analysis function calls
-            elif _re.search(r'sc\.(tl|pp|pl|external)\.\w+', stripped):
+            elif _re.search(r'(sc|sn)\.(tl|pp|pl|external)\.\w+|pydeseq2\.\w+|liana\.\w+|gseapy\.\w+|pyscenic\.\w+|decoupler\.\w+|scvelo\.\w+', stripped):
                 is_key = True
             # Key function calls
             elif any(kw in stripped.lower() for kw in [

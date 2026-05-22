@@ -286,6 +286,45 @@ async def retry_with_backoff(
     ) from last_exception
 
 
+def _collect_reasoning_parts(getter) -> list:
+    """Collect non-empty reasoning fields from a message-like object.
+
+    ``getter`` is a callable taking a field name and returning the value
+    (e.g. ``msg_data.get`` for dicts or ``lambda k: getattr(obj, k, None)``).
+    Handles str / dict / list element types robustly and concatenates all
+    non-empty fields rather than returning only the first match.
+    """
+    parts: list = []
+    for field in ("reasoning", "reasoning_content", "thinking", "thought"):
+        val = getter(field)
+        if not val:
+            continue
+        if isinstance(val, str):
+            parts.append(val)
+        elif isinstance(val, list):
+            for elem in val:
+                if isinstance(elem, str):
+                    if elem:
+                        parts.append(elem)
+                elif isinstance(elem, dict):
+                    text = elem.get("text") or elem.get("content") or ""
+                    if text:
+                        parts.append(str(text))
+                else:
+                    s = str(elem)
+                    if s:
+                        parts.append(s)
+        elif isinstance(val, dict):
+            text = val.get("text") or val.get("content") or ""
+            if text:
+                parts.append(str(text))
+        else:
+            s = str(val)
+            if s:
+                parts.append(s)
+    return [p for p in parts if p]
+
+
 @dataclass
 class LLMResponse:
     """Response from LLM"""
@@ -297,10 +336,17 @@ class LLMResponse:
 
 @dataclass
 class ToolCall:
-    """Represents a tool/function call from the model"""
+    """Represents a tool/function call from the model.
+
+    parse_error / raw_arguments are populated when the JSON arguments
+    string returned by the model cannot be decoded. Callers should
+    check parse_error before dispatching the tool.
+    """
     id: str
     name: str
     arguments: Dict[str, Any]
+    parse_error: Optional[str] = None
+    raw_arguments: Optional[str] = None
 
 
 @dataclass
@@ -345,10 +391,23 @@ class OpenAICompatibleClient:
         # Key is model name (extracted), value is True
         self._temp_unsupported_models: set[str] = set()
 
+        # P3-4: Session-level override cache mapping model_name -> field name
+        # ("max_tokens" or "max_completion_tokens") that the provider accepts.
+        # Populated reactively when a BadRequestError indicates the wrong field
+        # was sent (e.g. an o-series variant routed through OpenRouter that the
+        # static _is_o_series check missed, or vice versa).
+        self._max_tokens_field_overrides: dict[str, str] = {}
+
         # Session-level cache of models that rejected non-"auto" tool_choice.
         # Key is the extracted model name; when present, chat_with_tools demotes
         # tool_choice to "auto" pre-emptively to avoid the round-trip.
         self._toolchoice_unsupported_models: set[str] = set()
+
+        # P2-1: asyncio.Lock protecting check-then-add on the unsupported
+        # model caches. Concurrent first-time probes for the same model could
+        # otherwise both proceed past the membership check before either adds.
+        self._temp_cache_lock: asyncio.Lock = asyncio.Lock()
+        self._toolchoice_cache_lock: asyncio.Lock = asyncio.Lock()
 
         # Always create an explicit HTTP client with tuned timeouts and pool settings,
         # so both proxy and non-proxy scenarios get the same configuration.
@@ -376,6 +435,14 @@ class OpenAICompatibleClient:
         """Set session and agent context for logging"""
         self.session_id = session_id
         self.agent_name = agent_name
+
+    def _ensure_cache_locks(self) -> None:
+        # Lazy-init guard for objects constructed via __new__ or fixtures that
+        # bypass __init__ (e.g., unit tests). Safe to call repeatedly.
+        if getattr(self, "_temp_cache_lock", None) is None:
+            self._temp_cache_lock = asyncio.Lock()
+        if getattr(self, "_toolchoice_cache_lock", None) is None:
+            self._toolchoice_cache_lock = asyncio.Lock()
         
     async def close(self):
         try:
@@ -413,10 +480,16 @@ class OpenAICompatibleClient:
             # Fallback mode: don't set temperature, but keep max_tokens
             if max_tokens is not None:
                 model_name = _extract_model_name(model)
-                if _is_o_series(model_name):
-                    params["max_completion_tokens"] = max_tokens
+                # P3-4: honor previously discovered field override before falling
+                # back to the static _is_o_series heuristic.
+                override = self._max_tokens_field_overrides.get(model_name)
+                if override:
+                    field = override
+                elif _is_o_series(model_name):
+                    field = "max_completion_tokens"
                 else:
-                    params["max_tokens"] = max_tokens
+                    field = "max_tokens"
+                params[field] = max_tokens
             logger.info(f"[{self.agent_name}] Temperature skipped for {model} (using server default)")
             return
 
@@ -429,10 +502,18 @@ class OpenAICompatibleClient:
         # max_tokens: only OpenAI o-series uses max_completion_tokens
         model_name = _extract_model_name(model)
         if max_tokens is not None:
-            if _is_o_series(model_name):
-                params["max_completion_tokens"] = max_tokens
+            # P3-4: honor previously discovered field override before falling
+            # back to the static _is_o_series heuristic. This lets the client
+            # adapt to provider routes (e.g. openrouter/openai/o3-mini) that
+            # the heuristic misclassifies.
+            override = self._max_tokens_field_overrides.get(model_name)
+            if override:
+                field = override
+            elif _is_o_series(model_name):
+                field = "max_completion_tokens"
             else:
-                params["max_tokens"] = max_tokens
+                field = "max_tokens"
+            params[field] = max_tokens
 
         if effective_temp is not None and effective_temp != temperature:
             logger.info(f"[{self.agent_name}] Temperature overridden: {temperature} -> {effective_temp} for {model}")
@@ -451,8 +532,12 @@ class OpenAICompatibleClient:
         parameter, the model is added to _temp_unsupported_models and the request
         is retried without the temperature parameter.
         """
-        # If model is already known to reject temperature, skip directly
-        if model_key in self._temp_unsupported_models:
+        # If model is already known to reject temperature, skip directly.
+        # P2-1: serialize read under the lock to avoid racing with a writer.
+        self._ensure_cache_locks()
+        async with self._temp_cache_lock:
+            cached_no_temp = model_key in self._temp_unsupported_models
+        if cached_no_temp:
             return await retry_with_backoff(make_request_no_temp, **retry_kwargs)
         try:
             return await retry_with_backoff(make_request, **retry_kwargs)
@@ -462,7 +547,9 @@ class OpenAICompatibleClient:
                     f"[{self.agent_name}] Temperature rejected by {model_key}, "
                     f"retrying without temperature..."
                 )
-                self._temp_unsupported_models.add(model_key)
+                async with self._temp_cache_lock:
+                    if model_key not in self._temp_unsupported_models:
+                        self._temp_unsupported_models.add(model_key)
                 return await retry_with_backoff(make_request_no_temp, **retry_kwargs)
             else:
                 raise
@@ -556,17 +643,9 @@ class OpenAICompatibleClient:
                             )
                     # Reasoning model fallback: content in reasoning/reasoning_content/thinking/thought
                     if not content:
-                        for key in ("reasoning", "reasoning_content", "thinking", "thought"):
-                            val = msg_data.get(key)
-                            if not val:
-                                continue
-                            if isinstance(val, str):
-                                content = val
-                                break
-                            if isinstance(val, list):
-                                parts = [p.get("text", "") if isinstance(p, dict) else str(p) for p in val]
-                                content = "\n".join(parts)
-                                break
+                        parts = _collect_reasoning_parts(msg_data.get)
+                        if parts:
+                            content = "\n".join(parts)
             except Exception as e:
                 logger.debug(f"[{self.agent_name}] model_dump extraction failed: {e}")
 
@@ -575,17 +654,9 @@ class OpenAICompatibleClient:
                 content = message.text or ""
             # Fallback: check reasoning attribute directly on the object
             if not content:
-                for attr in ("reasoning", "reasoning_content", "thinking", "thought"):
-                    val = getattr(message, attr, None)
-                    if not val:
-                        continue
-                    if isinstance(val, str):
-                        content = val
-                        break
-                    if isinstance(val, list):
-                        parts = [p.get("text", "") if isinstance(p, dict) else str(p) for p in val]
-                        content = "\n".join(parts)
-                        break
+                parts = _collect_reasoning_parts(lambda k: getattr(message, k, None))
+                if parts:
+                    content = "\n".join(parts)
 
         # Case 4: Other types — convert to string
         if not content and raw_content is not None:
@@ -826,7 +897,11 @@ class OpenAICompatibleClient:
                         f"[{self.agent_name}] tool_choice rejected by {model_key}, "
                         f"caching as unsupported and retrying with 'auto'"
                     )
-                    self._toolchoice_unsupported_models.add(model_key)
+                    # P2-1: serialize add under the cache lock.
+                    self._ensure_cache_locks()
+                    async with self._toolchoice_cache_lock:
+                        if model_key not in self._toolchoice_unsupported_models:
+                            self._toolchoice_unsupported_models.add(model_key)
                     base_params["tool_choice"] = "auto"
                     _make_request, _make_request_no_temp = self._build_request_pair(
                         base_params, model, temperature, max_tokens
@@ -847,20 +922,31 @@ class OpenAICompatibleClient:
             tool_calls_log = []
             if message and message.tool_calls:
                 for tc in message.tool_calls:
+                    parse_error: Optional[str] = None
+                    raw_args: Optional[str] = None
                     try:
                         arguments = json.loads(tc.function.arguments)
-                    except json.JSONDecodeError:
-                        arguments = {"raw": tc.function.arguments}
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            f"[{self.agent_name}] Tool call arguments JSON parse failed: {e}; "
+                            f"function={tc.function.name}, arguments={tc.function.arguments!r}"
+                        )
+                        arguments = {}
+                        parse_error = str(e)
+                        raw_args = tc.function.arguments
 
                     tool_calls.append(ToolCall(
                         id=tc.id,
                         name=tc.function.name,
-                        arguments=arguments
+                        arguments=arguments,
+                        parse_error=parse_error,
+                        raw_arguments=raw_args,
                     ))
                     tool_calls_log.append({
                         "id": tc.id,
                         "name": tc.function.name,
-                        "arguments": arguments
+                        "arguments": arguments,
+                        "parse_error": parse_error,
                     })
 
             # Extract content — handles reasoning models, list content, etc.

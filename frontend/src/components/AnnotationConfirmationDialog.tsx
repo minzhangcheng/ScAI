@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import { Language } from '../i18n/translations'
 
-interface ClusterAnnotation {
+export interface ClusterAnnotation {
   cluster_id: string
   cell_type: string
   subtypes: string[]
@@ -66,7 +66,7 @@ export function AnnotationConfirmationDialog({
 
   // Update annotations only when genuinely new data arrives (e.g. after supplementary analysis),
   // not on every parent re-render which would discard user edits
-  const annotationKey = `${initialAnnotations.length}:${initialAnnotations.map(a => a.cluster_id + a.confidence).join(',')}`
+  const annotationKey = JSON.stringify(initialAnnotations.map(a => [a.cluster_id, a.confidence]))
   useEffect(() => {
     setAnnotations(initialAnnotations)
   }, [annotationKey])

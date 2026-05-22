@@ -5,7 +5,8 @@ import asyncio
 import logging
 import os
 import traceback
-from typing import Callable, Dict, Any, List, Optional
+from collections import deque
+from typing import Callable, Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -129,9 +130,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self._llm_failure_actions: Dict[str, Optional[str]] = {}
         self._llm_failure_generation: int = 0  # monotonic counter for idempotency
 
-        # Supplementary analysis request (set by API, consumed by HITL loop)
-        self._supplementary_request: Optional[str] = None
-        self._supplementary_target: Optional[str] = None  # "annotation" or "direction"
+        # Supplementary analysis requests queue (set by API, consumed by HITL loop).
+        # Each item is (request_text, target) where target is "annotation" | "direction" | "round".
+        # Use a deque so consecutive rapid requests are preserved in order rather than overwritten.
+        self._supplementary_queue: deque[Tuple[str, str]] = deque()
 
         # Settings provider — set in initialize(), provides hot-reloadable settings
         self._settings_provider: Optional[AgentSettingsProvider] = None
@@ -329,12 +331,15 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         return True
 
     def signal_supplementary_analysis(self, request_text: str, target: str):
-        """Signal that user wants supplementary analysis at current HITL point."""
-        self._supplementary_request = request_text
-        self._supplementary_target = target
+        """Queue a supplementary analysis request at the current HITL point.
+
+        Multiple consecutive requests are preserved in arrival order (FIFO) and
+        processed one-by-one by the consumer loop in annotation/synthesis nodes.
+        """
+        self._supplementary_queue.append((request_text, target))
         if target == "annotation":
             self._annotation_event.set()
-        elif target == "direction":
+        elif target in ("direction", "round"):
             self._continue_event.set()
 
     @property

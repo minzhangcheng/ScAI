@@ -4,7 +4,13 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from ..constants import LlmFailureAction, WaitInputReason, StateSyncChangeType
+from ..constants import (
+    CONTINUE_SIGNAL,
+    LlmFailureAction,
+    PI_DECIDE_SIGNAL,
+    StateSyncChangeType,
+    WaitInputReason,
+)
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisState, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
 from .helpers import wait_with_skip_time
@@ -27,7 +33,7 @@ def _should_force_next_round(analysis_state: AnalysisState) -> bool:
     """
     has_real_text = bool(
         analysis_state.pending_human_input
-        and analysis_state.pending_human_input.strip() not in ("", "[CONTINUE]", "[PI_DECIDE]")
+        and analysis_state.pending_human_input.strip() not in ("", CONTINUE_SIGNAL, PI_DECIDE_SIGNAL)
     )
     has_uploaded_files = bool(analysis_state.pending_uploaded_files)
     has_remaining_directions = bool(
@@ -45,31 +51,20 @@ class SynthesisMixin:
     """Mixin providing synthesis, user-input, and convergence methods. Composed into SingleCellAnalysisWorkflow."""
 
     def _exploration_round_succeeded(self, state) -> bool:
-        """Return True when this round's bioinformatics phase succeeded
-        enough to declare the exploration phase complete.
+        """P1-12: whitelist — exploration succeeded ONLY when bioinformatics
+        explicitly reported status='completed'. All other statuses
+        (error, failed, timeout, max_steps_reached, completed_with_fallback,
+        waiting_data, waiting_input, skipped, no_data, unavailable, empty,
+        missing) mean the exploration was incomplete and we must NOT
+        advance EXPLORATION -> INNOVATION; the user retains the option to
+        retry stage 1 in the next round.
 
-        Used by _pi_synthesis to decide whether to generate Report A and
-        transition analysis_phase EXPLORATION -> INNOVATION. We block
-        advancement when:
-          - @with_retry recorded failed_node == "bioinformatics_analysis"
-            (LLM-failure HITL Skip path), OR
-          - bioinformatics_result.status is "failed" / "error", OR
-          - the loop ran out of steps ("max_steps_reached") without
-            producing any findings.
-
-        Other statuses ("completed", "completed_with_fallback", "skipped",
-        or missing entirely when the agent is disabled) are treated as
-        success so the workflow proceeds normally.
+        Also honors @with_retry's failed_node signal (HITL Skip path).
         """
         if state.get("failed_node") == "bioinformatics_analysis":
             return False
         bio = state.get("bioinformatics_result") or {}
-        status = bio.get("status")
-        if status in ("failed", "error"):
-            return False
-        if status == "max_steps_reached" and not bio.get("findings"):
-            return False
-        return True
+        return bio.get("status") == "completed"
 
     async def _pi_synthesis(self, state: WorkflowState) -> WorkflowState:
         """PI synthesizes all results and prepares round summary for user"""
@@ -356,14 +351,17 @@ class SynthesisMixin:
             # No-wait mode: proceed immediately (with let-PI-decide for direction gate)
             logger.info(f"[{self.session_id}] No-wait mode, proceeding immediately (round {analysis_state.current_round})")
             if is_direction_gate and not analysis_state.user_chosen_direction:
-                analysis_state.user_chosen_direction = "[PI_DECIDE]"
-                analysis_state.pending_human_input = "[PI_DECIDE]"
+                analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
+                analysis_state.pending_human_input = PI_DECIDE_SIGNAL
         else:
             if analysis_state.status != TaskStatus.WAITING_INPUT:
                 self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
                 await self._send_state_sync(analysis_state, "waiting_input")
 
-            self._continue_event.clear()
+            # P0-6: Do NOT clear _continue_event here. It was already cleared in
+            # _pi_synthesis before WAITING_INPUT was announced; clearing again
+            # would discard signals delivered during LangGraph's checkpoint I/O
+            # window between the two nodes, forcing the user to click twice.
             while True:
                 signaled = await wait_with_skip_time(
                     self._continue_event,
@@ -374,17 +372,15 @@ class SynthesisMixin:
                 if not signaled:
                     # Auto-skip on timeout
                     if is_direction_gate and not analysis_state.user_chosen_direction:
-                        analysis_state.user_chosen_direction = "[PI_DECIDE]"
-                        analysis_state.pending_human_input = "[PI_DECIDE]"
+                        analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
+                        analysis_state.pending_human_input = PI_DECIDE_SIGNAL
                     self._set_status(analysis_state, TaskStatus.RUNNING)
                     await self._send_state_sync(analysis_state, "auto_continue")
                     break
                 _consume_signal_then_clear(self._continue_event)
 
-                if self._supplementary_request and self._supplementary_target == "direction":
-                    req = self._supplementary_request
-                    self._supplementary_request = None
-                    self._supplementary_target = None
+                if self._supplementary_queue and self._supplementary_queue[0][1] == "direction":
+                    req, _target = self._supplementary_queue.popleft()
                     self._set_status(analysis_state, TaskStatus.RUNNING)
                     await self._send_state_sync(analysis_state, "supplementary_running")
 
@@ -420,10 +416,8 @@ class SynthesisMixin:
                     self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
                     await self._send_state_sync(analysis_state, "waiting_input")
                     continue
-                elif self._supplementary_request and self._supplementary_target == "round":
-                    req = self._supplementary_request
-                    self._supplementary_request = None
-                    self._supplementary_target = None
+                elif self._supplementary_queue and self._supplementary_queue[0][1] == "round":
+                    req, _target = self._supplementary_queue.popleft()
                     self._set_status(analysis_state, TaskStatus.RUNNING)
                     await self._send_state_sync(analysis_state, "supplementary_running")
 

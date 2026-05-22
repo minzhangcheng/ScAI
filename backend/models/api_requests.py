@@ -139,7 +139,8 @@ class AnnotationConfirmation(BaseModel):
 class SupplementaryAnalysisRequest(BaseModel):
     """Request body for supplementary analysis at HITL points"""
     request_text: str = Field(..., min_length=1, max_length=2000)
-    target: str = Field(..., pattern=r"^(annotation|direction)$")
+    # P1-6: target=round handles supplementary analysis during round-wait gates
+    target: str = Field(..., pattern=r"^(annotation|direction|round)$")
 
 
 class DirectionChoice(BaseModel):

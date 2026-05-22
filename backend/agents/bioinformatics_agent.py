@@ -370,6 +370,9 @@ class BioinformaticsAgent(BaseAgent):
         self.last_result: Optional[CodeExecutionResult] = None
         self.analysis_context: Dict[str, Any] = {}
         self._recent_sup_feedback: set = set()
+        # Current AnalysisState reference for modality inference in system prompt.
+        # Set at the start of each run; used by _infer_modality / _static_system_prompt.
+        self._current_analysis_state: Optional[AnalysisState] = None
 
         # Cooperative pause gate, populated by the workflow before each run.
         # When CLEAR, the autonomous loop blocks between steps until SET.
@@ -528,9 +531,31 @@ class BioinformaticsAgent(BaseAgent):
                                 (f"_s{f.sample_number}" if f.sample_number else ""))
                     var_name_counts[base_name] = var_name_counts.get(base_name, 0) + 1
                     var_name = f"{base_name}_{var_name_counts[base_name]}" if var_name_counts[base_name] > 1 else base_name
-                    data_parts.append(f"    Load: adata_{var_name} = sc.read_h5ad('{f.file_path}')")
-                    data_parts.append(f"    adata_{var_name}.obs_names_make_unique()")
-                    data_parts.append(f"    adata_{var_name}.var_names_make_unique()")
+                    ext = Path(f.file_path).suffix.lower()
+                    loaders = {
+                        '.h5ad':     f"adata_{var_name} = sc.read_h5ad('{f.file_path}')",
+                        '.h5':       f"adata_{var_name} = sc.read_10x_h5('{f.file_path}')",
+                        '.loom':     f"adata_{var_name} = sc.read_loom('{f.file_path}')",
+                        '.csv':      f"adata_{var_name} = sc.read_csv('{f.file_path}').T  # transpose if cells in columns; verify orientation",
+                        '.tsv':      f"adata_{var_name} = sc.read_text('{f.file_path}', delimiter='\\t').T  # verify orientation",
+                        '.mtx':      f"adata_{var_name} = sc.read_10x_mtx('{Path(f.file_path).parent}')  # expects matrix.mtx + barcodes.tsv + features.tsv in the same directory",
+                        '.zarr':     f"adata_{var_name} = sc.read_zarr('{f.file_path}')",
+                    }
+                    if ext in loaders:
+                        data_parts.append(f"    Load: {loaders[ext]}")
+                        if ext in ('.h5ad', '.h5', '.loom', '.zarr'):
+                            data_parts.append(f"    adata_{var_name}.obs_names_make_unique()")
+                            data_parts.append(f"    adata_{var_name}.var_names_make_unique()")
+                    elif ext in ('.rds', '.h5seurat'):
+                        data_parts.append(
+                            f"    # {ext} Seurat file detected at '{f.file_path}'. "
+                            f"Convert to h5ad first using SeuratDisk (R) or anndata2ri, then sc.read_h5ad() the converted file."
+                        )
+                    else:
+                        data_parts.append(
+                            f"    # Unknown scRNA-seq format '{ext}' at '{f.file_path}'. "
+                            f"Inspect the file and consult PI before loading."
+                        )
                 elif f.data_type == "loom":
                     data_parts.append(f"    Loom file for RNA velocity analysis")
                 elif f.data_type == DATA_TYPE_BULK_RNASEQ:
@@ -575,18 +600,49 @@ class BioinformaticsAgent(BaseAgent):
                 parts.append(f"{key}: {value}")
         return "\n".join(parts)
 
+    def _infer_modality(self) -> str:
+        """Infer the analysis modality from available data files.
+
+        Used to construct the agent's identity in the system prompt so the LLM
+        knows what kind of analysis it's actually conducting (single-cell vs
+        bulk vs RNA velocity etc.), rather than relying on a hardcoded label.
+        """
+        state = self._current_analysis_state
+        if not state or not getattr(state, "data_files", None):
+            return "transcriptomics"
+        try:
+            files = state.get_files_by_section("sequencing")
+        except Exception:
+            files = []
+        types = {getattr(f, "data_type", None) for f in files}
+        has_sc = DATA_TYPE_SCRNASEQ in types
+        has_bulk = DATA_TYPE_BULK_RNASEQ in types
+        has_loom = "loom" in types
+        if has_sc and has_bulk:
+            return "single-cell and bulk RNA-seq"
+        if has_sc:
+            return "single-cell RNA-seq"
+        if has_bulk:
+            return "bulk RNA-seq"
+        if has_loom:
+            return "RNA velocity (loom)"
+        return "transcriptomics"
+
     @property
     def _static_system_prompt(self) -> str:
         """Build the static portion of the system prompt.
 
-        Cached by system_prompt value — invalidated when the prompt changes,
-        preserving OpenAI prefix caching benefits while supporting hot reload.
+        Cached by (system_prompt, modality) — invalidated when either changes,
+        preserving OpenAI prefix caching benefits while supporting hot reload
+        and data-driven identity.
         """
         sp = self.system_prompt
-        if getattr(self, "_cached_static_sp_key", None) != sp:
+        modality = self._infer_modality()
+        cache_key = (sp, modality)
+        if getattr(self, "_cached_static_sp_key", None) != cache_key:
             result = f"""{sp}
 
-You are conducting single-cell RNA-seq analysis. You have access to tools:
+You are conducting {modality} analysis. You have access to tools:
 1. execute_code - Run Python code (scanpy, anndata, numpy, pandas, matplotlib available)
    For plotting code: use `plt.savefig('name.jpg')` (or `sc.pl.*(save='_name.jpg')`) to save figures — the system intercepts this and auto-generates a companion high-res PDF, so do NOT save a separate PDF yourself. Do NOT call plt.close() or plt.show() — the system handles figure cleanup automatically.
 2. consult_pi - Ask PI for biological decisions (analysis direction, pathway selection, interpretation)
@@ -819,7 +875,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 - Generate informative visualizations
 - Use report_findings when completing an analysis phase
 """
-            self._cached_static_sp_key, self._cached_static_sp = sp, result
+            self._cached_static_sp_key, self._cached_static_sp = cache_key, result
         return self._cached_static_sp
 
     def _build_dynamic_context(self, state: AnalysisState) -> str:
@@ -1395,6 +1451,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                 logger.info(f"[Bioinformatics] Restored {len(self.code_history)} cells into code_history from notebook state")
 
         # Build initial prompt — split into static prefix (cacheable) and dynamic context
+        self._current_analysis_state = state
         static_system_prompt = self._static_system_prompt
         dynamic_context = self._build_dynamic_context(state)
         dynamic_ctx_msg = {"role": "user", "content": f"{_DYNAMIC_CONTEXT_PREFIX}\n{dynamic_context}"}
@@ -1730,6 +1787,23 @@ If results significantly deviate from plan expectations, report via consult_pi i
             for tool_call in response.tool_calls:
                 tool_name = tool_call.name
                 args = tool_call.arguments
+
+                # P2-2: surface JSON parse failures back to the LLM so it can retry
+                # with valid JSON instead of silently KeyError-ing downstream.
+                if tool_call.parse_error:
+                    err_msg = (
+                        f"ERROR: failed to parse arguments JSON for tool "
+                        f"'{tool_name}': {tool_call.parse_error}. "
+                        f"Raw arguments: {tool_call.raw_arguments!r}. "
+                        f"Please retry the call with a valid JSON arguments object."
+                    )
+                    logger.warning(f"[Bioinformatics] {err_msg}")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": err_msg,
+                    })
+                    continue
 
                 if tool_name == "execute_code":
                     has_substantive_work = True
@@ -2162,6 +2236,9 @@ except Exception as _autosave_block_err:
                     # Auto-extract markers from kernel adata if LLM didn't provide them
                     if n_clusters == 0 and self.sandbox:
                         logger.info(f"[Bioinformatics] cluster_markers empty, auto-extracting from {adata_var}.uns[{rank_key_hint!r}]")
+                        # P2-11: Read padj cutoff from session-configurable deg_thresholds.
+                        _deg_thresholds = getattr(self._current_analysis_state, "deg_thresholds", None) or {}
+                        _padj_cutoff = float(_deg_thresholds.get("padj", 0.05))
                         extract_code = (
                             "import json as _json\n"
                             "_markers = {}\n"
@@ -2169,7 +2246,7 @@ except Exception as _autosave_block_err:
                             "    import scanpy as sc\n"
                             f"    for _cl in {adata_var}.obs['{cluster_key}'].cat.categories:\n"
                             f"        _df = sc.get.rank_genes_groups_df({adata_var}, group=str(_cl), key={rank_key_hint!r})\n"
-                            "        _df = _df[_df['pvals_adj'] < 0.05]\n"
+                            f"        _df = _df[_df['pvals_adj'] < {_padj_cutoff}]\n"
                             "        _markers[str(_cl)] = _df.head(15)['names'].tolist()\n"
                             "except Exception as _e:\n"
                             "    _markers = {'__error__': str(_e)}\n"

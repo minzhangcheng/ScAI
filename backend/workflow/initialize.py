@@ -3,6 +3,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from ..constants import PI_DECIDE_SIGNAL
 from ..models.schemas import AgentType, AnalysisPhase, BiochemistryIndicator, TaskStatus
 
 if TYPE_CHECKING:
@@ -19,6 +20,45 @@ class InitializeMixin:
     async def _initialize_round(self, state: WorkflowState) -> WorkflowState:
         """Initialize a new analysis round, processing any pending user input"""
         analysis_state = state["analysis_state"]
+        # P1-1: commit the previously peeked direction. If current_round_direction
+        # matches the head of the queue, the prior round completed successfully
+        # (otherwise LangGraph would have replayed from checkpoint without
+        # current_round_direction set) → consume it now.
+        if (
+            analysis_state.current_round_direction
+            and analysis_state.directions_queue
+            and analysis_state.directions_queue[0].get("direction") == analysis_state.current_round_direction
+        ):
+            consumed = analysis_state.directions_queue.pop(0)
+            logger.info(
+                f"[{self.session_id}] Direction consumed at round entry: "
+                f"{consumed.get('direction', '')[:80]} (remaining queue: {len(analysis_state.directions_queue)})"
+            )
+        analysis_state.current_round_direction = None
+
+        # P3-5: business default — if resuming in INNOVATION after round 1 with
+        # no direction chosen and no pending input, default to PI_DECIDE so the
+        # workflow doesn't run directionless. This belongs in workflow (not the
+        # resume route) because it's a workflow-state invariant, not a transport
+        # concern. The route just signals "resume"; defaults live here.
+        if (
+            analysis_state.analysis_phase == AnalysisPhase.INNOVATION
+            and analysis_state.current_round >= 1
+            and not analysis_state.user_chosen_direction
+            and not analysis_state.directions_queue
+            and not analysis_state.pending_human_input
+            and not analysis_state.user_chosen_directions
+        ):
+            analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
+            analysis_state.pending_human_input = PI_DECIDE_SIGNAL
+            logger.info(f"[{self.session_id}] Round init without direction: defaulting to PI_DECIDE")
+            effective_max = analysis_state.max_rounds if analysis_state.max_rounds > 0 else 2
+            if analysis_state.current_round >= effective_max:
+                analysis_state.max_rounds = analysis_state.current_round + 1
+                logger.info(
+                    f"[{self.session_id}] Extended max_rounds to {analysis_state.max_rounds} for PI_DECIDE default"
+                )
+
         # Update current analysis state for callbacks (e.g., literature_callback)
         self._current_analysis_state = analysis_state
         self._current_graph_state = state

@@ -1105,7 +1105,8 @@ try:
     print(f"Session restored: {{len(_session_data)}} variables")
     print(f"Restored: {{list(_session_data.keys())}}")
 except Exception as e:
-    print(f"Note: Could not restore session ({{e}}), starting fresh")
+    print(f"__SCAI_RESTORE_ERROR__: {{type(e).__name__}}: {{e}}")
+    raise
 """
         result = await self.execute(restore_code, save_to_history=False, skip_safety_check=True)
 
@@ -1114,11 +1115,21 @@ except Exception as e:
             self._session_restore_failed = False
             logger.info("Session restored successfully")
         else:
+            # P1-11: dill restore failure leaves the kernel without previously-saved
+            # variables while the notebook metadata has already been loaded. Continuing
+            # would yield silent NameErrors downstream. Surface the failure loudly and
+            # abort start-up so the workflow can react (retry / fresh kernel / restore
+            # from earlier snapshot).
             self._session_restore_failed = True
-            if result.success:
-                logger.warning(f"Session restore code ran but restore failed. Output: {result.output}")
-            else:
-                logger.warning(f"Session restore failed: {result.error}. Starting with fresh session.")
+            detail = result.error or result.output or "unknown error"
+            logger.error(
+                f"[{self.session_id}] dill session restore failed: {detail}"
+            )
+            raise RuntimeError(
+                f"Sandbox restore failed for session {self.session_id}: {detail}. "
+                f"Previous kernel variable state is unavailable. Start a fresh kernel "
+                f"or restore from an earlier snapshot."
+            )
     
     async def save_session(self):
         """Save the current session state using dill - only save data variables"""
@@ -1143,6 +1154,7 @@ _vars_to_save = ['adata', 'adata_control', 'adata_treatment', 'adata_merged',
 
 # Collect variables that exist and can be pickled
 _session_data = {{}}
+_skipped_vars = []  # P1-11: track unpicklable variables so they can be reported
 for _var_name in _vars_to_save:
     if _var_name in dir():
         try:
@@ -1150,8 +1162,8 @@ for _var_name in _vars_to_save:
             # Test if it can be pickled
             dill.dumps(_obj)
             _session_data[_var_name] = _obj
-        except Exception:
-            pass  # Skip variables that can't be pickled
+        except Exception as _e:
+            _skipped_vars.append((_var_name, type(_obj).__name__ if '_obj' in dir() else '?', type(_e).__name__, str(_e)[:200]))
 
 # Also save any AnnData objects we might have missed
 import anndata as ad
@@ -1160,22 +1172,55 @@ for _var_name, _obj in list(globals().items()):
         try:
             dill.dumps(_obj)
             _session_data[_var_name] = _obj
-        except Exception:
-            pass
+        except Exception as _e:
+            _skipped_vars.append((_var_name, type(_obj).__name__, type(_e).__name__, str(_e)[:200]))
 
 # Save the collected variables
 with open({escaped_path}, 'wb') as f:
     dill.dump(_session_data, f)
 
 print(f"Session saved: {{len(_session_data)}} variables")
+if _skipped_vars:
+    for _sv in _skipped_vars:
+        print(f"__SCAI_SAVE_SKIPPED__\\t{{_sv[0]}}\\t{{_sv[1]}}\\t{{_sv[2]}}\\t{{_sv[3]}}")
+    print(f"__SCAI_SAVE_SKIPPED_COUNT__: {{len(_skipped_vars)}}")
 """
         result = await self.execute(save_code, save_to_history=False, skip_safety_check=True)
 
         if result.success:
+            # P1-11: parse skipped-variable markers from kernel output and surface them
+            # so the agent/user knows what was NOT persisted (silent skips previously
+            # caused phantom missing state after restore).
+            skipped = []
+            for line in (result.output or "").splitlines():
+                if line.startswith("__SCAI_SAVE_SKIPPED__\t"):
+                    parts = line.split("\t")
+                    if len(parts) >= 5:
+                        skipped.append({
+                            "name": parts[1],
+                            "type": parts[2],
+                            "exc": parts[3],
+                            "msg": parts[4],
+                        })
+            if skipped:
+                for sv in skipped:
+                    logger.warning(
+                        f"[{self.session_id}] save_session: skipping unpicklable "
+                        f"variable '{sv['name']}' ({sv['type']}): "
+                        f"{sv['exc']}: {sv['msg']}"
+                    )
+                logger.warning(
+                    f"[{self.session_id}] save_session: {len(skipped)} variables were "
+                    f"not persisted and will be unavailable on restore: "
+                    f"{[sv['name'] for sv in skipped]}"
+                )
+                self._last_save_skipped = skipped
+            else:
+                self._last_save_skipped = []
             logger.info("Session saved successfully")
         else:
             logger.warning(f"Failed to save session: {result.error}")
-        
+
         return result.success
     
     async def execute(

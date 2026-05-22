@@ -145,6 +145,8 @@ async def delete_analysis(session_id: str, request: Request):
             raise HTTPException(status_code=409, detail="Cannot delete a running analysis. Stop it first.")
         sessions.pop(session_id, None)
         websockets.pop(session_id, None)
+        from backend.state import release_session_lock_slot
+        release_session_lock_slot(session_id)
 
     await cleanup_session_uploads(session_id)
 

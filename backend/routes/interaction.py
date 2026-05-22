@@ -10,11 +10,12 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Request
 
+from backend.constants import PI_DECIDE_SIGNAL
 from backend.models.api_requests import (
     HumanInputRequest, AnnotationConfirmation, SupplementaryAnalysisRequest,
     DirectionChoice, PlanReviewRequest,
 )
-from backend.models.schemas import APIResponse, TaskStatus
+from backend.models.schemas import AnalysisPhase, APIResponse, TaskStatus
 from backend.services.session_store import (
     async_save_session, ensure_session_loaded,
     update_session_cache as _update_session_cache,
@@ -24,6 +25,7 @@ from backend.state import (
     state_lock as _state_lock,
     websockets,
     workflows,
+    get_session_lock,
 )
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
@@ -43,44 +45,47 @@ async def _pause_and_restart_ws(session_id: str, state):
 async def send_human_input(session_id: str, request: Request, body: HumanInputRequest):
     """Send human input/intervention to the analysis"""
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    # P1-9: serialize read-modify-save with concurrent mutators on this session.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    state.pending_human_input = body.message
-    state.pending_uploaded_files = [f.model_dump() for f in body.uploaded_files]
-    state.human_input_requested = False
+        state.pending_human_input = body.message
+        state.pending_uploaded_files = [f.model_dump() for f in body.uploaded_files]
+        state.human_input_requested = False
 
-    if body.clear_queue and state.directions_queue:
-        cleared_count = len(state.directions_queue)
-        state.directions_queue = []
-        state.max_rounds = state.current_round + 1
-        logger.info(f"[{session_id}] Direction queue cleared ({cleared_count} directions removed) by user")
+        if body.clear_queue and state.directions_queue:
+            cleared_count = len(state.directions_queue)
+            state.directions_queue = []
+            state.max_rounds = state.current_round + 1
+            logger.info(f"[{session_id}] Direction queue cleared ({cleared_count} directions removed) by user")
 
-    state.human_messages.append({
-        "timestamp": datetime.now().isoformat(),
-        "message": body.message,
-        "target_agent": body.target_agent,
-        "uploaded_files": [f.model_dump() for f in body.uploaded_files]
-    })
+        state.human_messages.append({
+            "timestamp": datetime.now().isoformat(),
+            "message": body.message,
+            "target_agent": body.target_agent,
+            "uploaded_files": [f.model_dump() for f in body.uploaded_files]
+        })
 
-    if session_id in websockets:
-        try:
-            await websockets[session_id].send_json({
-                "type": "human_input_received",
-                "content": {
-                    "message": body.message,
-                    "uploaded_files": [f.model_dump() for f in body.uploaded_files]
-                },
-                "target_agent": body.target_agent,
-                "timestamp": datetime.now().isoformat()
-            })
-        except Exception:
-            logger.warning("Failed to buffer human input to WebSocket", exc_info=True)
+        if session_id in websockets:
+            try:
+                await websockets[session_id].send_json({
+                    "type": "human_input_received",
+                    "content": {
+                        "message": body.message,
+                        "uploaded_files": [f.model_dump() for f in body.uploaded_files]
+                    },
+                    "target_agent": body.target_agent,
+                    "timestamp": datetime.now().isoformat()
+                })
+            except Exception:
+                logger.warning("Failed to buffer human input to WebSocket", exc_info=True)
 
-    async with _state_lock:
-        workflow = workflows.get(session_id)
-    if workflow and state.status == TaskStatus.WAITING_INPUT:
-        workflow.signal_continue()
-        logger.info(f"[{session_id}] Human input received, signalling workflow to continue")
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if workflow and state.status == TaskStatus.WAITING_INPUT:
+            workflow.signal_continue()
+            logger.info(f"[{session_id}] Human input received, signalling workflow to continue")
 
     return APIResponse(
         success=True,
@@ -110,34 +115,37 @@ async def confirm_annotations(session_id: str, request: Request, body: Annotatio
     """User confirms or modifies cell type annotations during exploration phase"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    # P1-9: serialize read-modify-save with concurrent mutators on this session.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    if state.status != TaskStatus.WAITING_ANNOTATION:
-        raise HTTPException(status_code=400, detail="Session is not waiting for annotation confirmation")
+        if state.status != TaskStatus.WAITING_ANNOTATION:
+            raise HTTPException(status_code=400, detail="Session is not waiting for annotation confirmation")
 
-    if state.annotation_state:
-        for ua in body.annotations:
-            cid = ua.get("cluster_id", "")
-            for ca in state.annotation_state.cluster_annotations:
-                if ca.cluster_id == cid:
-                    if ua.get("user_override"):
-                        override = ua["user_override"].strip()
-                        override = _UNSAFE_PATTERN.sub('', override)
-                        ca.user_override = override[:200]
-                    ca.user_confirmed = True
-                    break
-        state.annotation_state.confirmed = True
-        state.annotation_state.pending = False
+        if state.annotation_state:
+            for ua in body.annotations:
+                cid = ua.get("cluster_id", "")
+                for ca in state.annotation_state.cluster_annotations:
+                    if ca.cluster_id == cid:
+                        if ua.get("user_override"):
+                            override = ua["user_override"].strip()
+                            override = _UNSAFE_PATTERN.sub('', override)
+                            ca.user_override = override[:200]
+                        ca.user_confirmed = True
+                        break
+            state.annotation_state.confirmed = True
+            state.annotation_state.pending = False
 
-    await _update_session_cache(session_id, state)
-    await async_save_session(session_id, state)
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
 
-    async with _state_lock:
-        workflow = workflows.get(session_id)
-    if workflow:
-        workflow.signal_annotation_confirmed()
-    else:
-        await _pause_and_restart_ws(session_id, state)
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if workflow:
+            workflow.signal_annotation_confirmed()
+        else:
+            await _pause_and_restart_ws(session_id, state)
 
     return APIResponse(
         success=True,
@@ -152,19 +160,22 @@ async def request_supplementary_analysis(
     """User requests additional analysis at a HITL point before finalizing their decision."""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    # P1-9: serialize with other mutators on this session.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    if body.target == "annotation" and state.status != TaskStatus.WAITING_ANNOTATION:
-        raise HTTPException(status_code=400, detail="Session is not at annotation confirmation point")
-    if body.target == "direction" and state.status != TaskStatus.WAITING_INPUT:
-        raise HTTPException(status_code=400, detail="Session is not at direction selection point")
+        if body.target == "annotation" and state.status != TaskStatus.WAITING_ANNOTATION:
+            raise HTTPException(status_code=400, detail="Session is not at annotation confirmation point")
+        if body.target == "direction" and state.status != TaskStatus.WAITING_INPUT:
+            raise HTTPException(status_code=400, detail="Session is not at direction selection point")
 
-    async with _state_lock:
-        workflow = workflows.get(session_id)
-    if not workflow:
-        raise HTTPException(status_code=400, detail="No active workflow for this session")
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if not workflow:
+            raise HTTPException(status_code=400, detail="No active workflow for this session")
 
-    workflow.signal_supplementary_analysis(body.request_text, body.target)
+        workflow.signal_supplementary_analysis(body.request_text, body.target)
 
     return APIResponse(
         success=True,
@@ -177,14 +188,37 @@ async def choose_direction(session_id: str, request: Request, body: DirectionCho
     """User chooses research direction(s) for innovation phase after exploration report"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
+    # P1-9: serialize read-modify-save with concurrent mutators on this session.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        return await _choose_direction_locked(session_id, user_id, body)
+
+
+async def _choose_direction_locked(session_id: str, user_id: str, body: DirectionChoice):
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status != TaskStatus.WAITING_INPUT:
         raise HTTPException(status_code=400, detail="Session is not waiting for input")
+    # P1-5: choose-direction is only valid at the post-exploration direction gate.
+    # Round-wait HITL (round 2+) also has WAITING_INPUT status; calling here would
+    # overwrite directions_queue / max_rounds and break the in-flight analysis.
+    is_direction_gate = (
+        state.current_round == 1
+        and state.analysis_phase == AnalysisPhase.INNOVATION
+        and not state.user_chosen_direction
+    )
+    if not is_direction_gate:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This endpoint is only valid at the post-exploration direction selection gate. "
+                "For mid-analysis input use /supplementary-analysis or /human-input."
+            ),
+        )
 
     if body.let_pi_decide:
-        state.user_chosen_direction = "[PI_DECIDE]"
-        state.pending_human_input = "[PI_DECIDE]"
+        state.user_chosen_direction = PI_DECIDE_SIGNAL
+        state.pending_human_input = PI_DECIDE_SIGNAL
     elif body.directions and len(body.directions) > 0:
         state.user_chosen_directions = body.directions
         state.directions_queue = [d.copy() for d in body.directions]
@@ -224,8 +258,11 @@ async def choose_direction(session_id: str, request: Request, body: DirectionCho
 async def request_human_input(session_id: str, request: Request):
     """Request human input (called by workflow when needing guidance)"""
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-    state.human_input_requested = True
+    # P1-9: serialize the flag flip with other mutators.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        state.human_input_requested = True
 
     if session_id in websockets:
         try:
@@ -244,35 +281,35 @@ async def request_human_input(session_id: str, request: Request):
 async def submit_plan_review(session_id: str, request: Request, body: PlanReviewRequest):
     """Submit user's review decision for an analysis plan."""
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    # P1-9: serialize plan-state mutation with other mutators on this session.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    action = body.action
-    user_input = _UNSAFE_PATTERN.sub('', body.user_input) if body.user_input else ""
+        action = body.action
+        user_input = _UNSAFE_PATTERN.sub('', body.user_input) if body.user_input else ""
 
-    async with _state_lock:
-        workflow = workflows.get(session_id)
-    if not workflow:
-        if state.status == TaskStatus.WAITING_PLAN_REVIEW:
-            if action == "modify":
-                raise HTTPException(
-                    status_code=409,
-                    detail="Cannot modify plan without an active workflow. Resume the session first.",
-                )
-            if action in ("approve", "skip"):
-                if state.current_plan is None:
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if not workflow:
+            if state.status == TaskStatus.WAITING_PLAN_REVIEW:
+                if action == "modify":
                     raise HTTPException(
-                        status_code=404,
-                        detail="No plan available to approve. Resume the session first.",
+                        status_code=409,
+                        detail="Cannot modify plan without an active workflow. Resume the session first.",
                     )
-                state.current_plan.status = "approved"
-                state.current_plan.approved_at = datetime.now()
-            # _pause_and_restart_ws will set PAUSED, save, and close the WebSocket
-            # to trigger a resume. Setting RUNNING here was wrong because it was
-            # immediately overwritten to PAUSED — set the correct final status directly.
-            await async_save_session(session_id, state)
-            await _pause_and_restart_ws(session_id, state)
-            return APIResponse(success=True, message="Plan review recorded, restarting")
-        raise HTTPException(status_code=404, detail="Session not found")
+                if action in ("approve", "skip"):
+                    if state.current_plan is None:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="No plan available to approve. Resume the session first.",
+                        )
+                    state.current_plan.status = "approved"
+                    state.current_plan.approved_at = datetime.now()
+                await async_save_session(session_id, state)
+                await _pause_and_restart_ws(session_id, state)
+                return APIResponse(success=True, message="Plan review recorded, restarting")
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    workflow.signal_plan_review(action, user_input)
+        workflow.signal_plan_review(action, user_input)
     return APIResponse(success=True, message=f"Plan review action '{action}' received")

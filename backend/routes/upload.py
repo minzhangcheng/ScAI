@@ -213,10 +213,14 @@ async def upload_chunk(
     session_id: str,
     upload_id: str,
     chunk_index: int,
+    request: Request,
     file: UploadFile = File(...),
     chunk_hash: Optional[str] = Form(None)
 ):
     """Upload a single chunk"""
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
     # Import here to avoid circular import
     from backend.services.upload import upload_manager
 
@@ -309,8 +313,11 @@ async def complete_chunked_upload(
 
 
 @router.get("/session/{session_id}/upload/status/{upload_id}")
-async def get_chunked_upload_status(session_id: str, upload_id: str):
+async def get_chunked_upload_status(session_id: str, upload_id: str, request: Request):
     """Get chunked upload progress"""
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
     # Import here to avoid circular import
     from backend.services.upload import upload_manager
 

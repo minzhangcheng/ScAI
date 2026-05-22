@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
-from .helpers import _get_task_text, _normalize_tasks, cache_hit, cache_invalidate, cache_store, STAGE1_KEYWORDS
+from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, STAGE1_KEYWORDS
 from .retry import with_retry
 
 if TYPE_CHECKING:
@@ -121,7 +121,7 @@ class AgentNodesMixin:
                 "result",
                 {
                     "status": "no_data",
-                    "message": "No pathology images uploaded. Please upload H&E or other stained sections for analysis.",
+                    "message": "No pathology images uploaded. Please upload stained tissue sections (e.g., H&E, IHC, or special stains) appropriate to your study.",
                     "findings": []
                 },
                 AgentType.PATHOLOGY
@@ -276,9 +276,7 @@ class AgentNodesMixin:
 
         # Stage1 task filtering: only QC + clustering + annotation tasks
         if planning_stage == "stage1":
-            stage1_tasks = [t for t in bioinf_tasks if any(
-                kw in _get_task_text(t) for kw in STAGE1_KEYWORDS
-            )]
+            stage1_tasks = [t for t in bioinf_tasks if _has_stage1_keyword(_get_task_text(t))]
             if not stage1_tasks:
                 stage1_tasks = ["Execute scRNA-seq QC, clustering, and cell type annotation"]
             bioinf_tasks = stage1_tasks
@@ -371,8 +369,8 @@ These Stage 1 findings will be used by PI to plan Stage 2 downstream analysis.
 ## EXPLORATION PHASE INSTRUCTIONS
 This is Round 1 — comprehensive, unbiased exploration. You MUST:
 1. Complete the FULL standard pipeline (QC → normalization → clustering → annotation)
-2. After annotation: merge biologically similar clusters (e.g., stress hepatocytes + hepatocytes,
-   macrophage subtypes) into unified cell type groups before DEG analysis
+2. After annotation: merge biologically similar clusters (e.g., subtypes of the same cell type
+   differing only in activation/maturation state) into unified cell type groups before DEG analysis
 3. Perform condition-level DEG (treatment vs control) for ALL merged cell type groups
 4. Run GO/KEGG pathway enrichment on ALL DEG results
 5. Keep analyses simple and high-throughput (DEG + GO/KEGG)
@@ -381,7 +379,7 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
 8. For EACH cell type group's DEG results, generate a visualization figure (volcano plot or bar chart)
 9. For EACH cell type group's KEGG/GO enrichment, generate a bar plot of top enriched pathways
 """
-            if has_bulk:
+            if has_bulk and has_scrna:
                 phase_instruction += """
 10. **MANDATORY — Bulk RNA-seq DEG Analysis** (DO NOT SKIP):
     - Load the bulk RNA-seq count matrix and perform DEG analysis using pydeseq2
@@ -402,6 +400,16 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
     - If needed and available, use advanced tools like scaden (prioritize scipy.optimize.nnls).
     - Generate a stacked bar plot or box plot showing the inferred cell-type proportions across bulk samples/conditions.
     NOTE: This is a SEPARATE mandatory gate. report_findings will be REJECTED if deconvolution is not performed.
+"""
+            elif has_bulk:
+                # Bulk-only: do not impose scRNA-dependent cross-validation/deconvolution.
+                phase_instruction += """
+10. **Bulk RNA-seq DEG Analysis**:
+    - Load the bulk RNA-seq count matrix and run pydeseq2 DEG analysis
+      (fallback: scipy.stats.ttest_ind + statsmodels multipletests FDR correction if pydeseq2 unavailable)
+    - Generate a volcano plot and a heatmap of top DEGs
+    - Run pathway enrichment via gseapy with organism-appropriate libraries
+    Cross-validation against scRNA-seq and cell-type deconvolution are NOT applicable in bulk-only mode.
 """
         else:
             direction_ctx = analysis_state.current_round_direction or "PI-directed"
@@ -645,7 +653,10 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         if isinstance(final_result, dict) and final_result.get("plan_revision_needed"):
             result_state["plan_revision_needed"] = True
             result_state["plan_revision_context"] = final_result.get("plan_revision_context", {})
-            logger.info(f"[{self.session_id}] Mid-execution plan revision triggered")
+            # P0-8: invalidate cache so post-revision re-execution actually runs
+            # instead of returning the stale (pre-revision) cached result.
+            cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
+            logger.info(f"[{self.session_id}] Mid-execution plan revision triggered; bioinfo cache invalidated")
 
         return result_state
     

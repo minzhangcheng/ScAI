@@ -34,10 +34,28 @@ last_save_times: Dict[str, float] = {}
 
 
 def get_session_lock(session_id: str) -> asyncio.Lock:
-    """Return a per-session lock; caller must hold state_lock or know key exists."""
+    """Return the asyncio.Lock for a session, creating it on first use.
+
+    Used to serialize mutating route handlers (read-modify-save) and the
+    WebSocket workflow create-or-observe decision so concurrent calls cannot
+    lose updates or both create a duplicate workflow (P1-8/P1-9).
+
+    Safe under asyncio: the dict check + insert below contains no `await`,
+    so the operation is atomic w.r.t. other coroutines on the same loop.
+    """
     if session_id not in session_locks:
         session_locks[session_id] = asyncio.Lock()
     return session_locks[session_id]
+
+
+def release_session_lock_slot(session_id: str) -> None:
+    """Drop a session's lock entry once the session is destroyed.
+
+    Best-effort: callers should invoke this only when no coroutine still
+    holds the lock (i.e. after session cleanup paths). Missing keys are
+    silently ignored.
+    """
+    session_locks.pop(session_id, None)
 
 
 def touch_access_time(session_id: str) -> None:

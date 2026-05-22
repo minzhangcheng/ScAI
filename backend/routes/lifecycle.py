@@ -14,7 +14,7 @@ from backend.config import get_session_states
 from backend.constants import WaitInputReason
 from backend.models.api_requests import LlmFailureActionRequest, RetryNodeRequest, StopAnalysisRequest
 from backend.models.schemas import (
-    AnalysisPhase, APIResponse, TaskStatus,
+    APIResponse, TaskStatus,
 )
 from backend.services.session_store import async_save_session, ensure_session_loaded, pause_and_restart_ws as _pause_and_restart_ws_impl
 from backend.utils.auth import require_session_ownership
@@ -23,6 +23,7 @@ from backend.state import (
     state_lock as _state_lock,
     websockets,
     workflows,
+    get_session_lock,
 )
 from backend.services.session_store import update_session_cache as _update_session_cache
 
@@ -70,6 +71,13 @@ async def run_analysis(session_id: str, request: Request):
 async def pause_analysis(session_id: str, request: Request):
     """Pause running analysis"""
     user_id = getattr(request.state, "user_id", "")
+    # P1-9: serialize with concurrent resume/stop/llm-failure mutators.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        return await _pause_analysis_locked(session_id, user_id)
+
+
+async def _pause_analysis_locked(session_id: str, user_id: str):
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Idempotent: already paused → no-op success (rapid double-click safe).
@@ -118,6 +126,13 @@ async def pause_analysis(session_id: str, request: Request):
 async def resume_analysis(session_id: str, request: Request):
     """Resume paused or completed analysis (for re-analysis)"""
     user_id = getattr(request.state, "user_id", "")
+    # P1-9: serialize with concurrent pause/stop/llm-failure mutators.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        return await _resume_analysis_locked(session_id, user_id)
+
+
+async def _resume_analysis_locked(session_id: str, user_id: str):
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     # Restore original max_rounds if it was saved during a stop operation
@@ -138,25 +153,8 @@ async def resume_analysis(session_id: str, request: Request):
             data={"needs_reconnect": True}
         )
     elif state.status == TaskStatus.WAITING_INPUT:
-        # Guard: if in innovation phase after round 1, ensure direction is set
-        if (state.analysis_phase == AnalysisPhase.INNOVATION
-            and state.current_round >= 1
-            and not state.user_chosen_direction
-            and not state.directions_queue
-            and not state.pending_human_input
-            and not state.user_chosen_directions):
-            # No direction chosen AND user never selected directions — default to PI_DECIDE
-            # so analysis doesn't run directionless.
-            # If user_chosen_directions is non-empty, all directions have been completed;
-            # just let _should_continue() stop naturally at max_rounds.
-            state.user_chosen_direction = "[PI_DECIDE]"
-            state.pending_human_input = "[PI_DECIDE]"
-            logger.info(f"[{session_id}] Resume without direction: defaulting to PI_DECIDE")
-            # Extend max_rounds since user explicitly requested continuation
-            effective_max = state.max_rounds if state.max_rounds > 0 else 2
-            if state.current_round >= effective_max:
-                state.max_rounds = state.current_round + 1
-                logger.info(f"[{session_id}] Extended max_rounds to {state.max_rounds} for PI_DECIDE resume")
+        # P3-5: directionless-INNOVATION default lives in workflow's
+        # _initialize_round (workflow-state invariant, not a transport concern).
         # Continue from round-end wait (user sent input or skipped)
         # Signal the workflow to continue from _wait_for_user_input
         # Grab workflow reference under lock to avoid race with cleanup_stale_sessions
@@ -224,16 +222,25 @@ async def resume_analysis(session_id: str, request: Request):
             workflow = workflows.get(session_id)
         if workflow:
             workflow.signal_resume()
-            if state.status == TaskStatus.WAITING_INPUT:
-                workflow.signal_continue()
-            elif state.status == TaskStatus.WAITING_ANNOTATION:
-                workflow.signal_annotation_confirmed()
-            elif state.status == TaskStatus.WAITING_PLAN_REVIEW:
-                pass
+            # P0-5: do NOT auto-signal HITL gates on generic resume. The user
+            # asked to unpause; they must still submit an explicit action via
+            # /choose-direction, /confirm-annotation, or /plan-review to
+            # advance past the restored WAITING_* gate.
+            if state.status in (
+                TaskStatus.WAITING_INPUT,
+                TaskStatus.WAITING_ANNOTATION,
+                TaskStatus.WAITING_PLAN_REVIEW,
+            ):
+                message = (
+                    "Analysis resumed; awaiting explicit user input via the "
+                    "appropriate gate endpoint"
+                )
+            else:
+                message = "Analysis resumed"
             return APIResponse(
                 success=True,
-                message="Analysis resumed",
-                data={"needs_reconnect": False}
+                message=message,
+                data={"needs_reconnect": False, "status": state.status.value},
             )
         return APIResponse(
             success=True,
@@ -258,6 +265,13 @@ async def resume_analysis(session_id: str, request: Request):
 async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequest):
     """Stop a running analysis - either immediately or with summary report"""
     user_id = getattr(request.state, "user_id", "")
+    # P1-9: serialize with concurrent pause/resume/llm-failure mutators.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        return await _stop_analysis_locked(session_id, user_id, req)
+
+
+async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysisRequest):
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
@@ -363,6 +377,13 @@ async def llm_failure_action(session_id: str, request: Request, req: LlmFailureA
     (e.g. double-click) are rejected with 409.
     """
     user_id = getattr(request.state, "user_id", "")
+    # P1-9: serialize with concurrent pause/resume/stop mutators.
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        return await _llm_failure_action_locked(session_id, user_id, req)
+
+
+async def _llm_failure_action_locked(session_id: str, user_id: str, req: LlmFailureActionRequest):
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
     if state.status != TaskStatus.WAITING_INPUT:

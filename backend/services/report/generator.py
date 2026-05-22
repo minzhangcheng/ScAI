@@ -201,7 +201,9 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
 
         # Step 2: Scan workspace for existing figures and tables, copy to report dir
         await self._report_progress(10, "Collecting analysis figures and tables...")
-        existing_figures = self._scan_existing_figures()
+        existing_figures = self._scan_existing_figures(
+            publication_figures=getattr(state, "publication_figures", None),
+        )
         existing_tables = self._scan_existing_tables()
         logger.info(f"Collected {len(existing_figures)} figures and {len(existing_tables)} tables for report")
 

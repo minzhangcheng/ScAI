@@ -618,7 +618,7 @@ IMPORTANT:
         figure_images = self._prepare_figure_images(existing_figures)
 
         # Step 4: Load table summaries
-        table_summaries = self._prepare_table_summaries(existing_tables)
+        table_summaries = self._prepare_table_summaries(existing_tables, analysis_state=state)
 
         # Step 5: Single comprehensive PI review
         await self._report_progress(23, "PI Agent reviewing complete analysis from scratch...")

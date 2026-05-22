@@ -33,9 +33,10 @@ class SnapshotManager:
             "pre_major_revision"   - Before major plan revision dialogue
             "post_report"          - After final report
         """
+        # P2-4: do NOT use snapshots[-1] as fallback — it picks by time, not by branch.
+        # When there's no explicit restore anchor, leave parent_id as None (a new root)
+        # to avoid corrupting the parent chain in multi-branch restore scenarios.
         parent_id = state.last_restored_snapshot_id
-        if parent_id is None and state.snapshots:
-            parent_id = state.snapshots[-1].id
 
         if state.last_restored_snapshot_id:
             existing_branches = sum(

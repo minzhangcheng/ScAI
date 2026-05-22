@@ -6,7 +6,7 @@ from datetime import datetime
 from html import escape as _html_escape
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from ..constants import LlmFailureAction
+from ..constants import LlmFailureAction, PI_DECIDE_SIGNAL
 from ..models.schemas import AgentType, AnalysisPhase, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
 from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
@@ -130,17 +130,13 @@ class PlanningMixin:
                     analysis_state.current_round_direction = None
                     logger.exception(f"[{self.session_id}] innovation_instruction failed, direction stays in queue")
                     raise
-                # Pop only after successful instruction generation
-                analysis_state.directions_queue.pop(0)
-                # Persist state after instructions are successfully generated
-                if self.state_callback:
-                    try:
-                        await self.state_callback(analysis_state)
-                    except Exception as e:
-                        logger.exception(f"[{self.session_id}] Failed to persist state after direction pop")
+                # P1-1: do NOT pop the queue here. The direction is committed
+                # at the start of the NEXT round via _initialize_round, only if
+                # this round completes successfully (LangGraph checkpoint confirms).
+                # current_round_direction (set above) is the in-flight marker.
                 # Clear single direction field
                 analysis_state.user_chosen_direction = None
-            elif user_direction and user_direction not in ("", "[PI_DECIDE]"):
+            elif user_direction and user_direction not in ("", PI_DECIDE_SIGNAL):
                 logger.info(f"[{self.session_id}] Innovation phase: user-directed → {user_direction[:100]}")
                 instructions = await self.pi_agent.innovation_instruction(
                     analysis_state, user_direction
@@ -149,7 +145,7 @@ class PlanningMixin:
                 analysis_state.current_round_direction = user_direction
                 # Consume the direction to avoid reusing in next round
                 analysis_state.user_chosen_direction = None
-            elif user_direction == "[PI_DECIDE]" or (not user_direction and analysis_state.current_round == 2):
+            elif user_direction == PI_DECIDE_SIGNAL or (not user_direction and analysis_state.current_round == 2):
                 # PI autonomously selects 2 best directions
                 logger.info(f"[{self.session_id}] Innovation phase: PI selecting best directions")
                 selected_dirs = await self.pi_agent.select_best_directions(analysis_state)
@@ -362,7 +358,10 @@ class PlanningMixin:
                             for d in dialogue_history
                             if d.get("pi_feedback")
                         )
-                        user_feedback = _consume_user_plan_feedback(state)
+                        # P2-6: read user_plan_feedback WITHOUT clearing it.
+                        # If the revise call below fails, the feedback must
+                        # survive so the user doesn't have to re-type it.
+                        user_feedback = state.get("user_plan_feedback") or ""
                         pi_feedback = all_pi_feedback or (dialogue_history[-1]["pi_feedback"] if dialogue_history else "")
                         combined_feedback = f"{pi_feedback}\n\nUser feedback: {user_feedback}" if user_feedback else pi_feedback
                         plan = await self.bioinformatics_agent.revise_plan_incrementally(
@@ -370,6 +369,9 @@ class PlanningMixin:
                             current_plan=existing_plan,
                             pi_feedback=combined_feedback,
                         )
+                        # Clear only after a successful revise call.
+                        if user_feedback:
+                            state["user_plan_feedback"] = None
                     break  # success, exit inner retry loop
                 except UpstreamExhaustedError as e:
                     action = await self._wait_for_llm_intervention(
@@ -429,6 +431,9 @@ class PlanningMixin:
                         "findings": [],
                         "status": "failed",
                     }
+                    # P0-7: set should_continue=False so _after_review takes the
+                    # abort path instead of looping infinitely on "revise".
+                    state["should_continue"] = False
                     return state
 
             # --- PI review call (with LLM failure intervention) ---
@@ -500,6 +505,9 @@ class PlanningMixin:
                         "findings": [],
                         "status": "failed",
                     }
+                    # P0-7: set should_continue=False so _after_review takes the
+                    # abort path instead of looping infinitely on "revise".
+                    state["should_continue"] = False
                     return state
 
             # --- Process PI review decision ---
@@ -537,24 +545,73 @@ class PlanningMixin:
 
             round_num += 1
 
-        # Max rounds reached without approval — take last plan as-is
+        # Max rounds reached without approval — PI must finalize.
         if round_num > MAX_PLANNING_ROUNDS:
             logger.warning(
                 f"[{self.session_id}] Planning dialogue reached max rounds ({MAX_PLANNING_ROUNDS})"
             )
-            if existing_plan:
+            if existing_plan is not None:
                 existing_plan.status = "pi_reviewing"
                 analysis_state.current_plan = existing_plan
                 analysis_state.plan_dialogue_history = dialogue_history
+                state["plan_approved"] = True
                 state["planning_result"] = {
                     "plan": existing_plan.model_dump(mode="json"),
                     "dialogue": dialogue_history,
                 }
-            await self._send_message(
-                "status",
-                "Planning dialogue: max rounds reached, proceeding with last version",
-                AgentType.PI,
-            )
+                await self._send_message(
+                    "status",
+                    "Planning dialogue: max rounds reached, proceeding with last version",
+                    AgentType.PI,
+                )
+            else:
+                # P1-10: no plan after MAX_PLANNING_ROUNDS → PI unilaterally
+                # generates a final plan from the dialogue history instead of
+                # returning empty state (which would cause an infinite revise
+                # loop in _after_review).
+                logger.warning(
+                    f"[{self.session_id}] MAX_PLANNING_ROUNDS reached without plan; "
+                    f"PI finalizes unilaterally"
+                )
+                await self._send_message(
+                    "status",
+                    "Planning dialogue: max rounds reached without agreement, "
+                    "PI is finalizing the plan unilaterally...",
+                    AgentType.PI,
+                )
+                try:
+                    final_plan = await self.pi_agent.generate_final_plan_from_dialogue(
+                        analysis_state, dialogue_history
+                    )
+                    analysis_state.current_plan = final_plan
+                    analysis_state.plan_dialogue_history = dialogue_history
+                    state["plan_approved"] = True
+                    state["planning_result"] = {
+                        "plan": final_plan.model_dump(mode="json"),
+                        "dialogue": dialogue_history,
+                    }
+                    await self._send_message(
+                        "status",
+                        "PI has finalized the plan unilaterally after max rounds.",
+                        AgentType.PI,
+                    )
+                except Exception as e:
+                    logger.exception(
+                        f"[{self.session_id}] PI failed to generate final plan "
+                        f"from dialogue: {e}"
+                    )
+                    await self._send_message(
+                        "error",
+                        f"PI failed to finalize plan after max rounds: {str(e)}",
+                        AgentType.PI,
+                    )
+                    state["failed_node"] = "planning_dialogue"
+                    state["planning_result"] = {
+                        "error": str(e),
+                        "findings": [],
+                        "status": "failed",
+                    }
+                    state["should_continue"] = False
 
         return state
 

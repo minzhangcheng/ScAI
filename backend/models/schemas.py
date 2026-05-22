@@ -490,6 +490,12 @@ class AnalysisState(BaseModel):
     # Per-agent LLM server overrides (agent_name -> {"llm_base_url": ..., "api_key": ...})
     agent_server_configs: Dict[str, Dict[str, str]] = Field(default_factory=dict)
 
+    # P2-11: Session-configurable DEG significance thresholds.
+    # Different research domains use different cutoffs (e.g. tumor heterogeneity uses |logFC|>0.5).
+    deg_thresholds: Dict[str, float] = Field(
+        default_factory=lambda: {"logfc": 1.0, "padj": 0.05}
+    )
+
     # Agent vision capability settings (agent_name -> bool, True = supports vision)
     agent_vision_settings: Dict[str, bool] = Field(default_factory=dict)
 
@@ -561,6 +567,7 @@ class AnalysisState(BaseModel):
         "custom_prompts": "custom_prompts",
         "custom_models": "custom_models",
         "custom_temperatures": "custom_temperatures",
+        "deg_thresholds": "deg_thresholds",
         "state_version": "state_version",
         "last_sync_timestamp": "last_sync_timestamp",
         "current_plan": "current_plan",

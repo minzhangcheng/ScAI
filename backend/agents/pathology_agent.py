@@ -350,11 +350,19 @@ Please provide comprehensive analysis and reply in JSON format:
 {{
     "summary": "Comprehensive pathological diagnosis summary",
     "key_findings": ["key finding 1", ...],
-    "pathological_grade": {{
-        "inflammation": 0-4,
-        "fibrosis": 0-4,
-        "steatosis": 0-4,
-        "injury": 0-4
+    "grading": {{
+        "<dimension_name>": {{
+            "score": <int>,
+            "max": <int>,
+            "scale_description": "<what the scale measures and what each level means>"
+        }}
+        // Define grading dimensions appropriate for THIS tissue type and the
+        // pathology observed. Examples (DO NOT use as-is — derive from data):
+        //   liver/NASH:   inflammation, fibrosis, steatosis, hepatocellular injury
+        //   brain/AD:     amyloid burden, tau pathology, neuronal loss
+        //   tumor:        tumor grade, mitotic count, necrosis extent, invasion depth
+        //   kidney/AKI:   tubular injury, interstitial inflammation, fibrosis
+        //   lung/IPF:     UIP pattern severity, fibroblastic foci density, honeycombing
     }},
     "suggested_staining": ["suggested additional special staining"],
     "questions_for_bioinformatics": ["questions requiring bioinformatics assistance"],

@@ -68,13 +68,52 @@ _ADMIN_INITIALIZED_CACHE_TTL = 60  # seconds
 
 
 def _is_auth_optional(path: str) -> bool:
-    """Check if a path is auth-optional (auth delegated to route layer)."""
+    """Check if a path is auth-optional (auth delegated to route layer).
+
+    Suffix matching is anchored to the path segment immediately after
+    /api/session/{session_id} — so /export only matches at that position,
+    not as a substring elsewhere in the URL.
+    """
+    # Defense in depth: reject relative-traversal segments before suffix matching.
+    if "/../" in path or "/./" in path or path.endswith("/..") or path.endswith("/."):
+        return False
     if any(path.startswith(p) for p in AUTH_OPTIONAL_PATHS):
         return True
     if path.startswith("/api/session/"):
-        if any(suffix in path for suffix in SESSION_AUTH_OPTIONAL_SUFFIXES):
-            return True
+        # Extract the remainder after /api/session/{session_id}
+        rest = path[len("/api/session/"):]
+        slash_idx = rest.find("/")
+        if slash_idx == -1:
+            return False
+        # tail starts with "/" — e.g. "/export", "/report/html", "/exploration-report/x"
+        tail = rest[slash_idx:]
+        for suffix in SESSION_AUTH_OPTIONAL_SUFFIXES:
+            if suffix.endswith("/"):
+                # Prefix-of-subpath suffix (e.g. "/report/", "-report/", "/figure/")
+                if tail.startswith(suffix) or _tail_has_dash_prefix(tail, suffix):
+                    return True
+            else:
+                # Terminal suffix (e.g. "/export") — must be exact or followed by "/"
+                if tail == suffix or tail.startswith(suffix + "/"):
+                    return True
     return False
+
+
+def _tail_has_dash_prefix(tail: str, suffix: str) -> bool:
+    """Match suffixes like '-report/' that attach to the end of the first segment.
+
+    e.g. tail '/exploration-report/html' matches suffix '-report/'.
+    Only valid when suffix starts with '-' (not '/').
+    """
+    if not suffix.startswith("-"):
+        return False
+    # First segment of tail is everything between leading "/" and next "/"
+    next_slash = tail.find("/", 1)
+    if next_slash == -1:
+        return False
+    first_seg = tail[1:next_slash]
+    rest_with_slash = tail[next_slash:]  # starts with "/"
+    return first_seg.endswith(suffix.rstrip("/")) and rest_with_slash.startswith("/")
 
 
 class AuthMiddleware(BaseHTTPMiddleware):

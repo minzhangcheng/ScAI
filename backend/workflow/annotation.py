@@ -122,7 +122,12 @@ class AnnotationMixin:
                 "error": "cluster_markers is empty. Run rank_genes_groups and extract markers first."
             }
 
-        state = self._current_analysis_state if self._current_analysis_state else AnalysisState()
+        if self._current_analysis_state is None:
+            raise RuntimeError(
+                "_current_analysis_state must be set before annotate_clusters; "
+                "this fallback was previously a silent ValidationError because user_id is required."
+            )
+        state = self._current_analysis_state
 
         # Early exit: if annotations were already confirmed, return cached results
         if state.annotation_state and state.annotation_state.confirmed:
@@ -389,10 +394,8 @@ class AnnotationMixin:
                     await self._send_state_sync(state, "annotation_auto_skipped")
                     break
 
-                if self._supplementary_request and self._supplementary_target == "annotation":
-                    req = self._supplementary_request
-                    self._supplementary_request = None
-                    self._supplementary_target = None
+                if self._supplementary_queue and self._supplementary_queue[0][1] == "annotation":
+                    req, _target = self._supplementary_queue.popleft()
                     state.status = TaskStatus.RUNNING
                     await self._send_state_sync(state, "supplementary_running")
 

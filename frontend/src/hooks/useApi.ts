@@ -615,6 +615,17 @@ export function useSession() {
       }).catch(e => { syncFailures.push('literature_config'); throw e }),
     ])
 
+    // P2-9: Abort if any agent config sync failed so analysis does not run with stale config.
+    if (syncFailures.length > 0) {
+      const summary = syncFailures.join(', ')
+      console.error('[startAnalysis] agent config sync failed:', summary)
+      const err: Error & { syncFailures?: string[] } = new Error(
+        `Agent config sync failed before starting analysis: ${summary}. Analysis aborted.`
+      )
+      err.syncFailures = syncFailures
+      throw err
+    }
+
     await apiFetch(`/session/${currentSession.id}/run`, { method: 'POST' })
     updateSession({ status: 'running' })
     return syncFailures
@@ -799,36 +810,28 @@ export function useWebSocket() {
           if (data) {
 
             if (data.messages && Array.isArray(data.messages)) {
-              // Get current local messages
-              const localMessages = currentState.messages
-
               // Convert server messages to frontend format
               const serverMessages: Message[] = data.messages.map(transformRawMessage)
 
-              // Deduplicate using server-assigned unique IDs
-              const serverMsgIdSet = new Set(serverMessages.map(m => m.id))
+              // Transactional merge: read+write inside setState so messages that
+              // arrived via WebSocket during the async fetch are preserved.
+              let mergedCount = 0
+              let localOnlyCount = 0
+              useAppStore.setState((state) => {
+                const serverMsgIdSet = new Set(serverMessages.map(m => m.id))
+                localOnlyCount = state.messages.filter(m => !serverMsgIdSet.has(m.id)).length
 
-              // Filter local messages that don't exist on server (by id)
-              const localOnlyMessages = localMessages.filter(m =>
-                !serverMsgIdSet.has(m.id)
-              )
-
-              // Read latest messages from store to avoid overwriting messages
-              // that arrived via WebSocket during the async fetch.
-              const latestMessages = useAppStore.getState().messages
-              const latestMsgIdSet = new Set(latestMessages.map((m: Message) => m.id))
-
-              // Find server messages not already present locally
-              const newFromServer = serverMessages.filter((m) =>
-                !latestMsgIdSet.has(m.id)
-              )
-
-              if (newFromServer.length > 0) {
-                const merged = [...latestMessages, ...newFromServer]
+                const currentIdSet = new Set(state.messages.map((m: Message) => m.id))
+                const newFromServer = serverMessages.filter((m) => !currentIdSet.has(m.id))
+                if (newFromServer.length === 0) {
+                  return state
+                }
+                mergedCount = newFromServer.length
+                const merged = [...state.messages, ...newFromServer]
                   .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-                setMessages(merged)
-              }
-              devLog(`WebSocket: Restored ${serverMessages.length} messages, merged ${localOnlyMessages.length} local-only`)
+                return { ...state, messages: merged }
+              })
+              devLog(`WebSocket: Restored ${serverMessages.length} messages (${mergedCount} new merged), ${localOnlyCount} local-only`)
             }
 
             // Also restore agent errors if present

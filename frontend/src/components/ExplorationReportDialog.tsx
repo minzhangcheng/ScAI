@@ -19,7 +19,7 @@ import {
 import { Language } from '../i18n/translations'
 import { useCountdownTimer } from '../hooks/useCountdownTimer'
 
-interface ExplorationReport {
+export interface ExplorationReport {
   cluster_overview: string
   data_quality_warnings: string[]
   strongest_heterogeneity: string[]

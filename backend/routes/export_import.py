@@ -44,6 +44,20 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="", tags=["export_import"])
 
+# P3-7: cap export filename's slug portion to keep total filename below
+# filesystem limits (most FS allow 255 bytes). When truncation is needed,
+# append a short UUID suffix to preserve uniqueness across long names.
+MAX_EXPORT_NAME = 200
+
+
+def _build_export_filename(session_id: str, name: str, ext: str = ".tar.gz") -> str:
+    """Build a length-capped, unique export filename."""
+    safe_name = slugify_session_name(name)
+    if len(safe_name) > MAX_EXPORT_NAME:
+        suffix = uuid.uuid4().hex[:8]
+        safe_name = f"{safe_name[:MAX_EXPORT_NAME]}_{suffix}"
+    return f"export_{session_id[:8]}_{safe_name}{ext}"
+
 
 # ---------------------------------------------------------------------------
 # Helper functions (used by export handlers)
@@ -167,8 +181,7 @@ async def export_state(session_id: str, request: Request):
         await asyncio.to_thread(_build_tar)
 
     # Build safe filename (consistent format with export_prepare)
-    safe_name = slugify_session_name(state.name)
-    filename = f"export_{session_id[:8]}_{safe_name}.tar.gz"
+    filename = _build_export_filename(session_id, state.name)
 
     # FileResponse streams from disk; BackgroundTask deletes the temp file after response is sent
     return FileResponse(
@@ -197,8 +210,7 @@ async def export_prepare(session_id: str, request: Request):
     export_dir = UPLOAD_TEMP_DIR
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_name = slugify_session_name(state.name)
-    filename = f"export_{session_id[:8]}_{safe_name}.tar.gz"
+    filename = _build_export_filename(session_id, state.name)
     tar_path = export_dir / filename
 
     def _build_tar():
@@ -452,6 +464,20 @@ def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
 
     with tarfile.open(file_path, mode='r:gz') as tf:
         for member in tf:
+            # Reject link entries (symlink/hardlink) and device/special files BEFORE
+            # the isfile() filter: such members would otherwise be silently skipped,
+            # but an attacker may craft them to point at /etc/passwd or other sessions.
+            if member.issym() or member.islnk():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Archive contains link entries (rejected): {member.name}",
+                )
+            if member.isdev() or member.ischr() or member.isfifo():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Archive contains device/special entries: {member.name}",
+                )
+
             if not member.isfile():
                 continue
 
@@ -580,9 +606,13 @@ def _import_zip(content: bytes, user_id: str) -> AnalysisState:
             if wf.startswith(f"{session_id}/workspace/") and not wf.endswith('/'):
                 relative_path = wf.replace(f"{session_id}/workspace/", "")
                 dest_path = (ws_dir / relative_path).resolve()
-                if not str(dest_path).startswith(str(workspace_parent) + os.sep):
-                    logger.warning(f"Skipping zip entry with path traversal: {wf}")
-                    continue
+                # Robust traversal check via Path.is_relative_to (3.9+). Reject
+                # rather than silently skip — a malicious archive should fail loudly.
+                if not dest_path.is_relative_to(workspace_parent):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Archive entry escapes target directory: {wf}",
+                    )
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 dest_path.write_bytes(zf.read(wf))
 

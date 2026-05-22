@@ -27,8 +27,13 @@ TECHNICAL_ERROR_TYPES: FrozenSet[str] = frozenset({
     "InvalidIndexError", "AnnDataReadError", "SparseDataError",
 })
 
-# Regex to strip ANSI escape sequences (e.g. \x1b[31m) from Jupyter tracebacks
-_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+# Regex to strip ANSI escape sequences from Jupyter tracebacks.
+# Covers CSI (any final byte), OSC (BEL-terminated), and charset designations.
+_ANSI_RE = re.compile(
+    r'\x1b\[[0-9;]*[a-zA-Z]'   # CSI ... final letter
+    r'|\x1b\][^\x07]*\x07'      # OSC ... BEL
+    r'|\x1b[()][AB012]'         # charset designations
+)
 
 
 def strip_ansi(text: str) -> str:

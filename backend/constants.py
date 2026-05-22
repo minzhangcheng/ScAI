@@ -63,6 +63,13 @@ PI_REVIEW_FALLBACK_DECISION = "revise"
 # responses like "I cannot execute this step because X" will trigger false positives
 # on "cannot execute". Consider replacing with structured signals (e.g. a dedicated
 # tool call or a prefixed tag like [PLAN_REVISION]) so that intent is unambiguous.
+# HITL signal sentinel values used in analysis_state.user_chosen_direction and
+# pending_human_input fields. Centralized so a typo in any consumer is caught
+# at import time rather than silently breaking comparison semantics.
+CONTINUE_SIGNAL = "[CONTINUE]"
+PI_DECIDE_SIGNAL = "[PI_DECIDE]"
+
+
 PLAN_REVISION_KEYWORDS = frozenset([
     "plan needs revision", "plan revision", "replan",
     "cannot execute", "not applicable", "different approach",

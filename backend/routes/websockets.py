@@ -94,16 +94,21 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     logger.info(f"WebSocket connected for session {session_id}, state={state.status.value}")
 
-    # Check if workflow is already running BEFORE updating websocket reference
-    # Use lock to prevent race condition between check and set
-    async with state_lock:
-        workflow_running = session_id in workflows
-        workflow_initializing = session_id in initializing_sessions
-        if not workflow_running and not workflow_initializing:
-            # Only set websocket reference if we're the main connection (not an observer)
-            websockets[session_id] = websocket
-            # Mark as initializing to prevent concurrent workflow creation
-            initializing_sessions.add(session_id)
+    # P1-8: acquire session-scoped lock BEFORE the create-or-observe gate so
+    # two concurrent connections cannot both decide to create a workflow
+    # (TOCTOU). Lock order: session_lock first, then state_lock.
+    _sess_lock = get_session_lock(session_id)
+    async with _sess_lock:
+        # Check if workflow is already running BEFORE updating websocket reference
+        # Use lock to prevent race condition between check and set
+        async with state_lock:
+            workflow_running = session_id in workflows
+            workflow_initializing = session_id in initializing_sessions
+            if not workflow_running and not workflow_initializing:
+                # Only set websocket reference if we're the main connection (not an observer)
+                websockets[session_id] = websocket
+                # Mark as initializing to prevent concurrent workflow creation
+                initializing_sessions.add(session_id)
 
     if workflow_running or workflow_initializing:
         logger.info(f"Workflow already running for session {session_id}, reconnecting WebSocket...")
@@ -389,7 +394,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         logger.exception(f"[{session_id}] Failed to send initial message")
 
     # State callback to save after each round
-    _sess_lock = get_session_lock(session_id)
+    # (_sess_lock acquired above for create-or-observe gate; reuse same handle)
 
     async def _write_state_if_current(state: AnalysisState, *, set_paused=False, set_failed=False) -> bool:
         """Write state to cache and disk only if this workflow is still current.

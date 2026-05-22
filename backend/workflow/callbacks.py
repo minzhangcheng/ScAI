@@ -19,8 +19,12 @@ class CallbacksMixin:
 
     async def _literature_callback(self, topic: str) -> str:
         """Callback for bioinformatics agent to request literature support"""
-        # Use current analysis state if available, otherwise create minimal state
-        state = self._current_analysis_state if self._current_analysis_state else AnalysisState()
+        if self._current_analysis_state is None:
+            raise RuntimeError(
+                "_current_analysis_state must be set before _literature_callback; "
+                "this fallback was previously a silent ValidationError because user_id is required."
+            )
+        state = self._current_analysis_state
         result = await self.literature_agent.process(
             state,
             topic,
@@ -233,7 +237,12 @@ IMPORTANT: Respond in English only. Do not use any other language."""
             AgentType.PI
         )
 
-        state = self._current_analysis_state if self._current_analysis_state else AnalysisState()
+        if self._current_analysis_state is None:
+            raise RuntimeError(
+                "_current_analysis_state must be set before figure review callback; "
+                "this fallback was previously a silent ValidationError because user_id is required."
+            )
+        state = self._current_analysis_state
 
         review = await self.pi_agent.review_figure(
             state,

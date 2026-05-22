@@ -51,10 +51,31 @@ def _retry_backoff_delay(attempt: int) -> float:
 
 # Stage1 keyword set for filtering bioinformatics tasks
 STAGE1_KEYWORDS = frozenset([
+    # scRNA-seq exploration
     "qc", "quality", "filter", "normaliz", "cluster", "umap", "pca",
     "dimension", "annotat", "cell type", "doublet", "batch", "harmony",
     "hvg", "preprocess", "load", "inspect", "merg", "integrat",
+    # bulk RNA-seq exploration
+    "deseq", "pydeseq2", "volcano", "bulk", "library_size",
+    "count_matrix", "vst", "tmm",
 ])
+
+
+def _has_stage1_keyword(text: str) -> bool:
+    """Return True if text mentions a stage1 (exploration) keyword, while
+    treating 're-' prefixed forms (re-cluster, re-annotate) as NOT stage1."""
+    text_lower = text.lower()
+    for kw in STAGE1_KEYWORDS:
+        idx = 0
+        while True:
+            pos = text_lower.find(kw, idx)
+            if pos < 0:
+                break
+            preceding3 = text_lower[max(0, pos - 3):pos]
+            if not preceding3.endswith("re-"):
+                return True
+            idx = pos + len(kw)
+    return False
 
 _DIFF_LABELS = {
     'added': '[ADDED]',

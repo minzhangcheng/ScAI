@@ -27,11 +27,8 @@ def _resolve_within_allowed_dirs(path: str) -> Path:
         raise HTTPException(status_code=400, detail="Invalid path")
 
     for allowed_dir in _ALLOWED_DIRS:
-        try:
-            real_path.relative_to(allowed_dir)
+        if real_path.is_relative_to(allowed_dir):
             return real_path
-        except ValueError:
-            continue
 
     raise HTTPException(status_code=403, detail="Access denied")
 

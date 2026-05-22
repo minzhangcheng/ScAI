@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.25 · **Last updated**: 2026-05-21
+**Version**: 0.24.26 · **Last updated**: 2026-05-21
 
 ## 1. Runtime Architecture
 
@@ -312,6 +312,47 @@ Detailed release notes for every version are available through `git log` and rel
     - `messaging.py` — WebSocket message sending
   - **Backward compatibility**: The `__init__.py` exports `SingleCellAnalysisWorkflow`, `WorkflowState`, `with_retry`, and `_retry_backoff_delay` to preserve existing import paths.
   - **New tests**: Added `test_workflow_helpers.py` and `test_workflow_routing.py` for the refactored code.
+
+- `0.24.26` — modality-branched workflow, concurrency hardening, LLM client resilience (2026-05-21):
+  - **Modality-branched workflow (P1-4)**: `workflow_for_modality()` in `agent_prompts.py` provides separate analysis workflows for scRNA-seq, bulk RNA-seq, and multimodal data. Bioinformatics agent's `_infer_modality()` drives modality-aware system prompt identity so the LLM knows what kind of analysis it's conducting.
+  - **Bulk-only instruction isolation**: Agent nodes no longer impose scRNA-dependent cross-validation or deconvolution on bulk-only sessions. New `_has_stage1_keyword()` helper excludes "re-" prefixed terms (re-cluster, re-annotate) from stage1 filtering. Bulk RNA-seq terms added to `STAGE1_KEYWORDS`.
+  - **PI unilateral final plan (P1-10)**: `PI.generate_final_plan_from_dialogue()` produces a plan when `MAX_PLANNING_ROUNDS` is exhausted without agreement, replacing infinite revise loops.
+  - **Direction queue commit on round entry (P1-1)**: Directions are now consumed at `_initialize_round` only after the prior round's LangGraph checkpoint confirms success, avoiding pre-mature pop with no rollback path.
+  - **PI_DECIDE moved to workflow invariant (P3-5)**: Directionless-INNOVATION default moved from the resume route into `_initialize_round` so it applies consistently regardless of how the workflow resumes.
+  - **Per-session lock on HITL endpoints (P1-9)**: All interaction/lifecycle mutation endpoints wrapped with session-scoped `asyncio.Lock` to prevent race conditions from concurrent pause/resume/stop/llm-failure calls.
+  - **Resume no longer auto-signals HITL gates (P0-5)**: Generic resume now awaits explicit user action at the restored WAITING_* gate rather than blindly emitting signals.
+  - **Supplementary queue FIFO**: Replaced single `_supplementary_request`/`_supplementary_target` fields with `deque` so consecutive rapid requests are preserved in order.
+  - **Cache invalidate on mid-execution plan revision (P0-8)**: Bioinfo cache cleared so post-revision re-execution doesn't return stale pre-revision results.
+  - **Exploration success whitelist**: `_exploration_round_succeeded()` now only accepts `status=="completed"` — all other outcomes (including `completed_with_fallback`, `max_steps_reached` with findings) block EXPLORATION→INNOVATION transition.
+  - **No double-clear of _continue_event (P0-6)**: Prevents signals delivered during LangGraph checkpoint I/O from being silently discarded, fixing the "click twice" bug.
+  - **should_continue=False on planning failure (P0-7)**: `_after_review` no longer loops infinitely on "revise" when the LLM fails.
+  - **LLM client resilience**:
+    - **Cache lock serialization (P2-1)**: `asyncio.Lock` guards on `_temp_unsupported_models` and `_toolchoice_unsupported_models` to prevent race conditions in concurrent first-time probes.
+    - **max_tokens field override cache (P3-4)**: Adaptive tracking of which field (`max_tokens` vs `max_completion_tokens`) a provider accepts, handling o-series variants routed through providers the static `_is_o_series` heuristic misses.
+    - **ToolCall parse_error propagation (P2-2)**: JSON parse failures now surface `parse_error`/`raw_arguments` to the caller so the bioinfo agent can retry with valid JSON instead of silent KeyErrors.
+    - **Reasoning extraction refactor**: `_collect_reasoning_parts()` helper handles str/dict/list elements robustly across both `model_dump` and `getattr` code paths.
+  - **Data-driven system prompt**: Bioinformatics agent's `_static_system_prompt` caches by `(system_prompt, modality)` tuple so hot-reload and data-driven identity compose correctly.
+  - **Multiple file format load hints**: Added format-appropriate load hints for `.h5ad`, `.h5` (10x), `.loom`, `.csv`, `.tsv`, `.mtx`, `.zarr`, `.rds`, `.h5seurat` in bioinformatics agent's data context building.
+  - **Configurable DEG thresholds (P2-11)**: `deg_thresholds` field on `AnalysisState` for session-configurable logFC/padj cutoffs; propagated to report figures and bioinformatics annotate_clusters.
+  - **Sandbox error hardening (P1-11)**: dill restore failure now raises `RuntimeError` instead of silently continuing with empty state; `save_session` tracks and logs unpicklable variables via `__SCAI_SAVE_SKIPPED__` markers.
+  - **Snapshot parent chain fix**: `parent_id` no longer falls back to `snapshots[-1]` by time — leaves as `None` (new root) to prevent parent-chain corruption in multi-branch restore.
+  - **Auth & security hardening**:
+    - Session auth suffix matching anchored to path segment position; defense-in-depth against traversal segments and nested `sessions/` paths.
+    - `validate_file_path_ownership()` rejects multiple `sessions/` segments and verifies resolved path is within `get_session_dir()`.
+    - Import archive rejects symlinks/hardlinks/devices and uses `is_relative_to()` for traversal check.
+    - Chunked upload endpoints now enforce session ownership validation.
+  - **ANSI regex expansion**: Covers CSI, OSC (BEL-terminated), and charset designations.
+  - **Figure type from agent metadata (P2-10)**: `_infer_figure_type()` prefers agent-declared `figure_type` over filename heuristics; `_scan_existing_figures()` builds declared-type map from `publication_figures`.
+  - **Report DEG table summary**: Honors session-configurable `deg_thresholds` for significant-gene counts.
+  - **Session list dedup (P3-8)**: Merged disk+memory sessions by ID to prevent duplicate entries.
+  - **Export filename length cap**: `MAX_EXPORT_NAME=200` with UUID suffix when truncation is needed.
+  - **Frontend hardening**:
+    - Typed HITL data interfaces (AnnotationData, PlanReviewData, ExplorationReportData) replace `any`.
+    - Plan review countdown timer resets on plan identity change.
+    - Message merge uses transactional `setState` to avoid loss during async fetch.
+    - Aborts analysis on agent config sync failure.
+    - Handles negative clock delta in message TTL persistence check.
+  - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
 
 - `0.24.25` — tool-choice fallback & exploration failure guard (2026-05-21):
   - **tool_choice BadRequestError fallback**: Added `is_tool_choice_error()` detection and `_toolchoice_unsupported_models` cache in `OpenAICompatibleClient`. When a provider rejects `tool_choice="required"`, the client caches the model and retries with `tool_choice="auto"`; subsequent calls are pre-emptively demoted. Fixes crashes on providers that don't support forced tool calling.

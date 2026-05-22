@@ -5,9 +5,9 @@ import { useTranslation } from '../i18n/translations'
 import type { RoundSummary } from '../types'
 import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
-import { AnnotationConfirmationDialog } from './AnnotationConfirmationDialog'
-import { ExplorationReportDialog } from './ExplorationReportDialog'
-import { PlanReviewDialog } from './PlanReviewDialog'
+import { AnnotationConfirmationDialog, ClusterAnnotation } from './AnnotationConfirmationDialog'
+import { ExplorationReportDialog, ExplorationReport } from './ExplorationReportDialog'
+import { PlanReviewDialog, AnalysisPlan } from './PlanReviewDialog'
 import { ValidationDialog } from './ValidationDialog'
 import { StopDialog } from './StopDialog'
 import LlmTimeoutDialog from './LlmTimeoutDialog'
@@ -38,6 +38,33 @@ import {
 
 const API_BASE = '/api'
 const MAX_EXPLORATION_ROUND = 1
+
+// Content shape for annotation_confirmation HITL message from backend
+interface AnnotationData {
+  annotations?: ClusterAnnotation[]
+  tissue?: string
+  organism?: string
+  tissue_summary?: string
+  report_html_url?: string
+  detailed_report_url?: string
+}
+
+// Content shape for plan_review HITL message from backend
+interface PlanReviewData {
+  plan?: AnalysisPlan | null
+  dialogue_html?: string
+  phase?: string
+  round?: number
+  stage?: string
+}
+
+// Content shape for exploration_report HITL message from backend
+interface ExplorationReportData extends Partial<ExplorationReport> {
+  report_a?: ExplorationReport
+  round_summary?: { summary?: string }
+  html_url?: string
+  detailed_report_url?: string
+}
 
 // Content shape from backend round_summary messages (snake_case)
 interface RoundSummaryContent {
@@ -78,15 +105,15 @@ export function AnalysisPanel() {
 
   // Annotation confirmation dialog state
   const [showAnnotationDialog, setShowAnnotationDialog] = useState(false)
-  const [annotationData, setAnnotationData] = useState<any>(null)
+  const [annotationData, setAnnotationData] = useState<AnnotationData | null>(null)
   const [showPlanReviewDialog, setShowPlanReviewDialog] = useState(false)
-  const [planReviewData, setPlanReviewData] = useState<any>(null)
+  const [planReviewData, setPlanReviewData] = useState<PlanReviewData | null>(null)
   const lastAnnotationMsgRef = useRef<string>('')
   const lastPlanReviewMsgRef = useRef<string>('')
 
   // Exploration report dialog state
   const [showExplorationDialog, setShowExplorationDialog] = useState(false)
-  const [explorationReportData, setExplorationReportData] = useState<any>(null)
+  const [explorationReportData, setExplorationReportData] = useState<ExplorationReportData | null>(null)
   const lastExplorationMsgRef = useRef<string>('')
 
   // Supplementary analysis state
@@ -1300,7 +1327,7 @@ export function AnalysisPanel() {
       {/* Exploration Report Dialog — shown after Round 1 exploration completes */}
       {showExplorationDialog && explorationReportData && currentSession && (
         <ExplorationReportDialog
-          report={explorationReportData.report_a || explorationReportData}
+          report={(explorationReportData.report_a || explorationReportData) as ExplorationReport}
           roundSummary={explorationReportData.round_summary?.summary || ''}
           explorationReportUrl={explorationReportData.html_url || undefined}
           detailedReportUrl={explorationReportData.detailed_report_url || undefined}

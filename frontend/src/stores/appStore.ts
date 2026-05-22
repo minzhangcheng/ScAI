@@ -726,12 +726,18 @@ export const useAppStore = create<AppState>()(
         if (ps.language && typeof ps.language !== 'string') delete ps.language
         if (ps.maxRounds && typeof ps.maxRounds !== 'number') delete ps.maxRounds
         if (ps.messages && !Array.isArray(ps.messages)) delete ps.messages
-        // Expire persisted messages older than 7 days to prevent localStorage bloat
+        // Expire persisted messages older than 7 days to prevent localStorage bloat.
+        // A negative delta means the system clock moved backwards (clock skew or
+        // user adjusted the date) — treat that as an invalid timestamp and clear,
+        // otherwise the data could effectively live forever from the user's POV.
         const PERSIST_TTL_MS = 7 * 24 * 60 * 60 * 1000
-        if (ps._persistedAt && Date.now() - ps._persistedAt > PERSIST_TTL_MS) {
-          delete ps.messages
-          delete ps.currentSession
-          delete ps.chatMessages
+        if (ps._persistedAt) {
+          const delta = Date.now() - (ps._persistedAt as number)
+          if (delta < 0 || delta > PERSIST_TTL_MS) {
+            delete ps.messages
+            delete ps.currentSession
+            delete ps.chatMessages
+          }
         }
         return { ...currentState, ...ps }
       },

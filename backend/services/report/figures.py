@@ -64,8 +64,21 @@ class FiguresMixin:
             return None
 
     @staticmethod
-    def _infer_figure_type(filename: str) -> str:
-        """Infer figure type from filename."""
+    def _infer_figure_type(filename: str, declared_type: Optional[str] = None) -> str:
+        """Infer figure type for a generated figure.
+
+        P2-10: When the agent declares ``figure_type`` (via the
+        ``generate_publication_figure`` tool, stored on
+        ``PublicationFigure.figure_type``), that value is authoritative —
+        filename heuristics only work for scanpy-named outputs and miss figures
+        produced by matplotlib directly or via R/reticulate. The filename
+        keyword scan is retained as a fallback for legacy / workspace-scanned
+        figures that have no associated PublicationFigure record.
+        """
+        if declared_type:
+            declared = str(declared_type).strip().lower()
+            if declared:
+                return declared
         name = filename.lower()
         if "celltype" in name or "cell_type" in name or "annotation" in name:
             return "annotation"
@@ -107,14 +120,33 @@ class FiguresMixin:
             return "stress_markers"
         return "unknown"
 
-    def _scan_existing_figures(self) -> List[Dict[str, Any]]:
+    def _scan_existing_figures(
+        self,
+        publication_figures: Optional[List[Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Scan the WORKSPACE directory for existing images from analysis phase.
         Copies figures to the report output directory for HTML embedding.
         Returns a list of figure info dicts with path, name, and inferred type.
+
+        P2-10: when ``publication_figures`` is provided (typically
+        ``analysis_state.publication_figures``), agent-declared ``figure_type``
+        values are preferred over filename heuristics.
         """
         existing_figures = []
         seen_filenames = set()
+
+        # Build filename-stem -> declared figure_type map from agent metadata.
+        declared_type_by_stem: Dict[str, str] = {}
+        if publication_figures:
+            for pf in publication_figures:
+                declared = getattr(pf, "figure_type", None)
+                png_path = getattr(pf, "png_path", None)
+                if not declared or not png_path:
+                    continue
+                stem = os.path.splitext(os.path.basename(str(png_path)))[0]
+                if stem:
+                    declared_type_by_stem[stem] = str(declared)
 
         if not self.workspace_dir or not self.workspace_dir.exists():
             return existing_figures
@@ -154,7 +186,10 @@ class FiguresMixin:
                     "name": png_file.stem.replace("_", " ").title(),
                     "png_path": str(dest_png),
                     "pdf_path": str(dest_pdf) if pdf_file.exists() else None,
-                    "inferred_type": self._infer_figure_type(png_file.stem)
+                    "inferred_type": self._infer_figure_type(
+                        png_file.stem,
+                        declared_type=declared_type_by_stem.get(png_file.stem),
+                    )
                 }
                 existing_figures.append(fig_info)
 
@@ -245,13 +280,19 @@ class FiguresMixin:
         self,
         existing_tables: List[Dict[str, Any]],
         max_rows: int = 30,
-        max_tables: int = 10
+        max_tables: int = 10,
+        analysis_state: Optional[Any] = None,
     ) -> Dict[str, str]:
         """
         Read CSV tables and produce text summaries for PI context.
         Returns dict mapping filename -> formatted text summary.
         """
         import pandas as pd
+
+        # P2-11: Read DEG thresholds from session-configurable analysis_state.
+        deg_thresholds = getattr(analysis_state, "deg_thresholds", None) or {}
+        logfc_cutoff = float(deg_thresholds.get("logfc", 1.0))
+        padj_cutoff = float(deg_thresholds.get("padj", 0.05))
 
         summaries: Dict[str, str] = {}
 
@@ -277,8 +318,8 @@ class FiguresMixin:
                     pval_col = next((c for c in df.columns if "padj" in c.lower() or "p_val_adj" in c.lower() or "fdr" in c.lower()), None)
                     if fc_col and pval_col:
                         try:
-                            sig = df[(df[fc_col].abs() > 1) & (df[pval_col] < 0.05)]
-                            parts.append(f"Significant genes (|logFC|>1, padj<0.05): {len(sig)}")
+                            sig = df[(df[fc_col].abs() > logfc_cutoff) & (df[pval_col] < padj_cutoff)]
+                            parts.append(f"Significant genes (|logFC|>{logfc_cutoff}, padj<{padj_cutoff}): {len(sig)}")
                             up = sig[sig[fc_col] > 0]
                             down = sig[sig[fc_col] < 0]
                             parts.append(f"  Upregulated: {len(up)}, Downregulated: {len(down)}")

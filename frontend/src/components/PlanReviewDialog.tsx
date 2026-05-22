@@ -24,7 +24,7 @@ interface PlanStep {
   status: string
 }
 
-interface AnalysisPlan {
+export interface AnalysisPlan {
   id: string
   phase: string
   stage: string
@@ -82,10 +82,16 @@ export function PlanReviewDialog({
     }
   }, [onSkip, submitting])
 
+  // Include a hash of plan identity + step ids/statuses so that when a revised
+  // plan is shown (modify -> re-open), the countdown timer resets instead of
+  // continuing from the previous (possibly expired) value.
+  const planFingerprint = plan
+    ? `${plan.id}|${plan.status}|${plan.stage}|${plan.steps.map(s => `${s.id}:${s.status}`).join(',')}`
+    : 'no-plan'
   const { timeRemaining: countdown, isPaused, pause, resume, hasCountdown } = useCountdownTimer({
     countdownSeconds,
     onExpire: handleAutoSkip,
-    resetKey: `${open}-${countdownSeconds}`,
+    resetKey: `${open}-${countdownSeconds}-${planFingerprint}`,
   })
 
   const minutes = Math.floor(countdown / 60)

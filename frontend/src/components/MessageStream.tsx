@@ -214,6 +214,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               src={typeof message.content === 'string' ? base64ToDataUri(message.content) : ''}
               alt="Analysis figure"
               className="max-w-full rounded-lg border border-slate-200 shadow-sm"
+              style={{ maxWidth: '800px', maxHeight: '600px' }}
             />
           </div>
         )

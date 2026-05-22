@@ -438,6 +438,118 @@ IMPORTANT: Be specific in your feedback. Reference exact step IDs. If you approv
         logger.info(f"[PI] Plan review decision: {result['decision']} (round {dialogue_round})")
         return result
 
+    async def generate_final_plan_from_dialogue(
+        self,
+        analysis_state: AnalysisState,
+        dialogue_history: List[Dict[str, Any]],
+    ) -> 'AnalysisPlan':
+        """P1-10: Unilaterally generate a final analysis plan based on the
+        planning dialogue so far. Used as a fallback when MAX_PLANNING_ROUNDS
+        is exhausted without bioinfo-PI agreement — PI decides alone instead
+        of looping further.
+
+        Returns an AnalysisPlan whose status is "pi_reviewing"; the workflow
+        will then mark plan_approved=True so the user-review gate sees a
+        concrete plan.
+        """
+        from ..models.schemas import AnalysisPlan, PlanStep
+
+        phase = analysis_state.analysis_phase.value
+        stage = "full"
+        if analysis_state.current_plan is not None and analysis_state.current_plan.stage:
+            stage = analysis_state.current_plan.stage
+
+        recent = dialogue_history[-5:] if dialogue_history else []
+        history_summary = "\n\n".join(
+            f"Round {entry.get('round', '?')}: PI decision={entry.get('pi_decision', '?')}\n"
+            f"  PI feedback: {str(entry.get('pi_feedback', ''))[:400]}\n"
+            f"  Plan attempted: {str(entry.get('plan'))[:600]}"
+            for entry in recent
+        ) or "(no prior dialogue)"
+
+        prompt = f"""You are the PI deciding on a FINAL analysis plan unilaterally because
+the bioinformatics agent and PI could not reach agreement within the maximum
+allowed planning rounds. You must now commit to a plan based on the dialogue
+history below — no more discussion is permitted.
+
+## Phase
+{phase}
+
+## Stage
+{stage}
+
+## Experimental Design
+{analysis_state.build_experimental_design_summary()}
+
+## Dialogue History (most recent rounds)
+{history_summary}
+
+## Your Task
+Produce a final AnalysisPlan in JSON form. Synthesize the best ideas from the
+dialogue, resolve any disagreements in favor of scientific soundness, and keep
+the plan executable within the current stage's scope.
+
+Respond ONLY with JSON in this schema:
+{{
+    "overview": "Short summary of the plan",
+    "steps": [
+        {{"id": 1, "title": "...", "method": "...", "input": "...",
+          "expected_output": "...", "rationale": "...", "depends_on": []}},
+        ...
+    ],
+    "key_decision_points": ["...", "..."],
+    "expected_runtime": "~N steps"
+}}"""
+
+        response = await self.chat(prompt, temperature=0.2)
+        parsed = self._safe_parse_json(response, default={})
+
+        steps: List[PlanStep] = []
+        if isinstance(parsed, dict):
+            for s in parsed.get("steps", []) or []:
+                if not isinstance(s, dict):
+                    continue
+                steps.append(PlanStep(
+                    id=s.get("id", len(steps) + 1),
+                    title=s.get("title", ""),
+                    method=s.get("method", ""),
+                    input=s.get("input", ""),
+                    expected_output=s.get("expected_output", ""),
+                    rationale=s.get("rationale", ""),
+                    depends_on=s.get("depends_on", []) or [],
+                ))
+
+        if not steps:
+            raise RuntimeError(
+                "PI failed to generate a final plan from dialogue (no parseable steps)"
+            )
+
+        overview = ""
+        decision_points: List[str] = []
+        expected_runtime = f"~{len(steps)} steps"
+        if isinstance(parsed, dict):
+            overview = parsed.get("overview", "") or ""
+            decision_points = parsed.get("key_decision_points", []) or []
+            expected_runtime = parsed.get("expected_runtime", expected_runtime) or expected_runtime
+
+        plan = AnalysisPlan(
+            phase=phase,
+            stage=stage,
+            overview=overview,
+            steps=steps,
+            key_decision_points=decision_points,
+            expected_runtime=expected_runtime,
+            status="pi_reviewing",
+            revision_of=(analysis_state.current_plan.id
+                         if analysis_state.current_plan else None),
+            revision_reason="MAX_PLANNING_ROUNDS exhausted — PI finalized unilaterally",
+        )
+        logger.info(
+            f"[PI] Generated final plan unilaterally from dialogue: "
+            f"{len(steps)} steps, phase={phase}, stage={stage}"
+        )
+        return plan
+
     async def process_user_plan_feedback(
         self,
         user_input: str,

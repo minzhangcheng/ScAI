@@ -101,14 +101,17 @@ async def list_sessions(request: Request):
     if user_id:
         disk_sessions = [s for s in disk_sessions if s.get("user_id") == user_id]
 
-    memory_session_ids = set(list(sessions.keys()))
-    disk_session_ids = {s["id"] for s in disk_sessions}
+    # P3-8: dedup-by-id when merging disk + memory sessions.
+    # Disk entries take precedence (they reflect persisted state); memory-only
+    # sessions fill in any not-yet-flushed sessions.
+    sessions_by_id: dict[str, dict] = {s["id"]: s for s in disk_sessions}
 
-    for session_id in memory_session_ids - disk_session_ids:
-        state = sessions.get(session_id)
+    for session_id, state in list(sessions.items()):
+        if session_id in sessions_by_id:
+            continue
         if state is None or (user_id and state.user_id != user_id):
             continue
-        disk_sessions.append({
+        sessions_by_id[session_id] = {
             "id": session_id,
             "name": state.name,
             "status": state.status.value if hasattr(state.status, 'value') else str(state.status),
@@ -120,10 +123,11 @@ async def list_sessions(request: Request):
             "has_pathology": any(f.section == "pathology" for f in state.data_files),
             "has_sequencing": state.has_sequencing_data(),
             "has_biochemistry": any(f.section == "biochemistry" for f in state.data_files) or len(state.biochemistry_indicators) > 0,
-        })
+        }
 
-    disk_sessions.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
-    return {"sessions": disk_sessions}
+    merged = list(sessions_by_id.values())
+    merged.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    return {"sessions": merged}
 
 
 @router.get("/session/{session_id}/load")
@@ -146,6 +150,8 @@ async def delete_session(session_id: str, request: Request):
         sessions.pop(session_id, None)
         session_access_times.pop(session_id, None)
         last_save_times.pop(session_id, None)
+        from backend.state import release_session_lock_slot
+        release_session_lock_slot(session_id)
         from backend.routes.reports import clear_generation_pending
         clear_generation_pending(session_id)
 
