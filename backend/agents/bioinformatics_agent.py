@@ -317,6 +317,14 @@ TOOLS = [
 ]
 
 
+# Derived from TOOLS to keep the dispatch chain in
+# run_autonomous_analysis in sync — see the else branch there for the
+# orphan-tool-call defense.
+KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
+    t["function"]["name"] for t in TOOLS
+)
+
+
 class BioinformaticsAgent(BaseAgent):
     """
     Bioinformatics Agent with Autonomous Mode
@@ -2756,6 +2764,34 @@ except Exception as _autosave_block_err:
                         pub_figure_name=figure_name, pub_figure_description=description,
                         pub_figure_type=figure_type, pub_figure_code=code,
                         pub_figure_result=(tool_result or "")[:2000],
+                    ))
+
+                else:
+                    # Unknown tool name — most commonly an LLM hallucination
+                    # or a recovered stringified tool_call with a bogus name.
+                    # We MUST emit a role=tool response message so the
+                    # assistant tool_call does not become orphan; otherwise
+                    # the next request fails with a 400 from the upstream.
+                    known = ", ".join(sorted(KNOWN_TOOL_NAMES))
+                    err_msg = (
+                        f"ERROR: Unknown tool '{tool_name}'. "
+                        f"This tool does not exist. Available tools: {known}. "
+                        f"Please retry using one of the available tools."
+                    )
+                    logger.warning(
+                        f"[Bioinformatics] Unknown tool '{tool_name}' called "
+                        f"(tool_call_id={tool_call.id}); responding with error to keep "
+                        f"conversation well-formed"
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": err_msg,
+                    })
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count, step_type="unknown_tool",
+                        agent_reasoning=agent_reasoning,
+                        text_content=err_msg[:2000],
                     ))
 
             # Clear reasoning after all tool calls in this iteration are processed

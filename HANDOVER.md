@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.26 · **Last updated**: 2026-05-21
+**Version**: 0.24.27 · **Last updated**: 2026-05-21
 
 ## 1. Runtime Architecture
 
@@ -312,6 +312,11 @@ Detailed release notes for every version are available through `git log` and rel
     - `messaging.py` — WebSocket message sending
   - **Backward compatibility**: The `__init__.py` exports `SingleCellAnalysisWorkflow`, `WorkflowState`, `with_retry`, and `_retry_backoff_delay` to preserve existing import paths.
   - **New tests**: Added `test_workflow_helpers.py` and `test_workflow_routing.py` for the refactored code.
+
+- `0.24.27` — stringified tool-call recovery & unknown-tool dispatch guard (2026-05-21):
+  - **Stringified tool-call recovery**: Added `_recover_stringified_tool_call()` helper that detects when an upstream gateway (notably litellm proxying n1n.ai for Claude/Gemini) loses the structured `tool_calls` field and serializes the tool-use JSON into `message.content`. Recognizes three shapes: n1n.ai (`{"tool":...,"parameters":...}`), OpenAI (`{"name":...,"arguments":...}`), and Anthropic native (`{"type":"tool_use","name":...,"input":...}`). Strips ` ```json ``` ` fences, synthesizes a ToolCall with a `recovered_`-prefixed ID, clears content, and syncs `raw_assistant_message` for Gemini thought-signature preservation.
+  - **Unknown-tool dispatch guard (orphan prevention)**: Added `KNOWN_TOOL_NAMES` frozenset derived from TOOLS in the bioinformatics agent. A new `else` branch in the dispatch chain catches hallucinated or recovered tool names that don't match any known tool, emitting a `role=tool` response listing available tools. Prevents orphan tool_call IDs that would cause 400 errors on subsequent requests.
+  - **Tests**: Added `test_stringified_tool_recovery.py` (12 tests) and `test_unknown_tool_dispatch.py` (6 tests) covering all recovery shapes, fence handling, plain-text rejection, native tool-call passthrough, and dispatch chain completeness.
 
 - `0.24.26` — modality-branched workflow, concurrency hardening, LLM client resilience (2026-05-21):
   - **Modality-branched workflow (P1-4)**: `workflow_for_modality()` in `agent_prompts.py` provides separate analysis workflows for scRNA-seq, bulk RNA-seq, and multimodal data. Bioinformatics agent's `_infer_modality()` drives modality-aware system prompt identity so the LLM knows what kind of analysis it's conducting.

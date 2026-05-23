@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import time
+from uuid import uuid4
 from typing import List, Dict, Any, Optional, AsyncGenerator, Union, Callable, Awaitable, Tuple
 from dataclasses import dataclass, field
 from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError
@@ -40,6 +41,64 @@ def _inject_english_enforcement(messages: List[Dict[str, Any]]) -> List[Dict[str
     # No system message found — prepend one
     messages.insert(0, {"role": "system", "content": ENGLISH_ENFORCEMENT})
     return messages
+
+
+def _recover_stringified_tool_call(
+    content: Optional[str],
+) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Attempt to recover a tool call that an upstream gateway stringified into content.
+
+    Some gateways (notably litellm proxying n1n.ai for Claude / Gemini) lose
+    the structured tool_calls field and put the tool_use JSON into
+    message.content as a string. We recognize three shapes:
+
+      - {"tool": NAME, "parameters": {...}}                  (n1n.ai stringified)
+      - {"name": NAME, "arguments": {...}}                   (OpenAI stringified)
+      - {"type": "tool_use", "name": NAME, "input": {...}}   (Anthropic native)
+
+    The payload may be wrapped in a ```json ... ``` markdown fence. Returns
+    (name, arguments_dict) on success or None if content does not look like
+    a stringified tool call.
+    """
+    if not content:
+        return None
+    s = content.strip()
+    if not s:
+        return None
+
+    # Strip a single ```json ... ``` (or plain ``` ... ```) fence if present
+    if s.startswith("```"):
+        first_newline = s.find("\n")
+        if first_newline == -1:
+            return None
+        s = s[first_newline + 1 :]
+        if s.rstrip().endswith("```"):
+            s = s[:-3]
+        s = s.strip()
+
+    if not s.startswith("{"):
+        return None
+
+    try:
+        obj = json.loads(s)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+
+    name = obj.get("tool") or obj.get("name")
+    args = obj.get("parameters")
+    if args is None:
+        args = obj.get("arguments")
+    if args is None:
+        args = obj.get("input")
+
+    if not isinstance(name, str) or not name:
+        return None
+    if not isinstance(args, dict):
+        return None
+
+    return name, args
 
 
 def _detect_image_mime_type(img_b64: str) -> str:
@@ -952,7 +1011,7 @@ class OpenAICompatibleClient:
             # Extract content — handles reasoning models, list content, etc.
             content = self._extract_content_from_message(message, response) if message else None
 
-            # Preserve the full raw assistant message so callers can echo it back verbatim.
+            # Preserve the full raw assistant message before recovery might modify it.
             # This is required for providers like Gemini that attach extra fields (e.g.
             # thought_signature) to tool calls and require them in subsequent requests.
             raw_assistant_message = None
@@ -966,6 +1025,39 @@ class OpenAICompatibleClient:
                     }
                 except Exception as e:
                     logger.debug(f"[{self.agent_name}] Failed to preserve raw assistant message: {e}")
+
+            # Fallback: some gateways (e.g. litellm proxying n1n.ai for Claude/Gemini)
+            # occasionally lose the structured tool_calls field and serialize the
+            # tool_use JSON into content. Recognize and recover it so the downstream
+            # agent loop does not mistake it for a plain-text response.
+            if not tool_calls and content:
+                recovered = _recover_stringified_tool_call(content)
+                if recovered is not None:
+                    rec_name, rec_args = recovered
+                    rec_id = f"recovered_{uuid4().hex[:8]}"
+                    logger.warning(
+                        f"[{self.agent_name}] Recovered stringified tool_call "
+                        f"name={rec_name!r} from content at {self.base_url} "
+                        f"(model={model}); upstream gateway lost tool_calls field"
+                    )
+                    tool_calls.append(ToolCall(
+                        id=rec_id, name=rec_name, arguments=rec_args,
+                    ))
+                    tool_calls_log.append({
+                        "id": rec_id, "name": rec_name,
+                        "arguments": rec_args, "parse_error": None,
+                        "recovered": True,
+                    })
+                    content = None
+                    # Sync raw_assistant_message so downstream echoes (e.g. Gemini
+                    # thought_signature preservation) get consistent recovered data.
+                    if raw_assistant_message is not None:
+                        raw_assistant_message["content"] = None
+                        raw_assistant_message["tool_calls"] = [{
+                            "id": rec_id,
+                            "function": {"name": rec_name, "arguments": json.dumps(rec_args)},
+                            "type": "function",
+                        }]
 
             result = LLMToolResponse(
                 content=content,
