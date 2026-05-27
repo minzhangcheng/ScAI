@@ -42,8 +42,12 @@ def externalize_blobs(obj: Any, blob_dir: Path) -> Any:
                 path = blob_dir / f"{digest}.b64"
                 if not path.exists():
                     tmp = blob_dir / f".{digest}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-                    tmp.write_text(node, encoding="utf-8")
-                    os.replace(tmp, path)
+                    try:
+                        tmp.write_text(node, encoding="utf-8")
+                        os.replace(tmp, path)
+                    except Exception:
+                        tmp.unlink(missing_ok=True)  # don't leave orphaned temp files on failure
+                        raise
                 return f"{BLOB_REF_PREFIX}{digest}"
             return node
         if isinstance(node, list):

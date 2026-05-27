@@ -181,11 +181,19 @@ class SnapshotManager:
         def _externalize_and_write() -> int:
             # Blocking blob writes + JSON serialization + atomic write,
             # all off the event loop to avoid blocking WebSocket / LLM streaming.
-            externalized = externalize_blobs(state_dict, blob_dir)
-            state_json = json.dumps(externalized, ensure_ascii=False, default=str)
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(state_json)
-            os.replace(str(tmp_path), str(state_path))
+            try:
+                externalized = externalize_blobs(state_dict, blob_dir)
+                state_json = json.dumps(externalized, ensure_ascii=False, default=str)
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(state_json)
+                os.replace(str(tmp_path), str(state_path))
+            except Exception:
+                # Snapshot isn't registered on failure, so delete_snapshot would
+                # never reach these. The blob dir is unique to this snapshot id,
+                # so removing it (and the temp json) on failure is safe.
+                shutil.rmtree(blob_dir, ignore_errors=True)
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
             return len(state_json.encode("utf-8"))
 
         snapshot.size_bytes = await asyncio.to_thread(_externalize_and_write)
