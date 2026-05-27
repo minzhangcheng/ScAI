@@ -66,10 +66,16 @@ def _blob_dir_for(session_id: str) -> Path:
     return get_session_metadata_path(session_id).parent / "blobs"
 
 
-def save_session_to_disk(session_id: str, state: AnalysisState) -> None:
-    dumped = state.model_dump(mode="json")
+def _externalize_and_write(session_id: str, dumped: dict) -> None:
+    """Externalize blobs to disk and write the session JSON. Blocking I/O —
+    async callers must invoke this via asyncio.to_thread so the large base64
+    blob writes do not stall the event loop."""
     externalized = externalize_blobs(dumped, _blob_dir_for(session_id))
     _write_session_json(session_id, json.dumps(externalized, ensure_ascii=False))
+
+
+def save_session_to_disk(session_id: str, state: AnalysisState) -> None:
+    _externalize_and_write(session_id, state.model_dump(mode="json"))
 
 
 async def async_save_session(session_id: str, state: AnalysisState, force: bool = False) -> None:
@@ -82,10 +88,10 @@ async def async_save_session(session_id: str, state: AnalysisState, force: bool 
             logger.debug("Throttled save for %s", session_id)
             return
     last_save_times[session_id] = now
+    # model_dump on the event loop (snapshot the mutable model here to avoid
+    # racing with in-place mutation); offload the blob writes + JSON write.
     dumped = state.model_dump(mode="json")
-    externalized = externalize_blobs(dumped, _blob_dir_for(session_id))
-    json_str = json.dumps(externalized, ensure_ascii=False)
-    await asyncio.to_thread(_write_session_json, session_id, json_str)
+    await asyncio.to_thread(_externalize_and_write, session_id, dumped)
 
 
 def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
@@ -149,9 +155,7 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
                 )
                 # Save the cleaned-up state so PAUSED status persists
                 dumped = state.model_dump(mode="json")
-                externalized = externalize_blobs(dumped, _blob_dir_for(session_id))
-                json_str = json.dumps(externalized, ensure_ascii=False)
-                await asyncio.to_thread(_write_session_json, session_id, json_str)
+                await asyncio.to_thread(_externalize_and_write, session_id, dumped)
             sessions[session_id] = state
             session_access_times[session_id] = time.time()
             return state

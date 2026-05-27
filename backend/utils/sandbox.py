@@ -604,7 +604,8 @@ class LocalJupyterSandbox:
         self._session_restored = False
         self._session_restore_failed = False  # Track if session restore failed
         self._kernel_dead = False  # Set when kernel restart fails
-    
+        self._restarting = False  # reentrancy guard for _restart_kernel
+
     async def start(self) -> dict:
         """Start the Jupyter kernel
 
@@ -642,6 +643,10 @@ class LocalJupyterSandbox:
 
         # Initialize with common imports and settings
         await self._initialize_kernel()
+
+        # A freshly started+initialized kernel is alive regardless of any prior
+        # dead state; reset before the best-effort restore below.
+        self._kernel_dead = False
 
         # Try to restore previous session
         await self._restore_session()
@@ -1237,31 +1242,59 @@ if _skipped_vars:
         return result.success
 
     async def _restart_kernel(self) -> None:
-        """Restart the kernel and restore the session. Sets _kernel_dead on failure."""
+        """Restart the kernel, then best-effort restore the session.
+
+        Kernel-level failure (restart/ready/init) marks the sandbox dead. A
+        restore failure (missing/corrupt dill dump) leaves the kernel fully
+        usable, so it must NOT set _kernel_dead. Reentrancy is guarded because
+        _initialize_kernel runs code through execute(), which can itself
+        trigger a restart on a protocol error.
+        """
+        if self._restarting:
+            logger.warning(
+                f"[{self.session_id}] _restart_kernel reentered; skipping nested restart"
+            )
+            return
+        self._restarting = True
         try:
-            await asyncio.to_thread(self.km.restart_kernel)
+            try:
+                await asyncio.to_thread(self.km.restart_kernel)
 
-            # Rebuild client connection
-            if self.kc is not None:
-                try:
-                    self.kc.stop_channels()
-                except Exception as e:
-                    logger.debug(f"Failed to stop kernel channels during recovery: {e}")
-            self.kc = self.km.client()
-            self.kc.start_channels()
+                # Rebuild client connection
+                if self.kc is not None:
+                    try:
+                        self.kc.stop_channels()
+                    except Exception as e:
+                        logger.debug(f"Failed to stop kernel channels during recovery: {e}")
+                self.kc = self.km.client()
+                self.kc.start_channels()
 
-            # Wait for kernel to be ready
-            await asyncio.wait_for(self._wait_for_ready(), timeout=30)
+                # Wait for kernel to be ready
+                await asyncio.wait_for(self._wait_for_ready(), timeout=30)
 
-            # Re-initialize and restore session
-            self._initialized = False
-            await self._initialize_kernel()
-            await self._restore_session()
+                # Re-initialize the kernel
+                self._initialized = False
+                await self._initialize_kernel()
+            except Exception as restart_error:
+                logger.error(f"Failed to restart kernel: {restart_error}")
+                self._kernel_dead = True
+                return
 
-            logger.info(f"Kernel restarted and session restored for session {self.session_id}")
-        except Exception as restart_error:
-            logger.error(f"Failed to restart kernel: {restart_error}")
-            self._kernel_dead = True
+            # Kernel is healthy again.
+            self._kernel_dead = False
+
+            # Restore is best-effort: a corrupt dump must not brick a live kernel.
+            try:
+                await self._restore_session()
+            except Exception as restore_error:
+                logger.error(
+                    f"[{self.session_id}] Session restore failed after kernel restart "
+                    f"(kernel remains usable): {restore_error}"
+                )
+
+            logger.info(f"Kernel restarted for session {self.session_id}")
+        finally:
+            self._restarting = False
 
     async def execute(
         self,

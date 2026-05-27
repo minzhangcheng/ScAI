@@ -71,3 +71,40 @@ def test_session_roundtrip_strips_base64_from_json(tmp_path, monkeypatch):
     loaded = ss.load_session_from_disk(sid)
     assert loaded is not None
     assert loaded.publication_figures[0].png_base64 == big   # lossless rehydrate
+
+
+def test_async_save_offloads_blob_io_to_worker_thread(tmp_path, monkeypatch):
+    """externalize_blobs (which writes .b64 files) must run in a worker thread,
+    not on the event loop, during async_save_session."""
+    import asyncio
+    import threading
+    import backend.services.session_store as ss
+    from backend.models.schemas import AnalysisState, PublicationFigure
+
+    sid = "22222222-2222-2222-2222-222222222222"
+    session_file = tmp_path / sid / "session.json"
+    monkeypatch.setattr(ss, "get_session_metadata_path", lambda s: session_file)
+    monkeypatch.setattr(ss, "resolve_session_metadata_path", lambda s: session_file)
+    ss.last_save_times.pop(sid, None)
+
+    main_thread = threading.get_ident()
+    recorded = {}
+    real_externalize = ss.externalize_blobs
+
+    def spy(obj, blob_dir):
+        recorded["thread"] = threading.get_ident()
+        return real_externalize(obj, blob_dir)
+
+    monkeypatch.setattr(ss, "externalize_blobs", spy)
+
+    state = AnalysisState(user_id="u")
+    state.publication_figures.append(
+        PublicationFigure(name="f1", description="d", figure_type="umap",
+                          png_path="", pdf_path="", png_base64="Z" * 5000)
+    )
+
+    asyncio.run(ss.async_save_session(sid, state, force=True))
+
+    assert "thread" in recorded, "externalize_blobs was never called"
+    assert recorded["thread"] != main_thread, "blob I/O ran on the event loop thread"
+    assert session_file.exists()

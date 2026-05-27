@@ -239,16 +239,41 @@ def is_tool_choice_error(error: Exception) -> bool:
     return "tool_choice" in error_str or "tool choice" in error_str
 
 
+# Hard-quota markers: a 429 carrying any of these never recovers by waiting
+# (monthly budget / billing exhausted), so we surface it immediately.
+_HARD_QUOTA_KEYWORDS = (
+    "monthly max",
+    "auto reload",
+    "insufficient_quota",
+    "exceeded your current quota",
+    "billing hard limit",
+)
+# Transient-limiter markers: per-window rate limits DO recover by waiting, so a
+# message carrying any of these is never treated as a hard quota even if it also
+# contains the word "quota" (Google's wording does).
+_TRANSIENT_RATE_MARKERS = (
+    "per minute",
+    "per second",
+    "per day",
+    "per region",
+    "requests per",
+    "tokens per",
+)
+
+
 def _is_hard_quota_error(error: Exception) -> bool:
     """True when a 429 is a non-recoverable quota exhaustion (not transient TPM).
 
-    Hard quota errors (monthly budget, billing) never recover by waiting, so we
-    surface them to the user immediately instead of burning the backoff budget.
+    Prefers the SDK error code (OpenAI sets ``insufficient_quota`` for hard
+    caps); falls back to narrowed keyword matching that explicitly excludes
+    per-window limiter text such as Google's "per minute per region".
     """
+    if getattr(error, "code", None) == "insufficient_quota":
+        return True
     s = str(error).lower()
-    return any(k in s for k in (
-        "monthly max", "auto reload", "quota", "insufficient_quota", "billing",
-    ))
+    if any(m in s for m in _TRANSIENT_RATE_MARKERS):
+        return False
+    return any(k in s for k in _HARD_QUOTA_KEYWORDS)
 
 
 async def retry_with_backoff(

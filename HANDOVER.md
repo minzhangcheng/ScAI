@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.28 · **Last updated**: 2026-05-27
+**Version**: 0.24.29 · **Last updated**: 2026-05-27
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,15 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.24.29` — blob externalization & retry hardening (2026-05-27):
+  - **Base64 blob externalization**: New `blob_store.py` module extracts large base64 strings (images, figures) from session JSON into SHA256-deduplicated `.b64` files. Integrated into `session_store.py` and `snapshot.py` for both sync/async save and load. Reduces session.json size and write overhead significantly.
+  - **Hard quota vs transient rate-limit classification**: `retry_with_backoff` now distinguishes hard 429s (monthly max, insufficient_quota) from transient per-window limits; 401 `AuthenticationError` and `PermissionDeniedError` surface immediately as `UpstreamExhaustedError` without burning retries.
+  - **Empty/truncated response handling**: `_is_empty_response()` detects zero-token, whitespace-only, and extraction-placeholder responses as transient upstream truncation; retries up to 3 times without counting toward the text-only HITL escalation. New test suite (`test_empty_response_handling.py`).
+  - **Kernel protocol error recovery**: `_is_kernel_protocol_error()` detects ZMQ signature corruption (`Invalid Signature`, `<IDS|MSG>`) and triggers `_restart_kernel()`. Refactored kernel restart into a dedicated method with reentrancy guard, proper dead-state reset, and best-effort session restore. New test suite (`test_kernel_recovery.py`).
+  - **Defensive routing hardening**: `_check_convergence_condition` missing key defaults to `continue` (not `stop`); `_initialize_round` wrapped with `@with_retry`; `_user_review_gate` sets `should_continue=False` when no plan exists. New test suite (`test_routing_defensive.py`).
+  - **Supplementary plan safety**: `plan_supplementary_analysis` result guarded with `or {}` to prevent `None` crash.
+  - **Tests**: Added `test_blob_store.py`, `test_empty_response_handling.py`, `test_kernel_recovery.py`, `test_retry_classification.py`, `test_routing_defensive.py` (5 new test files, ~400 lines).
 
 - `0.24.28` — unknown tool defense & stringified tool recovery (2026-05-27):
   - **Orphan tool call defense**: Bioinformatics agent now handles unknown/hallucinated tool names gracefully by responding with an error message rather than crashing. Added `KNOWN_TOOL_NAMES` frozenset derived from TOOLS; `run_autonomous_analysis()` now emits a role=tool error response for unknown tool calls, keeping conversation well-formed.
