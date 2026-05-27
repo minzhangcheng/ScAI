@@ -437,6 +437,57 @@ def _collect_reasoning_parts(getter) -> list:
     return [p for p in parts if p]
 
 
+# Reasoning fields a thinking-mode provider may attach to an assistant turn.
+# These must be echoed back VERBATIM (original key + original structure, be it
+# a plain string or a signature-carrying array) on tool-call turns. See:
+#   - https://api-docs.deepseek.com/guides/thinking_mode
+#   - https://platform.xiaomimimo.com/docs/zh-CN/usage-guide/passing-back-reasoning_content
+_REASONING_ECHO_KEYS = ("reasoning_content", "reasoning", "reasoning_details", "thinking", "thought")
+
+
+def _reasoning_echo_allowed(model: str) -> bool:
+    """Whether reasoning fields may be echoed back for this model.
+
+    DeepSeek R1 (deepseek-reasoner) rejects multi-turn requests that include
+    reasoning_content with HTTP 400, so it must never be echoed. Every other
+    known reasoning provider either requires the echo (DeepSeek v4, MiMo,
+    Anthropic/OpenRouter thinking) or ignores unknown fields — so default True.
+
+    Detection uses substring matching on the model name:
+    - "reasoner" catches the deepseek-reasoner endpoint name
+    - "-r1" catches deepseek-r1 variants (note: could also match *-r10 etc.,
+      but no such model exists today)
+    - "deepseek-r1" is a redundant catch for the canonical name
+
+    DeepSeek v4 / v4-pro do NOT contain any of these substrings, so they
+    correctly return True (echo is required for their tool-call turns).
+    """
+    m = (model or "").lower()
+    if "reasoner" in m or "-r1" in m or "deepseek-r1" in m:
+        return False
+    return True
+
+
+def _build_assistant_echo(msg_dict: Dict[str, Any], model: str) -> Dict[str, Any]:
+    """Build the assistant message to replay into multi-turn history.
+
+    Reasoning fields are preserved verbatim ONLY when (a) the model permits it
+    and (b) the turn contains tool_calls — matching the official contract that
+    scopes the echo requirement to tool-call turns, not by recency.
+    """
+    out: Dict[str, Any] = {
+        "role": "assistant",
+        "content": msg_dict.get("content"),
+        "tool_calls": msg_dict.get("tool_calls"),
+    }
+    if out.get("tool_calls") and _reasoning_echo_allowed(model):
+        for key in _REASONING_ECHO_KEYS:
+            val = msg_dict.get(key)
+            if val:  # truthy guard drops "" / None / [] uniformly
+                out[key] = val
+    return out
+
+
 @dataclass
 class LLMResponse:
     """Response from LLM"""
@@ -1065,17 +1116,13 @@ class OpenAICompatibleClient:
             content = self._extract_content_from_message(message, response) if message else None
 
             # Preserve the full raw assistant message before recovery might modify it.
-            # This is required for providers like Gemini that attach extra fields (e.g.
-            # thought_signature) to tool calls and require them in subsequent requests.
+            # Required for providers that attach extra fields to tool calls (Gemini
+            # thought_signature) and for thinking-mode providers that demand reasoning
+            # be echoed on tool-call turns (DeepSeek v4, MiMo, Anthropic/OpenRouter).
             raw_assistant_message = None
             if message:
                 try:
-                    msg_dict = message.model_dump()
-                    raw_assistant_message = {
-                        "role": "assistant",
-                        "content": msg_dict.get("content"),
-                        "tool_calls": msg_dict.get("tool_calls"),
-                    }
+                    raw_assistant_message = _build_assistant_echo(message.model_dump(), model)
                 except Exception as e:
                     logger.debug(f"[{self.agent_name}] Failed to preserve raw assistant message: {e}")
 

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.4 · **Last updated**: 2026-05-27
+**Version**: 0.25.5 · **Last updated**: 2026-05-27
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,13 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.5` — reasoning echo refactor (2026-05-27):
+  - **Structured reasoning echo**: Added `_REASONING_ECHO_KEYS`, `_reasoning_echo_allowed()`, and `_build_assistant_echo()` — single source of truth for echoing thinking-mode reasoning on tool-call turns. Preserves all known reasoning field names verbatim (`reasoning_content`, `reasoning`, `reasoning_details`, `thinking`, `thought`), matching DeepSeek v4, MiMo, and Anthropic/OpenRouter thinking requirements.
+  - **R1 exclusion**: `_reasoning_echo_allowed` returns False for `deepseek-reasoner` / `-r1` models — R1 rejects multi-turn requests containing `reasoning_content` with HTTP 400.
+  - **Tool-turn scoping**: Reasoning is echoed ONLY on turns with `tool_calls`, matching the official API contract. Plain-text turns never carry reasoning, even on echo-required models.
+  - **Simplified base**: `BaseAgent.add_to_history` reverted to plain 2-arg method — reasoning echo is handled at the `raw_assistant_message` layer, not in `LLMResponse` or message_history.
+  - **Tests**: `test_reasoning_echo.py` (158 lines) covering model detection, key set completeness, tool/plain/R1 echo behavior, structured array preservation, and end-to-end pipeline.
 
 - `0.25.4` — workflow teardown refactor & edge-guard (2026-05-27):
   - **Shared teardown helper**: New `routes/_helpers.py` with `teardown_running_workflow()` — extracts duplicated workflow-stop, task-cancel, and checkpoint-delete logic from `snapshots.py` and `lifecycle.py` into a single reusable function.

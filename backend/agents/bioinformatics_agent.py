@@ -1763,7 +1763,12 @@ If results significantly deviate from plan expectations, report via consult_pi i
             if not response.has_tool_calls:
                 if response.content:
                     await self._notify("response", response.content)
-                    messages.append({"role": "assistant", "content": response.content})
+                    # Use raw_assistant_message when available so provider-specific
+                    # fields (e.g. DeepSeek v4 thinking reasoning_content) survive into
+                    # the next turn; the gateway rejects multi-turn requests otherwise.
+                    messages.append(response.raw_assistant_message or {
+                        "role": "assistant", "content": response.content
+                    })
 
                 # Record text-only response in analysis log
                 analysis_log.append(AnalysisStep(

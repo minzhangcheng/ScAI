@@ -121,11 +121,8 @@ class BaseAgent(ABC):
         return False
 
     def add_to_history(self, role: str, content: str):
-        """Add a message to history"""
-        self.message_history.append({
-            "role": role,
-            "content": content
-        })
+        """Add a message to history."""
+        self.message_history.append({"role": role, "content": content})
     
     def get_messages_for_llm(self, user_message: str) -> List[Dict[str, Any]]:
         """Prepare messages for LLM call"""
