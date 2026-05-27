@@ -18,6 +18,29 @@ import nbformat
 from nbformat.v4 import new_notebook, new_code_cell, new_output
 from jupyter_client import KernelManager
 
+# zstd frame magic bytes — single source of truth for format detection.
+# Injected into kernel code strings via f-string to keep kernel and main process
+# in sync without requiring an import inside the kernel.
+# NOTE: The kernel (Jupyter) runs zstandard directly — if it is ever migrated
+# to a standalone container, ensure zstandard is installed in that image.
+ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
+
+# Compression level for session pkl streaming writes.
+# Level 3 is the default sweet spot (~500 MB/s/core); adjust if benchmarks show
+# a better trade-off for AnnData sparse-matrix payloads.
+# NOTE: Same kernel-environment dependency as ZSTD_MAGIC above.
+COMPRESSION_LEVEL = 3
+
+
+def _is_zstd(header: bytes) -> bool:
+    """Return True if *header* starts with the zstd frame magic bytes.
+
+    Used by the main process for test assertions; the kernel restore code
+    mirrors this check inline (both reference ``ZSTD_MAGIC``).
+    """
+    return len(header) >= 4 and header[:4] == ZSTD_MAGIC
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -1108,13 +1131,31 @@ print(f"I/O sandbox active: writes restricted to session directory")
         escaped_path = repr(session_path)  # Properly escape special characters
         logger.info(f"Restoring session from {session_path}")
 
-        # Load saved variables
+        # Load saved variables with zstd detection + backward compat
         restore_code = f"""
 import dill
 
+_ZSTD_MAGIC = {ZSTD_MAGIC!r}   # injected from module constant — single source of truth
+
 try:
-    with open({escaped_path}, 'rb') as f:
-        _session_data = dill.load(f)
+    with open({escaped_path}, 'rb') as _f:
+        # Read 4 bytes to detect format, then seek back.
+        # (File objects don't guarantee .peek(), so read+seek is the portable approach.)
+        _header = _f.read(4)
+        _f.seek(0)
+        if _header == _ZSTD_MAGIC:
+            import zstandard as zstd  # only needed for compressed pkl; plain dill stays dependency-free
+            try:
+                _dctx = zstd.ZstdDecompressor()
+                with _dctx.stream_reader(_f) as _zf:
+                    _session_data = dill.load(_zf)
+            except Exception as _e:
+                # Broad catch on purpose: a corrupt zstd frame can surface either as
+                # zstd.ZstdError OR as a downstream dill EOFError ("Ran out of input")
+                # when zstd yields empty output — both mean the pkl is unusable.
+                raise RuntimeError(f"zstd decompression failed (corrupt pkl): {{_e}}") from _e
+        else:  # backward-compat: plain (uncompressed) dill
+            _session_data = dill.load(_f)
 
     # Restore variables to global namespace
     for _var_name, _obj in _session_data.items():
@@ -1160,6 +1201,7 @@ except Exception as e:
         save_code = f"""
 import dill
 import os
+import zstandard as zstd
 
 # Ensure directory exists
 os.makedirs(os.path.dirname({escaped_path}), exist_ok=True)
@@ -1193,9 +1235,22 @@ for _var_name, _obj in list(globals().items()):
         except Exception as _e:
             _skipped_vars.append((_var_name, type(_obj).__name__, type(_e).__name__, str(_e)[:200]))
 
-# Save the collected variables
-with open({escaped_path}, 'wb') as f:
-    dill.dump(_session_data, f)
+# Save the collected variables with zstd streaming compression.
+# Write to a temp file then atomically replace, so a mid-write crash can't
+# corrupt the only good pkl (a truncated file would still carry the zstd magic).
+_cctx = zstd.ZstdCompressor(level={COMPRESSION_LEVEL}, threads=-1)
+_tmp_path = {escaped_path} + '.tmp'
+try:
+    with open(_tmp_path, 'wb') as _f:
+        with _cctx.stream_writer(_f) as _zf:
+            dill.dump(_session_data, _zf)
+    os.replace(_tmp_path, {escaped_path})
+except Exception:
+    try:
+        os.remove(_tmp_path)
+    except OSError:
+        pass
+    raise
 
 print(f"Session saved: {{len(_session_data)}} variables")
 if _skipped_vars:

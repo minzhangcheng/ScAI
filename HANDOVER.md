@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.30 · **Last updated**: 2026-05-27
+**Version**: 0.25.1 · **Last updated**: 2026-05-27
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,13 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.1` — zstd streaming compression for session pkl (2026-05-27):
+  - **Zstd-compressed pkl**: Session save/restore uses `zstandard.stream_writer`/`stream_reader` for streaming compression. Plain dill fallback for backward compat. Corrupt zstd raises clear `RuntimeError("zstd decompression failed (corrupt pkl)")`.
+  - **Atomic pkl write**: Save writes to temp file first, then `os.replace()` — no half-written compressed file on crash.
+  - **New dependency**: `zstandard>=0.23,<1.0` added to `requirements.txt`.
+  - **Lazy zstd import**: `zstandard` imported only inside the zstd branch of restore code — plain-dill restore stays dependency-free.
+  - **Tests**: Added `test_pkl_compression.py` (magic detection, round-trip dict/sparse, compression ratio, backward compat, corrupt zstd, kernel code compilation, exec round-trip) and `test_snapshot_rollback.py` (snapshot copies compressed/plain pkl byte-identical, detection round-trip).
 
 - `0.24.30` — atomic blob write & snapshot I/O offload (2026-05-27):
   - **Atomic blob write**: `externalize_blobs` writes `.b64` files via temp file + `os.replace()` — no half-written file on crash.

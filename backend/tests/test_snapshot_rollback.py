@@ -6,10 +6,13 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
+import dill
 import pytest
+import zstandard as zstd
 
 from backend.models.schemas import Snapshot, AnalysisState
 from backend.utils.snapshot import SnapshotManager
+from backend.utils.sandbox import ZSTD_MAGIC, COMPRESSION_LEVEL
 
 
 @pytest.fixture
@@ -319,3 +322,92 @@ class TestDeleteBranch:
         # Verify files are removed
         assert not (mgr.snapshots_dir / snap_b.state_file).exists()
         assert not (mgr.snapshots_dir / snap_c.state_file).exists()
+
+
+class TestPklCompressionSnapshotCompat:
+    """Tests that snapshot pkl files (opaque byte blobs) survive compression
+    format changes, and that the detection logic works in snapshot file paths."""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_copies_compressed_pkl_as_is(self, mock_config):
+        """Snapshot should copy a zstd-compressed pkl verbatim (byte-identical)."""
+        session_id, session_dir, tmp_path = mock_config
+        pkl_path = session_dir / "states" / f"{session_id}_session.pkl"
+
+        # Write a zstd-compressed dill blob (mimics what save_session now produces)
+        original_data = {'adata': 'mock', 'results': [1, 2, 3]}
+        _cctx = zstd.ZstdCompressor(level=COMPRESSION_LEVEL, threads=-1)
+        with open(pkl_path, 'wb') as f:
+            with _cctx.stream_writer(f) as zf:
+                dill.dump(original_data, zf)
+
+        mgr = SnapshotManager(session_id)
+        state = AnalysisState(
+            session_id=session_id,
+            user_id="test_user",
+            data_files=[],
+            current_round=1,
+        )
+
+        snapshot = await mgr.create_snapshot(state, "Compressed Pkl", "pre_annotation")
+
+        # Verify the snapshot pkl is byte-identical to the source
+        snapshot_pkl = mgr.snapshots_dir / f"{snapshot.id}_session.pkl"
+        assert snapshot_pkl.exists(), "Snapshot pkl should exist"
+        assert snapshot_pkl.read_bytes() == pkl_path.read_bytes(), \
+            "Snapshot pkl should be a byte-identical copy"
+
+    @pytest.mark.asyncio
+    async def test_snapshot_copies_plain_pkl_as_is(self, mock_config):
+        """Snapshot should copy a plain (uncompressed) dill pkl verbatim."""
+        session_id, session_dir, tmp_path = mock_config
+        pkl_path = session_dir / "states" / f"{session_id}_session.pkl"
+
+        # Write a plain dill blob (old format)
+        original_data = {'adata': 'mock', 'results': [4, 5, 6]}
+        with open(pkl_path, 'wb') as f:
+            dill.dump(original_data, f)
+
+        mgr = SnapshotManager(session_id)
+        state = AnalysisState(
+            session_id=session_id,
+            user_id="test_user",
+            data_files=[],
+            current_round=1,
+        )
+
+        snapshot = await mgr.create_snapshot(state, "Plain Pkl", "pre_annotation")
+
+        snapshot_pkl = mgr.snapshots_dir / f"{snapshot.id}_session.pkl"
+        assert snapshot_pkl.exists()
+        assert snapshot_pkl.read_bytes() == pkl_path.read_bytes(), \
+            "Snapshot pkl should be a byte-identical copy of plain dill"
+
+    def test_detection_on_snapshot_pkl_round_trip(self, tmp_path):
+        """End-to-end detection: write compressed -> copy to snapshot path -> detect & load."""
+        from backend.utils.sandbox import _is_zstd
+
+        original_data = {'sparse': 'data', 'count': 42}
+
+        # Write compressed to "source" path
+        src = tmp_path / "source_session.pkl"
+        _cctx = zstd.ZstdCompressor(level=COMPRESSION_LEVEL, threads=-1)
+        with open(src, 'wb') as f:
+            with _cctx.stream_writer(f) as zf:
+                dill.dump(original_data, zf)
+
+        # "Snapshot copy" -- just byte copy
+        dst = tmp_path / "snapshot_session.pkl"
+        import shutil
+        shutil.copy2(src, dst)
+
+        # Detect and load from snapshot copy
+        with open(dst, 'rb') as f:
+            header = f.read(4)
+            f.seek(0)
+            assert _is_zstd(header) is True
+            _dctx = zstd.ZstdDecompressor()
+            with _dctx.stream_reader(f) as zf:
+                loaded = dill.load(zf)
+
+        assert loaded == original_data
