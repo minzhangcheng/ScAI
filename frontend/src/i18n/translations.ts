@@ -8,7 +8,8 @@ export const translations = {
     appName: 'ScAI',
     appSubtitle: '单细胞测序AI分析',
     appFullName: 'ScAI - 单细胞测序AI分析',
-    
+    loadingAnalysis: '正在加载分析…',
+
     // Tabs
     tabAnalysis: '分析',
     tabData: '数据',
@@ -485,7 +486,8 @@ Please provide a detailed literature review report with specific citation inform
     appName: 'ScAI',
     appSubtitle: 'Single Cell Sequencing Analysis Driven by AI',
     appFullName: 'ScAI - Single Cell Sequencing Analysis Driven by AI',
-    
+    loadingAnalysis: 'Loading analysis…',
+
     // Tabs
     tabAnalysis: 'Analysis',
     tabData: 'Data',

@@ -362,6 +362,10 @@ interface AppState {
   readMode: boolean
   setReadMode: (mode: boolean) => void
 
+  // Session loading overlay - true while loadSession is fetching (not persisted)
+  sessionLoading: boolean
+  setSessionLoading: (loading: boolean) => void
+
   // Snapshot count and cleanup reminder
   snapshotCount: number
   setSnapshotCount: (count: number) => void
@@ -582,6 +586,9 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       // Read mode
       readMode: false,
       setReadMode: (mode) => set({ readMode: mode }),
+
+      sessionLoading: false,
+      setSessionLoading: (loading) => set({ sessionLoading: loading }),
 
       snapshotCount: 0,
       setSnapshotCount: (count) => {

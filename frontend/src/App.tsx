@@ -29,7 +29,7 @@ import {
 } from 'lucide-react'
 
 function App() {
-  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, authUser } = useAppStore()
+  const { activeTab, setActiveTab, sidebarOpen, setSidebarOpen, currentSession, language, wsConnected, messagePanelWidth, setMessagePanelWidth, setShowConfigPanelCallback, setWsCallbacks, authUser, sessionLoading } = useAppStore()
   const { checkStatus } = useConfig()
   const { getUserConfigStatus, getUserConfig } = useUserConfig()
   const { connect, disconnect } = useWebSocket()
@@ -147,6 +147,16 @@ function App() {
 
   return (
     <div className="min-h-screen bg-surface-50">
+      {/* Session loading overlay — shown while loadSession fetches, auto-closes on completion */}
+      {sessionLoading && (
+        <div className="fixed inset-0 z-[60] flex flex-col items-center justify-center gap-4 bg-surface-900/70 backdrop-blur-sm">
+          <div className="p-4 bg-gradient-to-br from-accent-500 to-accent-700 rounded-2xl shadow-glow-accent">
+            <Dna className="w-8 h-8 text-white animate-spin" />
+          </div>
+          <p className="text-white text-sm font-medium tracking-wide">{t('loadingAnalysis')}</p>
+        </div>
+      )}
+
       {/* Config Modal */}
       {showConfig && (
         <ConfigPanel

@@ -219,8 +219,9 @@ export function useSession() {
   
   const loadSession = useCallback(async (sessionId: string) => {
     setLoading(true)
+    useAppStore.getState().setSessionLoading(true)
     setError(null)
-    
+
     try {
       const data = await apiFetch<SessionLoadResponse>(`/session/${sessionId}/load`)
 
@@ -336,6 +337,7 @@ export function useSession() {
       throw e
     } finally {
       setLoading(false)
+      useAppStore.getState().setSessionLoading(false)
     }
   }, [setCurrentSession, setMessages, clearMessages])
   
