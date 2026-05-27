@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.27 · **Last updated**: 2026-05-21
+**Version**: 0.24.28 · **Last updated**: 2026-05-27
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,21 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.24.28` — unknown tool defense & stringified tool recovery (2026-05-27):
+  - **Orphan tool call defense**: Bioinformatics agent now handles unknown/hallucinated tool names gracefully by responding with an error message rather than crashing. Added `KNOWN_TOOL_NAMES` frozenset derived from TOOLS; `run_autonomous_analysis()` now emits a role=tool error response for unknown tool calls, keeping conversation well-formed.
+  - **Stringified tool recovery**: New regression tests for recovering from serialized tool_call IDs via dill checkpoint restore (`test_stringified_tool_recovery.py`).
+  - **Unknown tool dispatch tests**: New test suite for handling unknown tool names dispatched by LLM (`test_unknown_tool_dispatch.py`).
+  - **LLM client improvements**: Enhanced `OpenAICompatibleClient` with better error handling and retry logic.
+
+- `0.24.26` — multi-agent modality support & robustness fixes (2026-05-22):
+  - **Multi-modality analysis**: Full support for multi-omics data (scRNA-seq, snRNA-seq, bulk RNA-seq, pathology images, biochemical indicators) with dynamic modality detection and branched workflow routing.
+  - **PI Agent enhancements**: Added NMF gene-expression programs and RandomForest biomarker discovery to Round-2+ toolkit; restructured task-generation prompts with cascading storyline (Task/Rationale/Expected Outcome); literature verification loop for each bioinformatics hypothesis.
+  - **Bioinformatics agent improvements**: Multi-modal fallback rules with `print()` of raw data backing every plot; code-level self-repair with try/except and adaptive DEG thresholds; serendipity check (variance partitioning) before targeted analyses.
+  - **Sandbox robustness**: dill restore failure now raises `RuntimeError` instead of silently continuing; session save tracks unpicklable variables via `__SCAI_SAVE_SKIPPED__`.
+  - **Auth middleware**: Session auth suffix matching anchored to path segment position; defense-in-depth against traversal segments.
+  - **Configurable DEG thresholds**: `deg_thresholds` field on `AnalysisState` for session-configurable logFC/padj cutoffs.
+  - **40+ new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue, exploration success, reasoning extraction, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds, modality branched workflow, snapshot parent chain, tool call parse failure, and more.
 
 - `0.24.25` — tool-choice fallback & exploration failure guard (2026-05-21):
   - **tool_choice BadRequestError fallback**: Added `is_tool_choice_error()` detection and `_toolchoice_unsupported_models` cache in `OpenAICompatibleClient`. When a provider rejects `tool_choice="required"`, the client caches the model and retries with `tool_choice="auto"`; subsequent calls are pre-emptively demoted. Fixes crashes on providers that don't support forced tool calling.

@@ -21,6 +21,19 @@ from jupyter_client import KernelManager
 logger = logging.getLogger(__name__)
 
 
+def _is_kernel_protocol_error(exc: Exception) -> bool:
+    """True for ZMQ/jupyter session-key corruption that makes the kernel
+    permanently unusable until restarted (vs. a normal user code error)."""
+    if not isinstance(exc, (ValueError, KeyError)):
+        return False
+    s = str(exc).lower()
+    return (
+        "invalid signature" in s
+        or "<ids|msg>" in s
+        or "is not in list" in s
+    )
+
+
 # Dangerous code patterns that should not be executed in the sandbox.
 # Enforced at the sandbox level so ALL callers (BioinformaticsAgent,
 # report_generator, chat sandbox, etc.) are protected.
@@ -1222,7 +1235,34 @@ if _skipped_vars:
             logger.warning(f"Failed to save session: {result.error}")
 
         return result.success
-    
+
+    async def _restart_kernel(self) -> None:
+        """Restart the kernel and restore the session. Sets _kernel_dead on failure."""
+        try:
+            await asyncio.to_thread(self.km.restart_kernel)
+
+            # Rebuild client connection
+            if self.kc is not None:
+                try:
+                    self.kc.stop_channels()
+                except Exception as e:
+                    logger.debug(f"Failed to stop kernel channels during recovery: {e}")
+            self.kc = self.km.client()
+            self.kc.start_channels()
+
+            # Wait for kernel to be ready
+            await asyncio.wait_for(self._wait_for_ready(), timeout=30)
+
+            # Re-initialize and restore session
+            self._initialized = False
+            await self._initialize_kernel()
+            await self._restore_session()
+
+            logger.info(f"Kernel restarted and session restored for session {self.session_id}")
+        except Exception as restart_error:
+            logger.error(f"Failed to restart kernel: {restart_error}")
+            self._kernel_dead = True
+
     async def execute(
         self,
         code: str,
@@ -1297,30 +1337,7 @@ if _skipped_vars:
                             except asyncio.TimeoutError:
                                 # Kernel may be in bad state, restart it
                                 logger.warning(f"Kernel did not return to idle after interrupt for session {self.session_id}")
-                                try:
-                                    await asyncio.to_thread(self.km.restart_kernel)
-
-                                    # Rebuild client connection
-                                    if self.kc is not None:
-                                        try:
-                                            self.kc.stop_channels()
-                                        except Exception as e:
-                                            logger.debug(f"Failed to stop kernel channels during recovery: {e}")
-                                    self.kc = self.km.client()
-                                    self.kc.start_channels()
-
-                                    # Wait for kernel to be ready
-                                    await asyncio.wait_for(self._wait_for_ready(), timeout=30)
-
-                                    # Re-initialize and restore session
-                                    self._initialized = False
-                                    await self._initialize_kernel()
-                                    await self._restore_session()
-
-                                    logger.info(f"Kernel restarted and session restored for session {self.session_id}")
-                                except Exception as restart_error:
-                                    logger.error(f"Failed to restart kernel: {restart_error}")
-                                    self._kernel_dead = True
+                                await self._restart_kernel()
                         except Exception as interrupt_error:
                             logger.error(f"Failed to interrupt kernel: {interrupt_error}")
                     break
@@ -1392,6 +1409,12 @@ if _skipped_vars:
             
         except Exception as e:
             logger.exception("Execution error")
+            if _is_kernel_protocol_error(e):
+                logger.warning(
+                    f"Kernel protocol corruption detected for session {self.session_id}; "
+                    f"restarting kernel"
+                )
+                await self._restart_kernel()
             return CodeExecutionResult(
                 success=False,
                 error=str(e)

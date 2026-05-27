@@ -35,7 +35,7 @@ from ..models.schemas import (
     PublicationFigure, FigureReviewStatus, AnalysisStep, PlanStage,
     DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
-from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError
+from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError, EMPTY_CONTENT_PLACEHOLDER
 from ..constants import PLAN_REVISION_NEEDED_TAG
 from ..utils.error_parsing import strip_ansi, extract_error_type, TECHNICAL_ERROR_TYPES
 
@@ -400,6 +400,24 @@ class BioinformaticsAgent(BaseAgent):
         if text_response_count >= max_text_responses - 1:
             return "required"
         return "auto"
+
+    @staticmethod
+    def _is_empty_response(response) -> bool:
+        """True when the LLM returned nothing usable: no tool call AND
+        (empty/whitespace content, the extraction-error placeholder, or zero
+        completion tokens with empty content). This signals transient upstream
+        truncation, which should be retried rather than escalated as a 'text-only'
+        model behavior."""
+        if response.has_tool_calls:
+            return False
+        content = (response.content or "").strip()
+        if content == "" or content == EMPTY_CONTENT_PLACEHOLDER:
+            return True
+        # Non-empty content with real text is a genuine text-only response
+        # (the model chose to talk), even if usage is missing or completion_tokens
+        # is zero. Only treat zero completion_tokens as empty when content is
+        # also empty (checked above).
+        return False
 
     def _raise_text_only_exhausted(self, text_response_count: int) -> None:
         """Raise UpstreamExhaustedError when consecutive text-only LLM
@@ -1568,6 +1586,8 @@ If results significantly deviate from plan expectations, report via consult_pi i
         llm_error: Optional[str] = None
         text_response_count = 0
         MAX_TEXT_RESPONSES = 2
+        empty_response_count = 0
+        MAX_EMPTY_RESPONSES = 3  # transient upstream truncation → bounded retry
         figure_iteration_count = 0
         MAX_FIGURE_ITERATIONS = 5  # Max figure-only iterations excluded from step count
         consecutive_errors = 0
@@ -1713,6 +1733,22 @@ If results significantly deviate from plan expectations, report via consult_pi i
 
             # Capture agent reasoning from response content (before tool calls)
             agent_reasoning = response.content[:2000] if response.content else None
+
+            # Transient empty/truncated upstream response: retry without
+            # counting toward the text-only HITL escalation.
+            if self._is_empty_response(response):
+                empty_response_count += 1
+                logger.warning(
+                    f"[Bioinformatics] Empty/truncated response "
+                    f"({empty_response_count}/{MAX_EMPTY_RESPONSES})"
+                )
+                if empty_response_count >= MAX_EMPTY_RESPONSES:
+                    raise UpstreamExhaustedError(
+                        f"[Bioinformatics] {MAX_EMPTY_RESPONSES} consecutive empty responses",
+                        agent_name="bioinformatics",
+                    )
+                continue  # retry the LLM call
+            empty_response_count = 0
 
             if not response.has_tool_calls:
                 if response.content:

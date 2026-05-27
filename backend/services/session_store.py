@@ -26,6 +26,7 @@ from backend.config import (
 )
 from backend.constants import WaitInputReason
 from backend.models.schemas import AnalysisState, TaskStatus, DEFAULT_ROUND_WAIT_SECONDS
+from backend.utils.blob_store import externalize_blobs, inline_blobs
 from backend.utils.files import validate_session_id
 from backend.state import (
     sessions, state_lock, session_access_times, last_save_times,
@@ -61,8 +62,14 @@ def _write_session_json(session_id: str, json_str: str) -> None:
         logger.exception(f"Failed to save session {session_id}")
 
 
+def _blob_dir_for(session_id: str) -> Path:
+    return get_session_metadata_path(session_id).parent / "blobs"
+
+
 def save_session_to_disk(session_id: str, state: AnalysisState) -> None:
-    _write_session_json(session_id, state.model_dump_json())
+    dumped = state.model_dump(mode="json")
+    externalized = externalize_blobs(dumped, _blob_dir_for(session_id))
+    _write_session_json(session_id, json.dumps(externalized, ensure_ascii=False))
 
 
 async def async_save_session(session_id: str, state: AnalysisState, force: bool = False) -> None:
@@ -75,7 +82,9 @@ async def async_save_session(session_id: str, state: AnalysisState, force: bool 
             logger.debug("Throttled save for %s", session_id)
             return
     last_save_times[session_id] = now
-    json_str = state.model_dump_json()
+    dumped = state.model_dump(mode="json")
+    externalized = externalize_blobs(dumped, _blob_dir_for(session_id))
+    json_str = json.dumps(externalized, ensure_ascii=False)
     await asyncio.to_thread(_write_session_json, session_id, json_str)
 
 
@@ -85,6 +94,7 @@ def load_session_from_disk(session_id: str) -> Optional[AnalysisState]:
         if session_file and session_file.exists():
             with open(session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            data = inline_blobs(data, session_file.parent / "blobs")
             if not data.get("user_id"):
                 logger.warning(f"Session {session_id} has empty user_id, refusing to load")
                 return None
@@ -138,7 +148,9 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
                     f"Session {session_id}: Analysis paused due to unresolved LLM failure before restart."
                 )
                 # Save the cleaned-up state so PAUSED status persists
-                json_str = state.model_dump_json()
+                dumped = state.model_dump(mode="json")
+                externalized = externalize_blobs(dumped, _blob_dir_for(session_id))
+                json_str = json.dumps(externalized, ensure_ascii=False)
                 await asyncio.to_thread(_write_session_json, session_id, json_str)
             sessions[session_id] = state
             session_access_times[session_id] = time.time()

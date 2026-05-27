@@ -652,6 +652,7 @@ class PlanningMixin:
                 "Planning aborted: no plan available. Skipping to final report.",
                 AgentType.PI,
             )
+            state["should_continue"] = False  # defensive: ensure _after_review aborts
             return state
 
         # Wipe any action/event left behind by a previous gate invocation in the

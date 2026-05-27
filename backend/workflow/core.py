@@ -617,7 +617,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # PI agent plans supplementary tasks
         supp_plan = await self.pi_agent.plan_supplementary_analysis(
             state, request_text, context
-        )
+        ) or {}
 
         # Execute bioinformatics tasks if planned
         bio_tasks = supp_plan.get("bioinformatics_tasks", [])

@@ -143,10 +143,12 @@ def test_check_convergence_condition_stop():
     assert s._check_convergence_condition(state) == "stop"
 
 
-def test_check_convergence_condition_missing_key_defaults_stop():
+def test_check_convergence_condition_missing_key_defaults_continue():
+    """Missing should_continue key now defaults to 'continue' to avoid
+    silently stopping a live run (consistent with _should_continue)."""
     s = _Stub()
     state = {}
-    assert s._check_convergence_condition(state) == "stop"
+    assert s._check_convergence_condition(state) == "continue"
 
 
 def test_after_review_clears_plan_revision_resume_after_routing():

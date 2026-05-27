@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from ..constants import PI_DECIDE_SIGNAL
 from ..models.schemas import AgentType, AnalysisPhase, BiochemistryIndicator, TaskStatus
+from .retry import with_retry
 
 if TYPE_CHECKING:
     from .state import WorkflowState
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 class InitializeMixin:
     """Mixin providing round-initialization method. Composed into SingleCellAnalysisWorkflow."""
 
+    @with_retry("initialize_round")
     async def _initialize_round(self, state: WorkflowState) -> WorkflowState:
         """Initialize a new analysis round, processing any pending user input"""
         analysis_state = state["analysis_state"]

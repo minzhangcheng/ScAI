@@ -108,9 +108,11 @@ class RoutingMixin:
         return "continue"
 
     def _check_convergence_condition(self, state: "WorkflowState") -> str:
-        """Conditional check for convergence"""
-        if "should_continue" not in state:
-            logger.warning(f"[{self.session_id}] should_continue key missing from state, defaulting to stop")
-        if state.get("should_continue", False):
-            return "continue"
-        return "stop"
+        """Conditional check for convergence.
+
+        Missing key defaults to 'continue' to stay consistent with
+        _should_continue and avoid silently stopping a live run.
+        """
+        if state.get("should_continue") is False:
+            return "stop"
+        return "continue"

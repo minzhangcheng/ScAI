@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 from ..models.schemas import AnalysisState, Snapshot
 from ..config import get_session_dir, get_session_states
+from ..utils.blob_store import externalize_blobs, inline_blobs
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,9 @@ class SnapshotManager:
                 seg.pop("content_html", None)
 
         state_path = self.snapshots_dir / snapshot.state_file
-        state_json = json.dumps(state_dict, ensure_ascii=False, default=str)
+        blob_dir = self.snapshots_dir / f"{snapshot.id}_blobs"
+        externalized = externalize_blobs(state_dict, blob_dir)
+        state_json = json.dumps(externalized, ensure_ascii=False, default=str)
         snapshot.size_bytes = len(state_json.encode("utf-8"))
 
         # Atomic write (run in thread to avoid blocking event loop)
@@ -227,6 +230,9 @@ class SnapshotManager:
 
         with open(state_path, "r", encoding="utf-8") as f:
             state_dict = json.load(f)
+
+        blob_dir = (self.snapshots_dir / snapshot.state_file).parent / f"{snapshot.id}_blobs"
+        state_dict = inline_blobs(state_dict, blob_dir)
 
         restored = AnalysisState.model_validate(state_dict)
 
@@ -336,6 +342,9 @@ class SnapshotManager:
         pkl.unlink(missing_ok=True)
         nb = self.snapshots_dir / f"{snapshot.id}_notebook.ipynb"
         nb.unlink(missing_ok=True)
+        blob_dir = self.snapshots_dir / f"{snapshot.id}_blobs"
+        if blob_dir.exists():
+            shutil.rmtree(blob_dir, ignore_errors=True)
         logger.info(f"[{self.session_id}] Snapshot deleted: {snapshot.name}")
 
     async def delete_checkpoint(self):

@@ -11,7 +11,7 @@ import time
 from uuid import uuid4
 from typing import List, Dict, Any, Optional, AsyncGenerator, Union, Callable, Awaitable, Tuple
 from dataclasses import dataclass, field
-from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError
+from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError, AuthenticationError, PermissionDeniedError
 
 from .llm_logger import get_llm_logger, LLMInteraction
 
@@ -142,6 +142,7 @@ RETRYABLE_EXCEPTIONS = (
 # JSONDecodeError gets fewer retries (max 2) since repeated bad JSON likely indicates
 # a persistent issue rather than a transient network problem.
 MAX_JSON_RETRIES = 2
+EMPTY_CONTENT_PLACEHOLDER = "[Error: LLM generated a response but content extraction failed. Please retry.]"
 
 
 class UpstreamExhaustedError(RuntimeError):
@@ -238,6 +239,18 @@ def is_tool_choice_error(error: Exception) -> bool:
     return "tool_choice" in error_str or "tool choice" in error_str
 
 
+def _is_hard_quota_error(error: Exception) -> bool:
+    """True when a 429 is a non-recoverable quota exhaustion (not transient TPM).
+
+    Hard quota errors (monthly budget, billing) never recover by waiting, so we
+    surface them to the user immediately instead of burning the backoff budget.
+    """
+    s = str(error).lower()
+    return any(k in s for k in (
+        "monthly max", "auto reload", "quota", "insufficient_quota", "billing",
+    ))
+
+
 async def retry_with_backoff(
     func,
     max_retries: int = MAX_RETRIES,
@@ -302,9 +315,23 @@ async def retry_with_backoff(
                     f"[{agent_name}] Invalid JSON after {MAX_JSON_RETRIES} attempts: {str(e)}"
                 )
                 raise
-        except RateLimitError as e:
-            # RateLimitError needs special handling with longer backoff delays.
+        except (AuthenticationError, PermissionDeniedError) as e:
+            # Non-transient: retrying with the same credentials cannot help.
+            # Surface immediately; @with_retry / planning turn this into a HITL
+            # gate where the user can fix the key and click Retry.
             last_exception = e
+            logger.error(
+                f"[{agent_name}] Auth/permission error (not retrying): "
+                f"{type(e).__name__}: {str(e)[:200]}"
+            )
+            break
+        except RateLimitError as e:
+            last_exception = e
+            if _is_hard_quota_error(e):
+                logger.error(
+                    f"[{agent_name}] Hard quota exhausted (not retrying): {str(e)[:200]}"
+                )
+                break
             rate_limit_max = min(max_retries, len(RATE_LIMIT_DELAYS))
             if attempt < rate_limit_max:
                 delay = RATE_LIMIT_DELAYS[attempt]
@@ -316,6 +343,7 @@ async def retry_with_backoff(
                 await asyncio.sleep(delay)
             else:
                 logger.error(f"[{agent_name}] Rate limit exceeded after {rate_limit_max + 1} attempts")
+                break  # stop spinning; fall through to UpstreamExhaustedError
         except RETRYABLE_EXCEPTIONS as e:
             last_exception = e
             is_5xx = isinstance(e, InternalServerError)
@@ -736,7 +764,7 @@ class OpenAICompatibleClient:
                 f"[{self.agent_name}] Non-zero completion tokens ({completion_tokens}) "
                 f"but empty extracted content — returning error placeholder"
             )
-            return "[Error: LLM generated a response but content extraction failed. Please retry.]"
+            return EMPTY_CONTENT_PLACEHOLDER
 
         return content
 
