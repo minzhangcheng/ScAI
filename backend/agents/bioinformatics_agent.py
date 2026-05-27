@@ -402,6 +402,15 @@ class BioinformaticsAgent(BaseAgent):
         return "auto"
 
     @staticmethod
+    def _empty_retry_backoff(count: int) -> float:
+        """Incremental backoff (seconds) between empty-response retries.
+
+        Capped so a transient truncation streak doesn't hammer the upstream,
+        but kept small enough that real work isn't meaningfully delayed.
+        """
+        return min(float(count), 5.0)
+
+    @staticmethod
     def _is_empty_response(response) -> bool:
         """True when the LLM returned nothing usable: no tool call AND
         (empty/whitespace content, the extraction-error placeholder, or zero
@@ -1747,6 +1756,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                         f"[Bioinformatics] {MAX_EMPTY_RESPONSES} consecutive empty responses",
                         agent_name="bioinformatics",
                     )
+                await asyncio.sleep(self._empty_retry_backoff(empty_response_count))
                 continue  # retry the LLM call
             empty_response_count = 0
 

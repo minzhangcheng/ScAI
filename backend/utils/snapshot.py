@@ -176,19 +176,19 @@ class SnapshotManager:
 
         state_path = self.snapshots_dir / snapshot.state_file
         blob_dir = self.snapshots_dir / f"{snapshot.id}_blobs"
-        externalized = externalize_blobs(state_dict, blob_dir)
-        state_json = json.dumps(externalized, ensure_ascii=False, default=str)
-        snapshot.size_bytes = len(state_json.encode("utf-8"))
-
-        # Atomic write (run in thread to avoid blocking event loop)
         tmp_path = state_path.with_suffix(".tmp")
 
-        def _atomic_write():
+        def _externalize_and_write() -> int:
+            # Blocking blob writes + JSON serialization + atomic write,
+            # all off the event loop to avoid blocking WebSocket / LLM streaming.
+            externalized = externalize_blobs(state_dict, blob_dir)
+            state_json = json.dumps(externalized, ensure_ascii=False, default=str)
             with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(state_json)
             os.replace(str(tmp_path), str(state_path))
+            return len(state_json.encode("utf-8"))
 
-        await asyncio.to_thread(_atomic_write)
+        snapshot.size_bytes = await asyncio.to_thread(_externalize_and_write)
 
         # Copy kernel session pkl (large file — run in thread to avoid blocking event loop)
         pkl_src = get_session_states(self.session_id) / f"{self.session_id}_session.pkl"

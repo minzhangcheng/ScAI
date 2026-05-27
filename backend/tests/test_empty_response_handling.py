@@ -57,3 +57,11 @@ def test_missing_usage_with_real_text_is_not_empty():
         raw_response=None,
     )
     assert BioinformaticsAgent._is_empty_response(resp) is False
+
+
+def test_empty_retry_backoff_is_incremental_and_capped():
+    """_empty_retry_backoff grows linearly and caps at 5.0 seconds."""
+    assert BioinformaticsAgent._empty_retry_backoff(1) == 1.0
+    assert BioinformaticsAgent._empty_retry_backoff(2) == 2.0
+    assert BioinformaticsAgent._empty_retry_backoff(5) == 5.0
+    assert BioinformaticsAgent._empty_retry_backoff(10) == 5.0  # capped

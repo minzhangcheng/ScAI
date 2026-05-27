@@ -1,5 +1,6 @@
 """Tests for base64 blob externalization used by session persistence."""
 import json
+import pytest
 from backend.utils.blob_store import externalize_blobs, inline_blobs, BLOB_REF_PREFIX, MIN_BLOB_LEN
 from backend.models.schemas import AnalysisState, PublicationFigure
 
@@ -108,3 +109,31 @@ def test_async_save_offloads_blob_io_to_worker_thread(tmp_path, monkeypatch):
     assert "thread" in recorded, "externalize_blobs was never called"
     assert recorded["thread"] != main_thread, "blob I/O ran on the event loop thread"
     assert session_file.exists()
+
+
+def test_blob_write_is_atomic_on_crash(tmp_path, monkeypatch):
+    """If os.replace fails (simulating a crash mid-write), no corrupt final file
+    should be left behind — the old direct-write path would leave a half-written
+    .b64 file."""
+    import backend.utils.blob_store as bs
+
+    blob_dir = tmp_path / "blobs"
+    big = "A" * (bs.MIN_BLOB_LEN + 10)
+    digest = bs._hash(big)
+
+    # Make os.replace raise — simulates crash during rename
+    def boom(*a, **k):
+        raise OSError("crash during rename")
+    monkeypatch.setattr(bs.os, "replace", boom)
+
+    with pytest.raises(OSError):
+        bs.externalize_blobs({"x": big}, blob_dir)
+
+    # No corrupt final file should exist
+    assert not (blob_dir / f"{digest}.b64").exists()
+
+    # After undo, a normal write should succeed
+    monkeypatch.undo()
+    out = bs.externalize_blobs({"x": big}, blob_dir)
+    assert out["x"].startswith(bs.BLOB_REF_PREFIX)
+    assert (blob_dir / f"{digest}.b64").read_text() == big

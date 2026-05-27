@@ -12,6 +12,8 @@ performs the exact inverse, yielding a lossless round-trip.
 """
 import hashlib
 import logging
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +41,9 @@ def externalize_blobs(obj: Any, blob_dir: Path) -> Any:
                 blob_dir.mkdir(parents=True, exist_ok=True)
                 path = blob_dir / f"{digest}.b64"
                 if not path.exists():
-                    path.write_text(node, encoding="utf-8")
+                    tmp = blob_dir / f".{digest}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+                    tmp.write_text(node, encoding="utf-8")
+                    os.replace(tmp, path)
                 return f"{BLOB_REF_PREFIX}{digest}"
             return node
         if isinstance(node, list):

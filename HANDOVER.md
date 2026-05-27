@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.24.29 · **Last updated**: 2026-05-27
+**Version**: 0.24.30 · **Last updated**: 2026-05-27
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,12 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.24.30` — atomic blob write & snapshot I/O offload (2026-05-27):
+  - **Atomic blob write**: `externalize_blobs` writes `.b64` files via temp file + `os.replace()` — no half-written file on crash.
+  - **Empty-response backoff**: `_empty_retry_backoff()` adds incremental delay (capped at 5s) between empty/truncated upstream retries.
+  - **Snapshot blob I/O offloaded to worker thread**: `create_snapshot` runs `externalize_blobs`, JSON serialization, and atomic file write inside `asyncio.to_thread()` — the event loop stays responsive for WebSocket pushes and LLM streaming.
+  - **Tests**: Added atomic write crash-safety test (`test_blob_store.py`), backoff behavior test (`test_empty_response_handling.py`), and snapshot I/O thread verification (`test_snapshot_blob_offload.py`).
 
 - `0.24.29` — blob externalization & retry hardening (2026-05-27):
   - **Base64 blob externalization**: New `blob_store.py` module extracts large base64 strings (images, figures) from session JSON into SHA256-deduplicated `.b64` files. Integrated into `session_store.py` and `snapshot.py` for both sync/async save and load. Reduces session.json size and write overhead significantly.
