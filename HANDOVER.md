@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.5 · **Last updated**: 2026-05-27
+**Version**: 0.25.6 · **Last updated**: 2026-05-28
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,12 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.6` — mid-execution plan revision routing fix (2026-05-28):
+  - **`decide_bioinfo_post_execution`**: New pure function in `helpers.py` that returns one of `"revision"`, `"stage1_complete"`, or `"complete"` — replacing inline stage checks that masked mid-plan revision.
+  - **Mid-execution revision detection**: `_bioinformatics_analysis` now checks the raw agent `result` (before it's rebuilt into `final_result`, which drops `plan_revision_needed`). On `"revision"`, stays in current stage, keeps `current_plan` intact, and invalidates cache — the agent resumes the same plan from its checkpoint after revision is approved.
+  - **Stage1 revision pause**: Previous code checked `plan_revision_needed` on `final_result` (which never carried it), making mid-execution revision detection impossible. Now correctly pauses in stage1 without advancing to stage2.
+  - **Tests**: `test_bioinfo_post_execution_decision.py` and `test_stage1_revision_pause.py`.
 
 - `0.25.5` — reasoning echo refactor (2026-05-27):
   - **Structured reasoning echo**: Added `_REASONING_ECHO_KEYS`, `_reasoning_echo_allowed()`, and `_build_assistant_echo()` — single source of truth for echoing thinking-mode reasoning on tool-call turns. Preserves all known reasoning field names verbatim (`reasoning_content`, `reasoning`, `reasoning_details`, `thinking`, `thought`), matching DeepSeek v4, MiMo, and Anthropic/OpenRouter thinking requirements.

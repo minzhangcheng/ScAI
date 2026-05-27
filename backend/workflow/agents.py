@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
-from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, STAGE1_KEYWORDS
+from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, STAGE1_KEYWORDS
 from .retry import with_retry
 
 if TYPE_CHECKING:
@@ -619,17 +619,39 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             json.dumps({"findings": all_findings, "summary": summary}, ensure_ascii=False)
         )
 
-        # Stage transition: if stage1 just completed, set up for stage2
+        # Mid-execution plan revision is signalled on the raw agent `result`, not
+        # on `final_result` (rebuilt above with only a fixed set of keys, so it
+        # never carries plan_revision_needed). A "paused_for_revision" return means
+        # the agent stopped partway through the current plan — NOT a stage
+        # completion — so the stage must not advance here.
+        plan_revision_requested = bool(result.get("plan_revision_needed"))
+        action = decide_bioinfo_post_execution(planning_stage, plan_revision_requested)
+
         result_state = {
             **state,
             "analysis_state": analysis_state,
             "bioinformatics_result": final_result
         }
 
-        if planning_stage == "stage1":
-            # Don't cache the stage1 result — stage2 re-enters this node and
-            # must run fresh. Biochem/pathology/literature cache survives so
-            # stage2 reuses them.
+        if action == "revision":
+            # Stay in the current stage and keep current_plan intact: after the
+            # revision is approved the agent resumes this same plan from its
+            # checkpoint (e.g. stage1's remaining annotation steps). Do NOT cache
+            # the partial result and do NOT advance the stage.
+            result_state["plan_revision_needed"] = True
+            result_state["plan_revision_context"] = result.get("plan_revision_context", {})
+            # P0-8: invalidate cache so post-revision re-execution actually runs
+            # instead of returning the stale (pre-revision) cached result.
+            cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
+            logger.info(
+                f"[{self.session_id}] Mid-execution plan revision triggered in stage "
+                f"'{planning_stage}'; staying in stage, bioinfo cache invalidated"
+            )
+        elif action == "stage1_complete":
+            # Stage transition: stage1 genuinely completed → set up for stage2.
+            # Don't cache the stage1 result — stage2 re-enters this node and must
+            # run fresh. Biochem/pathology/literature cache survives so stage2
+            # reuses them.
             result_state["planning_stage"] = "stage2"
             result_state["plan_approved"] = False
             result_state["pi_instructions"] = _reset_pi_instructions_for_stage2(
@@ -643,20 +665,11 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             }
             analysis_state.current_plan = None
             cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
-        else:
+        else:  # "complete"
             cache_store(analysis_state, AgentType.BIOINFORMATICS, final_result)
             if planning_stage == "stage2":
                 result_state["planning_stage"] = "full"
                 result_state["planning_context"] = None  # Clear stage1 context after stage2 completes
-
-        # Check for mid-execution plan revision from agent result
-        if isinstance(final_result, dict) and final_result.get("plan_revision_needed"):
-            result_state["plan_revision_needed"] = True
-            result_state["plan_revision_context"] = final_result.get("plan_revision_context", {})
-            # P0-8: invalidate cache so post-revision re-execution actually runs
-            # instead of returning the stale (pre-revision) cached result.
-            cache_invalidate(analysis_state, AgentType.BIOINFORMATICS)
-            logger.info(f"[{self.session_id}] Mid-execution plan revision triggered; bioinfo cache invalidated")
 
         return result_state
     

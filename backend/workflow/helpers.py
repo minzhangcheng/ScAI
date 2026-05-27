@@ -77,6 +77,26 @@ def _has_stage1_keyword(text: str) -> bool:
             idx = pos + len(kw)
     return False
 
+def decide_bioinfo_post_execution(planning_stage: str, plan_revision_requested: bool) -> str:
+    """Decide what _bioinformatics_analysis should do after the agent returns.
+
+    A "paused_for_revision" return is NOT a stage completion: the agent stopped
+    partway through the current plan and must resume the SAME plan/stage after
+    the revision is approved.
+
+    Returns one of:
+      "revision"        — agent paused mid-plan; keep current stage + current_plan,
+                          do not cache the partial result.
+      "stage1_complete" — stage1 genuinely finished; advance to stage2.
+      "complete"        — stage2/full finished normally; cache result.
+    """
+    if plan_revision_requested:
+        return "revision"
+    if planning_stage == "stage1":
+        return "stage1_complete"
+    return "complete"
+
+
 _DIFF_LABELS = {
     'added': '[ADDED]',
     'removed': '[REMOVED]',
