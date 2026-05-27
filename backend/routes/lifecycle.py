@@ -26,6 +26,7 @@ from backend.state import (
     get_session_lock,
 )
 from backend.services.session_store import update_session_cache as _update_session_cache
+from backend.routes._helpers import teardown_running_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -141,10 +142,13 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         state.original_max_rounds = None
 
     if state.status == TaskStatus.COMPLETED:
-        # Re-analysis: reset for a new round while keeping existing data
+        # Re-analysis: tear down the terminated checkpoint so the WS
+        # reconnect triggers a fresh run (core.py "no checkpoint" path)
+        # instead of resuming a graph already at END (infinite loop).
+        await teardown_running_workflow(session_id)
         state.status = TaskStatus.RUNNING
-        # Increment max_rounds to allow additional analysis
         state.max_rounds = state.current_round + 1
+        state.last_restored_snapshot_id = None
         await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
         return APIResponse(

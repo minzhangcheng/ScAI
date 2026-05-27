@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.3 · **Last updated**: 2026-05-27
+**Version**: 0.25.4 · **Last updated**: 2026-05-27
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,12 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.4` — workflow teardown refactor & edge-guard (2026-05-27):
+  - **Shared teardown helper**: New `routes/_helpers.py` with `teardown_running_workflow()` — extracts duplicated workflow-stop, task-cancel, and checkpoint-delete logic from `snapshots.py` and `lifecycle.py` into a single reusable function.
+  - **Re-analysis teardown**: `lifecycle.py` `_resume_analysis_locked` now calls `teardown_running_workflow` before resetting a COMPLETED session, so WS reconnect triggers a fresh graph run instead of resuming a terminated graph (which caused infinite loop).
+  - **Graph-at-END guard**: `core.py` `_resume_analysis` detects when `state.next` is empty (graph already terminated) and marks COMPLETED immediately, preventing infinite resume loop on WebSocket reconnect.
+  - **Snapshot restore cleanup**: `snapshots.py` `restore_snapshot` delegates to `teardown_running_workflow`; `delete_checkpoint` now runs inside the shared helper.
 
 - `0.25.3` — session loading overlay (2026-05-27):
   - **Session loading overlay**: Full-screen backdrop with animated DNA icon and i18n text (`loadingAnalysis`) shown while `loadSession` is fetching, providing users visual feedback during session load.

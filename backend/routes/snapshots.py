@@ -18,7 +18,6 @@ from backend.services.session_store import (
 )
 from backend.state import (
     workflows,
-    _run_tasks,
     state_lock as _state_lock,
     initializing_sessions as _initializing_sessions,
     websockets,
@@ -28,6 +27,7 @@ from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
 from backend.utils.snapshot import SnapshotManager
 from backend.config import get_session_states
+from backend.routes._helpers import teardown_running_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -65,34 +65,9 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
     # Observer WS connections will wait until this flag is cleared.
     async with _state_lock:
         _initializing_sessions.add(session_id)
-        workflow = workflows.get(session_id)
 
-    # Stop running workflow if any.
-    # Do NOT signal_continue/annotation_confirmed — signaling would let the
-    # graph run nodes, each calling state_callback which writes old state.
-    if workflow:
-        try:
-            await workflow.close()
-        except Exception:
-            logger.exception(f"[{session_id}] Error closing workflow during restore")
-
-    # Cancel running task. state_callback (runs inside run_coro) completes
-    # before wait_for returns. CancelledError handler (runs in the task's
-    # exception handler) is guarded by the per-session lock below.
-    task = _run_tasks.get(session_id)
-    if task and not task.done():
-        task.cancel()
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-            pass
-    _run_tasks.pop(session_id, None)
-
-    # Cancel monitor task
-    from backend.state import _monitor_tasks
-    monitor = _monitor_tasks.pop(session_id, None)
-    if monitor and not monitor.done():
-        monitor.cancel()
+    # Stop running workflow, cancel tasks, and delete checkpoint.
+    await teardown_running_workflow(session_id)
 
     # Restore state from snapshot
     mgr = SnapshotManager(session_id)
@@ -105,8 +80,6 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
     restored_state.exploration_report_html_path = None
     restored_state.detailed_report_html_path = None
     restored_state.annotation_report_html_path = None
-
-    await mgr.delete_checkpoint()
 
     restored_state.snapshots = state.snapshots
     restored_state.last_restored_snapshot_id = snapshot.id

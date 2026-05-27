@@ -848,6 +848,17 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # Get current state
         state = await self.compiled_graph.aget_state(config)
 
+        # Graph already at END (no pending nodes) — nothing to resume.
+        # Continuing would inject stale RUNNING status and ainvoke(None)
+        # returns it unchanged, causing an infinite resume loop on every
+        # WebSocket reconnect (kernel restart → reconnect → resume → RUNNING).
+        if state and state.values and not state.next:
+            effective = state.values.get("analysis_state") or analysis_state
+            if effective and effective.status not in (TaskStatus.COMPLETED, TaskStatus.STOPPED):
+                self._set_status(effective, TaskStatus.COMPLETED)
+            logger.info(f"[{self.session_id}] Resume requested but graph already terminated; marking complete")
+            return effective
+
         if state and state.values:
             # Restore _current_analysis_state for callbacks
             self._current_analysis_state = state.values.get("analysis_state")
