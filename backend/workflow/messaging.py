@@ -2,6 +2,7 @@
 import logging
 from typing import Any, List, Optional, TYPE_CHECKING
 
+from ..agents.supervisor_agent import SupervisorEvalResult
 from ..models.schemas import AgentType, AnalysisStep, AnalysisState, WebSocketMessage
 
 if TYPE_CHECKING:
@@ -77,12 +78,12 @@ class MessagingMixin:
         """Callback for technique agent messages"""
         await self._send_message(msg_type, content, AgentType.TECHNIQUE)
 
-    async def _supervisor_callback(self, step: AnalysisStep, figures: Optional[List[str]] = None) -> Optional[str]:
+    async def _supervisor_callback(self, step: AnalysisStep, figures: Optional[List[str]] = None) -> SupervisorEvalResult:
         """Bridge bioinformatics agent's supervisor_callback to SupervisorAgent."""
         if not self.supervisor_agent or not self._settings_provider.get_model("supervisor"):
-            return None
+            return SupervisorEvalResult()
         try:
             return await self.supervisor_agent.evaluate_step(step, figures or [])
         except Exception as e:
             logger.warning(f"[{self.session_id}] Supervisor callback failed: {e}")
-            return None
+            return SupervisorEvalResult()

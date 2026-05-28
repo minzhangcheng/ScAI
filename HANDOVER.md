@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.7.5 · **Last updated**: 2026-05-28
+**Version**: 0.25.8 · **Last updated**: 2026-05-28
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,14 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.8` — supervisor force-skip, kernel death guard, figure template hardening (2026-05-28):
+  - **SupervisorEvalResult**: New dataclass with `feedback` and `force_skip` fields. `evaluate_step()` returns structured result instead of bare string. `force_skip=True` when agent is stuck AND PI has already intervened.
+  - **Bioinfo force-skip escalation**: On first 2 force-skips, injects MANDATORY skip instructions to agent messages. On 3rd force-skip (same error type), forces `report_findings` and hard-exits the tool-call loop with partial results.
+  - **Figure template hardening**: All code templates (auto-save, initial plot, revision, retry) restructured — `plt.close`/`plt.show` restore + figure save moved into `finally` block so JPG+PDF are always written even on user code error. Individual save formats wrapped in try/except so one failure doesn't block the other. PDF supplement deduplicates targets. Figure-less execution prints a diagnostic message.
+  - **Kernel death guard**: `execute()` now checks `km.is_alive()` before running code and on iopub poll timeout — dead kernel triggers restart early, preventing libzmq abort from corrupt ZMQ channels after OOM kill.
+  - **savefig-redirect diagnostics**: Logs when resolved path is outside workspace root.
+  - **Tests**: `test_supervisor_stuck_escalation.py` extended with force_skip assertion tests.
 
 - `0.25.7.5` — cleanup & refactoring (2026-05-28):
   - **Rate limiter lazy init**: `SlidingWindowRateLimiter` switched from `defaultdict(deque)` to `dict` + manual `get()` — no auto-created entries for non-existent keys. `_prune` returns `None` for unseen keys; `is_allowed` short-circuits to True.

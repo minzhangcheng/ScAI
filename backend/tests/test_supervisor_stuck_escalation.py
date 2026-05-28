@@ -1,7 +1,11 @@
-"""Supervisor should escalate to PI when agent is stuck, regardless of error type."""
+"""Supervisor should escalate to PI when agent is stuck, regardless of error type.
+
+Also tests force_skip flag: when stuck AND PI already intervened, the supervisor
+signals that the current step must be force-skipped.
+"""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from backend.agents.supervisor_agent import SupervisorAgent
+from backend.agents.supervisor_agent import SupervisorAgent, SupervisorEvalResult
 from backend.models.schemas import AnalysisStep
 
 
@@ -50,7 +54,7 @@ async def test_stuck_agent_escalates_to_pi_regardless_of_severity():
     )
 
     with patch.object(sup, '_is_technical_error', return_value=True):
-        feedback = await sup.evaluate_step(step, [])
+        result = await sup.evaluate_step(step, [])
 
     # PI escalation MUST have happened
     assert sup.pi_callback.called, (
@@ -64,6 +68,10 @@ async def test_stuck_agent_escalates_to_pi_regardless_of_severity():
     question = call_args[0][0]
     assert "stuck" in question.lower(), f"Expected 'stuck' in question, got: {question}"
 
+    # force_skip should be True because is_stuck=True AND PI was escalated
+    assert isinstance(result, SupervisorEvalResult)
+    assert result.force_skip is True
+
 
 @pytest.mark.asyncio
 async def test_first_technical_error_not_stuck_skips_pi():
@@ -75,11 +83,13 @@ async def test_first_technical_error_not_stuck_skips_pi():
     )
 
     with patch.object(sup, '_is_technical_error', return_value=True):
-        feedback = await sup.evaluate_step(step, [])
+        result = await sup.evaluate_step(step, [])
 
     assert not sup.pi_callback.called, (
         "PI should NOT be escalated for first technical error"
     )
+    assert isinstance(result, SupervisorEvalResult)
+    assert result.force_skip is False
 
 
 @pytest.mark.asyncio
@@ -96,11 +106,13 @@ async def test_syntax_error_stuck_triggers_pi():
     )
 
     with patch.object(sup, '_is_technical_error', return_value=True):
-        feedback = await sup.evaluate_step(step, [])
+        result = await sup.evaluate_step(step, [])
 
     assert sup.pi_callback.called, (
         "Repeated SyntaxError should trigger PI escalation (is_stuck=True)"
     )
+    assert isinstance(result, SupervisorEvalResult)
+    assert result.force_skip is True
 
 
 @pytest.mark.asyncio
@@ -125,10 +137,54 @@ async def test_stuck_block_skipped_when_pi_already_escalated():
     })
 
     with patch.object(sup, '_is_technical_error', return_value=False):
-        feedback = await sup.evaluate_step(step, [])
+        result = await sup.evaluate_step(step, [])
 
     # PI should be called exactly ONCE (from the critical branch, not the stuck block)
     assert sup.pi_callback.call_count == 1, (
         f"Expected 1 PI escalation (critical branch), got {sup.pi_callback.call_count}. "
         "Stuck block should be skipped when record.pi_escalated is already True."
     )
+    assert isinstance(result, SupervisorEvalResult)
+    # force_skip is True because is_stuck AND record.pi_escalated (from critical branch)
+    assert result.force_skip is True
+
+
+@pytest.mark.asyncio
+async def test_force_skip_false_when_not_stuck():
+    """When the agent is not stuck, force_skip should be False regardless of
+    PI escalation status."""
+    sup = _mk_supervisor(recent_errors=[])
+    step = _make_step(
+        code_error="KeyError: 'column_name'\nTraceback...",
+        step_number=1,
+    )
+
+    with patch.object(sup, '_is_technical_error', return_value=True):
+        result = await sup.evaluate_step(step, [])
+
+    assert isinstance(result, SupervisorEvalResult)
+    assert result.force_skip is False
+
+
+@pytest.mark.asyncio
+async def test_force_skip_false_when_pi_escalation_fails():
+    """When stuck detection fires but PI callback returns None (escalation failed),
+    record.pi_escalated stays False, so force_skip should also be False."""
+    sup = _mk_supervisor(recent_errors=[
+        "SyntaxError: unterminated string literal (Cell In[14], line 129)",
+        "SyntaxError: unterminated string literal (Cell In[16], line 129)",
+    ])
+    step = _make_step(
+        code_error="SyntaxError: unterminated string literal (Cell In[18], line 124)",
+        step_number=3,
+    )
+
+    # PI callback returns None (escalation failed)
+    sup.pi_callback = AsyncMock(return_value=None)
+
+    with patch.object(sup, '_is_technical_error', return_value=True):
+        result = await sup.evaluate_step(step, [])
+
+    assert isinstance(result, SupervisorEvalResult)
+    # PI was called but returned None, so pi_escalated stays False
+    assert result.force_skip is False

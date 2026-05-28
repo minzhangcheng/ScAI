@@ -830,6 +830,9 @@ def _combined_savefig(self, fname, *args, **kwargs):
                 _new = _FIGURES_DIR / _p.name
                 print(f"[savefig-redirect] {_p.name} -> figures/")
                 fname = str(_new)
+            elif not str(_p).startswith(str(_WORKSPACE_DIR_RESOLVED)):
+                # Path resolved outside the workspace root — log for diagnostics (3c)
+                print(f"[savefig-redirect] skip: '{fname}' -> resolved to {_p} (workspace is {_WORKSPACE_DIR_RESOLVED}, cwd is {os.getcwd()})")
         except Exception as _redir_err:
             print(f"[savefig-redirect] failed: {_redir_err}, saving to original location")
             _redirect_failed = True
@@ -1396,7 +1399,25 @@ if _skipped_vars:
 
         if self.kc is None:
             await self.start()
-        
+
+        # Guard against silent kernel death (e.g. OOM kill, libzmq abort).
+        # km.is_alive() checks whether the kernel subprocess is still running.
+        # Without this check, kc.execute() on a dead kernel triggers ZMQ channel
+        # corruption that calls abort() inside libzmq, killing the entire process.
+        if self.km is not None and not self.km.is_alive():
+            logger.warning(
+                f"[{self.session_id}] Kernel process is dead before execute; "
+                f"attempting restart"
+            )
+            await self._restart_kernel()
+            if self._kernel_dead:
+                return CodeExecutionResult(
+                    success=False,
+                    output="",
+                    error="Kernel died unexpectedly and restart failed. Please restart the analysis session.",
+                    figures=[]
+                )
+
         outputs = []
         figures = []
         output_text = []
@@ -1424,6 +1445,30 @@ if _skipped_vars:
                         # Either the poll cap elapsed (wall-clock time may remain →
                         # re-loop) or the deadline truly passed. Re-check before
                         # declaring a timeout.
+                        # Also check kernel liveness: if the kernel died mid-execution
+                        # (e.g. OOM kill), ZMQ channels will be corrupt and the next
+                        # get_iopub_msg or kc.execute would trigger libzmq abort.
+                        if self.km and not self.km.is_alive():
+                            logger.warning(
+                                f"[{self.session_id}] Kernel died during execution; "
+                                f"aborting output collection"
+                            )
+                            await self._restart_kernel()
+                            if self._kernel_dead:
+                                return CodeExecutionResult(
+                                    success=False,
+                                    output="",
+                                    error="Kernel died during execution and restart failed.",
+                                    figures=[]
+                                )
+                            # Kernel restarted successfully; the old execution is gone,
+                            # return an error so the caller can retry.
+                            return CodeExecutionResult(
+                                success=False,
+                                output="",
+                                error="Kernel died during execution. Restarted successfully, but the execution was lost.",
+                                figures=[]
+                            )
                         if compute_remaining_timeout(deadline, time.monotonic()) > 0:
                             continue
                         remaining = 0  # fall through to timeout handling below

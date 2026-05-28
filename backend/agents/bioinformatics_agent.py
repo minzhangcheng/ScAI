@@ -39,6 +39,7 @@ from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaust
 from ..utils.tool_messages import tool_calls_are_paired, append_missing_tool_results
 from ..constants import PLAN_REVISION_NEEDED_TAG
 from ..utils.error_parsing import strip_ansi, extract_error_type, TECHNICAL_ERROR_TYPES
+from .supervisor_agent import SupervisorEvalResult
 
 # Pre-compiled pattern for detecting manual cell_type assignment in code
 _DYNAMIC_CONTEXT_PREFIX = "[Analysis Context]"
@@ -358,7 +359,7 @@ class BioinformaticsAgent(BaseAgent):
         annotate_clusters_callback: Optional[Callable[[Dict, str, str], Awaitable[Dict[str, Any]]]] = None,
         message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
-        supervisor_callback: Optional[Callable[['AnalysisStep', List[str]], Awaitable[Optional[str]]]] = None,
+        supervisor_callback: Optional[Callable[['AnalysisStep', List[str]], Awaitable[SupervisorEvalResult]]] = None,
         technique_agent=None,
     ):
         super().__init__(
@@ -379,6 +380,8 @@ class BioinformaticsAgent(BaseAgent):
         self.last_result: Optional[CodeExecutionResult] = None
         self.analysis_context: Dict[str, Any] = {}
         self._recent_sup_feedback: set = set()
+        self._force_skip_counter: int = 0
+        self._force_skip_error_type: Optional[str] = None
         # Current AnalysisState reference for modality inference in system prompt.
         # Set at the start of each run; used by _infer_modality / _static_system_prompt.
         self._current_analysis_state: Optional[AnalysisState] = None
@@ -1610,6 +1613,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
         # Initialize before loop to prevent NameError when max_steps <= 0
         _plan_revision_needed = False
         _plan_revision_context: Dict[str, Any] = {}
+        force_break = False  # Set by supervisor force-skip to hard-exit the loop
 
         while step_count < max_steps and not completed:
             # Cooperative pause: block here between steps when the workflow has
@@ -1632,6 +1636,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     pass
 
             step_count += 1
+            force_break = False  # Reset per-iteration
 
             # Save checkpoint periodically
             if checkpoint_mgr.should_checkpoint(step_count):
@@ -1985,76 +1990,99 @@ _mpl_figure.Figure.savefig = _tracking_savefig
 
 {_TPL_NOOP_INSTALL}
 
-# Execute user code (with try-finally to guarantee restore)
+# Execute user code (auto-save runs in finally so PDFs are always supplemented,
+# even when the user code raises midway through)
 try:
 {indented_code}
 finally:
-    plt.close = _orig_close
-    plt.show = _orig_show
+    # Restore plt.close / plt.show / Figure.savefig overrides
+    try:
+        plt.close = _orig_close
+    except Exception:
+        pass
+    try:
+        plt.show = _orig_show
+    except Exception:
+        pass
     try:
         _mpl_figure.Figure.savefig = _prev_fig_savefig
     except Exception:
-        pass  # Ignore restore errors to avoid masking real user code errors
+        pass
 
-# Detect and save all active figures
-try:
-    _fig_nums = plt.get_fignums()
-    for _fig_num in _fig_nums:
-        try:
-            _fig = plt.figure(_fig_num)
-
-            # Display figure to trigger capture via display_data message (always)
-            display(_fig)
-
-            _fig_id = f"fig_{timestamp}_{{_fig_num}}"
-
-            # For figures already saved by user code, skip JPG but supplement PDF if missing
-            if _fig_num in _explicitly_saved_figs:
-                _saved_paths = _explicitly_saved_figs[_fig_num]
-                # Emit [Auto-saved] for explicitly saved images so they get tracked
-                for _sp in _saved_paths:
-                    _sp_lower = _sp.lower()
-                    if _sp_lower.endswith(('.jpg', '.jpeg')):
-                        print(f"[Auto-saved] JPG: {{_sp}}")
-                    elif _sp_lower.endswith('.png'):
-                        print(f"[Auto-saved] PNG: {{_sp}}")
-                _has_pdf = any(_p.lower().endswith('.pdf') for _p in _saved_paths)
-                if not _has_pdf and _saved_paths:
-                    # Derive PDF path from the first saved image path
-                    _src_path = Path(_saved_paths[0])
-                    _pdf_supplement = _src_path.with_suffix('.pdf')
-                    try:
-                        _fig.savefig(str(_pdf_supplement), dpi=300, bbox_inches='tight', format='pdf')
-                        print(f"[Auto-save] Supplemented PDF: {{_pdf_supplement}}")
-                    except Exception as _pdf_err:
-                        print(f"[Auto-save] Warning: could not supplement PDF: {{_pdf_err}}")
-                else:
-                    print(f"[Auto-save] Skipped figure {{_fig_num}} (already saved by code with PDF)")
-                continue
-
-            _jpg_path = _figures_dir / f"{{_fig_id}}.jpg"
-            _pdf_path = _figures_dir / f"{{_fig_id}}.pdf"
-
-            # Save JPG (for web display — smaller file size than PNG)
-            _fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-                         format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-
-            # Save PDF (vector format for publication quality download)
-            _fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-
-            print(f"[Auto-saved] JPG: {{_jpg_path}}")
-            print(f"[Auto-saved] PDF: {{_pdf_path}}")
-        except Exception as _save_err:
-            print(f"[Auto-save] Warning: could not save figure {{_fig_num}}: {{_save_err}}")
+    # Detect and save all active figures (must run regardless of user-code success)
+    try:
+        _fig_nums = plt.get_fignums()
+        for _fig_num in _fig_nums:
             try:
-                plt.close(_fig_num)
-            except Exception as _close_err:
-                print(f"[Auto-save] Debug: plt.close({{_fig_num}}) failed: {{_close_err}}")
-except Exception as _autosave_block_err:
-    print(f"[Auto-save] Warning: figure auto-save failed: {{_autosave_block_err}}")
+                _fig = plt.figure(_fig_num)
 
-# Close all figures to free memory
-{_TPL_SAFE_CLOSE_ALL}
+                # Display figure to trigger capture via display_data message (always)
+                display(_fig)
+
+                _fig_id = f"fig_{timestamp}_{{_fig_num}}"
+
+                # For figures already saved by user code, skip JPG but supplement PDF if missing
+                if _fig_num in _explicitly_saved_figs:
+                    _saved_paths = _explicitly_saved_figs[_fig_num]
+                    # Emit [Auto-saved] for explicitly saved images so they get tracked
+                    for _sp in _saved_paths:
+                        _sp_lower = _sp.lower()
+                        if _sp_lower.endswith(('.jpg', '.jpeg')):
+                            print(f"[Auto-saved] JPG: {{_sp}}")
+                        elif _sp_lower.endswith('.png'):
+                            print(f"[Auto-saved] PNG: {{_sp}}")
+                    _has_pdf = any(_p.lower().endswith('.pdf') for _p in _saved_paths)
+                    if not _has_pdf and _saved_paths:
+                        # Supplement PDF for every image path that doesn't already have one
+                        _seen_pdf_targets = set()
+                        for _src_str in _saved_paths:
+                            _src_path = Path(_src_str)
+                            if _src_path.suffix.lower() not in ('.jpg', '.jpeg', '.png'):
+                                continue
+                            _pdf_supplement = _src_path.with_suffix('.pdf')
+                            if str(_pdf_supplement) in _seen_pdf_targets:
+                                continue
+                            _seen_pdf_targets.add(str(_pdf_supplement))
+                            try:
+                                _fig.savefig(str(_pdf_supplement), dpi=300, bbox_inches='tight', format='pdf')
+                                print(f"[Auto-save] Supplemented PDF: {{_pdf_supplement}}")
+                            except Exception as _pdf_err:
+                                print(f"[Auto-save] Warning: could not supplement PDF for {{_src_path}}: {{_pdf_err}}")
+                    else:
+                        print(f"[Auto-save] Skipped figure {{_fig_num}} (already saved by code with PDF)")
+                    continue
+
+                _jpg_path = _figures_dir / f"{{_fig_id}}.jpg"
+                _pdf_path = _figures_dir / f"{{_fig_id}}.pdf"
+
+                # Save JPG (for web display — smaller file size than PNG)
+                try:
+                    _fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                                 format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+                    print(f"[Auto-saved] JPG: {{_jpg_path}}")
+                except Exception as _jpg_err:
+                    print(f"[Auto-save] Warning: could not save JPG for figure {{_fig_num}}: {{_jpg_err}}")
+
+                # Save PDF (vector format for publication quality download)
+                try:
+                    _fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+                    print(f"[Auto-saved] PDF: {{_pdf_path}}")
+                except Exception as _pdf_err:
+                    print(f"[Auto-save] Warning: could not save PDF for figure {{_fig_num}}: {{_pdf_err}}")
+            except Exception as _save_err:
+                print(f"[Auto-save] Warning: could not save figure {{_fig_num}}: {{_save_err}}")
+                try:
+                    plt.close(_fig_num)
+                except Exception as _close_err:
+                    print(f"[Auto-save] Debug: plt.close({{_fig_num}}) failed: {{_close_err}}")
+    except Exception as _autosave_block_err:
+        print(f"[Auto-save] Warning: figure auto-save failed: {{_autosave_block_err}}")
+
+    # Close all figures to free memory
+    try:
+        plt.close('all')
+    except Exception:
+        pass
 '''
 
                     result = await self.sandbox.execute(wrapped_code)
@@ -2116,6 +2144,8 @@ except Exception as _autosave_block_err:
                         total_errors += 1
                     else:
                         consecutive_errors = 0
+                        self._force_skip_counter = 0
+                        self._force_skip_error_type = None
 
                     tool_result = f"Execution {'successful' if not result.error else 'failed'}.\n"
                     if result.output:
@@ -2859,26 +2889,80 @@ except Exception as _autosave_block_err:
             # === SUPERVISOR monitoring (every step) ===
             if _supervisor_callback and analysis_log:
                 try:
-                    supervisor_feedback = await _supervisor_callback(
+                    sup_result = await _supervisor_callback(
                         analysis_log[-1],   # Latest step
                         _step_figures       # Figures from this iteration (may be empty)
                     )
-                    if supervisor_feedback:
+                    if sup_result.feedback:
                         # De-duplicate: skip if the same feedback (first 120 chars)
                         # was already injected recently to avoid wasting tokens on
                         # repeated identical warnings.
-                        sup_key = supervisor_feedback[:120]
+                        sup_key = sup_result.feedback[:120]
                         if sup_key not in self._recent_sup_feedback:
                             messages.append({
                                 "role": "user",
-                                "content": f"[Supervisor] {supervisor_feedback}"
+                                "content": f"[Supervisor] {sup_result.feedback}"
                             })
                             self._recent_sup_feedback.add(sup_key)
                         else:
                             logger.debug(f"[Bioinformatics] Skipping duplicate supervisor feedback: {sup_key[:60]}...")
+
+                    if sup_result.force_skip:
+                        current_err_type = extract_error_type(analysis_log[-1].code_error) if analysis_log[-1].code_error else None
+                        if self._force_skip_error_type != current_err_type:
+                            self._force_skip_counter = 0
+                            self._force_skip_error_type = current_err_type
+
+                        self._force_skip_counter += 1
+
+                        if self._force_skip_counter <= 2:
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[Supervisor] MANDATORY: You must skip the current step immediately. "
+                                    "Do NOT retry this code or attempt to fix it. "
+                                    "Move on to the next analysis step in your plan. "
+                                    "This instruction is not optional — you will be forced to "
+                                    "report findings if you continue on this path."
+                                )
+                            })
+                        else:
+                            # 3rd force-skip on same error type: the agent has ignored
+                            # two mandatory-skip instructions. Force a hard exit from
+                            # the tool-call loop by injecting report_findings and breaking.
+                            logger.warning(
+                                f"[Bioinformatics] Force-skip ignored after {self._force_skip_counter} "
+                                f"attempts for {current_err_type}; forcing report_findings"
+                            )
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[System] You have repeatedly failed to skip the problematic step "
+                                    "despite mandatory instructions. You MUST call report_findings now "
+                                    "with whatever results you have so far. Do NOT attempt any more code execution."
+                                )
+                            })
+                            self._force_skip_counter = 0
+                            self._force_skip_error_type = None
+                            force_break = True
+
                 except Exception as e:
                     logger.warning(f"[Bioinformatics] Supervisor callback error: {e}")
             # === END SUPERVISOR ===
+
+            # Force-break: supervisor force-skip was ignored 3 times; the loop
+            # must exit now. Mark completed so the return path produces a valid
+            # status rather than falling through to max_steps_reached with empty findings.
+            if force_break:
+                logger.info("[Bioinformatics] Force-break triggered by supervisor force-skip")
+                if not all_findings:
+                    all_findings.append(
+                        "[Supervisor] Analysis was forcibly stopped: the agent was stuck "
+                        "on a repeated error despite mandatory-skip instructions and "
+                        "PI guidance. Results below are partial."
+                    )
+                completed = True
+                break
 
             # Check if plan revision was triggered during this step
             if _plan_revision_needed:
@@ -2966,6 +3050,8 @@ except Exception as _autosave_block_err:
         self.code_history = []
         self.analysis_context = {}
         self._recent_sup_feedback: set = set()  # Reset supervisor dedup set per round
+        self._force_skip_counter = 0
+        self._force_skip_error_type = None
         self.last_result = None
 
         # For round 2+, inject previous round findings into instruction so the agent
@@ -3117,28 +3203,47 @@ Path(_figures_dir).mkdir(exist_ok=True)
 
 {_TPL_NOOP_INSTALL}
 
-# Execute the plotting code (with try-finally to guarantee restore)
+# Execute the plotting code (save runs in finally so JPG+PDF are always written,
+# even if user code raises midway through)
 try:
 {indented_code}
 finally:
-    plt.close = _orig_close
-    plt.show = _orig_show
+    try:
+        plt.close = _orig_close
+    except Exception:
+        pass
+    try:
+        plt.show = _orig_show
+    except Exception:
+        pass
 
-# Get current figure and save
-try:
-    fig = plt.gcf()
-    _jpg_path = {png_path_repr}
-    _pdf_path = {pdf_path_repr}
+    # Get current figure and save (both JPG and PDF)
+    if plt.get_fignums():
+        try:
+            fig = plt.gcf()
+            _jpg_path = {png_path_repr}
+            _pdf_path = {pdf_path_repr}
 
-    fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-                format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-    print(f"Saved JPG: {{_jpg_path}}")
-    fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-    print(f"Saved PDF: {{_pdf_path}}")
-except Exception as _save_err:
-    print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
+            try:
+                fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+                print(f"Saved JPG: {{_jpg_path}}")
+            except Exception as _jpg_err:
+                print(f"[Auto-save] Warning: could not save JPG: {{_jpg_err}}")
+            try:
+                fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+                print(f"Saved PDF: {{_pdf_path}}")
+            except Exception as _pdf_err:
+                print(f"[Auto-save] Warning: could not save PDF: {{_pdf_err}}")
+        except Exception as _save_err:
+            print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
+    else:
+        print("[Auto-save] No figures found — skipping save")
 
-{_TPL_SAFE_CLOSE_ALL}
+    try:
+        plt.close('all')
+    except Exception:
+        pass
 '''
 
         # Execute the code
@@ -3325,25 +3430,47 @@ _orig_show = plt.show
 plt.close = lambda *a, **kw: None
 plt.show = lambda *a, **kw: None
 
-# Execute revised code (with try-finally to guarantee restore)
+# Execute revised code (save runs in finally so JPG+PDF are always written,
+# even if user code raises midway through)
 try:
 {indented_revised_code}
 finally:
-    plt.close = _orig_close
-    plt.show = _orig_show
+    try:
+        plt.close = _orig_close
+    except Exception:
+        pass
+    try:
+        plt.show = _orig_show
+    except Exception:
+        pass
 
-try:
-    fig = plt.gcf()
-    _jpg_path = {png_path_repr}
-    _pdf_path = {pdf_path_repr}
+    # Get current figure and save (both JPG and PDF)
+    if plt.get_fignums():
+        try:
+            fig = plt.gcf()
+            _jpg_path = {png_path_repr}
+            _pdf_path = {pdf_path_repr}
 
-    fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-                format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-    fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-except Exception as _save_err:
-    print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
+            try:
+                fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+                print(f"Saved JPG: {{_jpg_path}}")
+            except Exception as _jpg_err:
+                print(f"[Auto-save] Warning: could not save JPG: {{_jpg_err}}")
+            try:
+                fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+                print(f"Saved PDF: {{_pdf_path}}")
+            except Exception as _pdf_err:
+                print(f"[Auto-save] Warning: could not save PDF: {{_pdf_err}}")
+        except Exception as _save_err:
+            print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
+    else:
+        print("[Auto-save] No figures found — skipping save")
 
-{_TPL_SAFE_CLOSE_ALL}
+    try:
+        plt.close('all')
+    except Exception:
+        pass
 '''
                 result = await self.sandbox.execute(revised_wrapped)
 
@@ -3418,25 +3545,47 @@ _orig_show = plt.show
 plt.close = lambda *a, **kw: None
 plt.show = lambda *a, **kw: None
 
+# Execute retry code (save runs in finally so JPG+PDF are always written,
+# even if user code raises midway through)
 try:
 {indented_retry_code}
 finally:
-    plt.close = _orig_close
-    plt.show = _orig_show
+    try:
+        plt.close = _orig_close
+    except Exception:
+        pass
+    try:
+        plt.show = _orig_show
+    except Exception:
+        pass
 
-try:
-    fig = plt.gcf()
+    # Get current figure and save (both JPG and PDF)
+    if plt.get_fignums():
+        try:
+            fig = plt.gcf()
+            _jpg_path = {png_path_repr}
+            _pdf_path = {pdf_path_repr}
 
-    _jpg_path = {png_path_repr}
-    _pdf_path = {pdf_path_repr}
+            try:
+                fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
+                            format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
+                print(f"Saved JPG: {{_jpg_path}}")
+            except Exception as _jpg_err:
+                print(f"[Auto-save] Warning: could not save JPG: {{_jpg_err}}")
+            try:
+                fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+                print(f"Saved PDF: {{_pdf_path}}")
+            except Exception as _pdf_err:
+                print(f"[Auto-save] Warning: could not save PDF: {{_pdf_err}}")
+        except Exception as _save_err:
+            print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
+    else:
+        print("[Auto-save] No figures found — skipping save")
 
-    fig.savefig(_jpg_path, dpi=150, bbox_inches='tight', facecolor='white', edgecolor='none',
-                format='jpeg', pil_kwargs={{'quality': 85, 'optimize': True}})
-    fig.savefig(_pdf_path, dpi=300, bbox_inches='tight', format='pdf')
-except Exception as _save_err:
-    print(f"[Auto-save] Warning: could not save figure: {{_save_err}}")
-
-{_TPL_SAFE_CLOSE_ALL}
+    try:
+        plt.close('all')
+    except Exception:
+        pass
 '''
                             retry_result = await self.sandbox.execute(retry_wrapped)
                             if not retry_result.error and jpg_path.exists() and jpg_path.stat().st_size >= 2000:

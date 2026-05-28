@@ -90,6 +90,20 @@ class SupervisorRecord:
     agent_reasoning: Optional[str] = None
 
 
+@dataclass
+class SupervisorEvalResult:
+    """Return type for SupervisorAgent.evaluate_step().
+
+    Attributes:
+        feedback: Advisory feedback string to inject into agent messages, or None.
+        force_skip: When True, the caller MUST treat the current step as
+            non-recoverable and force-skip it. Set when the agent is stuck
+            AND PI has already intervened but the agent still cannot fix it.
+    """
+    feedback: Optional[str] = None
+    force_skip: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Rule-based patterns
 # ---------------------------------------------------------------------------
@@ -253,7 +267,7 @@ class SupervisorAgent:
         self,
         step: AnalysisStep,
         figures: List[str],
-    ) -> Optional[str]:
+    ) -> SupervisorEvalResult:
         """
         Evaluate a single analysis step. Called after every tool-call iteration.
 
@@ -262,7 +276,7 @@ class SupervisorAgent:
             figures: List of base64-encoded PNG images generated in this step (may be empty)
 
         Returns:
-            Feedback string to inject into analyst's messages, or None if no feedback needed.
+            SupervisorEvalResult with feedback string and force_skip flag.
         """
         self._step_count += 1
         record = SupervisorRecord(
@@ -498,7 +512,12 @@ class SupervisorAgent:
             await self._notify("supervisor_feedback", feedback[:500])
 
         self.supervision_log.append(record)
-        return feedback
+        # force_skip: agent is stuck AND PI already intervened on this step,
+        # meaning the LLM has received strategic guidance but still cannot fix it.
+        return SupervisorEvalResult(
+            feedback=feedback,
+            force_skip=is_stuck and record.pi_escalated,
+        )
 
     def reset_for_round(self, planning_stage: PlanStage = "full"):
         """Archive current round log and reset for a new round."""
