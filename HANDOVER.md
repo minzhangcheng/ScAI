@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.6 · **Last updated**: 2026-05-28
+**Version**: 0.25.7.1 · **Last updated**: 2026-05-28
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,12 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.7.1` — login rate-limit & import security hardening (2026-05-28):
+  - **Login brute-force protection**: `SlidingWindowRateLimiter` — thread-safe in-process rate limiter (defaultdict(deque) + Lock). Applied to `/api/auth/login`: max 5 failed attempts per (username, client-ip) / 60s → HTTP 429. Resets on successful login.
+  - **Import size guard**: `check_inline_import_size()` fast-rejects oversized inline imports via Content-Length; `read_capped()` streaming read with 100 MB cap for requests that omit/lie about Content-Length → HTTP 413.
+  - **Import pickle security (S4)**: `is_sandbox_pickle()` detects session pkl files; both tar.gz and zip import paths now skip sandbox pickles instead of writing them, preventing arbitrary code execution via dill.load on untrusted archives.
+  - **New files**: `backend/utils/rate_limit.py`, `backend/tests/test_rate_limit.py`, `backend/tests/test_import_pkl_skip.py`, `backend/tests/test_import_size_guard.py`.
 
 - `0.25.6` — mid-execution plan revision routing fix (2026-05-28):
   - **`decide_bioinfo_post_execution`**: New pure function in `helpers.py` that returns one of `"revision"`, `"stage1_complete"`, or `"complete"` — replacing inline stage checks that masked mid-plan revision.

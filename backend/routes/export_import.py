@@ -44,6 +44,44 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="", tags=["export_import"])
 
+# S3: 100 MB cap for inline zip/json imports to prevent OOM
+MAX_INLINE_IMPORT_BYTES = 100 * 1024 * 1024
+
+
+def check_inline_import_size(content_length: Optional[int], max_bytes: int = MAX_INLINE_IMPORT_BYTES) -> None:
+    """Fast-reject oversized inline imports based on the Content-Length header."""
+    if content_length is not None and content_length > max_bytes:
+        raise HTTPException(status_code=413, detail=f"Import file too large (max {max_bytes} bytes)")
+
+
+async def read_capped(file, max_bytes: int = MAX_INLINE_IMPORT_BYTES) -> bytes:
+    """Read an UploadFile fully but abort with 413 if it exceeds max_bytes.
+
+    Defends against requests that omit / lie about Content-Length.
+    """
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail=f"Import file too large (max {max_bytes} bytes)")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def is_sandbox_pickle(name: str) -> bool:
+    """True if an archive entry is a sandbox session pickle.
+
+    SECURITY: dill.load on imported pickle is arbitrary code execution, so these
+    files are skipped during import. Matches 'session.pkl' or '<id>_session.pkl'.
+    """
+    base = name.rsplit("/", 1)[-1]
+    return base == "session.pkl" or base.endswith("_session.pkl")
+
+
 # P3-7: cap export filename's slug portion to keep total filename below
 # filesystem limits (most FS allow 255 bytes). When truncation is needed,
 # append a short UUID suffix to preserve uniqueness across long names.
@@ -366,12 +404,16 @@ async def import_state(request: Request, background_tasks: BackgroundTasks, file
 
     elif filename.endswith('.zip'):
         # ---- Legacy zip import (typically small) ----
-        content = await file.read()
+        _cl = request.headers.get("content-length")
+        check_inline_import_size(int(_cl) if _cl and _cl.isdigit() else None)
+        content = await read_capped(file)
         state = _import_zip(content, user_id)
 
     else:
         # ---- Plain JSON (backward compatibility) ----
-        content = await file.read()
+        _cl = request.headers.get("content-length")
+        check_inline_import_size(int(_cl) if _cl and _cl.isdigit() else None)
+        content = await read_capped(file)
         state_data = json.loads(content.decode('utf-8'))
         state_data["user_id"] = user_id
         state = AnalysisState(**state_data)
@@ -512,6 +554,10 @@ def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
 
             dest_path = _resolve_import_dest(relative_to_base, session_id)
             validate_path_within(dest_path, DATA_BASE_DIR)
+            # SECURITY (S4): never write a sandbox pickle from an imported archive.
+            if is_sandbox_pickle(dest_path.name):
+                logger.warning(f"Skipping sandbox pickle from imported archive (untrusted): {member.name}")
+                continue
             dest_path.parent.mkdir(parents=True, exist_ok=True)
 
             f = tf.extractfile(member)
@@ -589,10 +635,12 @@ def _import_zip(content: bytes, user_id: str) -> AnalysisState:
         if notebook_path in namelist:
             (states_dir / f"{session_id}.ipynb").write_bytes(zf.read(notebook_path))
 
-        # Extract session.pkl if exists (for sandbox restore)
+        # SECURITY (S4): do NOT restore session.pkl from imported archives.
+        # dill.load on untrusted pickle is arbitrary code execution. Sandbox
+        # state is rebuilt by re-running; we deliberately drop it on import.
         pkl_path = f"{session_id}/session.pkl"
-        if pkl_path in namelist:
-            (states_dir / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
+        if pkl_path in namelist and is_sandbox_pickle(pkl_path):
+            logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {pkl_path}")
 
         # Extract metadata if exists
         metadata_path = f"{session_id}/metadata.json"

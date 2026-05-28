@@ -2,8 +2,16 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.routes.auth import _login_rate_limiter
 from backend.utils import auth as auth_module
 from backend.utils.db import AppDB
+
+
+@pytest.fixture(autouse=True)
+def _reset_login_limiter():
+    _login_rate_limiter._events.clear()
+    yield
+    _login_rate_limiter._events.clear()
 
 
 @pytest.fixture

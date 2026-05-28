@@ -1,5 +1,5 @@
 """Authentication routes: register, login, me, API key CRUD."""
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 
@@ -18,6 +18,11 @@ from backend.utils.auth import (
     require_non_pending_user,
     require_admin,
 )
+
+from backend.utils.rate_limit import SlidingWindowRateLimiter
+
+# Login brute-force protection: max 5 failed attempts per (username, client-ip) / 60s
+_login_rate_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=60)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -104,13 +109,23 @@ async def register(req: RegisterRequest):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    rl_key = f"{req.username}:{client_ip}"
+    if not _login_rate_limiter.is_allowed(rl_key):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts. Please wait and try again.",
+        )
+
     db: AppDB = await get_db()
     user = await db.get_user_by_username(req.username)
     if user is None or not verify_password(req.password, user.password_hash):
+        _login_rate_limiter.record_failure(rl_key)
         raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Bearer"})
     if user.status == "pending":
         raise HTTPException(status_code=403, detail="Account is pending approval. Please contact the administrator to activate your account.")
+    _login_rate_limiter.reset(rl_key)
     token = create_access_token(user.id, user.username)
     return TokenResponse(
         access_token=token,
