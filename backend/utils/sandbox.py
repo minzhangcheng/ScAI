@@ -19,19 +19,6 @@ import nbformat
 from nbformat.v4 import new_notebook, new_code_cell, new_output
 from jupyter_client import KernelManager
 
-# zstd frame magic bytes — single source of truth for format detection.
-# Injected into kernel code strings via f-string to keep kernel and main process
-# in sync without requiring an import inside the kernel.
-# NOTE: The kernel (Jupyter) runs zstandard directly — if it is ever migrated
-# to a standalone container, ensure zstandard is installed in that image.
-ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
-
-# Compression level for session pkl streaming writes.
-# Level 3 is the default sweet spot (~500 MB/s/core); adjust if benchmarks show
-# a better trade-off for AnnData sparse-matrix payloads.
-# NOTE: Same kernel-environment dependency as ZSTD_MAGIC above.
-COMPRESSION_LEVEL = 3
-
 # Cap on a single iopub poll so the wall-clock deadline is re-checked at least
 # this often even while the kernel keeps streaming output (tqdm/scanpy verbose).
 IOPUB_POLL_CAP = 30.0
@@ -40,15 +27,6 @@ IOPUB_POLL_CAP = 30.0
 def compute_remaining_timeout(deadline: float, now: float) -> float:
     """Seconds left until the wall-clock deadline; <= 0 means expired."""
     return deadline - now
-
-
-def _is_zstd(header: bytes) -> bool:
-    """Return True if *header* starts with the zstd frame magic bytes.
-
-    Used by the main process for test assertions; the kernel restore code
-    mirrors this check inline (both reference ``ZSTD_MAGIC``).
-    """
-    return len(header) >= 4 and header[:4] == ZSTD_MAGIC
 
 
 logger = logging.getLogger(__name__)
@@ -1131,51 +1109,39 @@ print(f"I/O sandbox active: writes restricted to session directory")
         logger.info("Kernel initialized")
     
     async def _restore_session(self):
-        """Restore session from dill dump if available"""
-        # First load notebook metadata
+        """Restore session from per-variable streaming dill dump if available.
+
+        Format produced by `save_session`: a sequence of `dill.dump((name, obj), f)`
+        frames in a single uncompressed .pkl file. Read by looping `dill.load`
+        until EOFError. No compression handling — snapshots are decompressed
+        out-of-kernel before being placed at this path.
+        """
         self.notebook_state.load()
 
         if not self.notebook_state.has_session_dump():
             logger.info("No session dump to restore")
             return
 
-        # Use absolute path with proper escaping for Python string
         session_path = str(self.notebook_state.session_path.absolute())
-        escaped_path = repr(session_path)  # Properly escape special characters
+        escaped_path = repr(session_path)
         logger.info(f"Restoring session from {session_path}")
 
-        # Load saved variables with zstd detection + backward compat
         restore_code = f"""
 import dill
 
-_ZSTD_MAGIC = {ZSTD_MAGIC!r}   # injected from module constant — single source of truth
-
+_restored_names = []
 try:
     with open({escaped_path}, 'rb') as _f:
-        # Read 4 bytes to detect format, then seek back.
-        # (File objects don't guarantee .peek(), so read+seek is the portable approach.)
-        _header = _f.read(4)
-        _f.seek(0)
-        if _header == _ZSTD_MAGIC:
-            import zstandard as zstd  # only needed for compressed pkl; plain dill stays dependency-free
+        while True:
             try:
-                _dctx = zstd.ZstdDecompressor()
-                with _dctx.stream_reader(_f) as _zf:
-                    _session_data = dill.load(_zf)
-            except Exception as _e:
-                # Broad catch on purpose: a corrupt zstd frame can surface either as
-                # zstd.ZstdError OR as a downstream dill EOFError ("Ran out of input")
-                # when zstd yields empty output — both mean the pkl is unusable.
-                raise RuntimeError(f"zstd decompression failed (corrupt pkl): {{_e}}") from _e
-        else:  # backward-compat: plain (uncompressed) dill
-            _session_data = dill.load(_f)
+                _name, _obj = dill.load(_f)
+            except EOFError:
+                break
+            globals()[_name] = _obj
+            _restored_names.append(_name)
 
-    # Restore variables to global namespace
-    for _var_name, _obj in _session_data.items():
-        globals()[_var_name] = _obj
-
-    print(f"Session restored: {{len(_session_data)}} variables")
-    print(f"Restored: {{list(_session_data.keys())}}")
+    print(f"Session restored: {{len(_restored_names)}} variables")
+    print(f"Restored: {{_restored_names}}")
 except Exception as e:
     print(f"__SCAI_RESTORE_ERROR__: {{type(e).__name__}}: {{e}}")
     raise
@@ -1204,59 +1170,73 @@ except Exception as e:
             )
     
     async def save_session(self):
-        """Save the current session state using dill - only save data variables"""
-        # Use absolute path to avoid working directory issues
+        """Save the current session state by streaming dill per-variable.
+
+        Each saved variable is written as one independent `dill.dump((name, obj), f)`
+        frame. Variables that cannot be pickled are skipped via
+        `file.tell()/seek()/truncate()` rollback so the file stays parseable.
+
+        No compression is applied here — compression happens out-of-kernel during
+        snapshot creation. This keeps the kernel's peak memory low (a single
+        variable's dill chunk buffer instead of multiple full pickle byte strings
+        held simultaneously, which previously OOM-killed the kernel and crashed
+        the parent backend via libzmq fq.cpp abort).
+        """
         session_path = str(self.notebook_state.session_path.absolute())
-        escaped_path = repr(session_path)  # Properly escape special characters
+        escaped_path = repr(session_path)
         logger.info(f"Saving session to {session_path}")
 
-        # Only save important data variables, avoid non-serializable objects like zmq
         save_code = f"""
 import dill
 import os
-import zstandard as zstd
+try:
+    import anndata as ad
+except ImportError:
+    ad = None
 
-# Ensure directory exists
-os.makedirs(os.path.dirname({escaped_path}), exist_ok=True)
-
-# List of variable names to save (data objects that can be serialized)
 _vars_to_save = ['adata', 'adata_control', 'adata_treatment', 'adata_merged',
                  'ldata', 'ldata_control', 'ldata_treatment',
                  'results', 'markers', 'deg_results', 'pathway_results',
                  'cell_types', 'cluster_markers', 'differential_genes']
 
-# Collect variables that exist and can be pickled
-_session_data = {{}}
-_skipped_vars = []  # P1-11: track unpicklable variables so they can be reported
+# Collect explicit list, then sweep globals() for any other AnnData we missed.
+_to_dump = []  # list of (name, obj)
+_seen = set()
 for _var_name in _vars_to_save:
     if _var_name in dir():
-        try:
-            _obj = globals()[_var_name]
-            # Test if it can be pickled
-            dill.dumps(_obj)
-            _session_data[_var_name] = _obj
-        except Exception as _e:
-            _skipped_vars.append((_var_name, type(_obj).__name__ if '_obj' in dir() else '?', type(_e).__name__, str(_e)[:200]))
+        _to_dump.append((_var_name, globals()[_var_name]))
+        _seen.add(_var_name)
+if ad is not None:
+    for _var_name, _obj in list(globals().items()):
+        if isinstance(_obj, ad.AnnData) and _var_name not in _seen:
+            _to_dump.append((_var_name, _obj))
+            _seen.add(_var_name)
 
-# Also save any AnnData objects we might have missed
-import anndata as ad
-for _var_name, _obj in list(globals().items()):
-    if isinstance(_obj, ad.AnnData) and _var_name not in _session_data:
-        try:
-            dill.dumps(_obj)
-            _session_data[_var_name] = _obj
-        except Exception as _e:
-            _skipped_vars.append((_var_name, type(_obj).__name__, type(_e).__name__, str(_e)[:200]))
+_skipped_vars = []  # P1-11: report what could not be persisted
 
-# Save the collected variables with zstd streaming compression.
 # Write to a temp file then atomically replace, so a mid-write crash can't
-# corrupt the only good pkl (a truncated file would still carry the zstd magic).
-_cctx = zstd.ZstdCompressor(level={COMPRESSION_LEVEL}, threads=-1)
+# corrupt the only good pkl.
 _tmp_path = {escaped_path} + '.tmp'
+_saved_count = 0
 try:
     with open(_tmp_path, 'wb') as _f:
-        with _cctx.stream_writer(_f) as _zf:
-            dill.dump(_session_data, _zf)
+        for _var_name, _obj in _to_dump:
+            _checkpoint = _f.tell()
+            try:
+                # Stream one (name, obj) frame; dill writes incrementally so peak
+                # memory is bounded by this single object's pickling, not the sum.
+                dill.dump((_var_name, _obj), _f)
+                _saved_count += 1
+            except Exception as _e:
+                # Roll back the half-written frame so subsequent loads stay valid.
+                _f.seek(_checkpoint)
+                _f.truncate()
+                _skipped_vars.append((
+                    _var_name,
+                    type(_obj).__name__,
+                    type(_e).__name__,
+                    str(_e)[:200],
+                ))
     os.replace(_tmp_path, {escaped_path})
 except Exception:
     try:
@@ -1265,7 +1245,7 @@ except Exception:
         pass
     raise
 
-print(f"Session saved: {{len(_session_data)}} variables")
+print(f"Session saved: {{_saved_count}} variables")
 if _skipped_vars:
     for _sv in _skipped_vars:
         print(f"__SCAI_SAVE_SKIPPED__\\t{{_sv[0]}}\\t{{_sv[1]}}\\t{{_sv[2]}}\\t{{_sv[3]}}")
@@ -1274,9 +1254,6 @@ if _skipped_vars:
         result = await self.execute(save_code, save_to_history=False, skip_safety_check=True)
 
         if result.success:
-            # P1-11: parse skipped-variable markers from kernel output and surface them
-            # so the agent/user knows what was NOT persisted (silent skips previously
-            # caused phantom missing state after restore).
             skipped = []
             for line in (result.output or "").splitlines():
                 if line.startswith("__SCAI_SAVE_SKIPPED__\t"):

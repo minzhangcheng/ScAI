@@ -198,15 +198,33 @@ class SnapshotManager:
 
         snapshot.size_bytes = await asyncio.to_thread(_externalize_and_write)
 
-        # Copy kernel session pkl (large file — run in thread to avoid blocking event loop)
+        # Compress kernel session pkl into the snapshot directory.
+        # Compression runs in the backend process (not the kernel) on a worker
+        # thread, so anndata-heavy kernel memory is never multiplied by the
+        # compression window. Snapshot pkls live as .zst on disk.
         pkl_src = get_session_states(self.session_id) / f"{self.session_id}_session.pkl"
-        pkl_dst = self.snapshots_dir / f"{snapshot.id}_session.pkl"
+        pkl_dst = self.snapshots_dir / f"{snapshot.id}_session.pkl.zst"
         if pkl_src.exists():
-            await asyncio.to_thread(shutil.copy2, pkl_src, pkl_dst)
-            snapshot.size_bytes += pkl_dst.stat().st_size
+            def _compress_to_snapshot():
+                import zstandard as zstd
+                cctx = zstd.ZstdCompressor(level=3, threads=-1)
+                tmp_dst = pkl_dst.with_suffix(pkl_dst.suffix + ".tmp")
+                try:
+                    with open(pkl_src, "rb") as src_f, open(tmp_dst, "wb") as dst_f:
+                        cctx.copy_stream(src_f, dst_f)
+                    os.replace(tmp_dst, pkl_dst)
+                except Exception:
+                    try:
+                        tmp_dst.unlink()
+                    except OSError:
+                        pass
+                    raise
+                return pkl_dst.stat().st_size
+
+            snapshot.size_bytes += await asyncio.to_thread(_compress_to_snapshot)
             logger.info(
                 f"[{self.session_id}] Snapshot created: {name} ({phase}), "
-                f"size={snapshot.size_bytes} bytes (includes pkl)"
+                f"size={snapshot.size_bytes} bytes (includes compressed pkl)"
             )
         else:
             logger.info(
@@ -244,11 +262,28 @@ class SnapshotManager:
 
         restored = AnalysisState.model_validate(state_dict)
 
-        # Restore kernel session pkl (large file — run in thread to avoid blocking event loop)
-        pkl_backup = self.snapshots_dir / f"{snapshot.id}_session.pkl"
+        # Decompress snapshot pkl back to the live path. Runs in backend process
+        # so the kernel never holds the compression dictionary in memory.
+        pkl_backup = self.snapshots_dir / f"{snapshot.id}_session.pkl.zst"
         if pkl_backup.exists():
             pkl_dst = get_session_states(self.session_id) / f"{self.session_id}_session.pkl"
-            await asyncio.to_thread(shutil.copy2, pkl_backup, pkl_dst)
+
+            def _decompress_to_live():
+                import zstandard as zstd
+                dctx = zstd.ZstdDecompressor()
+                tmp_dst = pkl_dst.with_suffix(pkl_dst.suffix + ".tmp")
+                try:
+                    with open(pkl_backup, "rb") as src_f, open(tmp_dst, "wb") as dst_f:
+                        dctx.copy_stream(src_f, dst_f)
+                    os.replace(tmp_dst, pkl_dst)
+                except Exception:
+                    try:
+                        tmp_dst.unlink()
+                    except OSError:
+                        pass
+                    raise
+
+            await asyncio.to_thread(_decompress_to_live)
             logger.info(f"[{self.session_id}] Kernel session restored from snapshot {snapshot.name}")
         else:
             logger.warning(
@@ -346,7 +381,7 @@ class SnapshotManager:
             raise ValueError(f"Invalid snapshot path: {snapshot.state_file}")
         if state_path.exists():
             state_path.unlink()
-        pkl = self.snapshots_dir / f"{snapshot.id}_session.pkl"
+        pkl = self.snapshots_dir / f"{snapshot.id}_session.pkl.zst"
         pkl.unlink(missing_ok=True)
         nb = self.snapshots_dir / f"{snapshot.id}_notebook.ipynb"
         nb.unlink(missing_ok=True)

@@ -2,7 +2,26 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.8 · **Last updated**: 2026-05-28
+**Version**: 0.25.9 · **Last updated**: 2026-05-28
+
+### Session save/restore: streaming + out-of-kernel compression
+
+- `LocalJupyterSandbox.save_session` now streams each variable as an independent
+  `dill.dump((name, obj), file)` frame to an uncompressed `.pkl`. Unpicklable
+  variables are skipped via `file.tell()/seek()/truncate()` rollback so the
+  resulting file is always parseable. Peak kernel memory dropped from "N full
+  pickle byte strings held simultaneously" to "one variable's dill chunk
+  buffer," eliminating the OOM-kill that previously crashed the parent backend
+  via libzmq `fq.cpp:56` abort.
+- `_restore_session` loads with a `while True: dill.load` loop until EOFError.
+- Snapshot pkls are stored as `<snapshot_id>_session.pkl.zst`. Compression and
+  decompression run in the **backend process** (via `asyncio.to_thread`), not
+  the kernel — keeping the memory-heavy kernel out of the compression path.
+- **Format is NOT backward compatible.** Sessions saved before this change cannot be
+  resumed; users must start fresh sessions. Old snapshot directories containing
+  `<id>_session.pkl` (without `.zst`) will not be recognized by `restore_snapshot` /
+  `delete_snapshot` — these orphan files should be cleaned up manually or via
+  `delete_snapshot` / `cleanup` tools to reclaim disk space.
 
 ## 1. Runtime Architecture
 
@@ -358,6 +377,14 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.9` — streaming session save/restore & out-of-kernel snapshot compression (2026-05-28):
+  - **Per-variable streaming dill**: `save_session` writes each variable as an independent `dill.dump((name, obj), f)` frame. Unpicklable variables skipped via `tell()/seek()/truncate()` rollback — file always parseable. Peak kernel memory drops from "N full pickle byte strings" to one variable's buffer, eliminating OOM-kills.
+  - **Out-of-kernel snapshot compression**: Snapshot pkls stored as `<id>_session.pkl.zst`. Compression/decompression runs in the backend process (via `asyncio.to_thread` + `zstd.copy_stream`), not the kernel. Old kernel-level `ZSTD_MAGIC`/`_is_zstd`/`COMPRESSION_LEVEL` constants removed from `sandbox.py`.
+  - **Import security**: `is_sandbox_pickle` now matches `_session.pkl.zst` in addition to `_session.pkl`.
+  - **NOT backward compatible**: Sessions saved before this version cannot be resumed.
+  - **Deleted test file**: `test_pkl_compression.py` (kernel-level zstd approach removed). Tests in `test_snapshot_rollback.py` and `test_sandbox_save_restore_streaming.py` rewritten for the new format.
+  - **New test file**: `test_sandbox_save_restore_streaming.py`.
 
 - `0.25.8` — supervisor force-skip, kernel death guard, figure template hardening (2026-05-28):
   - **SupervisorEvalResult**: New dataclass with `feedback` and `force_skip` fields. `evaluate_step()` returns structured result instead of bare string. `force_skip=True` when agent is stuck AND PI has already intervened.

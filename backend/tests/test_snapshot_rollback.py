@@ -12,7 +12,6 @@ import zstandard as zstd
 
 from backend.models.schemas import Snapshot, AnalysisState
 from backend.utils.snapshot import SnapshotManager
-from backend.utils.sandbox import ZSTD_MAGIC, COMPRESSION_LEVEL
 
 
 @pytest.fixture
@@ -325,21 +324,20 @@ class TestDeleteBranch:
 
 
 class TestPklCompressionSnapshotCompat:
-    """Tests that snapshot pkl files (opaque byte blobs) survive compression
-    format changes, and that the detection logic works in snapshot file paths."""
+    """Tests that snapshot pkl files are compressed to .zst by the backend
+    and can be decompressed back to the live streaming dill format."""
 
     @pytest.mark.asyncio
-    async def test_snapshot_copies_compressed_pkl_as_is(self, mock_config):
-        """Snapshot should copy a zstd-compressed pkl verbatim (byte-identical)."""
+    async def test_snapshot_compresses_streaming_pkl_to_zst(self, mock_config):
+        """Snapshot should compress an uncompressed streaming dill pkl to .pkl.zst."""
         session_id, session_dir, tmp_path = mock_config
         pkl_path = session_dir / "states" / f"{session_id}_session.pkl"
 
-        # Write a zstd-compressed dill blob (mimics what save_session now produces)
-        original_data = {'adata': 'mock', 'results': [1, 2, 3]}
-        _cctx = zstd.ZstdCompressor(level=COMPRESSION_LEVEL, threads=-1)
-        with open(pkl_path, 'wb') as f:
-            with _cctx.stream_writer(f) as zf:
-                dill.dump(original_data, zf)
+        # Write per-var streaming dill (mimics what new save_session produces)
+        original_data = [("adata", "mock"), ("results", [1, 2, 3])]
+        with open(pkl_path, "wb") as f:
+            for name, obj in original_data:
+                dill.dump((name, obj), f)
 
         mgr = SnapshotManager(session_id)
         state = AnalysisState(
@@ -349,65 +347,64 @@ class TestPklCompressionSnapshotCompat:
             current_round=1,
         )
 
-        snapshot = await mgr.create_snapshot(state, "Compressed Pkl", "pre_annotation")
+        snapshot = await mgr.create_snapshot(state, "Streaming Pkl", "pre_annotation")
 
-        # Verify the snapshot pkl is byte-identical to the source
-        snapshot_pkl = mgr.snapshots_dir / f"{snapshot.id}_session.pkl"
-        assert snapshot_pkl.exists(), "Snapshot pkl should exist"
-        assert snapshot_pkl.read_bytes() == pkl_path.read_bytes(), \
-            "Snapshot pkl should be a byte-identical copy"
+        # Verify the snapshot produced a .pkl.zst file
+        snapshot_pkl = mgr.snapshots_dir / f"{snapshot.id}_session.pkl.zst"
+        assert snapshot_pkl.exists(), "Snapshot .pkl.zst should exist"
 
-    @pytest.mark.asyncio
-    async def test_snapshot_copies_plain_pkl_as_is(self, mock_config):
-        """Snapshot should copy a plain (uncompressed) dill pkl verbatim."""
-        session_id, session_dir, tmp_path = mock_config
-        pkl_path = session_dir / "states" / f"{session_id}_session.pkl"
-
-        # Write a plain dill blob (old format)
-        original_data = {'adata': 'mock', 'results': [4, 5, 6]}
-        with open(pkl_path, 'wb') as f:
-            dill.dump(original_data, f)
-
-        mgr = SnapshotManager(session_id)
-        state = AnalysisState(
-            session_id=session_id,
-            user_id="test_user",
-            data_files=[],
-            current_round=1,
-        )
-
-        snapshot = await mgr.create_snapshot(state, "Plain Pkl", "pre_annotation")
-
-        snapshot_pkl = mgr.snapshots_dir / f"{snapshot.id}_session.pkl"
-        assert snapshot_pkl.exists()
-        assert snapshot_pkl.read_bytes() == pkl_path.read_bytes(), \
-            "Snapshot pkl should be a byte-identical copy of plain dill"
-
-    def test_detection_on_snapshot_pkl_round_trip(self, tmp_path):
-        """End-to-end detection: write compressed -> copy to snapshot path -> detect & load."""
-        from backend.utils.sandbox import _is_zstd
-
-        original_data = {'sparse': 'data', 'count': 42}
-
-        # Write compressed to "source" path
-        src = tmp_path / "source_session.pkl"
-        _cctx = zstd.ZstdCompressor(level=COMPRESSION_LEVEL, threads=-1)
-        with open(src, 'wb') as f:
-            with _cctx.stream_writer(f) as zf:
-                dill.dump(original_data, zf)
-
-        # "Snapshot copy" -- just byte copy
-        dst = tmp_path / "snapshot_session.pkl"
-        import shutil
-        shutil.copy2(src, dst)
-
-        # Detect and load from snapshot copy
-        with open(dst, 'rb') as f:
-            header = f.read(4)
-            f.seek(0)
-            assert _is_zstd(header) is True
-            _dctx = zstd.ZstdDecompressor()
+        # Decompress and verify round-trip
+        _dctx = zstd.ZstdDecompressor()
+        with open(snapshot_pkl, "rb") as f:
             with _dctx.stream_reader(f) as zf:
-                loaded = dill.load(zf)
+                loaded = {}
+                while True:
+                    try:
+                        name, obj = dill.load(zf)
+                    except EOFError:
+                        break
+                    loaded[name] = obj
 
-        assert loaded == original_data
+        assert loaded == {"adata": "mock", "results": [1, 2, 3]}
+
+    @pytest.mark.asyncio
+    async def test_snapshot_restore_decompresses_zst_to_live_pkl(self, mock_config):
+        """restore_snapshot should decompress .pkl.zst back to live .pkl path."""
+        session_id, session_dir, tmp_path = mock_config
+        pkl_path = session_dir / "states" / f"{session_id}_session.pkl"
+
+        # Write per-var streaming dill
+        with open(pkl_path, "wb") as f:
+            dill.dump(("adata", "mock"), f)
+            dill.dump(("results", [4, 5, 6]), f)
+
+        mgr = SnapshotManager(session_id)
+        state = AnalysisState(
+            session_id=session_id,
+            user_id="test_user",
+            data_files=[],
+            current_round=1,
+        )
+
+        snapshot = await mgr.create_snapshot(state, "Restore Test", "pre_annotation")
+
+        # Delete the live pkl to simulate a rollback scenario
+        pkl_path.unlink()
+
+        # Restore from snapshot
+        restored_state = await mgr.restore_snapshot(snapshot)
+
+        # Live pkl should be restored (decompressed from .zst)
+        assert pkl_path.exists(), "Live pkl should be restored after snapshot restore"
+
+        # Verify the content is readable as streaming dill
+        loaded = {}
+        with open(pkl_path, "rb") as f:
+            while True:
+                try:
+                    name, obj = dill.load(f)
+                except EOFError:
+                    break
+                loaded[name] = obj
+
+        assert loaded == {"adata": "mock", "results": [4, 5, 6]}

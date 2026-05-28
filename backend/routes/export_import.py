@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import tarfile
 import uuid
@@ -76,10 +77,11 @@ def is_sandbox_pickle(name: str) -> bool:
     """True if an archive entry is a sandbox session pickle.
 
     SECURITY: dill.load on imported pickle is arbitrary code execution, so these
-    files are skipped during import. Matches 'session.pkl' or '<id>_session.pkl'.
+    files are skipped during import. Matches 'session.pkl', '<id>_session.pkl',
+    and '<id>_session.pkl.zst' (compressed snapshot format).
     """
     base = name.rsplit("/", 1)[-1]
-    return base == "session.pkl" or base.endswith("_session.pkl")
+    return bool(re.match(r".*_session\.pkl(\.zst)?$", base) or base == "session.pkl")
 
 
 # P3-7: cap export filename's slug portion to keep total filename below
