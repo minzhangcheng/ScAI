@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.7.2 · **Last updated**: 2026-05-28
+**Version**: 0.25.7.3 · **Last updated**: 2026-05-28
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,12 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.7.3` — image MIME detection, independent 429 budget, wall-clock sandbox timeout (2026-05-28):
+  - **WebP MIME fix**: `detect_image_mime()` checks the WEBP fourcc at bytes 8:12, not just the RIFF prefix — RIFF-container WAV/AVI are no longer misclassified as `image/webp`.
+  - **Independent 429 retry budget**: `compute_rate_limit_delay()` tracks the 429 counter separately from other error types (5xx/timeout/JSON). A burst of 5xx can no longer shift or consume the rate-limit retry budget. JSON retry count is now correctly bounded to `MAX_JSON_RETRIES` (uses `<=` instead of `<`).
+  - **Wall-clock sandbox timeout**: Iopub loop uses a fixed `deadline` before the loop; `compute_remaining_timeout()` is checked each iteration with `min(remaining, IOPUB_POLL_CAP=30s)` per poll. A kernel that keeps streaming output (tqdm/scanpy verbose) can no longer reset the timeout indefinitely.
+  - **New tests**: `test_image_mime.py`, `test_json_retry_budget.py`, `test_rate_limit_backoff.py`, `test_sandbox_timeout.py`.
 
 - `0.25.7.2` — tool-message pairing & HITL gate routing fixes (2026-05-28):
   - **Tool-call pairing helpers**: New `tool_messages.py` with `tool_calls_are_paired()` (detect orphaned tool calls) and `append_missing_tool_results()` (backfill placeholders). Used by checkpoint validation and plan-revision pause to prevent upstream HTTP 400 from orphaned tool_call IDs.

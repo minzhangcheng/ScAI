@@ -101,23 +101,32 @@ def _recover_stringified_tool_call(
     return name, args
 
 
+def detect_image_mime(header: bytes) -> str:
+    """Identify image MIME type from leading magic bytes; default image/png.
+
+    WebP lives in a RIFF container shared with WAV/AVI, so the RIFF prefix
+    alone is ambiguous — the 'WEBP' fourcc at bytes 8:12 must also match.
+    """
+    if header[:3] == b'\xff\xd8\xff':
+        return "image/jpeg"
+    if header[:8] == b'\x89PNG\r\n\x1a\n':
+        return "image/png"
+    if header[:6] in (b'GIF87a', b'GIF89a'):
+        return "image/gif"
+    if len(header) >= 12 and header[:4] == b'RIFF' and header[8:12] == b'WEBP':
+        return "image/webp"
+    return "image/png"
+
+
 def _detect_image_mime_type(img_b64: str) -> str:
     """Detect image MIME type from base64-encoded data using magic bytes.
 
-    Checks the first few decoded bytes to identify JPEG, PNG, GIF, or WebP.
     Falls back to 'image/png' if the format cannot be determined.
     """
     try:
-        # 12 base64 chars → 9 bytes, enough to cover all magic byte sequences
-        header = base64.b64decode(img_b64[:12] + "==")
-        if header[:3] == b'\xff\xd8\xff':
-            return "image/jpeg"
-        if header[:8] == b'\x89PNG\r\n\x1a\n':
-            return "image/png"
-        if header[:6] in (b'GIF87a', b'GIF89a'):
-            return "image/gif"
-        if header[:4] == b'RIFF' and len(header) >= 8:
-            return "image/webp"
+        # 16 base64 chars → 12 bytes, enough to read the WebP fourcc at [8:12]
+        header = base64.b64decode(img_b64[:16])
+        return detect_image_mime(header)
     except Exception as e:
         logger.debug(f"Image MIME type detection failed, defaulting to image/png: {e}")
     return "image/png"
@@ -143,6 +152,19 @@ RETRYABLE_EXCEPTIONS = (
 # a persistent issue rather than a transient network problem.
 MAX_JSON_RETRIES = 2
 EMPTY_CONTENT_PLACEHOLDER = "[Error: LLM generated a response but content extraction failed. Please retry.]"
+
+
+def compute_rate_limit_delay(rate_limit_attempt: int, max_retries: int) -> Optional[float]:
+    """Delay (seconds) for the given 0-based 429 retry attempt, or None when the
+    dedicated rate-limit budget is exhausted.
+
+    The 429 budget is tracked separately from other error types so a burst of
+    5xx / timeout / JSON errors cannot shift its index or consume its budget.
+    """
+    budget = min(max_retries, len(RATE_LIMIT_DELAYS))
+    if rate_limit_attempt < budget:
+        return float(RATE_LIMIT_DELAYS[rate_limit_attempt])
+    return None
 
 
 class UpstreamExhaustedError(RuntimeError):
@@ -311,6 +333,7 @@ async def retry_with_backoff(
     effective_max = max_retries
 
     json_error_count = 0
+    rate_limit_attempt = 0  # independent 429 counter (see compute_rate_limit_delay)
 
     async def _notify_retry(attempt: int, delay: float, error_type: str):
         """Fire the on_retry callback if provided, swallowing errors."""
@@ -324,20 +347,22 @@ async def retry_with_backoff(
         try:
             return await asyncio.wait_for(func(), timeout=request_timeout)
         except json.JSONDecodeError as e:
-            # JSON errors get fewer retries — repeated bad JSON is likely persistent
+            # JSON errors get fewer retries — repeated bad JSON is likely persistent.
+            # MAX_JSON_RETRIES is the retry budget; <= keeps the actual retry count
+            # equal to MAX_JSON_RETRIES (total invocations == MAX_JSON_RETRIES + 1).
             json_error_count += 1
             last_exception = e
-            if json_error_count < MAX_JSON_RETRIES:
+            if json_error_count <= MAX_JSON_RETRIES:
                 delay = retry_delay_base * json_error_count
                 logger.warning(
-                    f"[{agent_name}] Invalid JSON response (attempt {json_error_count}/{MAX_JSON_RETRIES}): {str(e)[:100]}. "
+                    f"[{agent_name}] Invalid JSON response (retry {json_error_count}/{MAX_JSON_RETRIES}): {str(e)[:100]}. "
                     f"Retrying in {delay:.1f}s..."
                 )
                 await _notify_retry(attempt, delay, "JSONDecodeError")
                 await asyncio.sleep(delay)
             else:
                 logger.error(
-                    f"[{agent_name}] Invalid JSON after {MAX_JSON_RETRIES} attempts: {str(e)}"
+                    f"[{agent_name}] Invalid JSON after {json_error_count} attempts: {str(e)}"
                 )
                 raise
         except (AuthenticationError, PermissionDeniedError) as e:
@@ -357,17 +382,18 @@ async def retry_with_backoff(
                     f"[{agent_name}] Hard quota exhausted (not retrying): {str(e)[:200]}"
                 )
                 break
+            delay = compute_rate_limit_delay(rate_limit_attempt, max_retries)
             rate_limit_max = min(max_retries, len(RATE_LIMIT_DELAYS))
-            if attempt < rate_limit_max:
-                delay = RATE_LIMIT_DELAYS[attempt]
+            if delay is not None:
                 logger.warning(
-                    f"[{agent_name}] Rate limited (attempt {attempt + 1}/{rate_limit_max + 1}). "
+                    f"[{agent_name}] Rate limited (429 retry {rate_limit_attempt + 1}/{rate_limit_max}). "
                     f"Retrying in {delay}s..."
                 )
                 await _notify_retry(attempt, delay, "RateLimitError")
                 await asyncio.sleep(delay)
+                rate_limit_attempt += 1
             else:
-                logger.error(f"[{agent_name}] Rate limit exceeded after {rate_limit_max + 1} attempts")
+                logger.error(f"[{agent_name}] Rate limit exceeded after {rate_limit_max} retries")
                 break  # stop spinning; fall through to UpstreamExhaustedError
         except RETRYABLE_EXCEPTIONS as e:
             last_exception = e

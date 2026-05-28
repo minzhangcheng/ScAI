@@ -10,6 +10,7 @@ import re
 import json
 import base64
 import asyncio
+import time
 import logging
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
@@ -30,6 +31,15 @@ ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
 # a better trade-off for AnnData sparse-matrix payloads.
 # NOTE: Same kernel-environment dependency as ZSTD_MAGIC above.
 COMPRESSION_LEVEL = 3
+
+# Cap on a single iopub poll so the wall-clock deadline is re-checked at least
+# this often even while the kernel keeps streaming output (tqdm/scanpy verbose).
+IOPUB_POLL_CAP = 30.0
+
+
+def compute_remaining_timeout(deadline: float, now: float) -> float:
+    """Seconds left until the wall-clock deadline; <= 0 means expired."""
+    return deadline - now
 
 
 def _is_zstd(header: bytes) -> bool:
@@ -1397,14 +1407,28 @@ if _skipped_vars:
             # Send execute request
             msg_id = self.kc.execute(code)
 
-            # Collect outputs — only process messages belonging to THIS execution (matched by msg_id)
+            # Collect outputs — only process messages belonging to THIS execution (matched by msg_id).
+            # Timeout is wall-clock: the deadline is fixed before the loop so a task that
+            # keeps streaming output (tqdm/scanpy verbose) cannot reset it indefinitely.
+            deadline = time.monotonic() + self.timeout
             while True:
-                try:
-                    msg = await asyncio.wait_for(
-                        asyncio.to_thread(self.kc.get_iopub_msg),
-                        timeout=self.timeout
-                    )
-                except asyncio.TimeoutError:
+                remaining = compute_remaining_timeout(deadline, time.monotonic())
+                msg = None
+                if remaining > 0:
+                    try:
+                        msg = await asyncio.wait_for(
+                            asyncio.to_thread(self.kc.get_iopub_msg),
+                            timeout=min(remaining, IOPUB_POLL_CAP)
+                        )
+                    except asyncio.TimeoutError:
+                        # Either the poll cap elapsed (wall-clock time may remain →
+                        # re-loop) or the deadline truly passed. Re-check before
+                        # declaring a timeout.
+                        if compute_remaining_timeout(deadline, time.monotonic()) > 0:
+                            continue
+                        remaining = 0  # fall through to timeout handling below
+
+                if remaining <= 0:
                     error_msg = f"Execution timed out after {self.timeout} seconds"
                     # Interrupt the kernel to stop the running code
                     if self.km:
