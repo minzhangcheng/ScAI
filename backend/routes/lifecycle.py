@@ -42,6 +42,22 @@ async def _resume_workflow(session_id, state, signal_fn=None):
     return workflow
 
 
+def resolve_hitl_skip_target(state):
+    """Return (node_name, generation) for a WAITING_INPUT gate that must be
+    released via signal_llm_failure_action — both the LLM-failure gate and the
+    disabled-agent gate use that path. Return None for the round-completion
+    gate (released via signal_continue).
+    """
+    reason = getattr(state, "wait_input_reason", None)
+    if reason == WaitInputReason.LLM_FAILURE.value:
+        info = state.llm_failure_info or {}
+        return info.get("node_name", ""), info.get("generation", 0)
+    if reason == WaitInputReason.AGENT_DISABLED.value:
+        info = state.agent_disabled_info or {}
+        return info.get("node_name", ""), info.get("generation", 0)
+    return None
+
+
 async def _pause_and_restart_ws(session_id: str, state):
     await _pause_and_restart_ws_impl(session_id, state, websockets)
 
@@ -320,18 +336,20 @@ async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysis
 
     elif req.action == "summarize":
         if state.status == TaskStatus.WAITING_INPUT:
-            if state.wait_input_reason == WaitInputReason.LLM_FAILURE.value:
-                # LLM failure wait — signal skip to unblock @with_retry
+            skip_target = resolve_hitl_skip_target(state)
+            if skip_target is not None:
+                # LLM-failure OR disabled-agent gate — both wait on
+                # _llm_failure_events[node] and are released by
+                # signal_llm_failure_action. Using signal_continue here would
+                # leave the gate blocked forever (deadlock).
+                node_name, generation = skip_target
                 if state.original_max_rounds is None:
                     state.original_max_rounds = state.max_rounds
                 state.max_rounds = state.current_round
                 state.status = TaskStatus.RUNNING
-                info = state.llm_failure_info
-                node_name = info.get("node_name", "") if info else ""
-                generation = info.get("generation", 0) if info else 0
                 await _resume_workflow(session_id, state,
                     signal_fn=lambda w, nn=node_name, g=generation: w.signal_llm_failure_action(nn, "skip", g))
-                return APIResponse(success=True, message="Skipping failed LLM call, generating report...")
+                return APIResponse(success=True, message="Skipping blocked step, generating report...")
             else:
                 # Round completion wait — existing behavior
                 if state.original_max_rounds is None:

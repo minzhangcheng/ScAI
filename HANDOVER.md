@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.7.1 · **Last updated**: 2026-05-28
+**Version**: 0.25.7.2 · **Last updated**: 2026-05-28
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,13 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.7.2` — tool-message pairing & HITL gate routing fixes (2026-05-28):
+  - **Tool-call pairing helpers**: New `tool_messages.py` with `tool_calls_are_paired()` (detect orphaned tool calls) and `append_missing_tool_results()` (backfill placeholders). Used by checkpoint validation and plan-revision pause to prevent upstream HTTP 400 from orphaned tool_call IDs.
+  - **Disabled-agent HITL routing**: `resolve_hitl_skip_target()` in `lifecycle.py` returns `(node_name, generation)` for both LLM-failure AND disabled-agent gates. `stop_analysis` "summarize" action now releases both gate types via `signal_llm_failure_action` instead of deadlocking on disabled-agent gates.
+  - **WebSocket init failure recovery**: Workflow construction in `websockets.py` wrapped in try/except — cleans up `initializing_sessions` and sends error message on failure, preventing observer connections from spinning forever.
+  - **UpstreamExhaustedError re-raise**: `_evaluate_dr_coverage` (agents.py) and `_revise_figure_code` (bioinformatics_agent.py) now re-raise `UpstreamExhaustedError` instead of swallowing it, correctly delegating to `@with_retry`.
+  - **New files**: `backend/utils/tool_messages.py`, `backend/tests/test_tool_messages.py`, `backend/tests/test_dr_coverage_reraise.py`, `backend/tests/test_hitl_skip_target.py`.
 
 - `0.25.7.1` — login rate-limit & import security hardening (2026-05-28):
   - **Login brute-force protection**: `SlidingWindowRateLimiter` — thread-safe in-process rate limiter (defaultdict(deque) + Lock). Applied to `/api/auth/login`: max 5 failed attempts per (username, client-ip) / 60s → HTTP 429. Resets on successful login.

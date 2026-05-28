@@ -422,16 +422,36 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # Import workflow here to avoid circular imports
     from backend.workflow import SingleCellAnalysisWorkflow
 
-    # Create workflow with session_id for state persistence
-    workflow = SingleCellAnalysisWorkflow(
-        config=config,
-        session_id=session_id,
-        message_callback=message_callback,
-        state_callback=state_callback
-    )
-    # Add workflow to tracking dict (protected by lock to prevent race conditions)
-    async with state_lock:
-        workflows[session_id] = workflow
+    # Create workflow with session_id for state persistence.
+    # If construction fails we are NOT yet inside the run try/finally (below),
+    # so initializing_sessions would leak — clean it up here, otherwise later
+    # observer connections spin forever in `while session_id in initializing_sessions`.
+    try:
+        workflow = SingleCellAnalysisWorkflow(
+            config=config,
+            session_id=session_id,
+            message_callback=message_callback,
+            state_callback=state_callback
+        )
+        # Add workflow to tracking dict (protected by lock to prevent race conditions)
+        async with state_lock:
+            workflows[session_id] = workflow
+    except Exception:
+        logger.exception(f"[{session_id}] Failed to create workflow")
+        async with state_lock:
+            initializing_sessions.discard(session_id)
+            if websockets.get(session_id) is websocket:
+                del websockets[session_id]
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "agent": None,
+                "content": "Failed to initialize analysis workflow.",
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception:
+            pass
+        return
 
     # Background task to monitor WebSocket for client disconnect
     async def monitor_websocket():

@@ -36,6 +36,7 @@ from ..models.schemas import (
     DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError, EMPTY_CONTENT_PLACEHOLDER
+from ..utils.tool_messages import tool_calls_are_paired, append_missing_tool_results
 from ..constants import PLAN_REVISION_NEEDED_TAG
 from ..utils.error_parsing import strip_ansi, extract_error_type, TECHNICAL_ERROR_TYPES
 
@@ -1495,9 +1496,12 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
         if checkpoint and checkpoint_valid:
             messages = checkpoint.get('messages', [])
             # Validate message structure: each must have role and content
-            valid_messages = all(
-                isinstance(m, dict) and "role" in m and ("content" in m or "tool_calls" in m)
-                for m in messages
+            valid_messages = (
+                all(
+                    isinstance(m, dict) and "role" in m and ("content" in m or "tool_calls" in m)
+                    for m in messages
+                )
+                and tool_calls_are_paired(messages)
             ) if messages else False
             if len(messages) < 2 or not valid_messages:
                 logger.warning("[Bioinformatics] Checkpoint messages invalid (len=%d, valid=%s), using fresh messages",
@@ -2878,6 +2882,15 @@ except Exception as _autosave_block_err:
 
             # Check if plan revision was triggered during this step
             if _plan_revision_needed:
+                # The consult_pi plan-revision path breaks the per-tool_call loop
+                # early, so sibling tool_calls in this assistant message may lack
+                # results. Backfill placeholders so the saved checkpoint stays
+                # resumable (orphaned tool_calls cause an upstream HTTP 400).
+                append_missing_tool_results(
+                    messages,
+                    [tc.id for tc in response.tool_calls],
+                    note="[System: plan revision was triggered; this tool call was not executed.]",
+                )
                 logger.info("[Bioinformatics] Plan revision needed, pausing execution")
                 # Result dict will be populated after the loop exits
                 break
@@ -3262,6 +3275,8 @@ except Exception as _save_err:
                         current_code, feedback, suggestions, must_fix, figure_type, state, figure.png_base64,
                         revision_history=revision_history
                     )
+                except UpstreamExhaustedError:
+                    raise
                 except Exception as revise_err:
                     logger.error(f"[Bioinformatics] _revise_figure_code failed: {revise_err}, keeping current version")
                     await self._notify("status", f"Figure revision failed ({revise_err}), keeping current version")

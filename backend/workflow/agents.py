@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
+from ..utils.llm_client import UpstreamExhaustedError
 from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, STAGE1_KEYWORDS
 from .retry import with_retry
 
@@ -953,7 +954,10 @@ Return ONLY the JSON array, nothing else."""
             gaps = json.loads(cleaned)
             if isinstance(gaps, list):
                 return [g for g in gaps if isinstance(g, str)]
-        except (json.JSONDecodeError, Exception) as e:
+        except UpstreamExhaustedError:
+            raise
+        except Exception as e:
             logger.warning(f"[{self.session_id}] DR coverage evaluation failed: {e}")
+            return topics
         return []
     
