@@ -55,31 +55,31 @@ async def build_chat_sections_async(
     llm_client: Any = None,
     progress_callback: Optional[Callable] = None,
     max_chat_entries: int = 20,
+    model: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Process chat messages and return a list of report section dicts.
-    
-    Each section dict has: title, content, figures, tables, analysis_type.
-    Titles are generated via batch LLM call when llm_client is provided and no cached _summary_title.
-    Falls back to truncated user message on LLM failure.
-    Caches titles back to messages[i]["_summary_title"].
+
+    Titles are generated via a single batch LLM call when both ``llm_client``
+    and ``model`` are provided and no cached ``_summary_title`` exists. Falls
+    back to truncated user message on any failure.
     """
     if not messages:
         return []
-    
+
     pairs = _pair_messages(messages)
     if not pairs:
         return []
-    
+
     if len(pairs) > max_chat_entries:
         pairs = pairs[-max_chat_entries:]
-    
+
     needs_title = []
     for idx, pair in enumerate(pairs):
         user_msg = pair["user"]
         if not user_msg.get("_summary_title"):
             needs_title.append((idx, _truncate_text(user_msg.get("content", ""), 500)))
-    
-    if needs_title and llm_client is not None:
+
+    if needs_title and llm_client is not None and model:
         try:
             prompt_parts = [f"{i+1}. {q}" for i, (_, q) in enumerate(needs_title)]
             prompt = (
@@ -87,10 +87,17 @@ async def build_chat_sections_async(
                 + "\n".join(prompt_parts)
                 + '\n\nRespond with JSON: [{"index": 1, "title": "..."}, ...]'
             )
-            
-            response = await llm_client.chat({"messages": [{"role": "user", "content": prompt}]})
-            
-            content = response.get("content", "") if isinstance(response, dict) else str(response)
+
+            response = await llm_client.chat(
+                model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            content = getattr(response, "content", None)
+            if content is None and isinstance(response, dict):
+                content = response.get("content", "")
+            content = content or ""
+
             titles = safe_parse_json_array(content, default=[])
             if titles:
                 for t in titles:

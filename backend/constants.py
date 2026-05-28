@@ -28,6 +28,26 @@ NODE_TO_RESULT_KEY: dict[str, str] = {
     "literature_research": "literature_result",
 }
 
+# Nodes that participate in the agent registry but intentionally have no
+# independent WorkflowState result key. Update this set when adding such a
+# node; otherwise the import-time assertion below will fail and force the
+# author to decide whether the new node needs a result key.
+RESULT_KEYLESS_NODES: frozenset[str] = frozenset({
+    "pi_synthesis",       # writes into round_result, not its own key
+    "user_review_gate",   # gating node, not an analysis step
+})
+
+# Drift guard — fires at import time if the two maps go out of sync.
+assert set(NODE_TO_RESULT_KEY).issubset(set(NODE_TO_AGENT)), (
+    "NODE_TO_RESULT_KEY contains nodes missing from NODE_TO_AGENT: "
+    f"{set(NODE_TO_RESULT_KEY) - set(NODE_TO_AGENT)}"
+)
+assert (set(NODE_TO_AGENT) - set(NODE_TO_RESULT_KEY)) == RESULT_KEYLESS_NODES, (
+    "NODE_TO_AGENT has agent-nodes without a result key that are not declared in "
+    "RESULT_KEYLESS_NODES: "
+    f"{(set(NODE_TO_AGENT) - set(NODE_TO_RESULT_KEY)) ^ RESULT_KEYLESS_NODES}"
+)
+
 
 # ── LLM failure intervention constants ─────────────────────────────
 
@@ -76,3 +96,12 @@ PLAN_REVISION_KEYWORDS = frozenset([
     "rethink", "redesign", "fundamental change",
     "major change", "hypothesis change",
 ])
+
+# ── PI human-input stop keywords (single source of truth) ─────────
+# Used by pi_agent.process_human_guidance and pi_agent.process_user_input
+# fallback parsing when the LLM does not return a structured decision.
+STOP_KEYWORDS: frozenset[str] = frozenset({
+    "stop", "terminate", "end", "finish", "conclude",
+    "summarize", "report",
+    "停止", "终止", "结束", "总结", "报告",
+})

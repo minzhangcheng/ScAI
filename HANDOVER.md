@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.7.3 · **Last updated**: 2026-05-28
+**Version**: 0.25.7.4 · **Last updated**: 2026-05-28
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,14 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.7.4` — node-map drift guard, STOP_KEYWORDS consolidation, cleanup async offload (2026-05-28):
+  - **Node-map drift guard**: `constants.py` adds `RESULT_KEYLESS_NODES` and import-time assertions ensuring `NODE_TO_AGENT` and `NODE_TO_RESULT_KEY` stay in sync. New test `test_node_maps_consistent.py`.
+  - **STOP_KEYWORDS consolidation**: Moved inline stop-keyword lists from `pi_agent.py`'s `process_human_guidance` and `process_user_input` into a single `constants.STOP_KEYWORDS` frozenset. Both paths now import from the shared source.
+  - **Supervisor appendix uses resolved models**: `_build_appendix` reads resolved provider models/temperatures (via `AgentSettingsProvider`) instead of raw `custom_models` overrides, so the appendix now shows all agents even without overrides.
+  - **chat_sections title generation fix**: Uses `llm_client.chat(model=model, messages=...)` signature and reads `LLMResponse.content` attribute. Title generation guards on `model` being non-None.
+  - **Cleanup async offload**: `user_cleanup.delete_user_data` routes `shutil.rmtree` and state-file `glob`/`unlink` through `asyncio.to_thread`. `ttl_cleanup` offloads chunk-file deletion. `db.list_expired_uploads` no longer filters `completed=0`, so completed-but-expired uploads also get cleaned.
+  - **New tests**: `test_chat_sections_title_generation.py`, `test_supervisor_appendix_models.py`, `test_pi_stop_keywords.py`, `test_node_maps_consistent.py`, `test_cleanup_async.py`.
 
 - `0.25.7.3` — image MIME detection, independent 429 budget, wall-clock sandbox timeout (2026-05-28):
   - **WebP MIME fix**: `detect_image_mime()` checks the WEBP fourcc at bytes 8:12, not just the RIFF prefix — RIFF-container WAV/AVI are no longer misclassified as `image/webp`.

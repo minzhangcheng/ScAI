@@ -424,10 +424,13 @@ class AppDB:
             await db.commit()
 
     async def list_expired_uploads(self, now_iso: str) -> List[dict]:
+        # Note: deliberately *not* filtering completed=0. A completed upload
+        # whose finalize step crashed could leave chunk files on disk; those
+        # records still need to be returned so ttl_cleanup can sweep them.
         async with aiosqlite.connect(self.path, timeout=30) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT * FROM upload_sessions WHERE expires_at < ? AND completed=0",
+                "SELECT * FROM upload_sessions WHERE expires_at < ?",
                 (now_iso,),
             )
             rows = await cur.fetchall()

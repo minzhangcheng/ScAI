@@ -1552,11 +1552,10 @@ If adjusting direction, provide specific and actionable tasks.
             logger.warning(f"[PI] No valid JSON found in response, using fallback parsing. Response: {response[:200] if response else 'None'}...")
         
         # Fallback: check for stop keywords manually (English + Chinese)
+        from ..constants import STOP_KEYWORDS
         human_lower = human_input.lower()
-        stop_keywords = ['stop', 'terminate', 'end', 'finish', 'conclude', 'summarize',
-                         '停止', '终止', '结束', '总结']
-        
-        if any(keyword in human_lower for keyword in stop_keywords):
+
+        if any(keyword in human_lower for keyword in STOP_KEYWORDS):
             return {
                 "interpretation": "Human requested to stop the analysis",
                 "response": "Understood. I will conclude the current analysis and generate a final report.",
@@ -1766,11 +1765,9 @@ Note: Extract biochemistry values from user message if they mention specific num
             }
         
         # Fallback: check for stop keywords (English + Chinese)
-        user_lower = user_message.lower()
-        stop_keywords = ['stop', 'terminate', 'end', 'finish', 'conclude', 'report',
-                         '停止', '终止', '结束', '总结', '报告']
-        
-        if any(keyword in user_lower for keyword in stop_keywords):
+        from ..constants import STOP_KEYWORDS
+
+        if any(keyword in user_lower for keyword in STOP_KEYWORDS):
             return {
                 "action": "stop",
                 "response": "Understood. Generating final report.",

@@ -12,6 +12,19 @@ logger = logging.getLogger(__name__)
 TTL_CLEANUP_INTERVAL = 3600  # Run every hour
 
 
+def _unlink_chunks(upload_id: str, total: int, base: Path) -> int:
+    cleaned = 0
+    for i in range(total):
+        chunk_path = base / f"{upload_id}.chunk.{i}"
+        try:
+            if chunk_path.exists():
+                chunk_path.unlink()
+                cleaned += 1
+        except OSError:
+            pass
+    return cleaned
+
+
 async def ttl_cleanup_task():
     """Periodically scan for expired upload sessions and clean them up."""
     while True:
@@ -24,15 +37,10 @@ async def ttl_cleanup_task():
                 upload_id = upload["id"]
                 total_chunks = upload["total_chunks"]
 
-                # Clean up chunk files
-                cleaned = 0
-                for i in range(total_chunks):
-                    chunk_path = UPLOAD_TEMP_DIR / f"{upload_id}.chunk.{i}"
-                    try:
-                        chunk_path.unlink(missing_ok=True)
-                        cleaned += 1
-                    except OSError:
-                        pass
+                # Clean up chunk files (offloaded to thread)
+                cleaned = await asyncio.to_thread(
+                    _unlink_chunks, upload_id, total_chunks, UPLOAD_TEMP_DIR
+                )
 
                 # Remove DB record
                 await db.delete_upload_session(upload_id)

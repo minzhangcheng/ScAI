@@ -1,4 +1,5 @@
 """User data cleanup service: cascade delete sessions and files for a user."""
+import asyncio
 import shutil
 import logging
 from pathlib import Path
@@ -9,6 +10,26 @@ from backend.utils.auth import get_db
 from backend.state import sessions, state_lock
 
 logger = logging.getLogger(__name__)
+
+
+def _rmtree(path: Path) -> None:
+    shutil.rmtree(path)
+
+
+def _scan_and_unlink_state_files(state_dir: Path, sid: str) -> int:
+    """Return number of state files deleted for ``sid`` under ``state_dir``."""
+    if not state_dir.exists():
+        return 0
+    count = 0
+    for pattern in (f"{sid}.pkl", f"{sid}.json"):
+        for f in state_dir.glob(pattern):
+            try:
+                f.unlink()
+                count += 1
+                logger.info(f"Deleted state file: {f}")
+            except OSError as e:
+                logger.warning(f"Failed to delete state file {f}: {e}")
+    return count
 
 
 async def delete_user_data(user_id: str) -> dict:
@@ -26,7 +47,8 @@ async def delete_user_data(user_id: str) -> dict:
 
     # 1. Remove from in-memory sessions cache
     async with state_lock:
-        to_evict = [sid for sid, state in sessions.items() if getattr(state, "user_id", None) == user_id]
+        to_evict = [sid for sid, state in sessions.items()
+                    if getattr(state, "user_id", None) == user_id]
         for sid in to_evict:
             sessions.pop(sid, None)
 
@@ -36,20 +58,14 @@ async def delete_user_data(user_id: str) -> dict:
         if sess.get("user_id") != user_id:
             continue
         sid = sess.get("id", "")
-        # Session directory
         session_dir = SESSION_DIR / sid
         if session_dir.exists():
-            shutil.rmtree(session_dir)
+            await asyncio.to_thread(_rmtree, session_dir)
             deleted_sessions += 1
             logger.info(f"Deleted session directory: {session_dir}")
-        # Legacy state files: {sid}*.pkl, {sid}*.json under STATE_DIR
-        if STATE_DIR.exists():
-            for pattern in [f"{sid}.pkl", f"{sid}.json"]:
-                for f in STATE_DIR.glob(pattern):
-                    if f.exists():
-                        f.unlink()
-                        deleted_state_files += 1
-                        logger.info(f"Deleted state file: {f}")
+        deleted_state_files += await asyncio.to_thread(
+            _scan_and_unlink_state_files, STATE_DIR, sid
+        )
 
     # 3. Delete from database
     db = await get_db()
@@ -57,7 +73,10 @@ async def delete_user_data(user_id: str) -> dict:
     await db.delete_user_llm_config(user_id)
     await db.delete_user(user_id)
 
-    logger.info(f"User {user_id} deleted: {deleted_sessions} sessions, {deleted_state_files} state files")
+    logger.info(
+        f"User {user_id} deleted: {deleted_sessions} sessions, "
+        f"{deleted_state_files} state files"
+    )
     return {
         "user_id": user_id,
         "deleted_sessions": deleted_sessions,

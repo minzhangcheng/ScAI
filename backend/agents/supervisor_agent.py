@@ -732,6 +732,7 @@ class SupervisorAgent:
                     tables_dir=str(Path(workspace_dir) / "tables") if workspace_dir else "",
                     llm_client=report_llm_client or self._provider.get_llm_client("pi"),
                     progress_callback=progress_callback,
+                    model=self._provider.get_model("pi"),
                 )
                 sections.extend(chat_sections)
             except Exception as e:
@@ -1753,12 +1754,17 @@ Report generation model call failed due to API connection error. Please refer to
                     "notes": d.get("notes", ""),
                 })
 
+        agent_names = ("pi", "bioinformatics", "pathology", "biochemistry",
+                       "literature", "painter", "supervisor")
+        agent_models = {a: self._provider.get_model(a) for a in agent_names}
+        agent_temperatures = {a: self._provider.get_temperature(a) for a in agent_names}
+
         return {
             "project_name": state.name,
             "project_description": state.initial_instruction[:500],
             "created_at": datetime.now().isoformat(),
-            "agent_models": dict(state.custom_models),
-            "agent_temperatures": dict(state.custom_temperatures),
+            "agent_models": agent_models,
+            "agent_temperatures": agent_temperatures,
             "treatment_groups": [
                 {"id": g.id, "name": g.name, "description": g.description, "sample_count": g.sample_count}
                 for g in state.treatment_groups
