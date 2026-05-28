@@ -42,10 +42,12 @@ assert set(NODE_TO_RESULT_KEY).issubset(set(NODE_TO_AGENT)), (
     "NODE_TO_RESULT_KEY contains nodes missing from NODE_TO_AGENT: "
     f"{set(NODE_TO_RESULT_KEY) - set(NODE_TO_AGENT)}"
 )
-assert (set(NODE_TO_AGENT) - set(NODE_TO_RESULT_KEY)) == RESULT_KEYLESS_NODES, (
-    "NODE_TO_AGENT has agent-nodes without a result key that are not declared in "
-    "RESULT_KEYLESS_NODES: "
-    f"{(set(NODE_TO_AGENT) - set(NODE_TO_RESULT_KEY)) ^ RESULT_KEYLESS_NODES}"
+undocumented = set(NODE_TO_AGENT) - set(NODE_TO_RESULT_KEY) - RESULT_KEYLESS_NODES
+stale = RESULT_KEYLESS_NODES - (set(NODE_TO_AGENT) - set(NODE_TO_RESULT_KEY))
+assert not undocumented and not stale, (
+    "NODE_TO_AGENT / NODE_TO_RESULT_KEY drift: "
+    f"undocumented nodes (in agent map but no result key and not in RESULT_KEYLESS_NODES): {undocumented or 'none'}, "
+    f"stale entries (in RESULT_KEYLESS_NODES but no longer keyless): {stale or 'none'}"
 )
 
 

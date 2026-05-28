@@ -93,10 +93,7 @@ async def build_chat_sections_async(
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            content = getattr(response, "content", None)
-            if content is None and isinstance(response, dict):
-                content = response.get("content", "")
-            content = content or ""
+            content = getattr(response, "content", "")
 
             titles = safe_parse_json_array(content, default=[])
             if titles:

@@ -383,17 +383,18 @@ async def retry_with_backoff(
                 )
                 break
             delay = compute_rate_limit_delay(rate_limit_attempt, max_retries)
-            rate_limit_max = min(max_retries, len(RATE_LIMIT_DELAYS))
             if delay is not None:
+                budget = min(max_retries, len(RATE_LIMIT_DELAYS))
                 logger.warning(
-                    f"[{agent_name}] Rate limited (429 retry {rate_limit_attempt + 1}/{rate_limit_max}). "
+                    f"[{agent_name}] Rate limited (429 retry {rate_limit_attempt + 1}/{budget}). "
                     f"Retrying in {delay}s..."
                 )
                 await _notify_retry(attempt, delay, "RateLimitError")
                 await asyncio.sleep(delay)
                 rate_limit_attempt += 1
             else:
-                logger.error(f"[{agent_name}] Rate limit exceeded after {rate_limit_max} retries")
+                budget = min(max_retries, len(RATE_LIMIT_DELAYS))
+                logger.error(f"[{agent_name}] Rate limit exceeded after {budget} retries")
                 break  # stop spinning; fall through to UpstreamExhaustedError
         except RETRYABLE_EXCEPTIONS as e:
             last_exception = e

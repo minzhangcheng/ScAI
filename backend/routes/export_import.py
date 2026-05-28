@@ -639,7 +639,7 @@ def _import_zip(content: bytes, user_id: str) -> AnalysisState:
         # dill.load on untrusted pickle is arbitrary code execution. Sandbox
         # state is rebuilt by re-running; we deliberately drop it on import.
         pkl_path = f"{session_id}/session.pkl"
-        if pkl_path in namelist and is_sandbox_pickle(pkl_path):
+        if pkl_path in namelist:
             logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {pkl_path}")
 
         # Extract metadata if exists

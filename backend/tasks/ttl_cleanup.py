@@ -17,9 +17,8 @@ def _unlink_chunks(upload_id: str, total: int, base: Path) -> int:
     for i in range(total):
         chunk_path = base / f"{upload_id}.chunk.{i}"
         try:
-            if chunk_path.exists():
-                chunk_path.unlink()
-                cleaned += 1
+            chunk_path.unlink(missing_ok=True)
+            cleaned += 1
         except OSError:
             pass
     return cleaned

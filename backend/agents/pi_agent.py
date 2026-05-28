@@ -18,7 +18,7 @@ from ..models.schemas import (
     DATA_TYPE_SCRNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient
-from ..constants import PI_REVIEW_FALLBACK_DECISION
+from ..constants import PI_REVIEW_FALLBACK_DECISION, STOP_KEYWORDS
 
 
 def _build_default_bio_tasks(state: AnalysisState, detailed: bool = False) -> list:
@@ -1552,7 +1552,6 @@ If adjusting direction, provide specific and actionable tasks.
             logger.warning(f"[PI] No valid JSON found in response, using fallback parsing. Response: {response[:200] if response else 'None'}...")
         
         # Fallback: check for stop keywords manually (English + Chinese)
-        from ..constants import STOP_KEYWORDS
         human_lower = human_input.lower()
 
         if any(keyword in human_lower for keyword in STOP_KEYWORDS):
@@ -1765,8 +1764,7 @@ Note: Extract biochemistry values from user message if they mention specific num
             }
         
         # Fallback: check for stop keywords (English + Chinese)
-        from ..constants import STOP_KEYWORDS
-
+        user_lower = user_message.lower()
         if any(keyword in user_lower for keyword in STOP_KEYWORDS):
             return {
                 "action": "stop",

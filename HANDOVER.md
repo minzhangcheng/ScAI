@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.7.4 · **Last updated**: 2026-05-28
+**Version**: 0.25.7.5 · **Last updated**: 2026-05-28
 
 ## 1. Runtime Architecture
 
@@ -358,6 +358,13 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.7.5` — cleanup & refactoring (2026-05-28):
+  - **Rate limiter lazy init**: `SlidingWindowRateLimiter` switched from `defaultdict(deque)` to `dict` + manual `get()` — no auto-created entries for non-existent keys. `_prune` returns `None` for unseen keys; `is_allowed` short-circuits to True.
+  - **Node-map assertion refined**: `constants.py` drift guard now separately tracks `undocumented` vs `stale` nodes with clearer error messages.
+  - **PI agent cleanup**: `STOP_KEYWORDS` import moved to top-level; restored accidentally removed `user_lower = user_message.lower()` in `process_user_input`.
+  - **Unknown WaitInputReason handling**: `resolve_hitl_skip_target` logs a warning for unrecognized `wait_input_reason` values so new gate types don't silently deadlock.
+  - **Minor simplifications**: `_import_zip` removes redundant `is_sandbox_pickle` check; `chat_sections` simplifies content extraction; `user_cleanup` calls `shutil.rmtree` directly via `to_thread`; `ttl_cleanup` uses `unlink(missing_ok=True)`; `_evaluate_dr_coverage` removes unreachable `return []`; bioinfo auto-retry re-raises `UpstreamExhaustedError`.
 
 - `0.25.7.4` — node-map drift guard, STOP_KEYWORDS consolidation, cleanup async offload (2026-05-28):
   - **Node-map drift guard**: `constants.py` adds `RESULT_KEYLESS_NODES` and import-time assertions ensuring `NODE_TO_AGENT` and `NODE_TO_RESULT_KEY` stay in sync. New test `test_node_maps_consistent.py`.

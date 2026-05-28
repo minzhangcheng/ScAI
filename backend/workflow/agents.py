@@ -959,5 +959,4 @@ Return ONLY the JSON array, nothing else."""
         except Exception as e:
             logger.warning(f"[{self.session_id}] DR coverage evaluation failed: {e}")
             return topics
-        return []
     

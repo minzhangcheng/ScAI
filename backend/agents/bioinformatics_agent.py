@@ -3447,6 +3447,8 @@ except Exception as _save_err:
                                 continue  # Back to review loop
                             else:
                                 logger.warning(f"[Bioinformatics] Auto-retry also failed: {retry_result.error}")
+                    except UpstreamExhaustedError:
+                        raise
                     except Exception as retry_err:
                         logger.warning(f"[Bioinformatics] Auto-retry exception: {retry_err}")
                     break  # Both attempts failed

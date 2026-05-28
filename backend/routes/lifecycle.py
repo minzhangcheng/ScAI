@@ -55,6 +55,12 @@ def resolve_hitl_skip_target(state):
     if reason == WaitInputReason.AGENT_DISABLED.value:
         info = state.agent_disabled_info or {}
         return info.get("node_name", ""), info.get("generation", 0)
+    # Unknown or None reason — round-completion gate uses signal_continue.
+    # Fail-closed: if a new WaitInputReason is added that has its own gate,
+    # this must be updated to handle it (otherwise signal_continue would deadlock).
+    if reason is not None:
+        logger.warning(f"[lifecycle] resolve_hitl_skip_target: unknown wait_input_reason={reason}, "
+                       f"falling back to signal_continue which may not unblock this gate")
     return None
 
 

@@ -12,10 +12,6 @@ from backend.state import sessions, state_lock
 logger = logging.getLogger(__name__)
 
 
-def _rmtree(path: Path) -> None:
-    shutil.rmtree(path)
-
-
 def _scan_and_unlink_state_files(state_dir: Path, sid: str) -> int:
     """Return number of state files deleted for ``sid`` under ``state_dir``."""
     if not state_dir.exists():
@@ -60,7 +56,7 @@ async def delete_user_data(user_id: str) -> dict:
         sid = sess.get("id", "")
         session_dir = SESSION_DIR / sid
         if session_dir.exists():
-            await asyncio.to_thread(_rmtree, session_dir)
+            await asyncio.to_thread(shutil.rmtree, session_dir)
             deleted_sessions += 1
             logger.info(f"Deleted session directory: {session_dir}")
         deleted_state_files += await asyncio.to_thread(
