@@ -12,6 +12,7 @@ import base64
 import asyncio
 import time
 import logging
+from queue import Empty as QueueEmpty
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -673,15 +674,14 @@ class LocalJupyterSandbox:
         while True:
             try:
                 self.kc.kernel_info()
-                msg = await asyncio.wait_for(
-                    asyncio.to_thread(self.kc.get_shell_msg),
-                    timeout=5
-                )
+                msg = await asyncio.to_thread(self.kc.get_shell_msg, timeout=5)
                 if msg['msg_type'] == 'kernel_info_reply':
                     break
+            except QueueEmpty:
+                # ZMQ poll timed out — kernel not ready yet
+                await asyncio.sleep(0.5)
             except Exception as e:
-                # Kernel not ready yet, wait and retry
-                logger.debug(f"Kernel not ready yet: {e}")
+                logger.warning(f"Kernel not ready yet: {e}")
                 await asyncio.sleep(0.5)
     
     async def _initialize_kernel(self):
@@ -1305,7 +1305,11 @@ if _skipped_vars:
             try:
                 await asyncio.to_thread(self.km.restart_kernel)
 
-                # Rebuild client connection
+                # Rebuild client connection.  Brief sleep to let any
+                # in-flight ZMQ reader threads finish their current poll
+                # cycle before we close the channels underneath them.
+                await asyncio.sleep(0.3)
+
                 if self.kc is not None:
                     try:
                         self.kc.stop_channels()
@@ -1313,6 +1317,17 @@ if _skipped_vars:
                         logger.debug(f"Failed to stop kernel channels during recovery: {e}")
                 self.kc = self.km.client()
                 self.kc.start_channels()
+
+                # Drain stale messages that may have arrived on the new
+                # channels before the kernel was fully initialised (e.g.
+                # kernel-info broadcasts).  These carry the new session key
+                # so they won't trigger "Invalid Signature", but leaving
+                # them in the queue can confuse the first execute().
+                try:
+                    for _ in range(10):
+                        await asyncio.to_thread(self.kc.get_iopub_msg, timeout=0.1)
+                except QueueEmpty:
+                    pass  # queue drained
 
                 # Wait for kernel to be ready
                 await asyncio.wait_for(self._wait_for_ready(), timeout=30)
@@ -1414,17 +1429,22 @@ if _skipped_vars:
                 msg = None
                 if remaining > 0:
                     try:
-                        msg = await asyncio.wait_for(
-                            asyncio.to_thread(self.kc.get_iopub_msg),
+                        # Pass timeout directly to get_iopub_msg so the thread
+                        # returns after the ZMQ-level poll expires.  Previously
+                        # asyncio.wait_for(asyncio.to_thread(get_iopub_msg)) was
+                        # used, but that only cancels the *coroutine* — the
+                        # underlying thread stays blocked on ZMQ recv forever.
+                        # Each timeout leaked an orphaned reader thread; multiple
+                        # threads reading the same ZMQ socket is unsafe and
+                        # eventually triggers libzmq abort (src/msg.cpp:387).
+                        msg = await asyncio.to_thread(
+                            self.kc.get_iopub_msg,
                             timeout=min(remaining, IOPUB_POLL_CAP)
                         )
-                    except asyncio.TimeoutError:
-                        # Either the poll cap elapsed (wall-clock time may remain →
-                        # re-loop) or the deadline truly passed. Re-check before
-                        # declaring a timeout.
-                        # Also check kernel liveness: if the kernel died mid-execution
-                        # (e.g. OOM kill), ZMQ channels will be corrupt and the next
-                        # get_iopub_msg or kc.execute would trigger libzmq abort.
+                    except QueueEmpty:
+                        # ZMQ poll timed out — no message arrived within the
+                        # poll cap.  Re-check the wall-clock deadline and
+                        # kernel liveness before looping or declaring timeout.
                         if self.km and not self.km.is_alive():
                             logger.warning(
                                 f"[{self.session_id}] Kernel died during execution; "
@@ -1462,13 +1482,12 @@ if _skipped_vars:
                             # Drain any remaining messages to clear the queue
                             try:
                                 while True:
-                                    drain_msg = await asyncio.wait_for(
-                                        asyncio.to_thread(self.kc.get_iopub_msg),
-                                        timeout=1.0
+                                    drain_msg = await asyncio.to_thread(
+                                        self.kc.get_iopub_msg, timeout=1.0
                                     )
                                     if drain_msg['msg_type'] == 'status' and drain_msg['content']['execution_state'] == 'idle':
                                         break
-                            except asyncio.TimeoutError:
+                            except QueueEmpty:
                                 # Kernel may be in bad state, restart it
                                 logger.warning(f"Kernel did not return to idle after interrupt for session {self.session_id}")
                                 await self._restart_kernel()

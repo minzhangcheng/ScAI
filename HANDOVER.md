@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.9 · **Last updated**: 2026-05-28
+**Version**: 0.25.10 · **Last updated**: 2026-05-28
 
 ### Session save/restore: streaming + out-of-kernel compression
 
@@ -377,6 +377,13 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.10` — ZMQ thread leak fix (2026-05-28):
+  - **Orphaned reader thread elimination**: Replaced `asyncio.wait_for(asyncio.to_thread(get_iopub_msg))` with `asyncio.to_thread(get_iopub_msg, timeout=...)` across the entire `execute()` method. The old pattern only cancelled the coroutine — the underlying thread stayed blocked on ZMQ recv forever, leaking orphaned reader threads. Multiple threads reading the same ZMQ socket is unsafe and eventually triggers libzmq `abort()` in `src/msg.cpp:387`.
+  - **Timeout detection via QueueEmpty**: All `except asyncio.TimeoutError` changed to `except QueueEmpty` since the ZMQ-level poll timeout now surfaces as `queue.Empty` instead of `asyncio.TimeoutError`. `queue.Empty` imported as `QueueEmpty`.
+  - **Restart channel drain**: `_restart_kernel` drains stale ZMQ messages (up to 10) from new channels after restart, preventing leftover kernel-info broadcasts from confusing the first `execute()`.
+  - **Restart sleep guard**: Added `await asyncio.sleep(0.3)` before stopping channels during kernel restart, letting in-flight reader threads finish their current poll cycle.
+  - **wait_for_ready simplified**: Uses `get_shell_msg(timeout=5)` directly with `except QueueEmpty` handler instead of nested `asyncio.wait_for`/`asyncio.to_thread`.
 
 - `0.25.9` — streaming session save/restore & out-of-kernel snapshot compression (2026-05-28):
   - **Per-variable streaming dill**: `save_session` writes each variable as an independent `dill.dump((name, obj), f)` frame. Unpicklable variables skipped via `tell()/seek()/truncate()` rollback — file always parseable. Peak kernel memory drops from "N full pickle byte strings" to one variable's buffer, eliminating OOM-kills.

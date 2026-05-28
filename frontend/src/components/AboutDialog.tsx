@@ -49,7 +49,7 @@ export function AboutDialog() {
                     : 'Single Cell Sequencing Analysis Driven by AI'}
                 </p>
                 <div className="mt-2 inline-block px-3 py-1 bg-accent-100 text-accent-700 text-xs font-medium rounded-full">
-                  v0.25.9
+                  v0.25.10
                 </div>
               </div>
 
