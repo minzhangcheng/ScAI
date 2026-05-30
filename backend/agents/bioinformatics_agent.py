@@ -931,6 +931,125 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         ]
         return "\n\n".join(p for p in parts if p)
 
+    # ---- Context compaction (volume-based) ----
+
+    COMPACT_THRESHOLD_TOKENS = 150_000
+    COMPACT_TARGET_TOKENS = 105_000
+    RECENT_PROTECT = 6
+    _CHARS_PER_TOKEN = 3.5
+    _COMPACT_TRUNCATE_BUDGETS = [64 * 1024, 32 * 1024, 16 * 1024]
+
+    @staticmethod
+    def _estimate_context_tokens(messages: List[Dict[str, Any]]) -> int:
+        total_chars = 0
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                total_chars += len(json.dumps(content))
+            for tc in m.get("tool_calls") or []:
+                if isinstance(tc, dict):
+                    args = tc.get("function", {}).get("arguments", "")
+                    if isinstance(args, str):
+                        total_chars += len(args)
+            total_chars += len(m.get("name", "") or "")
+            total_chars += len(m.get("tool_call_id", "") or "")
+        return int(total_chars / BioinformaticsAgent._CHARS_PER_TOKEN)
+
+    @staticmethod
+    def _compact_context(messages: List[Dict[str, Any]], target_tokens: int) -> Tuple[List[Dict[str, Any]], bool]:
+        estimated = BioinformaticsAgent._estimate_context_tokens(messages)
+        if estimated <= target_tokens:
+            return messages, False
+
+        cls = BioinformaticsAgent
+        budget_list = cls._COMPACT_TRUNCATE_BUDGETS
+        RECENT_PROTECT = cls.RECENT_PROTECT
+
+        result = [dict(m) for m in messages]
+
+        # --- Phase 1: truncate large tool/user content (never assistant tool_calls.arguments) ---
+        anchor_count = 2
+        if len(result) > 1:
+            c1 = result[1].get("content", "")
+            is_dynamic = False
+            if isinstance(c1, str):
+                is_dynamic = c1.startswith(_DYNAMIC_CONTEXT_PREFIX)
+            elif isinstance(c1, list):
+                is_dynamic = any(
+                    p.get("text", "").startswith(_DYNAMIC_CONTEXT_PREFIX)
+                    for p in c1 if isinstance(p, dict)
+                )
+            if not is_dynamic:
+                anchor_count = 1
+
+        protect_end = max(anchor_count, len(result) - RECENT_PROTECT)
+
+        for budget in budget_list:
+            if cls._estimate_context_tokens(result) <= target_tokens:
+                break
+            candidates = []
+            for idx in range(anchor_count, protect_end):
+                m = result[idx]
+                role = m.get("role", "")
+                content = m.get("content")
+                if role not in ("tool", "user"):
+                    continue
+                if not isinstance(content, str) or len(content) <= budget:
+                    continue
+                candidates.append((idx, len(content)))
+            candidates.sort(key=lambda x: -x[1])
+            for idx, _ in candidates:
+                if cls._estimate_context_tokens(result) <= target_tokens:
+                    break
+                old_content = result[idx]["content"]
+                new_content = truncate_for_llm(old_content, max_chars=budget)
+                if len(new_content) < len(old_content):
+                    result[idx] = {**result[idx], "content": new_content}
+
+        # --- Phase 2: drop oldest mid-section with summary ---
+        if cls._estimate_context_tokens(result) > target_tokens:
+            system_msg = result[0]
+            dynamic_msg = result[1] if anchor_count >= 2 else None
+            tail_start = max(anchor_count, len(result) - RECENT_PROTECT)
+
+            # Walk backward from tail boundary to avoid orphaning tool_result
+            cut = tail_start
+            while cut > anchor_count and result[cut].get("role") == "tool":
+                cut -= 1
+
+            if cut > anchor_count:
+                dropped = result[anchor_count:cut]
+                summary = BioinformaticsAgent._summarize_dropped_messages(dropped)
+                summary_msg = {
+                    "role": "user",
+                    "content": f"[Previous analysis summary (compacted)]\n{summary}"
+                }
+                if dynamic_msg:
+                    result = [system_msg, dynamic_msg, summary_msg] + result[cut:]
+                else:
+                    result = [system_msg, summary_msg] + result[cut:]
+
+        # --- Phase 3: fallback — truncate protected window if still over ---
+        if cls._estimate_context_tokens(result) > target_tokens:
+            fallback_start = max(0, len(result) - RECENT_PROTECT)
+            for idx in range(fallback_start, len(result)):
+                m = result[idx]
+                role = m.get("role", "")
+                content = m.get("content")
+                if role not in ("tool", "user"):
+                    continue
+                if not isinstance(content, str) or len(content) <= 16 * 1024:
+                    continue
+                new_content = truncate_for_llm(content, max_chars=16 * 1024)
+                if len(new_content) < len(content):
+                    result[idx] = {**result[idx], "content": new_content}
+                if cls._estimate_context_tokens(result) <= target_tokens:
+                    break
+
+        return result, cls._estimate_context_tokens(result) < estimated
+
     @staticmethod
     def _summarize_dropped_messages(dropped: List[Dict[str, Any]]) -> str:
         """Summarize dropped messages for the trimming summary.
@@ -1764,6 +1883,20 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     messages = [system_msg, summary_msg] + messages[cut:]
                 logger.info(f"Trimmed message history: dropped {len(dropped)} messages, {len(messages)} remaining")
 
+            # Volume-based compaction: truncate large tool/user content and
+            # drop+summarize oldest messages when estimated token count
+            # exceeds the threshold. Complements count-based trim above
+            # (which only fires at 80 messages; this session failed at 53
+            # messages / ~257K tokens due to voluminous execute_code output).
+            messages, _compacted = self._compact_context(
+                messages, self.COMPACT_THRESHOLD_TOKENS
+            )
+            if _compacted:
+                logger.info(
+                    f"[Bioinformatics] Context compacted: "
+                    f"estimated {self._estimate_context_tokens(messages)} tokens"
+                )
+
             # If the previous annotate_clusters call failed, prepend a high-priority
             # reminder to force the agent back to the annotation workflow.
             if annotation_retry_required and annotation_retry_attempts <= 3:
@@ -1794,13 +1927,28 @@ If results significantly deviate from plan expectations, report via consult_pi i
                 )
                 break
 
+            # When the model has returned consecutive empty responses, force
+            # tool_choice="required" so it cannot produce another zero-content
+            # turn. A message-level nudge alone is insufficient for models that
+            # silently decline to act (content='', tool_calls=None, ~4
+            # completion tokens); "required" eliminates the empty-response
+            # option entirely.
+            effective_tool_choice = self._compute_tool_choice(
+                text_response_count, MAX_TEXT_RESPONSES
+            )
+            if empty_response_count > 0 and effective_tool_choice == "auto":
+                effective_tool_choice = "required"
+                logger.info(
+                    f"[Bioinformatics] Escalating tool_choice to 'required' "
+                    f"after {empty_response_count} empty response(s)"
+                )
             try:
                 response = await self.llm_client.chat_with_tools(
                     model=self.model,
                     messages=messages,
                     tools=TOOLS,
-                    tool_choice=self._compute_tool_choice(text_response_count, MAX_TEXT_RESPONSES),
-                    temperature=self.config.temperature,  # Use configured temperature
+                    tool_choice=effective_tool_choice,
+                    temperature=self.config.temperature,
                     max_tokens=32768
                 )
             except UpstreamExhaustedError:
@@ -1822,10 +1970,28 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     f"[Bioinformatics] Empty/truncated response "
                     f"({empty_response_count}/{MAX_EMPTY_RESPONSES})"
                 )
+
+                # Reactive compaction: empty response is a strong signal of
+                # context overflow (usage=0, ~80s duration). Force compact
+                # now so the retry has a smaller context.
+                messages, _reactive_compacted = self._compact_context(
+                    messages, self.COMPACT_TARGET_TOKENS
+                )
+                if _reactive_compacted:
+                    est = self._estimate_context_tokens(messages)
+                    logger.info(
+                        f"[Bioinformatics] Reactive context compaction after empty "
+                        f"response: estimated {est} tokens"
+                    )
+                    await self._notify(
+                        "status",
+                        f"Context compacted due to large outputs (≈{est:,} tokens), retrying…"
+                    )
+
                 if empty_response_count >= MAX_EMPTY_RESPONSES:
-                    # Persist nudges + conversation so a Retry from the HITL
-                    # gate resumes with the perturbed messages instead of
-                    # replaying the identical prefix that caused the loop.
+                    # Persist compacted conversation so a Retry from the HITL
+                    # gate resumes with reduced context instead of replaying
+                    # the same overflow that caused the loop.
                     try:
                         await checkpoint_mgr.save({
                             'step_name': f'step_{step_count}_empty_exhausted',
@@ -1848,26 +2014,22 @@ If results significantly deviate from plan expectations, report via consult_pi i
                         f"[Bioinformatics] {MAX_EMPTY_RESPONSES} consecutive empty responses",
                         agent_name="bioinformatics",
                     )
-                # Perturb the request before retrying. A plain retry resends the
-                # byte-identical (and ~99% prefix-cached) message list, so a model
-                # that emitted an empty completion — common with reasoning models
-                # that occasionally return a zero-content turn — deterministically
-                # returns empty again and burns the whole budget. Appending a fresh
-                # nudge changes the suffix and forces a concrete next action. The
-                # counter in the text makes each retry's nudge distinct so it also
-                # busts any exact-match response cache on the upstream.
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"[System] Your previous reply was empty — no text and no "
-                        f"tool call (attempt {empty_response_count}). An empty turn "
-                        f"is not a valid step. You MUST respond now with exactly one "
-                        f"concrete action: call execute_code to run the next analysis "
-                        f"step, call another appropriate tool, or call report_findings "
-                        f"if every assigned task is already complete. Do not return an "
-                        f"empty message."
-                    ),
-                })
+                # Append nudge only if compaction did NOT happen this round
+                # (compaction already significantly changed the request;
+                #  nudge would add volume without value).
+                if not _reactive_compacted:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[System] Your previous reply was empty — no text and no "
+                            f"tool call (attempt {empty_response_count}). An empty turn "
+                            f"is not a valid step. You MUST respond now with exactly one "
+                            f"concrete action: call execute_code to run the next analysis "
+                            f"step, call another appropriate tool, or call report_findings "
+                            f"if every assigned task is already complete. Do not return an "
+                            f"empty message."
+                        ),
+                    })
                 await asyncio.sleep(self._empty_retry_backoff(empty_response_count))
                 continue  # retry the LLM call
             empty_response_count = 0

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.11 · **Last updated**: 2026-05-28
+**Version**: 0.25.12 · **Last updated**: 2026-05-28
 
 ### Session save/restore: streaming + out-of-kernel compression
 
@@ -377,6 +377,13 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.12` — volume-based context compaction & reactive empty-response escalation (2026-05-28):
+  - **Volume-based context compaction**: `_compact_context()` applies three-phase compaction at 150K estimated tokens: (1) truncate large tool/user content with decreasing budgets 64K/32K/16K chars, (2) drop+summarize oldest non-protected messages, (3) fallback truncate protected window. Protects anchor system/dynamic messages and the 6 most recent messages.
+  - **Reactive compaction on empty response**: Empty responses trigger immediate compaction to `COMPACT_TARGET_TOKENS=105K` before retrying, replacing the previous nudge-only approach. The nudge now only fires when compaction didn't occur (compaction alone already changes the request sufficiently).
+  - **Empty-response tool_choice escalation**: When `empty_response_count > 0`, forces `tool_choice="required"` — the model must respond with a concrete tool call instead of another zero-content turn.
+  - **New static methods**: `_estimate_context_tokens()`, `_compact_context()`.
+  - **New test file**: `test_context_compaction.py`.
 
 - `0.25.11` — smart retry resume & checkpoint stage awareness (2026-05-28):
   - **Resumable checkpoint detection**: `has_resumable_checkpoint()` returns True when a non-completed checkpoint for the current round+stage exists. `_bioinformatics_analysis` uses this to skip the PI planning prelude (goal definition, task refinement, snapshot, instruction display) on Retry — re-running PI LLM calls wastes tokens and confuses the user.
