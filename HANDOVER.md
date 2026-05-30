@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.10 · **Last updated**: 2026-05-28
+**Version**: 0.25.11 · **Last updated**: 2026-05-28
 
 ### Session save/restore: streaming + out-of-kernel compression
 
@@ -377,6 +377,13 @@ Detailed release notes for every version are available through `git log` and rel
     - Aborts analysis on agent config sync failure.
     - Handles negative clock delta in message TTL persistence check.
   - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
+- `0.25.11` — smart retry resume & checkpoint stage awareness (2026-05-28):
+  - **Resumable checkpoint detection**: `has_resumable_checkpoint()` returns True when a non-completed checkpoint for the current round+stage exists. `_bioinformatics_analysis` uses this to skip the PI planning prelude (goal definition, task refinement, snapshot, instruction display) on Retry — re-running PI LLM calls wastes tokens and confuses the user.
+  - **Checkpoint stage guard**: Checkpoints now store `planning_stage`. `run_autonomous_analysis` rejects checkpoints whose `planning_stage` doesn't match the current stage, preventing a stale stage1 checkpoint from being wrongly resumed when stage2 begins (both share the same `round_number`).
+  - **Pre-exhaustion checkpoint save**: Before raising `UpstreamExhaustedError` on empty responses, the full conversation state (messages, findings, figures, code_history, analysis_log) is saved as a checkpoint. A Retry from the HITL gate then resumes with the perturbed messages instead of replaying the identical prefix.
+  - **Empty-response nudge perturbation**: Each empty-response retry appends a distinct `[System]` nudge message before retrying — the changing suffix busts both prefix caching and deterministic re-failure in reasoning models.
+  - **New helper**: `_checkpoint_state_dir()` resolves checkpoint path, shared by `has_resumable_checkpoint` and `run_autonomous_analysis`.
 
 - `0.25.10` — ZMQ thread leak fix (2026-05-28):
   - **Orphaned reader thread elimination**: Replaced `asyncio.wait_for(asyncio.to_thread(get_iopub_msg))` with `asyncio.to_thread(get_iopub_msg, timeout=...)` across the entire `execute()` method. The old pattern only cancelled the coroutine — the underlying thread stayed blocked on ZMQ recv forever, leaking orphaned reader threads. Multiple threads reading the same ZMQ socket is unsafe and eventually triggers libzmq `abort()` in `src/msg.cpp:387`.

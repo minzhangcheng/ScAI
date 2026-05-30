@@ -255,19 +255,39 @@ class AgentNodesMixin:
                 "bioinformatics_result": waiting_result
             }
         
+        # Planning stage support: filter tasks and adjust instructions based on stage
+        planning_stage = state.get("planning_stage", "full")
+
+        # Detect resume: a non-completed checkpoint for this round+stage means a
+        # prior run already started the autonomous loop (e.g. it failed and the
+        # user clicked Retry on the LLM-failure gate). On resume the agent restores
+        # the conversation from the checkpoint and ignores the instruction we build
+        # here, so the PI planning prelude — goal definition, task refinement, and
+        # the heavy pre-execution snapshot — is pure waste and re-triggers PI LLM
+        # calls. Skip it and go straight back into the autonomous loop. The
+        # planning_stage argument prevents a stale stage1 checkpoint (same round)
+        # from being treated as resumable once stage2 begins.
+        resuming = await self.bioinformatics_agent.has_resumable_checkpoint(
+            analysis_state, planning_stage
+        )
+        if resuming:
+            logger.info(
+                f"[{self.session_id}] Resumable checkpoint detected — "
+                f"skipping PI planning prelude and resuming autonomous analysis"
+            )
+
         # Incorporate human guidance from workflow state (set by _initialize_round)
         human_guidance = ""
         if state.get("human_guidance"):
             human_guidance = f"\n\nHuman researcher guidance: {state['human_guidance']}"
-        
-        # Planning stage support: filter tasks and adjust instructions based on stage
-        planning_stage = state.get("planning_stage", "full")
-        
-        # Create snapshot before execution
-        await self._create_auto_snapshot(analysis_state, f"pre_execution_{planning_stage}")
-        
+
+        # Create snapshot before execution (skip on resume — it already exists)
+        if not resuming:
+            await self._create_auto_snapshot(analysis_state, f"pre_execution_{planning_stage}")
+
         # Step 1: PI provides analysis goals
-        await self._send_message("status", "PI is defining analysis goals...", AgentType.PI)
+        if not resuming:
+            await self._send_message("status", "PI is defining analysis goals...", AgentType.PI)
         
         # Get PI instructions from workflow state
         pi_instructions = state.get("pi_instructions", {})
@@ -283,8 +303,9 @@ class AgentNodesMixin:
             bioinf_tasks = stage1_tasks
 
         # Dynamic PI planning: refine bioinformatics tasks based on completed results
+        # (skipped on resume — the refined instruction would be discarded anyway)
         overview = pi_instructions.get("overview", "")
-        if overview:
+        if overview and not resuming:
             completed = self._collect_current_round_results(state)
             if completed:
                 await self._send_message("status", "PI is refining bioinformatics tasks...", AgentType.PI)
@@ -507,8 +528,11 @@ This is Round {analysis_state.current_round}. The Jupyter kernel retains all var
 Focus on PI's specific goals above — do NOT re-run completed steps (QC, clustering, cell annotation, etc.).
 Call report_findings ONLY after completing ALL assigned tasks above."""
 
-        await self._send_message("prompt", instruction, AgentType.PI)
-        
+        # On resume the agent restores its own conversation from the checkpoint,
+        # so showing this freshly-built (and discarded) instruction would mislead.
+        if not resuming:
+            await self._send_message("prompt", instruction, AgentType.PI)
+
         # Step 2: Bioinformatics agent runs autonomously with figure review support
         await self._send_message("status", "Bioinformatics agent is running autonomous analysis...", AgentType.BIOINFORMATICS)
 

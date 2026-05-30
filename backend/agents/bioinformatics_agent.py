@@ -1362,6 +1362,54 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
 
         return revised_plan
 
+    def _checkpoint_state_dir(self) -> str:
+        """Resolve the directory where this session's checkpoint lives.
+
+        Mirrors the resolution used inside run_autonomous_analysis so both
+        agree on the checkpoint path.
+        """
+        if hasattr(self.sandbox, 'state_dir') and self.sandbox.state_dir:
+            return str(self.sandbox.state_dir)
+        state_dir = str(Path(self.sandbox.working_dir) / "states")
+        Path(state_dir).mkdir(parents=True, exist_ok=True)
+        return state_dir
+
+    async def has_resumable_checkpoint(
+        self, state: AnalysisState, planning_stage: str = "full"
+    ) -> bool:
+        """True when a non-completed checkpoint for the current round+stage exists.
+
+        The workflow node uses this to decide whether a re-entry (e.g. the user
+        clicking Retry after an LLM failure) should resume the autonomous loop
+        directly. On resume, run_autonomous_analysis restores the conversation
+        from the checkpoint and discards the freshly-built instruction, so the
+        PI planning prelude (goal definition, task refinement, pre-execution
+        snapshot) is wasted work — and worse, re-runs PI LLM calls that confuse
+        the user and can fail the same way. The deeper message-shape validation
+        still happens inside run_autonomous_analysis; this is only the cheap
+        gate that distinguishes "fresh start" from "resume".
+
+        The planning_stage check mirrors run_autonomous_analysis: stage1 and
+        stage2 share a round_number, so a not-yet-cleared stage1 checkpoint must
+        NOT be treated as resumable when stage2 begins. Only an explicit stage
+        mismatch disqualifies it (pre-fix checkpoints carry no planning_stage).
+        """
+        try:
+            checkpoint_mgr = CheckpointManager(
+                session_id=state.id, state_dir=self._checkpoint_state_dir()
+            )
+            checkpoint = await checkpoint_mgr.load()
+        except Exception:
+            return False
+        if not checkpoint or checkpoint.get('completed', False):
+            return False
+        if checkpoint.get('round_number') != state.current_round:
+            return False
+        cp_stage = checkpoint.get('planning_stage')
+        if cp_stage is not None and cp_stage != planning_stage:
+            return False
+        return True
+
     async def run_autonomous_analysis(
         self,
         state: AnalysisState,
@@ -1433,6 +1481,19 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                     if cp_round is not None and cp_round != state.current_round:
                         validation_errors.append(
                             f"round_number mismatch: checkpoint={cp_round}, current={state.current_round}"
+                        )
+
+                    # Check planning_stage matches. stage1 and stage2 share the same
+                    # round_number, so without this a stage1 checkpoint that wasn't
+                    # cleared (e.g. stage1 ended max_steps_reached/completed_with_fallback,
+                    # which keep completed=False) would be wrongly resumed when stage2
+                    # starts — feeding the stage2 run the stale stage1 conversation
+                    # instead of the stage2 instruction. Only reject on an explicit
+                    # mismatch so pre-fix checkpoints (no planning_stage) still resume.
+                    cp_stage = checkpoint.get('planning_stage')
+                    if cp_stage is not None and cp_stage != planning_stage:
+                        validation_errors.append(
+                            f"planning_stage mismatch: checkpoint={cp_stage}, current={planning_stage}"
                         )
 
                     if not validation_errors:
@@ -1645,6 +1706,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                         'step_name': f'step_{step_count}',
                         'session_id': state.id,
                         'round_number': state.current_round,
+                        'planning_stage': planning_stage,
                         'step_number': step_count,
                         'total_steps': max_steps,
                         'messages': messages,
@@ -1761,10 +1823,51 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     f"({empty_response_count}/{MAX_EMPTY_RESPONSES})"
                 )
                 if empty_response_count >= MAX_EMPTY_RESPONSES:
+                    # Persist nudges + conversation so a Retry from the HITL
+                    # gate resumes with the perturbed messages instead of
+                    # replaying the identical prefix that caused the loop.
+                    try:
+                        await checkpoint_mgr.save({
+                            'step_name': f'step_{step_count}_empty_exhausted',
+                            'session_id': state.id,
+                            'round_number': state.current_round,
+                            'planning_stage': planning_stage,
+                            'step_number': step_count,
+                            'total_steps': max_steps,
+                            'messages': messages,
+                            'findings': all_findings,
+                            'figures': all_figures,
+                            'code_history': [ce.model_dump(mode="json") for ce in self.code_history],
+                            'analysis_log': [step.model_dump(mode="json") for step in analysis_log],
+                            'analysis_context': self.analysis_context,
+                            'completed': False,
+                        })
+                    except Exception as e:
+                        logger.warning(f"[Bioinformatics] Pre-empty-exhaustion checkpoint save failed: {e}")
                     raise UpstreamExhaustedError(
                         f"[Bioinformatics] {MAX_EMPTY_RESPONSES} consecutive empty responses",
                         agent_name="bioinformatics",
                     )
+                # Perturb the request before retrying. A plain retry resends the
+                # byte-identical (and ~99% prefix-cached) message list, so a model
+                # that emitted an empty completion — common with reasoning models
+                # that occasionally return a zero-content turn — deterministically
+                # returns empty again and burns the whole budget. Appending a fresh
+                # nudge changes the suffix and forces a concrete next action. The
+                # counter in the text makes each retry's nudge distinct so it also
+                # busts any exact-match response cache on the upstream.
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[System] Your previous reply was empty — no text and no "
+                        f"tool call (attempt {empty_response_count}). An empty turn "
+                        f"is not a valid step. You MUST respond now with exactly one "
+                        f"concrete action: call execute_code to run the next analysis "
+                        f"step, call another appropriate tool, or call report_findings "
+                        f"if every assigned task is already complete. Do not return an "
+                        f"empty message."
+                    ),
+                })
                 await asyncio.sleep(self._empty_retry_backoff(empty_response_count))
                 continue  # retry the LLM call
             empty_response_count = 0
@@ -1800,6 +1903,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                             'step_name': f'step_{step_count}',
                             'session_id': state.id,
                             'round_number': state.current_round,
+                            'planning_stage': planning_stage,
                             'step_number': step_count,
                             'total_steps': max_steps,
                             'messages': messages,
