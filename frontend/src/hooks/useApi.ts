@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { useAppStore, Message, Session, AgentType, RoundResult, FigureReviewStatus } from '../stores/appStore'
+import { useAppStore, Message, Session, AgentType, RoundResult } from '../stores/appStore'
 import { transformRawMessage, restoreAgentErrors } from '../utils/messageTransform'
+import { transformLoadResponse, transformRoundResults } from '../utils/transformLoadResponse'
 import { devLog } from '../utils/logger'
 import { downloadBlob } from '../utils/download'
 
@@ -13,12 +14,6 @@ import type {
   SessionInfoUpdateResponse,
   GroupUpdateResponse,
   SessionListResponse,
-  RawRoundResult,
-  RawDataFile,
-  RawPublicationFigure,
-  RawPublicationTable,
-  RawTreatmentGroup,
-  RawBiochemistryIndicator,
   ChatMessage,
 } from '../types'
 
@@ -225,106 +220,38 @@ export function useSession() {
     try {
       const data = await apiFetch<SessionLoadResponse>(`/session/${sessionId}/load`)
 
-      // Transform round_results from snake_case to camelCase with defensive null checks
-      const transformedRoundResults = (data.round_results || []).map((r: RawRoundResult | null) => {
-        if (!r) return null
-        return {
-          round: r.round ?? 0,
-          summary: r.pi_summary || r.summary || '',
-          pathologyFindings: Array.isArray(r.pathology_findings) ? r.pathology_findings : [],
-          bioinformaticsFindings: Array.isArray(r.bioinformatics_findings) ? r.bioinformatics_findings : [],
-          biochemistryFindings: Array.isArray(r.biochemistry_findings) ? r.biochemistry_findings : [],
-          literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
-        }
-      }).filter((r): r is RoundResult => r !== null)
-
-      // Validate status is a known value
-      const validStatuses: readonly Session['status'][] = ['pending', 'running', 'paused', 'waiting_input', 'waiting_annotation', 'waiting_plan_review', 'completed', 'failed', 'generating_report']
-      const status: Session['status'] = validStatuses.includes(data.status as Session['status']) ? data.status as Session['status'] : 'pending'
+      const { sessionUpdates, storeUpdates } = transformLoadResponse(data)
 
       const session: Session = {
         id: data.session_id,
-        name: data.name,
-        status: status as Session['status'],
-        currentRound: data.current_round || 0,
+        name: data.name ?? '',
+        status: 'pending',
+        currentRound: 0,
         createdAt: data.created_at || new Date().toISOString(),
-        instruction: data.initial_instruction || '',
-        treatmentGroups: (data.treatment_groups || []).map((g: RawTreatmentGroup) => ({
-          id: g.id, name: g.name, description: g.description || '',
-          sampleCount: g.sampleCount ?? g.sample_count ?? 1, order: g.order ?? 0,
-        })),
-        dataFiles: (data.data_files || []).map((f: RawDataFile) => ({
-          id: f.id, filename: f.filename, filePath: f.filePath ?? f.file_path ?? '',
-          section: f.section, dataType: f.dataType ?? f.data_type ?? '',
-          groupId: f.groupId ?? f.group_id, sampleNumber: f.sampleNumber ?? f.sample_number,
-          description: f.description, timestamp: f.timestamp || '',
-        })),
-        biochemistryIndicators: (data.biochemistry_indicators || []).map((r: RawBiochemistryIndicator) => ({
-          id: r.id, indicator: r.indicator, value: r.value, unit: r.unit,
-          referenceRange: r.referenceRange ?? r.reference_range,
-          interpretation: r.interpretation,
-          groupId: r.groupId ?? r.group_id, sampleNumber: r.sampleNumber ?? r.sample_number,
-        })),
-        roundResults: transformedRoundResults,
-        finalSummary: data.final_summary,
-        // Publication outputs (snake_case → camelCase)
-        publicationFigures: (data.publication_figures || []).map((f: RawPublicationFigure) => ({
-          id: f.id,
-          name: f.name,
-          description: f.description,
-          figureType: f.figure_type || f.figureType || '',
-          pngPath: f.png_path || f.pngPath || '',
-          pdfPath: f.pdf_path || f.pdfPath || '',
-          pngBase64: f.png_base64 || f.pngBase64,
-          reviewStatus: (f.review_status || f.reviewStatus || 'pending') as FigureReviewStatus,
-          piFeedback: f.pi_feedback || f.piFeedback,
-          revisionCount: f.revision_count ?? f.revisionCount ?? 0,
-          createdAt: f.created_at || f.createdAt || '',
-        })),
-        publicationTables: (data.publication_tables || []).map((t: RawPublicationTable) => ({
-          id: t.id,
-          name: t.name,
-          description: t.description,
-          csvPath: t.csv_path || t.csvPath || '',
-          columns: Array.isArray(t.columns) ? t.columns : [],
-          previewData: Array.isArray(t.preview_data) ? t.preview_data : (t.previewData || []),
-          reviewStatus: (t.review_status || t.reviewStatus || 'pending') as FigureReviewStatus,
-          piFeedback: t.pi_feedback || t.piFeedback,
-          createdAt: t.created_at || t.createdAt || '',
-        })),
-        graphicAbstract: data.graphic_abstract ? {
-          id: data.graphic_abstract.id,
-          prompt: data.graphic_abstract.prompt || '',
-          imageBase64: data.graphic_abstract.image_base64 || data.graphic_abstract.imageBase64 || '',
-          textDiagram: data.graphic_abstract.text_diagram || data.graphic_abstract.textDiagram || undefined,
-          isTextMode: data.graphic_abstract.is_text_mode ?? data.graphic_abstract.isTextMode ?? false,
-          createdAt: data.graphic_abstract.created_at || data.graphic_abstract.createdAt || '',
-        } : undefined,
-        integratedReport: data.integrated_report || undefined,
-        explorationReportUrl: data.exploration_report_url || (data as any).explorationReportUrl,
-        analysisPhase: data.analysis_phase || undefined,
+        instruction: '',
+        treatmentGroups: [],
+        dataFiles: [],
+        biochemistryIndicators: [],
+        roundResults: [],
+        ...sessionUpdates,
       }
 
       setCurrentSession(session)
 
-      if (data.snapshot_count != null) {
-        useAppStore.getState().setSnapshotCount(data.snapshot_count)
+      if (storeUpdates.stateVersion != null) {
+        useAppStore.getState().setStateVersion(storeUpdates.stateVersion)
+      }
+      if (storeUpdates.snapshotCount != null) {
+        useAppStore.getState().setSnapshotCount(storeUpdates.snapshotCount)
+      }
+      if (storeUpdates.roundWaitSeconds != null) {
+        useAppStore.getState().setRoundWaitSeconds(storeUpdates.roundWaitSeconds)
       }
 
-      // Sync round_wait_seconds from server to store
-      if (typeof data.round_wait_seconds === 'number') {
-        useAppStore.getState().setRoundWaitSeconds(data.round_wait_seconds)
-      }
-
-      // Restore state version (always reset to avoid cross-session version collision)
-      useAppStore.getState().setStateVersion(data.state_version ?? 0)
-
-      // Restore agent errors
       if (data.agent_errors && Array.isArray(data.agent_errors)) {
         restoreAgentErrors(data.agent_errors)
       }
       
-      // Load realtime messages history (WebSocket messages)
       if (data.messages && Array.isArray(data.messages)) {
         setMessages(data.messages.map(transformRawMessage))
       } else {
@@ -491,13 +418,9 @@ export function useSession() {
       const refreshData = await apiFetch<SessionLoadResponse>(`/session/${session.id}/load`)
       const current = useAppStore.getState().currentSession
       if (current && current.id === session.id) {
+        const { sessionUpdates } = transformLoadResponse(refreshData)
         useAppStore.getState().updateSession({
-          dataFiles: (refreshData.data_files || []).map((f: RawDataFile) => ({
-            id: f.id, filename: f.filename, filePath: f.filePath ?? f.file_path ?? '',
-            section: f.section, dataType: f.dataType ?? f.data_type ?? '',
-            groupId: f.groupId ?? f.group_id, sampleNumber: f.sampleNumber ?? f.sample_number,
-            description: f.description, timestamp: f.timestamp || '',
-          })),
+          dataFiles: sessionUpdates.dataFiles,
         })
       }
     } catch {
@@ -840,15 +763,20 @@ export function useWebSocket() {
             if (data.agent_errors && Array.isArray(data.agent_errors)) {
               restoreAgentErrors(data.agent_errors)
             }
-            // Restore session status and analysis phase from server
-            if (data.status) {
-              const currentSess = useAppStore.getState().currentSession
-              if (currentSess && currentSess.id === loadingSessionId) {
-                useAppStore.getState().updateSession({
-                  status: data.status,
-                  currentRound: data.current_round ?? currentSess.currentRound,
-                  ...(data.analysis_phase ? { analysisPhase: data.analysis_phase } : {}),
-                })
+
+            // Sync full session state from server using shared transform
+            const { sessionUpdates, storeUpdates } = transformLoadResponse(data)
+            const currentSess = useAppStore.getState().currentSession
+            if (currentSess && currentSess.id === loadingSessionId) {
+              useAppStore.getState().updateSession(sessionUpdates)
+              if (storeUpdates.stateVersion != null) {
+                useAppStore.getState().setStateVersion(storeUpdates.stateVersion)
+              }
+              if (storeUpdates.snapshotCount != null) {
+                useAppStore.getState().setSnapshotCount(storeUpdates.snapshotCount)
+              }
+              if (storeUpdates.roundWaitSeconds != null) {
+                useAppStore.getState().setRoundWaitSeconds(storeUpdates.roundWaitSeconds)
               }
             }
           }
@@ -906,14 +834,16 @@ export function useWebSocket() {
                 .then(resp => resp.ok ? resp.json() : null)
                 .then(reloadData => {
                   if (reloadData) {
-                    if (reloadData.status) {
-                      useAppStore.getState().updateSession({
-                        status: reloadData.status,
-                        currentRound: reloadData.current_round ?? 0,
-                      })
+                    const { sessionUpdates, storeUpdates } = transformLoadResponse(reloadData)
+                    useAppStore.getState().updateSession(sessionUpdates)
+                    if (storeUpdates.stateVersion != null) {
+                      useAppStore.getState().setStateVersion(storeUpdates.stateVersion)
                     }
-                    if (reloadData.state_version != null) {
-                      setStateVersion(reloadData.state_version)
+                    if (storeUpdates.snapshotCount != null) {
+                      useAppStore.getState().setSnapshotCount(storeUpdates.snapshotCount)
+                    }
+                    if (storeUpdates.roundWaitSeconds != null) {
+                      useAppStore.getState().setRoundWaitSeconds(storeUpdates.roundWaitSeconds)
                     }
                   }
                 })
@@ -1075,14 +1005,7 @@ export function useWebSocket() {
           // Extract round_results if provided (for completed session reconnect)
           const roundResults = data.content?.round_results
           if (roundResults && Array.isArray(roundResults)) {
-            updates.roundResults = roundResults.map((r: RawRoundResult) => ({
-              round: r.round ?? 0,
-              summary: r.pi_summary || r.summary || '',
-              pathologyFindings: Array.isArray(r.pathology_findings) ? r.pathology_findings : [],
-              bioinformaticsFindings: Array.isArray(r.bioinformatics_findings) ? r.bioinformatics_findings : [],
-              biochemistryFindings: Array.isArray(r.biochemistry_findings) ? r.biochemistry_findings : [],
-              literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
-            }))
+            updates.roundResults = transformRoundResults(roundResults)
           }
           updateSession(updates)
         } else if (data.type === 'error' && !data.agent) {
@@ -1172,7 +1095,7 @@ export function useWebSocket() {
       // Auto-reconnect if session is still running (not manually disconnected)
       const latestSession = useAppStore.getState().currentSession
       if (latestSession &&
-          (latestSession.status === 'running' || latestSession.status === 'waiting_input' || latestSession.status === 'waiting_annotation') &&
+          (latestSession.status === 'running' || latestSession.status === 'waiting_input' || latestSession.status === 'waiting_annotation' || latestSession.status === 'waiting_plan_review') &&
           event.code !== 1000) {  // Not a normal close
         if (reconnectCountRef.current < 5) {  // Max 5 reconnect attempts
           const delay = Math.min(1000 * Math.pow(2, reconnectCountRef.current - 1), 10000)  // Exponential backoff, max 10s

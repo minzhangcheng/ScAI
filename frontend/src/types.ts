@@ -17,21 +17,21 @@ export type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, Biochemi
 /** Raw session data as returned by GET /session/:id/load */
 export interface SessionLoadResponse {
   session_id: string
-  name: string
-  status: string
-  current_round: number
-  created_at: string
-  initial_instruction: string
+  name?: string
+  status?: string
+  current_round?: number
+  created_at?: string
+  initial_instruction?: string
   analysis_phase?: 'exploration' | 'innovation'
-  treatment_groups: RawTreatmentGroup[]
-  data_files: RawDataFile[]
-  biochemistry_indicators: RawBiochemistryIndicator[]
-  round_results: RawRoundResult[]
+  treatment_groups?: RawTreatmentGroup[]
+  data_files?: RawDataFile[]
+  biochemistry_indicators?: RawBiochemistryIndicator[]
+  round_results?: RawRoundResult[]
   final_summary?: string
-  publication_figures: RawPublicationFigure[]
-  publication_tables: RawPublicationTable[]
+  publication_figures?: RawPublicationFigure[]
+  publication_tables?: RawPublicationTable[]
   graphic_abstract?: RawGraphicAbstract
-  integrated_report?: string
+  integrated_report?: string | null
   exploration_report_url?: string
   state_version?: number
   round_wait_seconds?: number

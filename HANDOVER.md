@@ -2,26 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.12 · **Last updated**: 2026-05-28
-
-### Session save/restore: streaming + out-of-kernel compression
-
-- `LocalJupyterSandbox.save_session` now streams each variable as an independent
-  `dill.dump((name, obj), file)` frame to an uncompressed `.pkl`. Unpicklable
-  variables are skipped via `file.tell()/seek()/truncate()` rollback so the
-  resulting file is always parseable. Peak kernel memory dropped from "N full
-  pickle byte strings held simultaneously" to "one variable's dill chunk
-  buffer," eliminating the OOM-kill that previously crashed the parent backend
-  via libzmq `fq.cpp:56` abort.
-- `_restore_session` loads with a `while True: dill.load` loop until EOFError.
-- Snapshot pkls are stored as `<snapshot_id>_session.pkl.zst`. Compression and
-  decompression run in the **backend process** (via `asyncio.to_thread`), not
-  the kernel — keeping the memory-heavy kernel out of the compression path.
-- **Format is NOT backward compatible.** Sessions saved before this change cannot be
-  resumed; users must start fresh sessions. Old snapshot directories containing
-  `<id>_session.pkl` (without `.zst`) will not be recognized by `restore_snapshot` /
-  `delete_snapshot` — these orphan files should be cleaned up manually or via
-  `delete_snapshot` / `cleanup` tools to reclaim disk space.
+**Version**: 0.25.13 · **Last updated**: 2026-05-31
 
 ## 1. Runtime Architecture
 
@@ -213,170 +194,13 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.24.x — collaborative analysis planning (2026-05-15)**
+**0.25.x — LLM resilience, sandbox hardening, frontend refactoring (2026-05-27 → present)**
 
-- `0.24.23` — report config table & websocket reconnect fix (2026-05-19):
-  - **Agent config table with LLM stats**: Added `render_agent_config_table_html()` in regenerator.py for building agent configuration table with LLM usage statistics (calls, input/output tokens, avg response time). Updated `sections.py` to use this new function instead of manual HTML construction.
-  - **WebSocket reconnect state sync**: Added `_resend_wait_input_state_sync()` in websockets.py to re-emit state_sync for pending HITL gates (llm_failure, agent_disabled) after a reconnect. Without this, LlmTimeoutDialog and disabled-agent dialog would not reopen on page reload.
-  - **AGENT_DISPLAY_NAMES mapping**: Added display name mapping for all agents (pi, pathology, bioinformatics, biochemistry, literature, painter, supervisor, technique) in regenerator.py.
-  - **Cleanup**: Removed unused `llm_server` field from agent stats and dead code in supervisor_agent.py.
-
-- `0.24.22` — snapshot label consistency (2026-05-19):
-  - **Snapshot "Experimental" label**: Added "(Experimental)" suffix to SnapshotPanel title and translation key `analysisSnapshots` in both English and Chinese for consistency with other experimental features.
-
-- `0.24.21` — core agent disabled handling (2026-05-19):
-  - **Core agents concept**: Added `CORE_AGENTS` constant in constants.py (pi, bioinformatics, literature) - these agents must be enabled for workflow to proceed.
-  - **Agent disabled intervention**: Added `AGENT_DISABLED` reason and `TERMINATE` action for LLM failure handling. When a core agent is disabled, workflow blocks and shows intervention dialog instead of silently skipping.
-  - **Settings provider fix**: Fixed agent disabled detection logic - now checks if key exists in custom_models/custom_prompts (including empty/whitespace values) instead of just checking truthiness.
-  - **Workflow intervention method**: Added `_require_core_agent()` method in agents.py that blocks until core agent is configured, with retry/skip/terminate options.
-  - **LlmTimeoutDialog integration**: Updated frontend LlmTimeoutDialog to handle "agent_disabled" reason - shows different title, body message, and removes model/server fields.
-  - **Test additions**: Added `test_core_agent_disabled_intervention.py`, `test_disabled_agent_e2e.py`, `test_optional_agent_hot_reload.py`, `test_settings_provider_disable.py`.
-
-- `0.24.20` — PlanReviewDialog countdown UI improvements (2026-05-19):
-  - **Countdown color change**: Added dynamic color change for countdown timer - turns red when <= 30 seconds remaining to alert users of time running out.
-  - **Layout refactor**: Restructured PlanReviewDialog header to organize countdown timer and download button in a horizontal flex layout alongside the title.
-
-- `0.24.19` — per-round agent result cache (2026-05-18):
-  - **AgentRoundCache model**: Added new Pydantic model in schemas.py for per-round per-agent intermediate result caching. Lives in AnalysisState so snapshot/restore captures it automatically.
-  - **cache_hit/cache_store helpers**: Added functions in helpers.py for checking and storing agent results in the current round cache. Returns None if no cache exists or cache is for a different round.
-  - **Pathology agent caching**: Added cache hit check at start of `_pathology_analysis` to skip re-execution if result already exists. Stores result on completion.
-  - **Bioinformatics agent caching**: Added cache hit check at start of `_bioinformatics_analysis` to skip re-execution if result already exists. Preserves planning_stage transition on cache hit.
-  - **Cache lifecycle management**: Clear `current_round_cache` on new round start in `_start_new_round` and after appending to `round_results` in `_synthesize_round` to prevent stale cache on snapshot restore.
-  - **Snapshot labeling**: Updated translation to mark snapshots as "Experimental" in both Chinese and English.
-  - **Test additions**: Added `test_agent_round_cache.py` and `test_snapshot_rollback_idempotency.py`.
-
-- `0.24.18` — unified HITL wait gate (2026-05-18):
-  - **wait_with_skip_time helper**: Added unified `wait_with_skip_time()` function in helpers.py that provides consistent HITL wait gate behavior across all gates (plan review, annotation, direction selection, round wait). Semantics: -1=manual (block forever), 0=no-wait (immediate), >0=countdown (wait_seconds + 60s buffer).
-  - **Planning integration**: Updated `_user_review_gate` to use `wait_with_skip_time` instead of hardcoded timeout.
-  - **Synthesis integration**: Updated `_wait_for_user_input` to use `wait_with_skip_time` for both direction selection gate and round wait. Auto-skip now sets user_chosen_direction to "[PI_DECIDE]".
-  - **Annotation integration**: Updated `_annotation_confirmation` to use `wait_with_skip_time`. Auto-skip now accepts PI annotations as-is and marks them as confirmed.
-
-- `0.24.17` — prompt template improvements (2026-05-18):
-  - **Figure saving clarification**: Clarified that execute_code tool allows `plt.savefig('name.jpg')` and `sc.pl.*(save='_name.jpg')` for figure saving, while generate_prompts_figure tool wraps saving internally with different rules.
-  - **Template placeholders in PI prompts**: Updated PI agent prompts to use template placeholders (e.g., `<pathway>`, `<cell type>`, `<condition>`) instead of hardcoded examples for research questions, literature topics, and graphic abstract feedback.
-  - **Stage split note**: Added note in PI agent about Stage 1 vs Stage 2 task splitting to prevent task compression.
-  - **MeSH tissue guidance**: Updated PubMed query guidance to include tissue MeSH terms (e.g., "Liver"[MeSH], "Kidney"[MeSH]).
-  - **Organism-specific pathway libraries**: Updated agent_prompts.py to use organism-specific gene set libraries for pathway enrichment (Human: KEGG_2021_Human, Mouse: KEGG_2019_Mouse, Other: query gseapy).
-  - **GO libraries cross-species**: Added guidance that GO libraries work across species when gene symbols match the organism convention.
-
-- `0.24.16` — stage scope validation in planning (2026-05-18):
-  - **Enhanced Stage 1 guidance**: Expanded `_STAGE1_GUIDANCE` in bioinformatics agent to explicitly exclude loading/preprocessing data for Stage 2 analyses, including: Loom files (RNA velocity), trajectory inputs, cell-cell communication preprocessing, and pre-staging gene sets for Stage 2 enrichment.
-  - **PI plan review stage scope validation**: Added "Plan Stage" field and "Stage Scope" section to PI plan review prompt. Stage 1 reviews now reject steps that prep data for Stage 2; Stage 2 reviews allow Stage 2-specific steps.
-  - **Stage scope as #1 review criterion**: PI plan review now evaluates stage scope first, with explicit criteria for detecting "scope leak" steps (methods referencing "for downstream", "for velocity", "for trajectory", etc.).
-  - **Test additions**: Added `test_stage1_guid ance_scope.py` and `test_pi_review_stage_scope.py` for stage scope validation coverage.
-
-- `0.24.15` — plan review action leak fix (2026-05-18):
-  - **Planning action leak fix**: Clear `_plan_review_action` and `_plan_review_event` at the start of `_user_review_gate` to prevent stale actions from previous gate invocations (e.g., stage1's approve still sitting in the slot when stage2's gate is entered).
-  - **Consume after action**: Clear the slot and event after consuming the action so the next loop iteration (clarify path) or the next gate invocation starts from a clean state.
-  - **Test additions**: Added `test_user_review_gate_action_leak.py` (142 lines) to test the action leak fix.
-
-- `0.24.14` — lifecycle & routing fixes (2026-05-18):
-  - **Plan review resume requires explicit action**: Lifecycle resume endpoint no longer auto-skips plan review. Instead returns message directing user to `/plan-review` endpoint for approve/skip/modify.
-  - **Reset pi_instructions on stage1→stage2 transition**: Added `_reset_pi_instructions_for_stage2()` to clear bioinformatics/pathology/biochemistry/literature tasks when transitioning from stage1 to stage2.
-  - **SHA-1 for code_history dedup**: Replaced Python's built-in `hash()` with `hashlib.sha1()` for stable code content deduplication across sessions/restarts.
-  - **plan_revision_resume one-shot**: Cleared `plan_revision_resume` flag immediately after routing to prevent stale True from mis-routing subsequent re-entries.
-  - **Honor pending user work over convergence**: Added `_should_force_next_round()` in synthesis to override convergence when there's real human text input, uploaded files, or remaining directions queue.
-  - **Clear user_plan_feedback after planning**: Planning now clears `user_plan_feedback` after consuming it to prevent stale feedback persisting.
-  - **Close signal-loss race in manual mode**: Fixed `_continue_event` clearing/waiting order in `wait_for_user_input` to prevent signal loss.
-  - **Test additions**: Added tests for code_history dedup hash, convergence override, resume plan review flow, stage transition instructions, user review gate abort signal, and wait for user input signal.
-
-- `0.24.13` — empty workflow short-circuit & planning abort handling (2026-05-18):
-  - **Empty workflow short-circuit**: Added early exit in `generate_final_report`, `generate_graphic_abstract`, and `generate_detailed_report` when `analysis_log` and `code_history` are empty (no analysis work recorded). Prevents generating empty reports when user stops before any analysis runs.
-  - **Planning abort handling**: When bioinformatics LLM fails unrecoverably during planning and there's no existing plan to fall back to, planning now sets `should_continue=False` and `status=FAILED` instead of letting `failed_node` loop indefinitely. Added `_after_review` routing to handle "abort" case.
-  - **Graph abort edge**: Added `abort → generate_final_report` edge in graph routing for the new abort flow.
-  - **Test additions**: Added `test_reporting_shortcircuit.py` for empty workflow report short-circuit.
-
-- `0.24.12` — report generation LLM failure handling (2026-05-18):
-  - **Report generation LLM retry loop**: Wrapped `generate_integrated_report` in retry loop with `UpstreamExhaustedError` handling, similar to other LLM-calling methods. Uses `_wait_for_llm_intervention()` for consistent failure recovery.
-  - **Test additions**: Added `test_generate_final_report_llm_failure.py`, `test_annotation_completed_restore.py`, `test_pi_planning_early_return.py`, `test_workflow_state_init.py`.
-  - **State field cleanup**: Removed unused `skip_nodes` from WorkflowState TypedDict.
-
-- `0.24.11` — HITL pause/resume with state restoration (2026-05-18):
-  - **pre_pause_status field**: Added `pre_pause_status` field to save original status when pausing from WAITING_INPUT/WAITING_ANNOTATION/WAITING_PLAN_REVIEW states.
-  - **Resume signal restoration**: Resume now properly signals continue/annotation/plan_review events based on restored status, allowing HITL-gated workflows to resume in place without frontend reconnection.
-  - **Template noop install**: Extracted matplotlib stub unwinding logic into `_TPL_NOOP_INSTALL` template string for reuse across sandbox and chat code generation; ensures clean unwinding of stale stubs.
-  - **Test additions**: Added `test_pause_resume_hitle.py` for HITL pause/resume coverage, `test_tpl_noop_install.py` for template installation, `test_initialize_plan_consistency.py`.
-
-- `0.24.10` — cooperative pause gate & matplotlib stub fixes (2026-05-18):
-  - **Cooperative pause gate**: Added `_pause_event` asyncio.Event to workflow for cooperative pausing. Cleared on `pause()` to block bioinformatics agent's autonomous loop between steps; set on `signal_resume()` to release. Wired into bioinformatics agent via `_pause_event` attribute.
-  - **Lifecycle pause improvements**: Pause endpoint now accepts RUNNING and all WAITING_* states; added idempotent check for already-paused state (double-click safe); clear cooperative gate first before snapshot.
-  - **Lifecycle resume improvements**: Resume now releases cooperative pause gate in-place when workflow is alive (no frontend reconnect needed); only cold reload when workflow was lost (server restart).
-  - **Matplotlib stub unwinding**: Chat code generation now unwinds any leftover SCAI no-op stubs before re-installing to prevent wrapper stacking; marks stubs with `_scai_noop` and `_scai_prev` attributes for clean unwinding.
-  - **Original plt.close capture**: Saved baseline `_original_plt_close` before any monkey-patching in sandbox for defensive restore.
-
-- `0.24.9` — reasoning field expansion & API serialization refactor (2026-05-17):
-  - **LLM reasoning field expansion**: Added "thinking" and "thought" keys to content extraction for DeepSeek/Claude compatibility; also handles list values in reasoning fields.
-  - **to_api_dict refactor**: Replaced manual snake_case → camelCase mapping with `model_dump(mode="json")` + `_API_KEY_MAP` dictionary for maintainability; fields not in map are excluded from API response.
-  - **Empty content diagnostic extraction**: Extracted `_log_empty_content_diagnostic()` helper from `llm_client.py` for reusability.
-  - **Literature mode_override refactor**: Pass mode_override as parameter instead of mutating agent state directly.
-  - **Config cleanup**: Removed dead config code from `main.py`; updated `_config.py`.
-  - **New tests**: Added test files for content extraction reasoning, error parsing, literature mode_override, to_api_dict coverage, and base agent history.
-
-- `0.24.8` — workflow modularization (2026-05-17):
-  - **Workflow package refactoring**: Split the monolithic `backend/workflow.py` (~4000 lines) into a modular `backend/workflow/` package with 13+ specialized modules:
-    - `core.py` — Main workflow class preserving backward-compatible API
-    - `agents.py` — Bioinformatics, PI, supervisor agent orchestration
-    - `planning.py` — Plan generation, revision, and PI review dialogue
-    - `annotation.py` — Cluster annotation and confirmation flow
-    - `callbacks.py` — PI callback, figure review, supervisor callbacks
-    - `synthesis.py` — Round synthesis and supervisor integration
-    - `reporting.py` — Exploration report and report generation
-    - `routing.py` — Node routing logic (after_bioinformatics, should_continue, etc.)
-    - `initialize.py` — Round initialization and plan checking
-    - `state.py` — WorkflowState TypedDict definition
-    - `retry.py` — @with_retry decorator and backoff logic
-    - `helpers.py` — Shared utility functions
-    - `context.py` — Planning context building
-    - `graph.py` — LangGraph state graph definition
-    - `messaging.py` — WebSocket message sending
-  - **Backward compatibility**: The `__init__.py` exports `SingleCellAnalysisWorkflow`, `WorkflowState`, `with_retry`, and `_retry_backoff_delay` to preserve existing import paths.
-  - **New tests**: Added `test_workflow_helpers.py` and `test_workflow_routing.py` for the refactored code.
-
-- `0.24.27` — stringified tool-call recovery & unknown-tool dispatch guard (2026-05-21):
-  - **Stringified tool-call recovery**: Added `_recover_stringified_tool_call()` helper that detects when an upstream gateway (notably litellm proxying n1n.ai for Claude/Gemini) loses the structured `tool_calls` field and serializes the tool-use JSON into `message.content`. Recognizes three shapes: n1n.ai (`{"tool":...,"parameters":...}`), OpenAI (`{"name":...,"arguments":...}`), and Anthropic native (`{"type":"tool_use","name":...,"input":...}`). Strips ` ```json ``` ` fences, synthesizes a ToolCall with a `recovered_`-prefixed ID, clears content, and syncs `raw_assistant_message` for Gemini thought-signature preservation.
-  - **Unknown-tool dispatch guard (orphan prevention)**: Added `KNOWN_TOOL_NAMES` frozenset derived from TOOLS in the bioinformatics agent. A new `else` branch in the dispatch chain catches hallucinated or recovered tool names that don't match any known tool, emitting a `role=tool` response listing available tools. Prevents orphan tool_call IDs that would cause 400 errors on subsequent requests.
-  - **Tests**: Added `test_stringified_tool_recovery.py` (12 tests) and `test_unknown_tool_dispatch.py` (6 tests) covering all recovery shapes, fence handling, plain-text rejection, native tool-call passthrough, and dispatch chain completeness.
-
-- `0.24.26` — modality-branched workflow, concurrency hardening, LLM client resilience (2026-05-21):
-  - **Modality-branched workflow (P1-4)**: `workflow_for_modality()` in `agent_prompts.py` provides separate analysis workflows for scRNA-seq, bulk RNA-seq, and multimodal data. Bioinformatics agent's `_infer_modality()` drives modality-aware system prompt identity so the LLM knows what kind of analysis it's conducting.
-  - **Bulk-only instruction isolation**: Agent nodes no longer impose scRNA-dependent cross-validation or deconvolution on bulk-only sessions. New `_has_stage1_keyword()` helper excludes "re-" prefixed terms (re-cluster, re-annotate) from stage1 filtering. Bulk RNA-seq terms added to `STAGE1_KEYWORDS`.
-  - **PI unilateral final plan (P1-10)**: `PI.generate_final_plan_from_dialogue()` produces a plan when `MAX_PLANNING_ROUNDS` is exhausted without agreement, replacing infinite revise loops.
-  - **Direction queue commit on round entry (P1-1)**: Directions are now consumed at `_initialize_round` only after the prior round's LangGraph checkpoint confirms success, avoiding pre-mature pop with no rollback path.
-  - **PI_DECIDE moved to workflow invariant (P3-5)**: Directionless-INNOVATION default moved from the resume route into `_initialize_round` so it applies consistently regardless of how the workflow resumes.
-  - **Per-session lock on HITL endpoints (P1-9)**: All interaction/lifecycle mutation endpoints wrapped with session-scoped `asyncio.Lock` to prevent race conditions from concurrent pause/resume/stop/llm-failure calls.
-  - **Resume no longer auto-signals HITL gates (P0-5)**: Generic resume now awaits explicit user action at the restored WAITING_* gate rather than blindly emitting signals.
-  - **Supplementary queue FIFO**: Replaced single `_supplementary_request`/`_supplementary_target` fields with `deque` so consecutive rapid requests are preserved in order.
-  - **Cache invalidate on mid-execution plan revision (P0-8)**: Bioinfo cache cleared so post-revision re-execution doesn't return stale pre-revision results.
-  - **Exploration success whitelist**: `_exploration_round_succeeded()` now only accepts `status=="completed"` — all other outcomes (including `completed_with_fallback`, `max_steps_reached` with findings) block EXPLORATION→INNOVATION transition.
-  - **No double-clear of _continue_event (P0-6)**: Prevents signals delivered during LangGraph checkpoint I/O from being silently discarded, fixing the "click twice" bug.
-  - **should_continue=False on planning failure (P0-7)**: `_after_review` no longer loops infinitely on "revise" when the LLM fails.
-  - **LLM client resilience**:
-    - **Cache lock serialization (P2-1)**: `asyncio.Lock` guards on `_temp_unsupported_models` and `_toolchoice_unsupported_models` to prevent race conditions in concurrent first-time probes.
-    - **max_tokens field override cache (P3-4)**: Adaptive tracking of which field (`max_tokens` vs `max_completion_tokens`) a provider accepts, handling o-series variants routed through providers the static `_is_o_series` heuristic misses.
-    - **ToolCall parse_error propagation (P2-2)**: JSON parse failures now surface `parse_error`/`raw_arguments` to the caller so the bioinfo agent can retry with valid JSON instead of silent KeyErrors.
-    - **Reasoning extraction refactor**: `_collect_reasoning_parts()` helper handles str/dict/list elements robustly across both `model_dump` and `getattr` code paths.
-  - **Data-driven system prompt**: Bioinformatics agent's `_static_system_prompt` caches by `(system_prompt, modality)` tuple so hot-reload and data-driven identity compose correctly.
-  - **Multiple file format load hints**: Added format-appropriate load hints for `.h5ad`, `.h5` (10x), `.loom`, `.csv`, `.tsv`, `.mtx`, `.zarr`, `.rds`, `.h5seurat` in bioinformatics agent's data context building.
-  - **Configurable DEG thresholds (P2-11)**: `deg_thresholds` field on `AnalysisState` for session-configurable logFC/padj cutoffs; propagated to report figures and bioinformatics annotate_clusters.
-  - **Sandbox error hardening (P1-11)**: dill restore failure now raises `RuntimeError` instead of silently continuing with empty state; `save_session` tracks and logs unpicklable variables via `__SCAI_SAVE_SKIPPED__` markers.
-  - **Snapshot parent chain fix**: `parent_id` no longer falls back to `snapshots[-1]` by time — leaves as `None` (new root) to prevent parent-chain corruption in multi-branch restore.
-  - **Auth & security hardening**:
-    - Session auth suffix matching anchored to path segment position; defense-in-depth against traversal segments and nested `sessions/` paths.
-    - `validate_file_path_ownership()` rejects multiple `sessions/` segments and verifies resolved path is within `get_session_dir()`.
-    - Import archive rejects symlinks/hardlinks/devices and uses `is_relative_to()` for traversal check.
-    - Chunked upload endpoints now enforce session ownership validation.
-  - **ANSI regex expansion**: Covers CSI, OSC (BEL-terminated), and charset designations.
-  - **Figure type from agent metadata (P2-10)**: `_infer_figure_type()` prefers agent-declared `figure_type` over filename heuristics; `_scan_existing_figures()` builds declared-type map from `publication_figures`.
-  - **Report DEG table summary**: Honors session-configurable `deg_thresholds` for significant-gene counts.
-  - **Session list dedup (P3-8)**: Merged disk+memory sessions by ID to prevent duplicate entries.
-  - **Export filename length cap**: `MAX_EXPORT_NAME=200` with UUID suffix when truncation is needed.
-  - **Frontend hardening**:
-    - Typed HITL data interfaces (AnnotationData, PlanReviewData, ExplorationReportData) replace `any`.
-    - Plan review countdown timer resets on plan identity change.
-    - Message merge uses transactional `setState` to avoid loss during async fetch.
-    - Aborts analysis on agent config sync failure.
-    - Handles negative clock delta in message TTL persistence check.
-  - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+- `0.25.13` — transformLoadResponse absent-field preservation (2026-05-31):
+  - **Partial Session updates**: `transformLoadResponse()` no longer fills missing fields with empty strings/arrays/zeros — uses `opt()` helper that omits the key entirely when raw value is null/undefined.
+  - **Null-safe store updates**: `setStateVersion`/`setSnapshotCount` now guarded with `!= null` checks in `useApi.ts` to prevent unintentional resets to 0.
+  - **Optional API types**: `SessionLoadResponse` fields (`name`, `status`, `current_round`, `created_at`, `initial_instruction`, `treatment_groups`, `data_files`, `biochemistry_indicators`, `round_results`) now typed as optional to match server behavior.
+  - **Session defaults**: `Session` construction provides sensible defaults in `useApi.ts` for `name`, `status`, `currentRound`, `instruction`, `treatmentGroups`, `dataFiles`, `biochemistryIndicators`, and `roundResults`.
 
 - `0.25.12` — volume-based context compaction & reactive empty-response escalation (2026-05-28):
   - **Volume-based context compaction**: `_compact_context()` applies three-phase compaction at 150K estimated tokens: (1) truncate large tool/user content with decreasing budgets 64K/32K/16K chars, (2) drop+summarize oldest non-protected messages, (3) fallback truncate protected window. Protects anchor system/dynamic messages and the 6 most recent messages.
@@ -484,11 +308,14 @@ Detailed release notes for every version are available through `git log` and rel
   - **Lazy zstd import**: `zstandard` imported only inside the zstd branch of restore code — plain-dill restore stays dependency-free.
   - **Tests**: Added `test_pkl_compression.py` (magic detection, round-trip dict/sparse, compression ratio, backward compat, corrupt zstd, kernel code compilation, exec round-trip) and `test_snapshot_rollback.py` (snapshot copies compressed/plain pkl byte-identical, detection round-trip).
 
+**0.24.x — collaborative analysis planning (2026-05-15)**
+
 - `0.24.30` — atomic blob write & snapshot I/O offload (2026-05-27):
   - **Atomic blob write**: `externalize_blobs` writes `.b64` files via temp file + `os.replace()` — no half-written file on crash.
   - **Empty-response backoff**: `_empty_retry_backoff()` adds incremental delay (capped at 5s) between empty/truncated upstream retries.
   - **Snapshot blob I/O offloaded to worker thread**: `create_snapshot` runs `externalize_blobs`, JSON serialization, and atomic file write inside `asyncio.to_thread()` — the event loop stays responsive for WebSocket pushes and LLM streaming.
   - **Tests**: Added atomic write crash-safety test (`test_blob_store.py`), backoff behavior test (`test_empty_response_handling.py`), and snapshot I/O thread verification (`test_snapshot_blob_offload.py`).
+
 
 - `0.24.29` — blob externalization & retry hardening (2026-05-27):
   - **Base64 blob externalization**: New `blob_store.py` module extracts large base64 strings (images, figures) from session JSON into SHA256-deduplicated `.b64` files. Integrated into `session_store.py` and `snapshot.py` for both sync/async save and load. Reduces session.json size and write overhead significantly.
@@ -499,20 +326,61 @@ Detailed release notes for every version are available through `git log` and rel
   - **Supplementary plan safety**: `plan_supplementary_analysis` result guarded with `or {}` to prevent `None` crash.
   - **Tests**: Added `test_blob_store.py`, `test_empty_response_handling.py`, `test_kernel_recovery.py`, `test_retry_classification.py`, `test_routing_defensive.py` (5 new test files, ~400 lines).
 
+
 - `0.24.28` — unknown tool defense & stringified tool recovery (2026-05-27):
   - **Orphan tool call defense**: Bioinformatics agent now handles unknown/hallucinated tool names gracefully by responding with an error message rather than crashing. Added `KNOWN_TOOL_NAMES` frozenset derived from TOOLS; `run_autonomous_analysis()` now emits a role=tool error response for unknown tool calls, keeping conversation well-formed.
   - **Stringified tool recovery**: New regression tests for recovering from serialized tool_call IDs via dill checkpoint restore (`test_stringified_tool_recovery.py`).
   - **Unknown tool dispatch tests**: New test suite for handling unknown tool names dispatched by LLM (`test_unknown_tool_dispatch.py`).
   - **LLM client improvements**: Enhanced `OpenAICompatibleClient` with better error handling and retry logic.
 
-- `0.24.26` — multi-agent modality support & robustness fixes (2026-05-22):
-  - **Multi-modality analysis**: Full support for multi-omics data (scRNA-seq, snRNA-seq, bulk RNA-seq, pathology images, biochemical indicators) with dynamic modality detection and branched workflow routing.
-  - **PI Agent enhancements**: Added NMF gene-expression programs and RandomForest biomarker discovery to Round-2+ toolkit; restructured task-generation prompts with cascading storyline (Task/Rationale/Expected Outcome); literature verification loop for each bioinformatics hypothesis.
-  - **Bioinformatics agent improvements**: Multi-modal fallback rules with `print()` of raw data backing every plot; code-level self-repair with try/except and adaptive DEG thresholds; serendipity check (variance partitioning) before targeted analyses.
-  - **Sandbox robustness**: dill restore failure now raises `RuntimeError` instead of silently continuing; session save tracks unpicklable variables via `__SCAI_SAVE_SKIPPED__`.
-  - **Auth middleware**: Session auth suffix matching anchored to path segment position; defense-in-depth against traversal segments.
-  - **Configurable DEG thresholds**: `deg_thresholds` field on `AnalysisState` for session-configurable logFC/padj cutoffs.
-  - **40+ new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue, exploration success, reasoning extraction, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds, modality branched workflow, snapshot parent chain, tool call parse failure, and more.
+
+- `0.24.27` — stringified tool-call recovery & unknown-tool dispatch guard (2026-05-21):
+  - **Stringified tool-call recovery**: Added `_recover_stringified_tool_call()` helper that detects when an upstream gateway (notably litellm proxying n1n.ai for Claude/Gemini) loses the structured `tool_calls` field and serializes the tool-use JSON into `message.content`. Recognizes three shapes: n1n.ai (`{"tool":...,"parameters":...}`), OpenAI (`{"name":...,"arguments":...}`), and Anthropic native (`{"type":"tool_use","name":...,"input":...}`). Strips ` ```json ``` ` fences, synthesizes a ToolCall with a `recovered_`-prefixed ID, clears content, and syncs `raw_assistant_message` for Gemini thought-signature preservation.
+  - **Unknown-tool dispatch guard (orphan prevention)**: Added `KNOWN_TOOL_NAMES` frozenset derived from TOOLS in the bioinformatics agent. A new `else` branch in the dispatch chain catches hallucinated or recovered tool names that don't match any known tool, emitting a `role=tool` response listing available tools. Prevents orphan tool_call IDs that would cause 400 errors on subsequent requests.
+  - **Tests**: Added `test_stringified_tool_recovery.py` (12 tests) and `test_unknown_tool_dispatch.py` (6 tests) covering all recovery shapes, fence handling, plain-text rejection, native tool-call passthrough, and dispatch chain completeness.
+
+
+- `0.24.26` — modality-branched workflow, concurrency hardening, LLM client resilience (2026-05-21):
+  - **Modality-branched workflow (P1-4)**: `workflow_for_modality()` in `agent_prompts.py` provides separate analysis workflows for scRNA-seq, bulk RNA-seq, and multimodal data. Bioinformatics agent's `_infer_modality()` drives modality-aware system prompt identity so the LLM knows what kind of analysis it's conducting.
+  - **Bulk-only instruction isolation**: Agent nodes no longer impose scRNA-dependent cross-validation or deconvolution on bulk-only sessions. New `_has_stage1_keyword()` helper excludes "re-" prefixed terms (re-cluster, re-annotate) from stage1 filtering. Bulk RNA-seq terms added to `STAGE1_KEYWORDS`.
+  - **PI unilateral final plan (P1-10)**: `PI.generate_final_plan_from_dialogue()` produces a plan when `MAX_PLANNING_ROUNDS` is exhausted without agreement, replacing infinite revise loops.
+  - **Direction queue commit on round entry (P1-1)**: Directions are now consumed at `_initialize_round` only after the prior round's LangGraph checkpoint confirms success, avoiding pre-mature pop with no rollback path.
+  - **PI_DECIDE moved to workflow invariant (P3-5)**: Directionless-INNOVATION default moved from the resume route into `_initialize_round` so it applies consistently regardless of how the workflow resumes.
+  - **Per-session lock on HITL endpoints (P1-9)**: All interaction/lifecycle mutation endpoints wrapped with session-scoped `asyncio.Lock` to prevent race conditions from concurrent pause/resume/stop/llm-failure calls.
+  - **Resume no longer auto-signals HITL gates (P0-5)**: Generic resume now awaits explicit user action at the restored WAITING_* gate rather than blindly emitting signals.
+  - **Supplementary queue FIFO**: Replaced single `_supplementary_request`/`_supplementary_target` fields with `deque` so consecutive rapid requests are preserved in order.
+  - **Cache invalidate on mid-execution plan revision (P0-8)**: Bioinfo cache cleared so post-revision re-execution doesn't return stale pre-revision results.
+  - **Exploration success whitelist**: `_exploration_round_succeeded()` now only accepts `status=="completed"` — all other outcomes (including `completed_with_fallback`, `max_steps_reached` with findings) block EXPLORATION→INNOVATION transition.
+  - **No double-clear of _continue_event (P0-6)**: Prevents signals delivered during LangGraph checkpoint I/O from being silently discarded, fixing the "click twice" bug.
+  - **should_continue=False on planning failure (P0-7)**: `_after_review` no longer loops infinitely on "revise" when the LLM fails.
+  - **LLM client resilience**:
+    - **Cache lock serialization (P2-1)**: `asyncio.Lock` guards on `_temp_unsupported_models` and `_toolchoice_unsupported_models` to prevent race conditions in concurrent first-time probes.
+    - **max_tokens field override cache (P3-4)**: Adaptive tracking of which field (`max_tokens` vs `max_completion_tokens`) a provider accepts, handling o-series variants routed through providers the static `_is_o_series` heuristic misses.
+    - **ToolCall parse_error propagation (P2-2)**: JSON parse failures now surface `parse_error`/`raw_arguments` to the caller so the bioinfo agent can retry with valid JSON instead of silent KeyErrors.
+    - **Reasoning extraction refactor**: `_collect_reasoning_parts()` helper handles str/dict/list elements robustly across both `model_dump` and `getattr` code paths.
+  - **Data-driven system prompt**: Bioinformatics agent's `_static_system_prompt` caches by `(system_prompt, modality)` tuple so hot-reload and data-driven identity compose correctly.
+  - **Multiple file format load hints**: Added format-appropriate load hints for `.h5ad`, `.h5` (10x), `.loom`, `.csv`, `.tsv`, `.mtx`, `.zarr`, `.rds`, `.h5seurat` in bioinformatics agent's data context building.
+  - **Configurable DEG thresholds (P2-11)**: `deg_thresholds` field on `AnalysisState` for session-configurable logFC/padj cutoffs; propagated to report figures and bioinformatics annotate_clusters.
+  - **Sandbox error hardening (P1-11)**: dill restore failure now raises `RuntimeError` instead of silently continuing with empty state; `save_session` tracks and logs unpicklable variables via `__SCAI_SAVE_SKIPPED__` markers.
+  - **Snapshot parent chain fix**: `parent_id` no longer falls back to `snapshots[-1]` by time — leaves as `None` (new root) to prevent parent-chain corruption in multi-branch restore.
+  - **Auth & security hardening**:
+    - Session auth suffix matching anchored to path segment position; defense-in-depth against traversal segments and nested `sessions/` paths.
+    - `validate_file_path_ownership()` rejects multiple `sessions/` segments and verifies resolved path is within `get_session_dir()`.
+    - Import archive rejects symlinks/hardlinks/devices and uses `is_relative_to()` for traversal check.
+    - Chunked upload endpoints now enforce session ownership validation.
+  - **ANSI regex expansion**: Covers CSI, OSC (BEL-terminated), and charset designations.
+  - **Figure type from agent metadata (P2-10)**: `_infer_figure_type()` prefers agent-declared `figure_type` over filename heuristics; `_scan_existing_figures()` builds declared-type map from `publication_figures`.
+  - **Report DEG table summary**: Honors session-configurable `deg_thresholds` for significant-gene counts.
+  - **Session list dedup (P3-8)**: Merged disk+memory sessions by ID to prevent duplicate entries.
+  - **Export filename length cap**: `MAX_EXPORT_NAME=200` with UUID suffix when truncation is needed.
+  - **Frontend hardening**:
+    - Typed HITL data interfaces (AnnotationData, PlanReviewData, ExplorationReportData) replace `any`.
+    - Plan review countdown timer resets on plan identity change.
+    - Message merge uses transactional `setState` to avoid loss during async fetch.
+    - Aborts analysis on agent config sync failure.
+    - Handles negative clock delta in message TTL persistence check.
+  - **40 new test files** covering: auth optional paths, bioinfo modality, direction gating, continue event, data format dispatch, DEG thresholds, directions queue commit, exploration success whitelist, reasoning extraction robustness, figure type metadata, file path ownership, import archive safety, LLM client cache locking, max planning rounds fallback, modality branched workflow, no silent validation error, ANSI/max-tok handling, batch modality recognition, routes housekeeping, pathology generic grading, PI review failure routing, plan revision cache invalidation, resume with no auto signal, sandbox failure surfacing, session locking, snapshot parent chain, supplementary deque/target round, tool call parse failure, upload ownership, user plan feedback preservation.
+
 
 - `0.24.25` — tool-choice fallback & exploration failure guard (2026-05-21):
   - **tool_choice BadRequestError fallback**: Added `is_tool_choice_error()` detection and `_toolchoice_unsupported_models` cache in `OpenAICompatibleClient`. When a provider rejects `tool_choice="required"`, the client caches the model and retries with `tool_choice="auto"`; subsequent calls are pre-emptively demoted. Fixes crashes on providers that don't support forced tool calling.
@@ -521,10 +389,144 @@ Detailed release notes for every version are available through `git log` and rel
   - **Exploration round success guard**: Added `_exploration_round_succeeded()` predicate — blocks Report A generation and EXPLORATION→INNOVATION phase transition when bioinformatics failed/errored or exhausted steps without findings. Prevents empty exploration reports and lost retry opportunities.
   - **Tests**: Added `test_bioinfo_text_only_exit.py`, `test_exploration_round_succeeded.py`, and `test_tool_choice_fallback.py` with unit and integration tests covering all paths.
 
+
 - `0.24.24` — plan review timer pause/resume (2026-05-21):
   - **Timer pause/resume**: PlanReviewDialog now supports pausing and resuming the countdown timer. Users can pause the timer during plan review and resume when ready.
   - **Timer display**: Countdown now displays in MM:SS format with visual styling for urgency (red pulse when ≤30s) and paused state (amber indicator).
   - **New hook features**: `useCountdownTimer` hook now exposes `isPaused`, `pause`, `resume`, and `hasCountdown` for timer control.
+
+- `0.24.23` — report config table & websocket reconnect fix (2026-05-19):
+  - **Agent config table with LLM stats**: Added `render_agent_config_table_html()` in regenerator.py for building agent configuration table with LLM usage statistics (calls, input/output tokens, avg response time). Updated `sections.py` to use this new function instead of manual HTML construction.
+  - **WebSocket reconnect state sync**: Added `_resend_wait_input_state_sync()` in websockets.py to re-emit state_sync for pending HITL gates (llm_failure, agent_disabled) after a reconnect. Without this, LlmTimeoutDialog and disabled-agent dialog would not reopen on page reload.
+  - **AGENT_DISPLAY_NAMES mapping**: Added display name mapping for all agents (pi, pathology, bioinformatics, biochemistry, literature, painter, supervisor, technique) in regenerator.py.
+  - **Cleanup**: Removed unused `llm_server` field from agent stats and dead code in supervisor_agent.py.
+
+
+- `0.24.22` — snapshot label consistency (2026-05-19):
+  - **Snapshot "Experimental" label**: Added "(Experimental)" suffix to SnapshotPanel title and translation key `analysisSnapshots` in both English and Chinese for consistency with other experimental features.
+
+
+- `0.24.21` — core agent disabled handling (2026-05-19):
+  - **Core agents concept**: Added `CORE_AGENTS` constant in constants.py (pi, bioinformatics, literature) - these agents must be enabled for workflow to proceed.
+  - **Agent disabled intervention**: Added `AGENT_DISABLED` reason and `TERMINATE` action for LLM failure handling. When a core agent is disabled, workflow blocks and shows intervention dialog instead of silently skipping.
+  - **Settings provider fix**: Fixed agent disabled detection logic - now checks if key exists in custom_models/custom_prompts (including empty/whitespace values) instead of just checking truthiness.
+  - **Workflow intervention method**: Added `_require_core_agent()` method in agents.py that blocks until core agent is configured, with retry/skip/terminate options.
+  - **LlmTimeoutDialog integration**: Updated frontend LlmTimeoutDialog to handle "agent_disabled" reason - shows different title, body message, and removes model/server fields.
+  - **Test additions**: Added `test_core_agent_disabled_intervention.py`, `test_disabled_agent_e2e.py`, `test_optional_agent_hot_reload.py`, `test_settings_provider_disable.py`.
+
+
+- `0.24.20` — PlanReviewDialog countdown UI improvements (2026-05-19):
+  - **Countdown color change**: Added dynamic color change for countdown timer - turns red when <= 30 seconds remaining to alert users of time running out.
+  - **Layout refactor**: Restructured PlanReviewDialog header to organize countdown timer and download button in a horizontal flex layout alongside the title.
+
+
+- `0.24.19` — per-round agent result cache (2026-05-18):
+  - **AgentRoundCache model**: Added new Pydantic model in schemas.py for per-round per-agent intermediate result caching. Lives in AnalysisState so snapshot/restore captures it automatically.
+  - **cache_hit/cache_store helpers**: Added functions in helpers.py for checking and storing agent results in the current round cache. Returns None if no cache exists or cache is for a different round.
+  - **Pathology agent caching**: Added cache hit check at start of `_pathology_analysis` to skip re-execution if result already exists. Stores result on completion.
+  - **Bioinformatics agent caching**: Added cache hit check at start of `_bioinformatics_analysis` to skip re-execution if result already exists. Preserves planning_stage transition on cache hit.
+  - **Cache lifecycle management**: Clear `current_round_cache` on new round start in `_start_new_round` and after appending to `round_results` in `_synthesize_round` to prevent stale cache on snapshot restore.
+  - **Snapshot labeling**: Updated translation to mark snapshots as "Experimental" in both Chinese and English.
+  - **Test additions**: Added `test_agent_round_cache.py` and `test_snapshot_rollback_idempotency.py`.
+
+
+- `0.24.18` — unified HITL wait gate (2026-05-18):
+  - **wait_with_skip_time helper**: Added unified `wait_with_skip_time()` function in helpers.py that provides consistent HITL wait gate behavior across all gates (plan review, annotation, direction selection, round wait). Semantics: -1=manual (block forever), 0=no-wait (immediate), >0=countdown (wait_seconds + 60s buffer).
+  - **Planning integration**: Updated `_user_review_gate` to use `wait_with_skip_time` instead of hardcoded timeout.
+  - **Synthesis integration**: Updated `_wait_for_user_input` to use `wait_with_skip_time` for both direction selection gate and round wait. Auto-skip now sets user_chosen_direction to "[PI_DECIDE]".
+  - **Annotation integration**: Updated `_annotation_confirmation` to use `wait_with_skip_time`. Auto-skip now accepts PI annotations as-is and marks them as confirmed.
+
+
+- `0.24.17` — prompt template improvements (2026-05-18):
+  - **Figure saving clarification**: Clarified that execute_code tool allows `plt.savefig('name.jpg')` and `sc.pl.*(save='_name.jpg')` for figure saving, while generate_prompts_figure tool wraps saving internally with different rules.
+  - **Template placeholders in PI prompts**: Updated PI agent prompts to use template placeholders (e.g., `<pathway>`, `<cell type>`, `<condition>`) instead of hardcoded examples for research questions, literature topics, and graphic abstract feedback.
+  - **Stage split note**: Added note in PI agent about Stage 1 vs Stage 2 task splitting to prevent task compression.
+  - **MeSH tissue guidance**: Updated PubMed query guidance to include tissue MeSH terms (e.g., "Liver"[MeSH], "Kidney"[MeSH]).
+  - **Organism-specific pathway libraries**: Updated agent_prompts.py to use organism-specific gene set libraries for pathway enrichment (Human: KEGG_2021_Human, Mouse: KEGG_2019_Mouse, Other: query gseapy).
+  - **GO libraries cross-species**: Added guidance that GO libraries work across species when gene symbols match the organism convention.
+
+
+- `0.24.16` — stage scope validation in planning (2026-05-18):
+  - **Enhanced Stage 1 guidance**: Expanded `_STAGE1_GUIDANCE` in bioinformatics agent to explicitly exclude loading/preprocessing data for Stage 2 analyses, including: Loom files (RNA velocity), trajectory inputs, cell-cell communication preprocessing, and pre-staging gene sets for Stage 2 enrichment.
+  - **PI plan review stage scope validation**: Added "Plan Stage" field and "Stage Scope" section to PI plan review prompt. Stage 1 reviews now reject steps that prep data for Stage 2; Stage 2 reviews allow Stage 2-specific steps.
+  - **Stage scope as #1 review criterion**: PI plan review now evaluates stage scope first, with explicit criteria for detecting "scope leak" steps (methods referencing "for downstream", "for velocity", "for trajectory", etc.).
+  - **Test additions**: Added `test_stage1_guidance_scope.py` and `test_pi_review_stage_scope.py` for stage scope validation coverage.
+
+
+- `0.24.15` — plan review action leak fix (2026-05-18):
+  - **Planning action leak fix**: Clear `_plan_review_action` and `_plan_review_event` at the start of `_user_review_gate` to prevent stale actions from previous gate invocations (e.g., stage1's approve still sitting in the slot when stage2's gate is entered).
+  - **Consume after action**: Clear the slot and event after consuming the action so the next loop iteration (clarify path) or the next gate invocation starts from a clean state.
+  - **Test additions**: Added `test_user_review_gate_action_leak.py` (142 lines) to test the action leak fix.
+
+
+- `0.24.14` — lifecycle & routing fixes (2026-05-18):
+  - **Plan review resume requires explicit action**: Lifecycle resume endpoint no longer auto-skips plan review. Instead returns message directing user to `/plan-review` endpoint for approve/skip/modify.
+  - **Reset pi_instructions on stage1→stage2 transition**: Added `_reset_pi_instructions_for_stage2()` to clear bioinformatics/pathology/biochemistry/literature tasks when transitioning from stage1 to stage2.
+  - **SHA-1 for code_history dedup**: Replaced Python's built-in `hash()` with `hashlib.sha1()` for stable code content deduplication across sessions/restarts.
+  - **plan_revision_resume one-shot**: Cleared `plan_revision_resume` flag immediately after routing to prevent stale True from mis-routing subsequent re-entries.
+  - **Honor pending user work over convergence**: Added `_should_force_next_round()` in synthesis to override convergence when there's real human text input, uploaded files, or remaining directions queue.
+  - **Clear user_plan_feedback after planning**: Planning now clears `user_plan_feedback` after consuming it to prevent stale feedback persisting.
+  - **Close signal-loss race in manual mode**: Fixed `_continue_event` clearing/waiting order in `wait_for_user_input` to prevent signal loss.
+  - **Test additions**: Added tests for code_history dedup hash, convergence override, resume plan review flow, stage transition instructions, user review gate abort signal, and wait for user input signal.
+
+
+- `0.24.13` — empty workflow short-circuit & planning abort handling (2026-05-18):
+  - **Empty workflow short-circuit**: Added early exit in `generate_final_report`, `generate_graphic_abstract`, and `generate_detailed_report` when `analysis_log` and `code_history` are empty (no analysis work recorded). Prevents generating empty reports when user stops before any analysis runs.
+  - **Planning abort handling**: When bioinformatics LLM fails unrecoverably during planning and there's no existing plan to fall back to, planning now sets `should_continue=False` and `status=FAILED` instead of letting `failed_node` loop indefinitely. Added `_after_review` routing to handle "abort" case.
+  - **Graph abort edge**: Added `abort → generate_final_report` edge in graph routing for the new abort flow.
+  - **Test additions**: Added `test_reporting_shortcircuit.py` for empty workflow report short-circuit.
+
+
+- `0.24.12` — report generation LLM failure handling (2026-05-18):
+  - **Report generation LLM retry loop**: Wrapped `generate_integrated_report` in retry loop with `UpstreamExhaustedError` handling, similar to other LLM-calling methods. Uses `_wait_for_llm_intervention()` for consistent failure recovery.
+  - **Test additions**: Added `test_generate_final_report_llm_failure.py`, `test_annotation_completed_restore.py`, `test_pi_planning_early_return.py`, `test_workflow_state_init.py`.
+  - **State field cleanup**: Removed unused `skip_nodes` from WorkflowState TypedDict.
+
+
+- `0.24.11` — HITL pause/resume with state restoration (2026-05-18):
+  - **pre_pause_status field**: Added `pre_pause_status` field to save original status when pausing from WAITING_INPUT/WAITING_ANNOTATION/WAITING_PLAN_REVIEW states.
+  - **Resume signal restoration**: Resume now properly signals continue/annotation/plan_review events based on restored status, allowing HITL-gated workflows to resume in place without frontend reconnection.
+  - **Template noop install**: Extracted matplotlib stub unwinding logic into `_TPL_NOOP_INSTALL` template string for reuse across sandbox and chat code generation; ensures clean unwinding of stale stubs.
+  - **Test additions**: Added `test_pause_resume_hitle.py` for HITL pause/resume coverage, `test_tpl_noop_install.py` for template installation, `test_initialize_plan_consistency.py`.
+
+
+- `0.24.10` — cooperative pause gate & matplotlib stub fixes (2026-05-18):
+  - **Cooperative pause gate**: Added `_pause_event` asyncio.Event to workflow for cooperative pausing. Cleared on `pause()` to block bioinformatics agent's autonomous loop between steps; set on `signal_resume()` to release. Wired into bioinformatics agent via `_pause_event` attribute.
+  - **Lifecycle pause improvements**: Pause endpoint now accepts RUNNING and all WAITING_* states; added idempotent check for already-paused state (double-click safe); clear cooperative gate first before snapshot.
+  - **Lifecycle resume improvements**: Resume now releases cooperative pause gate in-place when workflow is alive (no frontend reconnect needed); only cold reload when workflow was lost (server restart).
+  - **Matplotlib stub unwinding**: Chat code generation now unwinds any leftover SCAI no-op stubs before re-installing to prevent wrapper stacking; marks stubs with `_scai_noop` and `_scai_prev` attributes for clean unwinding.
+  - **Original plt.close capture**: Saved baseline `_original_plt_close` before any monkey-patching in sandbox for defensive restore.
+
+
+- `0.24.9` — reasoning field expansion & API serialization refactor (2026-05-17):
+  - **LLM reasoning field expansion**: Added "thinking" and "thought" keys to content extraction for DeepSeek/Claude compatibility; also handles list values in reasoning fields.
+  - **to_api_dict refactor**: Replaced manual snake_case → camelCase mapping with `model_dump(mode="json")` + `_API_KEY_MAP` dictionary for maintainability; fields not in map are excluded from API response.
+  - **Empty content diagnostic extraction**: Extracted `_log_empty_content_diagnostic()` helper from `llm_client.py` for reusability.
+  - **Literature mode_override refactor**: Pass mode_override as parameter instead of mutating agent state directly.
+  - **Config cleanup**: Removed dead config code from `main.py`; updated `_config.py`.
+  - **New tests**: Added test files for content extraction reasoning, error parsing, literature mode_override, to_api_dict coverage, and base agent history.
+
+
+- `0.24.8` — workflow modularization (2026-05-17):
+  - **Workflow package refactoring**: Split the monolithic `backend/workflow.py` (~4000 lines) into a modular `backend/workflow/` package with 13+ specialized modules:
+    - `core.py` — Main workflow class preserving backward-compatible API
+    - `agents.py` — Bioinformatics, PI, supervisor agent orchestration
+    - `planning.py` — Plan generation, revision, and PI review dialogue
+    - `annotation.py` — Cluster annotation and confirmation flow
+    - `callbacks.py` — PI callback, figure review, supervisor callbacks
+    - `synthesis.py` — Round synthesis and supervisor integration
+    - `reporting.py` — Exploration report and report generation
+    - `routing.py` — Node routing logic (after_bioinformatics, should_continue, etc.)
+    - `initialize.py` — Round initialization and plan checking
+    - `state.py` — WorkflowState TypedDict definition
+    - `retry.py` — @with_retry decorator and backoff logic
+    - `helpers.py` — Shared utility functions
+    - `context.py` — Planning context building
+    - `graph.py` — LangGraph state graph definition
+    - `messaging.py` — WebSocket message sending
+  - **Backward compatibility**: The `__init__.py` exports `SingleCellAnalysisWorkflow`, `WorkflowState`, `with_retry`, and `_retry_backoff_delay` to preserve existing import paths.
+  - **New tests**: Added `test_workflow_helpers.py` and `test_workflow_routing.py` for the refactored code.
+
 
 - `0.24.7` — stage-aware planning & stop/resume fixes (2026-05-15):
   - **PI stage context**: Added stage context to PI callback prompts so PI knows whether agent is in stage1 (QC+clustering+annotation only) or stage2 (downstream analysis).
@@ -533,7 +535,9 @@ Detailed release notes for every version are available through `git log` and rel
   - **Stop/resume max_rounds restoration**: Added `original_max_rounds` field to save original value during stop, restored on resume. Fixes round limit being permanently reduced after stop operations.
   - **PI_REVIEW_FALLBACK_DECISION**: Added constant for default PI review decision when LLM fails.
 
+
 - `0.24.6` — (skipped — consolidated into 0.24.7)
+
 
 - `0.24.5` — model serialization fix & planning improvements (2026-05-15):
   - **Pydantic model_dump mode="json"**: Changed all `model_dump()` calls to `model_dump(mode="json")` across workflow, bioinformatics_agent, schemas, and snapshots to properly serialize datetime objects and avoid Pydantic serialization warnings.
@@ -544,12 +548,14 @@ Detailed release notes for every version are available through `git log` and rel
   - **stage2 edge case handling**: Added warning and explicit routing when plan_approved=True is unexpectedly reached in stage2.
   - **Plan approval state sync**: Added `_set_status(analysis_state, TaskStatus.RUNNING)` and `_send_state_sync` when plan is approved to properly update state.
 
+
 - `0.24.4` — custom data type support (2026-05-15):
   - **Custom data type input**: Added ability to enter custom data type names in file uploads. Users can now type custom values (e.g., "Sirius Red", "IHC") beyond the predefined dropdown options for pathology images.
   - **New utility functions**: Added `CUSTOM_TYPE_SENTINEL` sentinel value ("Other"), `isCustomDataType()`, and `selectValueForDataType()` in `dataTypes.ts`.
   - **New CustomTypeInput component**: Created reusable `CustomTypeInput.tsx` component in `components/shared/` that shows a text input when dataType is custom.
   - **Frontend integration**: Updated `ChatPanel.tsx` and `RoundFeedbackDialog.tsx` to use the new custom type input with proper value derivation.
   - **Pathology cleanup**: Reorganized imports in `pathology_agent.py`.
+
 
 - `0.24.3` — planning dialogue improvements (2026-05-14):
   - **Refactored retry logic**: Extracted shared `_retry_backoff_delay()` helper used by `@with_retry` decorator and inline retries in workflow and report generation.
@@ -563,10 +569,15 @@ Detailed release notes for every version are available through `git log` and rel
   - **Async optimizations**: Moved snapshot atomic write and notebook state save to `asyncio.to_thread()` to avoid blocking event loop.
   - **Cleanup**: Removed unused `pending_plan_revision` field from `WorkflowState`; removed unused `random` import from reports.py.
 
+
 - `0.24.2` — version bump (2026-05-13): Version bumped to 0.24.2 across all files; HANDOVER.md modification history updated.
+
 - `0.24.1` — collaborative analysis planning (2026-05-13): Bioinformatics agent: `generate_analysis_plan()` and `revise_plan_incrementally()` methods for method-level analysis planning with stage-aware decomposition (stage1: QC+clustering+annotation, stage2: downstream); plan injected into agent context during autonomous execution. New Pydantic models: `AnalysisPlan`, `PlanStep` with field types (`SnapshotPhase`, `AnalysisPhaseType`, `PlanStage`, `PlanStatus`). New `WAITING_PLAN_REVIEW` task status for plan review HITL gate. Frontend: `PlanReviewDialog` component with expandable steps, countdown auto-skip, approve/modify/skip actions, and dialogue download; integrated into `AnalysisPanel`. Workflow: `planning_dialogue` and `user_review_gate` nodes added to `NODE_TO_AGENT`/`NODE_TO_RESULT_KEY` routing; `current_plan` and `plan_dialogue_history` fields in `AnalysisState`. API: `POST /session/{id}/plan-review` endpoint for approve/skip/modify actions; lifecycle resume/stop extended for `WAITING_PLAN_REVIEW`. Snapshot: strongly typed `SnapshotPhase` with `pre_execution_stage1`, `pre_execution_stage2`, `pre_execution_full`, `pre_major_revision`, `post_report` phases; expanded docstring in `SnapshotManager`. Tests: `test_planning_ordering.py` with regression tests for plan review workflow and planning context ordering; `test_bugs_confirmed.py` with PlanStep mutable default safety test.
 
+
 **0.23.x — report enhancements, chat sections, round tracking (2026-05-08 → 2026-05-10)**
+
+- `0.23.7` — **Frontend read-only hardening & HITL dialog reopen**: Sidebar now shows "Open Saved Session" and export actions in read-only mode while gating delete, edit, clear, new session, and API settings behind `!isReadOnly`; `DataConfigMenu` accepts a `readOnly` prop to conditionally hide import/configure actions; AnalysisPanel status badges ("Waiting for Annotation" / "Waiting for Input") are now clickable buttons that reopen the corresponding interaction dialog via `handleReopenDialog`, improving HITL workflow accessibility.
 
 - `0.23.6` — **Report download & export improvements**: Export now saves to `UPLOAD_TEMP_DIR` instead of reports dir; filename format changed to `export_{session_id[:8]}_{safe_name}.tar.gz`; `_should_skip_in_report_zip()` helper excludes report archives and orphan .zip.tmp files from report ZIP downloads; `download_full_report` now uses streaming temp file with background cleanup; frontend shows download errors inline instead of console errors.
 
@@ -580,7 +591,33 @@ Detailed release notes for every version are available through `git log` and rel
 
 - `0.23.1` — **Report enhancements, chat sections, round tracking**: Added report generation concurrency guard (409 on duplicate requests); automatic report archiving before regeneration (keeps last 5 versions); archive listing/download API endpoints; `round_number` field added to `AnalysisStep` schema for round tracking; supervisor log restored from report.json now groups by round (`all_rounds_log` vs current `supervision_log`); new chat sections generation from chat messages (`chat_sections.py`); config resolver now allows per-user config without global config; new `/user/config/validate-saved` endpoint for validating saved credentials; frontend validation flow: admin validates with frontend config, non-admin validates saved config; validation on report generation (check API key before start); session cleanup clears report generation pending flag.
 
-**0.22.x — per-user LLM config, config persistence, reproducibility toggle (2026-05-03 → 2026-05-08)**
+**0.22.x — snapshot rollback, LLM failure intervention, per-user config (2026-05-03 → 2026-05-08)**
+
+- `0.22.12` — Database inline foreign keys (2026-05-08): Removed `_connect()` helper; PRAGMA foreign_keys enabled directly in `delete_user()` and `set_user_llm_config()` for consistency.
+
+- `0.22.11` — PubMed Email for all users (2026-05-08): PubMed Email field in ConfigPanel made available to non-admin users, enabling literature search credential configuration for all roles.
+
+- `0.22.10` — Minor fixes & cleanup (2026-05-07): Removed `configSkipped` state; deleted stray `next-env.d.ts`; version bump.
+
+- `0.22.9` — Per-user LLM configuration & config persistence (2026-05-07): `user_llm_config` DB table with Fernet encryption; `/api/user/config` CRUD routes; `resolve_config_for_user()` merges per-user credentials over global config; `config_resolver.py`, `crypto.py`, `llm_probe.py` added; frontend `useUserConfig()` hook; ConfigPanel split between admin/user modes; global config persists to DB.
+
+- `0.22.8` — Auth-optional path refinement (2026-05-07): `SESSION_AUTH_OPTIONAL_SUFFIXES` tuple for report/export/figure paths; `_is_auth_optional()` refactored into helper.
+
+- `0.22.7` — Auth ownership enforcement (2026-05-07): `require_session_ownership()` replaces manual `ensure_session_loaded()` across all routes; `Request` parameter added to all session-specific endpoints; chat routes rename `request` to `body`; report WebSocket uses auth token/protocol; admin initialization check.
+
+- `0.22.6` — LLM failure workflow (2026-05-07): `@with_retry` while-loop with user intervention via per-node `asyncio.Event`; generation-based idempotency; `UpstreamExhaustedError` with context fields (`agent_name`, `model`, `llm_server`); `POST /llm-failure-action` route; frontend `LlmTimeoutDialog` and `LlmModifySubDialog` with countdown auto-skip; stale LLM failure cleanup on session load; `constants.py` created.
+
+- `0.22.5` — Supervisor stuck escalation & resilience (2026-05-05): Supervisor detects stuck agents (same error >=3 times) and escalates to PI; `CODE_GEN_ERROR_TYPES` added with static hints; bioinformatics agent error tolerance increased (MAX_CONSECUTIVE_ERRORS 3→5, MAX_TOTAL_ERRORS 30→50); last-chance attempt messaging.
+
+- `0.22.4` — Snapshot logic refactor & UI overhaul (2026-05-05): Extracted `compute_snapshot_context()` and `create_and_register_snapshot()` static methods shared by workflow and chat; chat auto-snapshots added; removed `cleanup_old_snapshots()`; frontend CSS-grid snapshot tree with SVG rails/fork paths; snapshot count reminder dialog; `snapshot_count` field in WebSocket messages; favicon; report auto-snapshot; start.sh build ordering fix.
+
+- `0.22.3` — Import hardening & memory optimization (2026-05-04): Added `validate_path_within()` for path-traversal protection; `_resolve_import_dest()` extracts archive-to-session mapping; `shutil.copyfileobj()` with `UPLOAD_CHUNK_SIZE` reduces peak memory; structured logging for import lifecycle.
+
+- `0.22.2` — Snapshot rollback enhancement (2026-05-03): Extended `Snapshot` model with `notebook_file`, `workspace_manifest`, `branch_label`; added `restore_notebook()`, `cleanup_workspace_files()`, `cleanup_reports()`; new `GET /rollback-preview` and `DELETE /branch` endpoints; branch labels auto-computed; frontend CSS-grid snapshot graph with SVG rails/fork paths and rollback preview.
+
+- `0.22.1` — Reproducibility toggle (2026-05-03): Added `enable_reproducibility` boolean to `SystemConfig` (env var `SCAI_ENABLE_REPRODUCIBILITY`, default `False`); extracted `_maybe_generate_reproducibility_bundle()` with lazy import; download endpoint returns 403 when disabled.
+
+**0.21.x — session priority loading, settings provider, username auth (2026-05-03 → 2026-05-08)**
 
 - `0.21.5` — Session priority loading & automatic tab sync: new `sessionPriority.ts` utility with intelligent session selection (priority tiers: waiting_input > active > paused > completed > pending); `waiting_input` sessions sorted by deadline urgency; `syncTabToSessionStatus()` auto-switches tab based on session status (pending→data, active→analysis, completed→report); Sidebar auto-loads highest-priority session on startup (via `doPriorityLoad()`); Zustand hydration tracking with `_hydrated` flag in `appStore.ts` (deferred flag flip via `onRehydrateStorage()`); `setActiveTab()` optimized to skip no-ops; backend: `waiting_input_started_at` timestamp in `AnalysisState`; `DEFAULT_ROUND_WAIT_SECONDS` extracted to `schemas.py`; session list API includes `waiting_input_started_at`, `round_wait_seconds`, and `created_at`; user guide fully reorganized and updated (both English and Chinese versions).
 - `0.21.4` — Settings provider hardening & user guide refactor: moved `from backend.state import sessions` to module-level import in `settings_provider.py` (removed deferred import); simplified `get_temperature()` to read custom temperatures directly instead of `merge_custom()` round-trip; inlined model/temperature reads in `chat.py` for PI and bioinformatics figure generation (bypassed `AgentSettingsProvider` for those two call sites); fixed `PainterAgent` log to use `self.model` instead of stale `model` param; removed unused `AgentConfig` import from `pi_agent.py` and redundant `from ..utils.settings_provider` import from `literature_agent.py`; fixed missing trailing newline in `settings_provider.py`. Added standalone Chinese `user-guide.md` at project root; updated all user-guide link references in `README.md` and `HANDOVER.md` from `docs/user-guide.md` to `user-guide.md`.
