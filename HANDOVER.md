@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.13 · **Last updated**: 2026-05-31
+**Version**: 0.25.14 · **Last updated**: 2026-06-01
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.25.x — LLM resilience, sandbox hardening, frontend refactoring (2026-05-27 → present)**
+
+- `0.25.14` — Google Deep Research API revision upgrade (2026-06-01):
+  - **Model & API revision bump**: `GoogleDeepResearchClient.DEFAULT_MODEL` upgraded from `deep-research-pro-preview-12-2025` to `deep-research-preview-04-2026`; new `API_REVISION = "2026-05-20"` constant is now sent on every Interactions API call via the `Api-Revision` header (cached on the client as `_default_headers`).
+  - **Structured `agent_config` payload**: Interaction creation now sends `agent_config: {type: "deep-research", thinking_summaries: "auto", visualization: "auto", collaborative_planning: false}` and reorders `agent` before `input` to match the new schema.
+  - **New response schema extraction**: `_extract_research_result()` first reads the top-level `output_text` and walks `steps[]` for `thinking_summary` / per-step `groundingMetadata`; legacy `outputs[]` and `output.parts[].text` paths are retained as defensive fallbacks.
+  - **Top-level grounding compatibility**: Accepts both `groundingMetadata` (camelCase) and `grounding_metadata` (snake_case) at the response root so source citations keep working across schema variants.
 
 - `0.25.13` — transformLoadResponse absent-field preservation (2026-05-31):
   - **Partial Session updates**: `transformLoadResponse()` no longer fills missing fields with empty strings/arrays/zeros — uses `opt()` helper that omits the key entirely when raw value is null/undefined.

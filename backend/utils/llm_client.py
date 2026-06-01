@@ -1371,12 +1371,17 @@ class GoogleDeepResearchClient:
     """Client for Google Gemini Deep Research via Interactions API"""
     
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-    
-    DEFAULT_MODEL = "deep-research-pro-preview-12-2025"
+
+    DEFAULT_MODEL = "deep-research-preview-04-2026"
+    API_REVISION = "2026-05-20"
 
     def __init__(self, api_key: str, proxy_url: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key
         self.model = model or self.DEFAULT_MODEL
+        self._default_headers = {
+            "x-goog-api-key": self.api_key,
+            "Api-Revision": self.API_REVISION,
+        }
         # httpx will also read from HTTP_PROXY/HTTPS_PROXY env vars if trust_env=True (default)
         if proxy_url:
             self.client = httpx.AsyncClient(
@@ -1407,15 +1412,21 @@ class GoogleDeepResearchClient:
         url = f"{self.BASE_URL}/interactions"
 
         payload = {
-            "input": query,
             "agent": self.model,
-            "background": background
+            "input": query,
+            "background": background,
+            "agent_config": {
+                "type": "deep-research",
+                "thinking_summaries": "auto",
+                "visualization": "auto",
+                "collaborative_planning": False,
+            },
         }
 
         response = await self.client.post(
             url,
-            headers={"x-goog-api-key": self.api_key},
-            json=payload
+            headers=self._default_headers,
+            json=payload,
         )
         response.raise_for_status()
 
@@ -1446,7 +1457,7 @@ class GoogleDeepResearchClient:
         while (time.time() - start_time) < max_wait:
             response = await self.client.get(
                 url,
-                headers={"x-goog-api-key": self.api_key}
+                headers=self._default_headers,
             )
             response.raise_for_status()
             
@@ -1464,31 +1475,61 @@ class GoogleDeepResearchClient:
         raise TimeoutError("Research timed out")
     
     def _extract_research_result(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract research result from Interactions API response"""
+        """Extract research result from Interactions API response.
+
+        New schema (Api-Revision 2026-05-20+): final text lives in `output_text`,
+        intermediate progress in `steps[]`. Legacy `outputs[]`/`output` kept for
+        defensive fallback.
+        """
         result = {
             "report": "",
             "sources": [],
             "thinking": []
         }
 
-        # Try new format first: outputs array (Interactions API)
-        outputs = data.get("outputs", [])
-        if outputs:
-            for output_item in outputs:
-                if isinstance(output_item, dict):
-                    # Direct text field
-                    if "text" in output_item:
-                        result["report"] += output_item["text"]
-                    # Nested parts format
-                    elif "parts" in output_item:
-                        for part in output_item["parts"]:
-                            if isinstance(part, dict) and "text" in part:
-                                result["report"] += part["text"]
-                    # Extract grounding metadata from each output
-                    grounding = output_item.get("groundingMetadata", {})
-                    self._extract_sources(grounding, result["sources"])
-        else:
-            # Fallback: legacy output.parts[].text format
+        # New schema: top-level output_text
+        output_text = data.get("output_text")
+        if isinstance(output_text, str) and output_text:
+            result["report"] = output_text
+
+        # New schema: steps[] — collect thinking summaries and grounding
+        for step in data.get("steps", []) or []:
+            if not isinstance(step, dict):
+                continue
+            step_type = step.get("type", "")
+            # Thinking / planning summaries
+            summary = step.get("thinking_summary") or step.get("summary")
+            if isinstance(summary, str) and summary:
+                result["thinking"].append({"type": step_type, "text": summary})
+            # Final report fallback if output_text missing
+            if not result["report"]:
+                text = step.get("text")
+                if isinstance(text, str) and text:
+                    result["report"] += text
+                for part in step.get("parts", []) or []:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        result["report"] += part["text"]
+            # Grounding can appear per-step
+            grounding = step.get("groundingMetadata") or step.get("grounding_metadata") or {}
+            if grounding:
+                self._extract_sources(grounding, result["sources"])
+
+        # Legacy fallback: outputs[]
+        if not result["report"]:
+            for output_item in data.get("outputs", []) or []:
+                if not isinstance(output_item, dict):
+                    continue
+                if "text" in output_item:
+                    result["report"] += output_item["text"]
+                elif "parts" in output_item:
+                    for part in output_item["parts"]:
+                        if isinstance(part, dict) and "text" in part:
+                            result["report"] += part["text"]
+                grounding = output_item.get("groundingMetadata", {})
+                self._extract_sources(grounding, result["sources"])
+
+        # Legacy fallback: single output.parts[].text
+        if not result["report"]:
             output = data.get("output", {})
             if isinstance(output, dict):
                 for part in output.get("parts", []):
@@ -1497,8 +1538,8 @@ class GoogleDeepResearchClient:
                 grounding = output.get("groundingMetadata", {})
                 self._extract_sources(grounding, result["sources"])
 
-        # Also check top-level groundingMetadata
-        top_grounding = data.get("groundingMetadata", {})
+        # Top-level groundingMetadata (any schema)
+        top_grounding = data.get("groundingMetadata") or data.get("grounding_metadata") or {}
         if top_grounding:
             self._extract_sources(top_grounding, result["sources"])
 
