@@ -30,3 +30,10 @@ def test_blocks_compressed_snapshot_pkl():
 def test_allows_unrelated_zst_files():
     assert is_sandbox_pickle("data.zst") is False
     assert is_sandbox_pickle("backup.tar.zst") is False
+
+
+def test_blocks_nested_pkl_under_snapshot_blob_dir():
+    # After rglob recursion the export tar may contain nested paths under snapshots/.
+    # The S4 skip must match by basename regardless of path depth.
+    assert is_sandbox_pickle("snapshots/abc_blobs/inner_session.pkl") is True
+    assert is_sandbox_pickle("snapshots/abc_blobs/deep/inner_session.pkl.zst") is True

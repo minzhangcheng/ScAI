@@ -66,6 +66,8 @@ def inline_blobs(obj: Any, blob_dir: Path) -> Any:
     corrupt session can still load rather than crashing.
     """
     blob_dir = Path(blob_dir)
+    if not blob_dir.exists():
+        return obj
 
     def _walk(node: Any) -> Any:
         if isinstance(node, str) and node.startswith(BLOB_REF_PREFIX):

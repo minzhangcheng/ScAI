@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.14 · **Last updated**: 2026-06-01
+**Version**: 0.25.15 · **Last updated**: 2026-06-04
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,18 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.25.x — LLM resilience, sandbox hardening, frontend refactoring (2026-05-27 → present)**
+
+- `0.25.15` — export blob round-trip, DeepResearch error logging, import path resilience (2026-06-04):
+  - **Session-level blob store packing**: `_add_session_blobs_to_tar()` packs `<session>/blobs/<hash>.b64` sidecars into tar exports so imported `@scai-blob` tokens resolve to real content instead of dangling as raw text in the UI.
+  - **Recursive snapshot tar inclusion**: `_add_snapshots_to_tar()` uses `rglob` instead of `iterdir` so per-snapshot blob subdirs (`<snap_id>_blobs/<hash>.b64`) are included alongside top-level state/notebook/pkl files.
+  - **Import `inline_blobs` resolution**: `_import_tar_gz` and `_import_zip` now call `inline_blobs()` on the deserialized `state_data` before constructing `AnalysisState`, restoring externalized blobs from extracted sidecars.
+  - **Zip legacy path remapping**: `_import_zip` remaps legacy `<UPLOAD_DIR>/<id>`, `<WORKSPACE_DIR>/<id>`, `<REPORTS_DIR>/<id>` paths in the JSON payload to the current session-centric layout.
+  - **Import path resolution for nested snapshots**: `_resolve_import_dest` handles `blobs/` entries and nested `snapshots/<subdir>/` paths (from rglob), not just top-level snapshot files.
+  - **DeepResearch structured error logging**: New `_check_response()` on `GoogleDeepResearchClient` logs warning with status/body before raising `HTTPStatusError`, replacing bare `raise_for_status()` in `start_research` and `poll_research`.
+  - **Blob store early return**: `inline_blobs()` returns the object unchanged when `blob_dir` doesn't exist, preventing crashes during import of blob-less archives.
+  - **Sandbox pickle skip depth guard**: `is_sandbox_pickle` matches session pkl basenames at any path depth, covering nested entries under `snapshots/<id>_blobs/`.
+  - **New test file**: `test_export_import_blob_roundtrip.py` — verifies session-blob and snapshot-blob content is preserved losslessly through export→import.
+  - **Extended test**: `test_import_pkl_skip.py` — tests nested pkl detection under snapshot blob directories.
 
 - `0.25.14` — Google Deep Research API revision upgrade (2026-06-01):
   - **Model & API revision bump**: `GoogleDeepResearchClient.DEFAULT_MODEL` upgraded from `deep-research-pro-preview-12-2025` to `deep-research-preview-04-2026`; new `API_REVISION = "2026-05-20"` constant is now sent on every Interactions API call via the `Api-Revision` header (cached on the client as `_default_headers`).

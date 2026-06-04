@@ -36,6 +36,7 @@ from backend.state import (
     prepared_exports_lock as _prepared_exports_lock,
 )
 from backend.utils.auth import require_session_ownership
+from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
 from backend.utils.upload import stream_save_file
 from starlette.background import BackgroundTask
@@ -104,12 +105,37 @@ def _build_export_filename(session_id: str, name: str, ext: str = ".tar.gz") -> 
 # ---------------------------------------------------------------------------
 
 def _add_snapshots_to_tar(tf, session_id: str):
-    """Add snapshot files to tar archive."""
+    """Add snapshot files to tar archive.
+
+    Recurses so per-snapshot blob subdirectories (<snap_id>_blobs/<hash>.b64)
+    are included alongside the top-level state.json / notebook.ipynb /
+    session.pkl.zst files. Without recursion `inline_blobs()` on the imported
+    snapshot would dangle, leaving raw "@scai-blob:<hash>" tokens in restored
+    state.
+    """
     snapshots_dir = get_session_dir(session_id) / "snapshots"
-    if snapshots_dir.exists():
-        for snap_file in snapshots_dir.iterdir():
-            if snap_file.is_file():
-                tf.add(str(snap_file), arcname=f"{session_id}/snapshots/{snap_file.name}")
+    if not snapshots_dir.exists():
+        return
+    for snap_file in snapshots_dir.rglob("*"):
+        if snap_file.is_file():
+            rel = snap_file.relative_to(snapshots_dir)
+            tf.add(str(snap_file), arcname=f"{session_id}/snapshots/{rel.as_posix()}")
+
+
+def _add_session_blobs_to_tar(tf, session_id: str):
+    """Add the session-level externalized blob store to tar archive.
+
+    The blob_store offloads any string >= 1024 chars from session.json into
+    <session_dir>/blobs/<sha256>.b64 sidecars. Without these files the
+    imported session.json contains dangling "@scai-blob:<hash>" tokens that
+    surface as raw text in the UI (e.g. inside the messages history).
+    """
+    blob_dir = get_session_dir(session_id) / "blobs"
+    if not blob_dir.exists():
+        return
+    for blob_file in blob_dir.iterdir():
+        if blob_file.is_file():
+            tf.add(str(blob_file), arcname=f"{session_id}/blobs/{blob_file.name}")
 
 
 def _add_reproducibility_to_tar(tf, session_id: str):
@@ -214,7 +240,10 @@ async def export_state(session_id: str, request: Request):
             # 6. reproducibility bundle
             _add_reproducibility_to_tar(tf, session_id)
 
-            # 7. snapshots (JSON state files + session pkl backups)
+            # 7. session-level externalized blob store (must accompany session.json)
+            _add_session_blobs_to_tar(tf, session_id)
+
+            # 8. snapshots (JSON state files + session pkl backups)
             _add_snapshots_to_tar(tf, session_id)
 
     async with temp_file_on_error(tmp_path):
@@ -314,6 +343,9 @@ async def export_prepare(session_id: str, request: Request):
 
             # reproducibility bundle
             _add_reproducibility_to_tar(tf, session_id)
+
+            # session-level externalized blob store
+            _add_session_blobs_to_tar(tf, session_id)
 
             # snapshots (JSON state files + session pkl backups)
             _add_snapshots_to_tar(tf, session_id)
@@ -488,9 +520,17 @@ def _resolve_import_dest(relative_to_base: str, session_id: str) -> Path:
     if relative_to_base.startswith(f"reports/{session_id}/"):
         rest = relative_to_base.split("/", 2)[2] if relative_to_base.count("/") >= 2 else ""
         return get_session_reports(session_id) / rest
-    if relative_to_base.startswith("snapshots/"):
+    if relative_to_base.startswith("blobs/"):
+        # Session-level externalized blob store sidecars.
         fname = relative_to_base.split("/", 1)[1]
-        return get_session_dir(session_id) / "snapshots" / fname
+        return get_session_dir(session_id) / "blobs" / fname
+    if relative_to_base.startswith("snapshots/"):
+        # Snapshot sidecars: state json, notebook ipynb, compressed pkl,
+        # AND per-snapshot blob subdirs `<snap_id>_blobs/<hash>.b64`. The
+        # original code only handled top-level files; rglob in the export
+        # now also brings in those nested blob files.
+        rest = relative_to_base.split("/", 1)[1]
+        return get_session_dir(session_id) / "snapshots" / rest
     return DATA_BASE_DIR / relative_to_base
 
 
@@ -599,12 +639,22 @@ def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
 
     state_data = json.loads(state_json_str)
     state_data["user_id"] = user_id
-    state = AnalysisState(**state_data)
 
-    # Write session file to new location
-    session_file = get_session_metadata_path(state.id)
+    # Write the externalized JSON (with @scai-blob tokens intact) to disk.
+    # This keeps session.json consistent with the extracted blob sidecars.
+    # async_save_session will re-externalize and overwrite, but writing here
+    # first ensures a valid session.json exists even if the process crashes
+    # before that step — the externalized form is always loadable.
+    # Re-serialize from state_data (not state_json_str) so the updated
+    # user_id is reflected on disk.
+    session_file = get_session_metadata_path(session_id)
     session_file.parent.mkdir(parents=True, exist_ok=True)
-    session_file.write_text(state.model_dump_json(indent=2), encoding='utf-8')
+    session_file.write_text(json.dumps(state_data, ensure_ascii=False), encoding="utf-8")
+
+    # Inline blob references so the in-memory AnalysisState carries the
+    # original content rather than dangling @scai-blob tokens.
+    state_data = inline_blobs(state_data, get_session_dir(session_id) / "blobs")
+    state = AnalysisState(**state_data)
 
     return state
 
@@ -626,8 +676,19 @@ def _import_zip(content: bytes, user_id: str) -> AnalysisState:
         if state_json_path not in namelist:
             raise HTTPException(status_code=400, detail="state.json not found in archive")
 
-        state_data = json.loads(zf.read(state_json_path).decode('utf-8'))
+        state_json_str = zf.read(state_json_path).decode('utf-8')
+
+        # Remap legacy paths to new session-centric paths
+        state_json_str = state_json_str.replace(
+            str(UPLOAD_DIR / session_id), str(get_session_uploads(session_id)))
+        state_json_str = state_json_str.replace(
+            str(WORKSPACE_DIR / session_id), str(get_session_workspace(session_id)))
+        state_json_str = state_json_str.replace(
+            str(REPORTS_DIR / session_id), str(get_session_reports(session_id)))
+
+        state_data = json.loads(state_json_str)
         state_data["user_id"] = user_id
+        state_data = inline_blobs(state_data, get_session_dir(session_id) / "blobs")
         state = AnalysisState(**state_data)
 
         # Extract notebook if exists

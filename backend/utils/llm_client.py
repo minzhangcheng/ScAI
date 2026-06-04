@@ -1394,6 +1394,24 @@ class GoogleDeepResearchClient:
     async def close(self):
         await self.client.aclose()
 
+    def _check_response(self, response: httpx.Response, context: str) -> None:
+        """Raise HTTPStatusError for non-success responses with logging.
+
+        Matches raise_for_status() behavior (raises on any non-2xx including 3xx)
+        while adding structured warning logs for debugging.
+        """
+        if not response.is_success:
+            body = response.text
+            logger.warning(
+                f"[DeepResearch] {context} {response.status_code} from {response.url} "
+                f"| response_body={body[:2000]}"
+            )
+            raise httpx.HTTPStatusError(
+                f"{response.status_code} {response.reason_phrase} from {response.url}: {body[:1000]}",
+                request=response.request,
+                response=response,
+            )
+
     async def start_research(
         self,
         query: str,
@@ -1428,7 +1446,7 @@ class GoogleDeepResearchClient:
             headers=self._default_headers,
             json=payload,
         )
-        response.raise_for_status()
+        self._check_response(response, f"start_research model={self.model} api_revision={self.API_REVISION}")
 
         data = response.json()
         # Handle both "id" field and "name" resource path format
@@ -1459,7 +1477,7 @@ class GoogleDeepResearchClient:
                 url,
                 headers=self._default_headers,
             )
-            response.raise_for_status()
+            self._check_response(response, f"poll_research interaction_id={interaction_id}")
             
             data = response.json()
             
