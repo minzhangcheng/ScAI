@@ -10,12 +10,26 @@ import os
 import re
 import shutil
 import tarfile
+import time
 import uuid
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
+import aiofiles
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+
+
+class ImportCancelled(Exception):
+    """Raised inside the extraction worker when the user requests cancellation."""
+    pass
+
+
+# Throttle progress writes from the extraction worker so we don't update the
+# job dict on every file (some archives have tens of thousands of small files).
+_IMPORT_PROGRESS_UPDATE_INTERVAL_S = 0.5
+# Throttle upload-phase progress updates (every ~64 MB).
+_IMPORT_UPLOAD_PROGRESS_BYTES = 64 * 1024 * 1024
 
 from backend.config import (
     DATA_BASE_DIR, REPORTS_DIR, SESSION_DIR, STATE_DIR, UPLOAD_DIR, WORKSPACE_DIR,
@@ -38,7 +52,6 @@ from backend.state import (
 from backend.utils.auth import require_session_ownership
 from backend.utils.blob_store import inline_blobs
 from backend.utils.files import slugify_session_name, validate_path_within, validate_session_id, temp_file_on_error
-from backend.utils.upload import stream_save_file
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse
 
@@ -54,24 +67,6 @@ def check_inline_import_size(content_length: Optional[int], max_bytes: int = MAX
     """Fast-reject oversized inline imports based on the Content-Length header."""
     if content_length is not None and content_length > max_bytes:
         raise HTTPException(status_code=413, detail=f"Import file too large (max {max_bytes} bytes)")
-
-
-async def read_capped(file, max_bytes: int = MAX_INLINE_IMPORT_BYTES) -> bytes:
-    """Read an UploadFile fully but abort with 413 if it exceeds max_bytes.
-
-    Defends against requests that omit / lie about Content-Length.
-    """
-    chunks = []
-    total = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(status_code=413, detail=f"Import file too large (max {max_bytes} bytes)")
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 def is_sandbox_pickle(name: str) -> bool:
@@ -104,7 +99,7 @@ def _build_export_filename(session_id: str, name: str, ext: str = ".tar.gz") -> 
 # Helper functions (used by export handlers)
 # ---------------------------------------------------------------------------
 
-def _add_snapshots_to_tar(tf, session_id: str):
+def _add_snapshots_to_tar(tf, session_id: str, include_runtime: bool = False):
     """Add snapshot files to tar archive.
 
     Recurses so per-snapshot blob subdirectories (<snap_id>_blobs/<hash>.b64)
@@ -112,14 +107,45 @@ def _add_snapshots_to_tar(tf, session_id: str):
     session.pkl.zst files. Without recursion `inline_blobs()` on the imported
     snapshot would dangle, leaving raw "@scai-blob:<hash>" tokens in restored
     state.
+
+    When ``include_runtime`` is False (default), sandbox session pickles
+    (``*_session.pkl`` / ``*_session.pkl.zst``) are skipped. These can be
+    multi-GB per snapshot and are only useful for in-memory kernel restore on
+    the *same* trusted instance — they cannot be re-loaded by import on any
+    other instance because ``dill.load`` is arbitrary code execution.
     """
     snapshots_dir = get_session_dir(session_id) / "snapshots"
     if not snapshots_dir.exists():
         return
     for snap_file in snapshots_dir.rglob("*"):
         if snap_file.is_file():
+            if not include_runtime and is_sandbox_pickle(snap_file.name):
+                continue
             rel = snap_file.relative_to(snapshots_dir)
             tf.add(str(snap_file), arcname=f"{session_id}/snapshots/{rel.as_posix()}")
+
+
+def _add_states_to_tar(tf, session_id: str, include_runtime: bool = False):
+    """Add files under sessions/<id>/states/ to the tar.
+
+    Skips the live sandbox pickle (``<id>_session.pkl``) unless ``include_runtime``
+    is True. Notebook (``*.ipynb``) and langgraph checkpoint (``checkpoints.sqlite``)
+    are always included — they are not arbitrary-code-execution risks.
+    """
+    def _add(state_file: Path):
+        if not include_runtime and is_sandbox_pickle(state_file.name):
+            return
+        tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
+
+    states_dir = get_session_states(session_id)
+    if states_dir.exists():
+        for sf in states_dir.iterdir():
+            if sf.is_file():
+                _add(sf)
+    # Legacy fallback (flat STATE_DIR layout)
+    for sf in STATE_DIR.glob(f"{session_id}*"):
+        if sf.is_file():
+            _add(sf)
 
 
 def _add_session_blobs_to_tar(tf, session_id: str):
@@ -158,10 +184,17 @@ def _add_reproducibility_to_tar(tf, session_id: str):
 # ---------------------------------------------------------------------------
 
 @router.api_route("/api/session/{session_id}/export", methods=["GET", "HEAD"])
-async def export_state(session_id: str, request: Request):
+async def export_state(session_id: str, request: Request, include_runtime: bool = False):
     """Export complete session as tar.gz including all uploads, workspace, reports, and state files.
 
     Uses a temporary file on disk to avoid loading the entire archive into memory.
+
+    Query params:
+        include_runtime: When True, include sandbox session pickles
+            (live kernel variable dumps + per-snapshot ``session.pkl.zst``).
+            These can be multi-GB and are only loadable on the same trusted
+            instance — every import path drops them unless ``trust=true`` is
+            passed. Default False produces smaller, portable archives.
     """
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
@@ -197,15 +230,7 @@ async def export_state(session_id: str, request: Request):
                 tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
 
             # 2. states (checkpoints, notebook, pkl)
-            states_dir = get_session_states(session_id)
-            if states_dir.exists():
-                for state_file in states_dir.iterdir():
-                    if state_file.is_file():
-                        tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
-            # Legacy fallback
-            for state_file in STATE_DIR.glob(f"{session_id}*"):
-                if state_file.is_file():
-                    tf.add(str(state_file), arcname=f"{session_id}/states/{state_file.name}")
+            _add_states_to_tar(tf, session_id, include_runtime=include_runtime)
 
             # 3. uploads (recursive)
             upload_dir = get_session_uploads(session_id)
@@ -244,7 +269,7 @@ async def export_state(session_id: str, request: Request):
             _add_session_blobs_to_tar(tf, session_id)
 
             # 8. snapshots (JSON state files + session pkl backups)
-            _add_snapshots_to_tar(tf, session_id)
+            _add_snapshots_to_tar(tf, session_id, include_runtime=include_runtime)
 
     async with temp_file_on_error(tmp_path):
         await asyncio.to_thread(_build_tar)
@@ -262,11 +287,15 @@ async def export_state(session_id: str, request: Request):
 
 
 @router.post("/api/session/{session_id}/export/prepare")
-async def export_prepare(session_id: str, request: Request):
+async def export_prepare(session_id: str, request: Request, include_runtime: bool = False):
     """Phase 1: Build the tar.gz archive on disk and return metadata.
 
     The frontend calls this first (showing a spinner), then triggers
     the streaming download via GET /export/download once ready.
+
+    Query params:
+        include_runtime: Include sandbox session pickles. See ``export_state``
+            for the trade-off. Default False.
     """
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
@@ -302,14 +331,7 @@ async def export_prepare(session_id: str, request: Request):
                 tf.add(str(session_file), arcname=f"{session_id}/sessions/{session_id}.json")
 
             # states
-            states_dir = get_session_states(session_id)
-            if states_dir.exists():
-                for sf in states_dir.iterdir():
-                    if sf.is_file():
-                        tf.add(str(sf), arcname=f"{session_id}/states/{sf.name}")
-            for sf in STATE_DIR.glob(f"{session_id}*"):
-                if sf.is_file():
-                    tf.add(str(sf), arcname=f"{session_id}/states/{sf.name}")
+            _add_states_to_tar(tf, session_id, include_runtime=include_runtime)
 
             # uploads
             upload_dir = get_session_uploads(session_id)
@@ -348,7 +370,7 @@ async def export_prepare(session_id: str, request: Request):
             _add_session_blobs_to_tar(tf, session_id)
 
             # snapshots (JSON state files + session pkl backups)
-            _add_snapshots_to_tar(tf, session_id)
+            _add_snapshots_to_tar(tf, session_id, include_runtime=include_runtime)
 
     async with temp_file_on_error(str(tar_path)):
         await asyncio.to_thread(_build_tar)
@@ -394,41 +416,118 @@ async def export_download(session_id: str, request: Request):
 
 
 @router.post("/api/session/import")
-async def import_state(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...), import_id: Optional[str] = Form(None)):
+async def import_state(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
     """Import session from tar.gz/zip/json archive, restoring all files to their directories.
 
-    For tar.gz: streams upload to temp file, then extracts in a background task and returns
-    an import_id immediately to avoid proxy timeouts on large archives.
-    The frontend can pre-generate import_id so that even if a proxy timeout prevents the
-    response from reaching the client, it can still poll for status.
-    For zip/json: processed inline (small files).
+    **Raw octet-stream upload** — the request body is the archive bytes directly,
+    not multipart/form-data. This avoids Starlette's SpooledTemporaryFile from
+    making a redundant copy of multi-GB archives (each multipart upload spool
+    + re-copy doubled disk I/O, adding ~50 min for a 73 GB archive).
+
+    Headers:
+        X-Filename: original filename, used to dispatch on extension
+            (``.tar.gz``/``.tgz`` → background extract; ``.zip``/``.json`` → inline).
+        X-Import-Id: optional client-generated UUID for the import job. Letting
+            the client pick it means the frontend can poll for status even if
+            the response is lost to a proxy timeout.
+        X-Trust: ``"true"`` opts in to restoring sandbox session pickles
+            (``*_session.pkl``). ``dill.load`` is arbitrary code execution, so
+            only pass for archives the caller fully trusts. Default false.
+
+    For tar.gz: streams the body to disk under ``UPLOAD_TEMP_DIR`` (single write
+    pass), then extracts in a background task and returns an ``import_id``.
+    For zip/json: streams to an in-memory buffer with a size cap, then processes
+    inline.
     """
     user_id = getattr(request.state, "user_id", "")
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required to import sessions")
 
-    filename = file.filename or ""
+    filename = (request.headers.get("x-filename") or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="X-Filename header is required")
+    # Reject obviously malicious filenames before they touch disk paths.
+    if '/' in filename or '\\' in filename or '\x00' in filename:
+        raise HTTPException(status_code=400, detail="X-Filename must not contain path separators")
+
+    import_id = request.headers.get("x-import-id") or None
+    trust = (request.headers.get("x-trust") or "").lower() in ("true", "1", "yes")
+
+    _cl_hdr = request.headers.get("content-length")
+    content_length = int(_cl_hdr) if _cl_hdr and _cl_hdr.isdigit() else 0
 
     if filename.endswith(('.tar.gz', '.tgz')):
-        # ---- tar.gz: save to disk, then extract in background to avoid proxy timeouts ----
-        # Register import job BEFORE saving file so frontend can poll even if proxy times out
+        # ---- tar.gz: stream body directly to disk, then extract in background ----
         import_job_id = import_id or str(uuid.uuid4())
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "uploading", "created_at": __import__("time").time()}
+            _import_jobs[import_job_id] = {
+                "status": "uploading",
+                "phase": "uploading",
+                "created_at": time.time(),
+                "bytes_total": content_length,
+                "bytes_processed": 0,
+                "files_total": 0,
+                "files_processed": 0,
+                "current_file": "",
+                "cancel_requested": False,
+            }
 
         tmp_path = UPLOAD_TEMP_DIR / f"import_{uuid.uuid4().hex}.tar.gz"
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        bytes_written = 0
+        last_progress_update = 0
         try:
-            await stream_save_file(file, tmp_path)
-        except Exception as e:
-            logger.error(f"Import {import_job_id}: stream_save_file failed: {e}")
+            async with aiofiles.open(tmp_path, 'wb') as f:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    # Cooperative cancel during the upload phase.
+                    if _import_jobs.get(import_job_id, {}).get("cancel_requested"):
+                        raise ImportCancelled("cancelled during upload")
+                    await f.write(chunk)
+                    bytes_written += len(chunk)
+                    if bytes_written - last_progress_update >= _IMPORT_UPLOAD_PROGRESS_BYTES:
+                        job = _import_jobs.get(import_job_id)
+                        if job is not None:
+                            job["bytes_processed"] = bytes_written
+                        last_progress_update = bytes_written
+        except ImportCancelled:
+            logger.info(f"Import {import_job_id}: cancelled during upload")
             async with _import_jobs_lock:
-                _import_jobs[import_job_id] = {"status": "failed", "error": f"Upload failed: {str(e)}"}
+                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user"}
+            tmp_path.unlink(missing_ok=True)
+            return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
+        except Exception as e:
+            logger.error(f"Import {import_job_id}: upload failed: {e}")
+            async with _import_jobs_lock:
+                _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": f"Upload failed: {str(e)}"}
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
 
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "pending"}
-        background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id, user_id)
+            job = _import_jobs.get(import_job_id, {})
+            cancel_flag = job.get("cancel_requested", False)
+            archive_size = bytes_written
+            _import_jobs[import_job_id] = {
+                "status": "pending",
+                "phase": "pending",
+                "bytes_total": archive_size,
+                "bytes_processed": archive_size,
+                "files_total": 0,
+                "files_processed": 0,
+                "current_file": "",
+                "cancel_requested": cancel_flag,
+            }
+        if cancel_flag:
+            tmp_path.unlink(missing_ok=True)
+            async with _import_jobs_lock:
+                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user"}
+            return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
+
+        background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id, user_id, trust)
 
         return APIResponse(
             success=True,
@@ -436,26 +535,28 @@ async def import_state(request: Request, background_tasks: BackgroundTasks, file
             data={"import_id": import_job_id, "status": "pending"}
         )
 
-    elif filename.endswith('.zip'):
-        # ---- Legacy zip import (typically small) ----
-        _cl = request.headers.get("content-length")
-        check_inline_import_size(int(_cl) if _cl and _cl.isdigit() else None)
-        content = await read_capped(file)
-        state = _import_zip(content, user_id)
+    # ---- zip / json: stream to in-memory buffer with size cap ----
+    check_inline_import_size(content_length if content_length > 0 else None)
+    buf = bytearray()
+    total = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > MAX_INLINE_IMPORT_BYTES:
+            raise HTTPException(status_code=413, detail=f"Import file too large (max {MAX_INLINE_IMPORT_BYTES} bytes)")
+        buf.extend(chunk)
+    content = bytes(buf)
 
+    if filename.endswith('.zip'):
+        state = _import_zip(content, user_id, trust=trust)
     else:
-        # ---- Plain JSON (backward compatibility) ----
-        _cl = request.headers.get("content-length")
-        check_inline_import_size(int(_cl) if _cl and _cl.isdigit() else None)
-        content = await read_capped(file)
+        # Plain JSON
         state_data = json.loads(content.decode('utf-8'))
         state_data["user_id"] = user_id
         state = AnalysisState(**state_data)
 
-    # Validate imported session ID (zip/json path)
     validate_session_id(state.id)
-
-    # Save state to disk and load into memory
     await async_save_session(state.id, state)
     await _update_session_cache(state.id, state)
 
@@ -467,39 +568,109 @@ async def import_state(request: Request, background_tasks: BackgroundTasks, file
     )
 
 
-async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: str):
+async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: str, trust: bool = False):
     """Background task: extract tar.gz archive and load session."""
     logger.info(f"Import {import_job_id}: starting extraction from {tmp_path_str}")
+    archive_size = Path(tmp_path_str).stat().st_size if Path(tmp_path_str).exists() else 0
+    # Move into the extracting phase; preserve cancel flag set during upload.
+    async with _import_jobs_lock:
+        prev = _import_jobs.get(import_job_id, {})
+        _import_jobs[import_job_id] = {
+            "status": "extracting",
+            "phase": "extracting",
+            "bytes_total": archive_size,
+            "bytes_processed": 0,
+            "files_total": 0,
+            "files_processed": 0,
+            "current_file": "",
+            "cancel_requested": prev.get("cancel_requested", False),
+        }
+    extracted_session_id: Optional[str] = None
     try:
-        state = await asyncio.to_thread(_import_tar_gz, tmp_path_str, user_id)
+        state = await asyncio.to_thread(_import_tar_gz, tmp_path_str, user_id, import_job_id, trust)
+        extracted_session_id = state.id
 
         validate_session_id(state.id)
 
         await async_save_session(state.id, state)
         await _update_session_cache(state.id, state)
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "completed", "session_id": state.id, "name": state.name}
+            _import_jobs[import_job_id] = {
+                "status": "completed",
+                "phase": "completed",
+                "session_id": state.id,
+                "name": state.name,
+            }
         logger.info(f"Import {import_job_id}: completed, session_id={state.id}")
+    except ImportCancelled as e:
+        logger.info(f"Import {import_job_id}: cancelled by user ({e})")
+        # Best-effort cleanup: drop the half-extracted session directory.
+        if extracted_session_id:
+            await asyncio.to_thread(_cleanup_partial_session, extracted_session_id)
+        async with _import_jobs_lock:
+            _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user"}
     except HTTPException as e:
         logger.error(f"Import {import_job_id}: failed (HTTPException): {e.detail}")
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "failed", "error": e.detail}
+            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": e.detail}
     except Exception as e:
         logger.exception(f"Import {import_job_id}: failed with exception")
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "failed", "error": str(e)}
+            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": str(e)}
     finally:
         Path(tmp_path_str).unlink(missing_ok=True)
 
 
+def _cleanup_partial_session(session_id: str) -> None:
+    """Remove a partially-extracted session directory on cancel.
+
+    Only touches the session-scoped directory under sessions/<id>/, leaving
+    other sessions intact. Idempotent — safe if directory does not exist.
+    """
+    try:
+        validate_session_id(session_id)
+    except Exception:
+        return
+    try:
+        sess_dir = get_session_dir(session_id)
+        if sess_dir.exists():
+            shutil.rmtree(sess_dir, ignore_errors=True)
+            logger.info(f"Cleaned up partial session directory: {sess_dir}")
+    except Exception as e:
+        logger.warning(f"Failed to clean up partial session {session_id}: {e}")
+
+
 @router.get("/api/session/import/{import_id}")
 async def get_import_status(import_id: str):
-    """Poll the status of a background tar.gz import job."""
+    """Poll the status of a background tar.gz import job.
+
+    Response carries phase/bytes/files progress fields so the client can render
+    a live progress bar instead of guessing whether the job is still alive.
+    """
     async with _import_jobs_lock:
         if import_id not in _import_jobs:
             raise HTTPException(status_code=404, detail="Import job not found")
         job = _import_jobs[import_id].copy()
     return {"import_id": import_id, **job}
+
+
+@router.post("/api/session/import/{import_id}/cancel")
+async def cancel_import(import_id: str):
+    """Request cancellation of an in-progress tar.gz import.
+
+    Cooperative cancellation: sets a flag that the upload loop and extraction
+    worker check between chunks/members. Already-completed or already-failed
+    jobs are left as-is.
+    """
+    async with _import_jobs_lock:
+        job = _import_jobs.get(import_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Import job not found")
+        terminal = job.get("status") in ("completed", "failed", "cancelled")
+        if terminal:
+            return {"import_id": import_id, "status": job.get("status"), "cancelled": False}
+        job["cancel_requested"] = True
+    return {"import_id": import_id, "status": "cancel_requested", "cancelled": True}
 
 
 # ---------------------------------------------------------------------------
@@ -534,11 +705,16 @@ def _resolve_import_dest(relative_to_base: str, session_id: str) -> Path:
     return DATA_BASE_DIR / relative_to_base
 
 
-def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
+def _import_tar_gz(file_path: str, user_id: str, import_job_id: Optional[str] = None, trust: bool = False) -> AnalysisState:
     """Import from tar.gz archive file on disk with path remapping.
 
     Uses streaming iteration and chunked file writes to minimise memory usage,
     which is critical for large archives (20+ GB) on memory-constrained systems.
+
+    Runs inside ``asyncio.to_thread``. Progress is written to ``_import_jobs[import_job_id]``
+    via atomic single-key dict assignments (GIL-safe; no async-lock needed from a thread).
+    Cancellation is cooperative: the cancel endpoint sets ``cancel_requested`` on the same
+    dict and this loop checks it between members.
     """
     data_base_str = str(DATA_BASE_DIR)
 
@@ -546,8 +722,46 @@ def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
     old_base_dir = ""
     state_json_data = None
 
+    archive_size = 0
+    try:
+        archive_size = os.path.getsize(file_path)
+    except OSError:
+        pass
+    if import_job_id:
+        job = _import_jobs.get(import_job_id)
+        if job is not None:
+            job["bytes_total"] = archive_size
+
+    last_progress_ts = 0.0
+    files_processed = 0
+    bytes_processed = 0
+
+    def _maybe_check_cancel():
+        if not import_job_id:
+            return
+        job = _import_jobs.get(import_job_id)
+        if job is not None and job.get("cancel_requested"):
+            raise ImportCancelled("cancelled by user")
+
+    def _maybe_update_progress(current_name: str, force: bool = False):
+        nonlocal last_progress_ts
+        if not import_job_id:
+            return
+        now = time.monotonic()
+        if not force and now - last_progress_ts < _IMPORT_PROGRESS_UPDATE_INTERVAL_S:
+            return
+        last_progress_ts = now
+        job = _import_jobs.get(import_job_id)
+        if job is None:
+            return
+        # Atomic single-key writes — no lock needed.
+        job["files_processed"] = files_processed
+        job["bytes_processed"] = bytes_processed
+        job["current_file"] = current_name
+
     with tarfile.open(file_path, mode='r:gz') as tf:
         for member in tf:
+            _maybe_check_cancel()
             # Reject link entries (symlink/hardlink) and device/special files BEFORE
             # the isfile() filter: such members would otherwise be silently skipped,
             # but an attacker may craft them to point at /etc/passwd or other sessions.
@@ -596,10 +810,13 @@ def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
 
             dest_path = _resolve_import_dest(relative_to_base, session_id)
             validate_path_within(dest_path, DATA_BASE_DIR)
-            # SECURITY (S4): never write a sandbox pickle from an imported archive.
+            # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
+            # Drop them unless the caller passed trust=true to take responsibility.
             if is_sandbox_pickle(dest_path.name):
-                logger.warning(f"Skipping sandbox pickle from imported archive (untrusted): {member.name}")
-                continue
+                if not trust:
+                    logger.warning(f"Skipping sandbox pickle from imported archive (untrusted): {member.name}")
+                    continue
+                logger.warning(f"Restoring sandbox pickle (trust=true): {member.name}")
             dest_path.parent.mkdir(parents=True, exist_ok=True)
 
             f = tf.extractfile(member)
@@ -620,6 +837,23 @@ def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
             else:
                 with open(dest_path, 'wb') as out_f:
                     shutil.copyfileobj(f, out_f, length=UPLOAD_CHUNK_SIZE)
+
+            # Progress accounting: count uncompressed member size (matches what
+            # the user sees on disk). bytes_total is compressed archive size, so
+            # bytes_processed can exceed it for highly compressible payloads —
+            # the frontend should treat the ratio as a heuristic, not a hard %.
+            files_processed += 1
+            bytes_processed += getattr(member, "size", 0) or 0
+            _maybe_update_progress(relative_to_base)
+
+    # Final progress flush so the poll sees 100% before completion is reported.
+    if import_job_id:
+        job = _import_jobs.get(import_job_id)
+        if job is not None:
+            job["files_processed"] = files_processed
+            job["bytes_processed"] = bytes_processed
+            job["files_total"] = files_processed
+            job["current_file"] = ""
 
     if state_json_data is None:
         raise HTTPException(status_code=400, detail="Session state JSON not found in archive")
@@ -659,8 +893,11 @@ def _import_tar_gz(file_path: str, user_id: str) -> AnalysisState:
     return state
 
 
-def _import_zip(content: bytes, user_id: str) -> AnalysisState:
-    """Legacy zip import (backward compatibility)"""
+def _import_zip(content: bytes, user_id: str, trust: bool = False) -> AnalysisState:
+    """Legacy zip import (backward compatibility).
+
+    See :func:`import_state` for the ``trust`` semantics.
+    """
     zip_buffer = io.BytesIO(content)
 
     with zipfile.ZipFile(zip_buffer, 'r') as zf:
@@ -698,12 +935,15 @@ def _import_zip(content: bytes, user_id: str) -> AnalysisState:
         if notebook_path in namelist:
             (states_dir / f"{session_id}.ipynb").write_bytes(zf.read(notebook_path))
 
-        # SECURITY (S4): do NOT restore session.pkl from imported archives.
-        # dill.load on untrusted pickle is arbitrary code execution. Sandbox
-        # state is rebuilt by re-running; we deliberately drop it on import.
+        # SECURITY (S4): sandbox pickles can execute arbitrary code via dill.load.
+        # Drop them unless the caller passed trust=true to take responsibility.
         pkl_path = f"{session_id}/session.pkl"
         if pkl_path in namelist:
-            logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {pkl_path}")
+            if trust:
+                logger.warning(f"Restoring sandbox pickle from zip (trust=true): {pkl_path}")
+                (states_dir / f"{session_id}_session.pkl").write_bytes(zf.read(pkl_path))
+            else:
+                logger.warning(f"Skipping sandbox pickle from imported zip (untrusted): {pkl_path}")
 
         # Extract metadata if exists
         metadata_path = f"{session_id}/metadata.json"

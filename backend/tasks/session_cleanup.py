@@ -96,7 +96,7 @@ async def _cleanup_stale_import_jobs(
     async with import_jobs_lock:
         stale = [
             jid for jid, job in import_jobs.items()
-            if job.get("status") in ("completed", "failed")
+            if job.get("status") in ("completed", "failed", "cancelled")
             and current_time - job.get("created_at", 0) > IMPORT_JOB_TTL
         ]
         for jid in stale:

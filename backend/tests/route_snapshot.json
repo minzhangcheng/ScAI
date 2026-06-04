@@ -156,6 +156,12 @@
     ]
   ],
   [
+    "/api/session/import/{import_id}/cancel",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/start",
     [
       "POST"

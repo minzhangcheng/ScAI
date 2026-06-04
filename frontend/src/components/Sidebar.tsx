@@ -59,7 +59,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   const [editingSession, setEditingSession] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
-  const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number; closable?: boolean; success?: boolean; onConfirm?: () => void } | null>(null)
+  const [progressInfo, setProgressInfo] = useState<{ action: string; detail: string; percent?: number; closable?: boolean; success?: boolean; onConfirm?: () => void; onCancel?: () => void; cancelLabel?: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Auto-reload session from API on page refresh to restore full data (images etc.)
@@ -141,6 +141,70 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       fetchSessions()
     }
   }, [showSessionBrowser])
+
+  // Auto-resume polling for an in-progress import after page refresh.
+  // The import job lives in backend memory (sessions/_import_jobs) and survives
+  // a frontend refresh; without this hook the user loses visibility into the
+  // job after reloading. Mount-only effect; guarded by ref to avoid double-fire.
+  const resumedImportRef = useRef(false)
+  useEffect(() => {
+    if (resumedImportRef.current) return
+    resumedImportRef.current = true
+    let raw: string | null = null
+    try { raw = localStorage.getItem('scai.pendingImport') } catch { return }
+    if (!raw) return
+    let saved: { importId?: string } | null = null
+    try { saved = JSON.parse(raw) } catch { saved = null }
+    const pendingId = saved?.importId
+    if (!pendingId) {
+      try { localStorage.removeItem('scai.pendingImport') } catch {}
+      return
+    }
+    // Probe once before showing the modal — the job may have finished or expired.
+    ;(async () => {
+      let info: any
+      try {
+        info = await apiFetch<any>(`/session/import/${pendingId}`)
+      } catch {
+        try { localStorage.removeItem('scai.pendingImport') } catch {}
+        return
+      }
+      const terminal = info?.status === 'completed' || info?.status === 'failed' || info?.status === 'cancelled'
+      if (terminal) {
+        try { localStorage.removeItem('scai.pendingImport') } catch {}
+        return
+      }
+      // Active job — re-enter the polling loop and surface the modal.
+      setImporting(true)
+      let cancelled = false
+      try {
+        const sessionId = await pollImportUntilDone(pendingId, () => cancelled)
+        if (sessionId) {
+          clearMessages()
+          await loadSession(sessionId)
+        }
+        try { localStorage.removeItem('scai.pendingImport') } catch {}
+        setProgressInfo({
+          action: t('importSuccess'),
+          detail: language === 'zh' ? '会话已成功导入' : 'Session imported successfully',
+          closable: true,
+          success: true,
+        })
+      } catch (err: any) {
+        try { localStorage.removeItem('scai.pendingImport') } catch {}
+        setProgressInfo({
+          action: t('importFailed'),
+          detail: err?.message || '',
+          closable: true,
+        })
+      } finally {
+        setImporting(false)
+        // Expose cancel hook to the resumed flow (declared but unused outside; satisfies linter)
+        void cancelled
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const [sessionListError, setSessionListError] = useState<string | null>(null)
 
@@ -226,6 +290,14 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
   const handleExport = async () => {
     if (!currentSession || exporting) return
 
+    // Opt-in for runtime kernel state. Off by default — the pickle is only
+    // restorable on the same trusted instance and can add multi-GB per snapshot.
+    const includeRuntime = window.confirm(
+      language === 'zh'
+        ? '是否包含内核运行时状态 (session.pkl)？\n\n选择「确定」会让归档包含已加载的 adata 等内存变量，恢复时可继续 pause/resume，但归档体积会变大（每个 snapshot 可能多几 GB）。仅在你打算导入回同一个实例时勾选。\n\n选择「取消」打包不带运行时状态（推荐，体积小、跨实例可移植）。'
+        : 'Include kernel runtime state (session.pkl)?\n\nClicking OK bundles the live in-memory variables (adata etc.) so pause/resume can continue after import, but the archive can be GBs larger per snapshot. Only useful when importing back into the same instance.\n\nClick Cancel to skip runtime (recommended — smaller, portable across instances).'
+    )
+
     setExporting(true)
 
     // Phase 1: 服务端打包，显示 spinner
@@ -237,7 +309,10 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
     try {
       // 等待服务端完成打包（不下载文件，只等元数据）
-      const meta = await apiFetch<{ status: string; size_bytes: number; filename: string }>(`/session/${currentSession.id}/export/prepare`, { method: 'POST' })
+      const meta = await apiFetch<{ status: string; size_bytes: number; filename: string }>(
+        `/session/${currentSession.id}/export/prepare${includeRuntime ? '?include_runtime=true' : ''}`,
+        { method: 'POST' },
+      )
 
       const sizeMB = (meta.size_bytes / 1024 / 1024).toFixed(1)
 
@@ -277,35 +352,177 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
     }
   }
 
+  // Poll the backend import-status endpoint until the job finishes. No hard
+  // timeout — large archives can legitimately take >1h to extract. The
+  // shouldCancel() hook lets the caller bail out (set by the modal cancel button).
+  // Returns the new session_id on success, or throws on failure/cancel.
+  const pollImportUntilDone = async (pollId: string, shouldCancel: () => boolean): Promise<string> => {
+    const POLL_INTERVAL = 3000
+    const MAX_CONSECUTIVE_ERRORS = 10
+    let consecutiveErrors = 0
+    const formatBytes = (n: number) => {
+      if (n <= 0) return '0 MB'
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+      if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+      return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
+    }
+    while (true) {
+      if (shouldCancel()) {
+        throw new Error(language === 'zh' ? '用户取消导入' : 'Import cancelled by user')
+      }
+      await new Promise(r => setTimeout(r, POLL_INTERVAL))
+      let status: any = null
+      try {
+        status = await apiFetch<any>(`/session/import/${pollId}`)
+        consecutiveErrors = 0
+      } catch (pollErr: any) {
+        consecutiveErrors += 1
+        const is404 = pollErr.message?.includes('not found')
+        // Bail out only after sustained errors; transient blips during long
+        // extractions (proxy hiccups, server restart in dev) shouldn't kill it.
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS && !is404) {
+          throw pollErr
+        }
+        if (is404 && consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          throw new Error(language === 'zh' ? '导入任务不存在或已过期' : 'Import job not found or expired')
+        }
+        continue
+      }
+      if (!status) continue
+
+      if (status.status === 'completed') {
+        return status.session_id
+      }
+      if (status.status === 'failed') {
+        throw new Error(status.error || (language === 'zh' ? '解压失败' : 'Extraction failed'))
+      }
+      if (status.status === 'cancelled') {
+        throw new Error(status.error || (language === 'zh' ? '导入已取消' : 'Import cancelled'))
+      }
+
+      // Render live progress from the server's status snapshot.
+      const phase = status.phase || status.status || 'pending'
+      const bytesProcessed: number = status.bytes_processed || 0
+      const bytesTotal: number = status.bytes_total || 0
+      const filesProcessed: number = status.files_processed || 0
+      const currentFile: string = status.current_file || ''
+      let percent: number | undefined
+      let action = language === 'zh' ? '导入' : 'Import'
+      let detail = ''
+      if (phase === 'uploading') {
+        if (bytesTotal > 0) percent = Math.min(100, Math.round((bytesProcessed / bytesTotal) * 100))
+        detail = language === 'zh'
+          ? `服务端接收中: ${formatBytes(bytesProcessed)} / ${formatBytes(bytesTotal)}`
+          : `Server receiving: ${formatBytes(bytesProcessed)} / ${formatBytes(bytesTotal)}`
+      } else if (phase === 'extracting' || phase === 'pending') {
+        action = language === 'zh' ? '正在解压' : 'Extracting'
+        if (bytesTotal > 0) percent = Math.min(99, Math.round((bytesProcessed / bytesTotal) * 100))
+        const filesPart = filesProcessed > 0
+          ? (language === 'zh' ? `已处理 ${filesProcessed} 个文件` : `${filesProcessed} files processed`)
+          : (language === 'zh' ? '等待开始解压...' : 'Waiting to start extraction...')
+        const filePart = currentFile
+          ? (language === 'zh' ? ` · 当前: ${currentFile}` : ` · current: ${currentFile}`)
+          : ''
+        detail = filesPart + filePart
+      } else {
+        detail = language === 'zh' ? '处理中...' : 'Processing...'
+      }
+      setProgressInfo({
+        action,
+        detail,
+        percent,
+        onCancel: async () => {
+          try {
+            await apiFetch<any>(`/session/import/${pollId}/cancel`, { method: 'POST' })
+          } catch (err) {
+            console.debug('Cancel failed:', err)
+          }
+        },
+        cancelLabel: language === 'zh' ? '取消导入' : 'Cancel Import',
+      })
+    }
+  }
+
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || importing) return
+
+    // Opt-in to load sandbox session pickles from the archive. Off by default
+    // because dill.load is arbitrary code execution — the user must vouch for
+    // the archive's origin. No backend restriction; entirely user judgment.
+    const trustArchive = window.confirm(
+      language === 'zh'
+        ? '是否信任此归档并恢复内核运行时状态 (session.pkl)？\n\n⚠️ 风险提示：归档中的 session.pkl 在加载时会执行其中保存的 Python 对象代码 (dill.load = 任意代码执行)。仅在归档来自你完全信任的来源（例如你自己在同一实例的备份）时勾选「确定」。\n\n选择「取消」会丢弃 pkl，只恢复数据/历史/图表（推荐，安全默认）。'
+        : 'Trust this archive and restore kernel runtime state (session.pkl)?\n\n⚠️ Warning: loading session.pkl runs arbitrary Python code (dill.load = arbitrary code execution). Only click OK for archives you fully trust (e.g. your own backup from the same instance).\n\nClick Cancel to drop pkl and restore only data/history/figures (recommended safe default).'
+    )
+
     setImporting(true)
     const sizeMB = (file.size / 1024 / 1024).toFixed(1)
     setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? `正在上传 (${sizeMB} MB)...` : `Uploading (${sizeMB} MB)...`, percent: 0 })
 
+    // Cancellation control. cancelRequested gates the polling loop; if the user
+    // clicks cancel mid-upload we abort the XHR. The pollId lives in
+    // localStorage so a page refresh can resume polling instead of orphaning
+    // the backend job.
+    let cancelRequested = false
+    let activeXhr: XMLHttpRequest | null = null
+    let activePollId: string | null = null
+
+    const cancelHandler = async () => {
+      cancelRequested = true
+      try {
+        if (activeXhr) activeXhr.abort()
+      } catch {}
+      if (activePollId) {
+        try {
+          await apiFetch<any>(`/session/import/${activePollId}/cancel`, { method: 'POST' })
+        } catch (err) {
+          console.debug('Cancel request failed:', err)
+        }
+      }
+    }
+
     try {
       // Pre-generate import_id so we can poll even if proxy times out before response arrives
       const preImportId = generateId()
+      activePollId = preImportId
+      // Persist so a page refresh can resume polling the same job instead of orphaning it.
+      try {
+        localStorage.setItem('scai.pendingImport', JSON.stringify({ importId: preImportId, fileName: file.name, startedAt: Date.now() }))
+      } catch {}
       let uploadFinished = false
 
-      // Phase 1: Upload with progress tracking
+      // Phase 1: Upload with progress tracking — raw octet-stream upload
+      // (no multipart). Server reads request.stream() directly into upload_temp,
+      // skipping Starlette's SpooledTemporaryFile which used to add ~50 min
+      // of redundant disk copying for multi-GB archives.
       let data: any = null
       try {
         data = await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest()
+          activeXhr = xhr
           xhr.open('POST', '/api/session/import')
           // Inject Authorization header — XHR doesn't go through apiFetch's auto-injection.
           // Without this, /api/session/ middleware treats request as unauth and the route returns 401.
           for (const [k, v] of Object.entries(authHeaders())) {
             xhr.setRequestHeader(k, v)
           }
+          xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+          xhr.setRequestHeader('X-Filename', file.name)
+          xhr.setRequestHeader('X-Import-Id', preImportId)
+          if (trustArchive) xhr.setRequestHeader('X-Trust', 'true')
 
           xhr.upload.onprogress = (ev) => {
             if (ev.lengthComputable) {
               const pct = Math.round((ev.loaded / ev.total) * 100)
               if (pct >= 100) uploadFinished = true
-              setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? `正在上传... ${pct}%` : `Uploading... ${pct}%`, percent: pct })
+              setProgressInfo({
+                action: language === 'zh' ? '导入' : 'Import',
+                detail: language === 'zh' ? `正在上传... ${pct}%` : `Uploading... ${pct}%`,
+                percent: pct,
+                onCancel: cancelHandler,
+                cancelLabel: language === 'zh' ? '取消导入' : 'Cancel Import',
+              })
             }
           }
 
@@ -324,11 +541,9 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
           }
 
           xhr.onerror = () => reject(new Error('Network error'))
+          xhr.onabort = () => reject(new Error(language === 'zh' ? '用户取消导入' : 'Import cancelled by user'))
 
-          const formData = new FormData()
-          formData.append('file', file)
-          formData.append('import_id', preImportId)
-          xhr.send(formData)
+          xhr.send(file)
         })
       } catch (uploadErr) {
         // If upload data was fully sent but response was lost (proxy timeout),
@@ -342,51 +557,13 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
       // Phase 2: Poll extraction status (tar.gz async path)
       // Use import_id from response if available, otherwise the pre-generated one
       const pollId: string = data?.data?.import_id || preImportId
+      activePollId = pollId
       const isTarGz = file.name.endsWith('.tar.gz') || file.name.endsWith('.tgz')
 
       if (isTarGz || !data) {
-        // For tar.gz or if response was lost: poll for status
-        setProgressInfo({ action: language === 'zh' ? '导入' : 'Import', detail: language === 'zh' ? '正在解压导入，请稍候...' : 'Extracting and importing, please wait...' })
-        const MAX_POLL_MS = 30 * 60 * 1000  // 30 minutes timeout for very large files
-        const POLL_INTERVAL = 3000
-        const MAX_RETRIES = 5
-        const startTime = Date.now()
-
-        while (true) {
-          if (Date.now() - startTime > MAX_POLL_MS) {
-            throw new Error(language === 'zh' ? '导入超时，请刷新页面检查是否已成功' : 'Import timed out. Please refresh to check if it succeeded.')
-          }
-          await new Promise(r => setTimeout(r, POLL_INTERVAL))
-
-          // Poll with retry: tolerate transient network errors and initial 404
-          let status: any = null
-          for (let retry = 0; retry < MAX_RETRIES; retry++) {
-            try {
-              status = await apiFetch<any>(`/session/import/${pollId}`)
-              break
-            } catch (pollErr: any) {
-              // Tolerate 404 during early polls (job may not be registered yet)
-              const is404 = pollErr.message?.includes('not found')
-              if (retry < MAX_RETRIES - 1 && (is404 || Date.now() - startTime < 60000)) {
-                await new Promise(r => setTimeout(r, 3000))
-                continue
-              }
-              if (retry === MAX_RETRIES - 1) throw pollErr
-              await new Promise(r => setTimeout(r, 3000))
-            }
-          }
-
-          if (!status) continue  // all retries hit 404, loop around
-
-          if (status.status === 'completed') {
-            sessionId = status.session_id
-            break
-          }
-          if (status.status === 'failed') {
-            throw new Error(status.error || (language === 'zh' ? '解压失败' : 'Extraction failed'))
-          }
-          // "uploading" or "pending" → keep polling
-        }
+        // Unlimited polling — large archives can take >1h. Cancellation is via
+        // the modal cancel button; transient network errors are tolerated.
+        sessionId = await pollImportUntilDone(pollId, () => cancelRequested)
       }
 
       // Phase 3: Load session
@@ -398,6 +575,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
 
       // Phase 4: Show success
       setImporting(false)
+      try { localStorage.removeItem('scai.pendingImport') } catch {}
       if (fileInputRef.current) fileInputRef.current.value = ''
       setProgressInfo({
         action: t('importSuccess'),
@@ -408,6 +586,7 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
     } catch (e: any) {
       console.error('Import failed:', e)
       setImporting(false)
+      try { localStorage.removeItem('scai.pendingImport') } catch {}
       if (fileInputRef.current) fileInputRef.current.value = ''
       setProgressInfo({
         action: t('importFailed'),
@@ -469,6 +648,16 @@ To dissect this, we performed histological analysis (H&E) and single-nucleus RNA
                 className="w-full px-4 py-2 bg-accent-600 text-white text-sm rounded-lg hover:bg-accent-700 transition-colors font-medium"
               >
                 {t('confirm')}
+              </button>
+            )}
+
+            {/* 取消按钮 - 进行中且支持取消时显示 */}
+            {!progressInfo.closable && progressInfo.onCancel && (
+              <button
+                onClick={() => { progressInfo.onCancel && progressInfo.onCancel() }}
+                className="w-full px-4 py-2 bg-surface-100 text-surface-700 text-sm rounded-lg hover:bg-surface-200 transition-colors font-medium"
+              >
+                {progressInfo.cancelLabel || (language === 'zh' ? '取消' : 'Cancel')}
               </button>
             )}
           </div>

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.15 · **Last updated**: 2026-06-04
+**Version**: 0.25.16 · **Last updated**: 2026-06-04
 
 ## 1. Runtime Architecture
 
@@ -196,16 +196,27 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.25.x — LLM resilience, sandbox hardening, frontend refactoring (2026-05-27 → present)**
 
-- `0.25.15` — export blob round-trip, DeepResearch error logging, import path resilience (2026-06-04):
+- `0.25.15` — import progress tracking, live cancel, trust-based pickle restore, blob round-trip & SDK overhaul (2026-06-04):
+  - **Raw octet-stream streaming upload**: Import route reads `request.stream()` with `X-Filename`/`X-Import-Id`/`X-Trust` headers instead of multipart FormData. Eliminates Starlette's `SpooledTemporaryFile` which caused ~50 min of redundant disk I/O for multi-GB archives.
+  - **Import progress tracking**: `_import_tar_gz` reports live `phase` (uploading/extracting/completed), `bytes_processed`, `files_processed`, `current_file` to the in-memory job dict. Frontend renders a real-time progress bar with cancel button for both upload and extraction phases.
+  - **Live import cancel**: New `POST /api/session/import/{import_id}/cancel` endpoint sets `cancel_requested` flag on the job. The streaming upload loop and tar member loop check this flag cooperatively. `ImportCancelled` exception triggers `_cleanup_partial_session()` to remove half-extracted session directories.
+  - **Page-refresh resilience**: Frontend persists `pendingImport` to `localStorage`; a mount-effect probe resumes polling and surfaces the progress modal on navigation refresh, preventing orphaned backend jobs.
+  - **Trust-based sandbox pickle restore**: Import accepts `X-Trust: true` header / `trust` parameter. When true, sandbox pickles (`_session.pkl`, `_session.pkl.zst`) are written from the archive instead of dropped. Default `trust=false` maintains S4 security (dill.load = arbitrary code execution). Frontend shows `window.confirm()` dialog before import.
+  - **Export `include_runtime`**: `GET /api/session/{id}/export?include_runtime=true` bundles sandbox session pickles (live kernel state + per-snapshot pkl.zst) in the archive. Default false for smaller portable archives. Frontend shows `window.confirm()` dialog before export.
+  - **Python SDK `import_session` overhaul**: Raw byte-stream POST (no files/multipart). New `on_progress` callback, `trust` parameter, `cancel_import()` method. `_wait_for_import` handles `cancelled` status and invokes the progress callback on each poll.
+  - **Python SDK `export_session` update**: New `include_runtime` parameter; passes `?include_runtime=true` query param to server.
+  - **CLI (`session_manager.py`)**: `import` subcommand gains `--trust` flag; `export` subcommand gains `--include-runtime` flag. Live progress callback with `_print_progress()` single-line status to stderr.
   - **Session-level blob store packing**: `_add_session_blobs_to_tar()` packs `<session>/blobs/<hash>.b64` sidecars into tar exports so imported `@scai-blob` tokens resolve to real content instead of dangling as raw text in the UI.
   - **Recursive snapshot tar inclusion**: `_add_snapshots_to_tar()` uses `rglob` instead of `iterdir` so per-snapshot blob subdirs (`<snap_id>_blobs/<hash>.b64`) are included alongside top-level state/notebook/pkl files.
   - **Import `inline_blobs` resolution**: `_import_tar_gz` and `_import_zip` now call `inline_blobs()` on the deserialized `state_data` before constructing `AnalysisState`, restoring externalized blobs from extracted sidecars.
   - **Zip legacy path remapping**: `_import_zip` remaps legacy `<UPLOAD_DIR>/<id>`, `<WORKSPACE_DIR>/<id>`, `<REPORTS_DIR>/<id>` paths in the JSON payload to the current session-centric layout.
   - **Import path resolution for nested snapshots**: `_resolve_import_dest` handles `blobs/` entries and nested `snapshots/<subdir>/` paths (from rglob), not just top-level snapshot files.
-  - **DeepResearch structured error logging**: New `_check_response()` on `GoogleDeepResearchClient` logs warning with status/body before raising `HTTPStatusError`, replacing bare `raise_for_status()` in `start_research` and `poll_research`.
-  - **Blob store early return**: `inline_blobs()` returns the object unchanged when `blob_dir` doesn't exist, preventing crashes during import of blob-less archives.
-  - **Sandbox pickle skip depth guard**: `is_sandbox_pickle` matches session pkl basenames at any path depth, covering nested entries under `snapshots/<id>_blobs/`.
-  - **New test file**: `test_export_import_blob_roundtrip.py` — verifies session-blob and snapshot-blob content is preserved losslessly through export→import.
+  - **DeepResearch structured error logging**: New `_check_response()` on `GoogleDeepResearchClient` uses `response.is_error` (4xx/5xx only, lets 3xx pass) with structured warning logs, replacing bare `raise_for_status()` in `start_research` and `poll_research`.
+  - **Stale import job cleanup**: `session_cleanup` handles `cancelled` status in TTL eviction alongside `completed`/`failed`.
+  - **Route registry**: New `POST /api/session/import/{import_id}/cancel` endpoint pinned in `route_snapshot.json`.
+  - **Auth test update**: `test_export_import_auth.py` uses raw octet-stream payload instead of multipart FormData for the 401 check.
+  - **Inline size guard test cleanup**: `read_capped` / `_FakeUpload` removed (replaced by streaming approach). `MAX_INLINE_IMPORT_BYTES` constant is still exported.
+  - **New test file**: `test_export_import_blob_roundtrip.py` — verifies session-blob and snapshot-blob content preserved losslessly through export→import.
   - **Extended test**: `test_import_pkl_skip.py` — tests nested pkl detection under snapshot blob directories.
 
 - `0.25.14` — Google Deep Research API revision upgrade (2026-06-01):

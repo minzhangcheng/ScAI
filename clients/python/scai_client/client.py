@@ -11,7 +11,7 @@ Usage:
 import json
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Dict, Optional
 
 import httpx
 
@@ -136,6 +136,8 @@ class Client:
         wait: bool = True,
         poll_interval: float = 2.0,
         timeout: Optional[int] = None,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        trust: bool = False,
     ) -> str:
         """Import a session from a local archive (.tar.gz / .tgz / .zip / .json).
 
@@ -151,7 +153,19 @@ class Client:
                 relevant for tar.gz archives. When False on a tar.gz upload,
                 returns the ``import_id`` instead of a ``session_id``.
             poll_interval: Seconds between import-status polls.
-            timeout: Maximum seconds to wait. ``None`` means no limit.
+            timeout: Maximum seconds to wait. ``None`` means no limit
+                (recommended for multi-GB archives — extraction can take >1h).
+            on_progress: Optional callback invoked once per poll with the raw
+                status dict from the server. Useful for rendering a progress
+                bar. Fields include ``phase`` (uploading/extracting/completed/
+                failed/cancelled), ``bytes_total``, ``bytes_processed``,
+                ``files_processed``, ``current_file``. Exceptions from the
+                callback are swallowed so they cannot abort the import.
+            trust: When True, instruct the server to restore sandbox session
+                pickles from the archive. ``dill.load`` runs arbitrary code,
+                so only pass True for archives whose origin you control.
+                Default False matches the historical S4 policy (pickles are
+                silently dropped).
 
         Returns:
             The newly created ``session_id`` (or ``import_id`` if
@@ -167,9 +181,24 @@ class Client:
         if not archive_path.is_file():
             raise FileNotFoundError(str(archive_path))
 
+        # Raw octet-stream upload — server reads request.stream() and writes
+        # directly to disk, avoiding Starlette's SpooledTemporaryFile (which
+        # added a redundant copy of the entire body, doubling disk I/O on
+        # multi-GB archives).
+        size = archive_path.stat().st_size
+        headers = {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(size),
+            "X-Filename": archive_path.name,
+        }
+        if trust:
+            headers["X-Trust"] = "true"
         with open(archive_path, "rb") as fh:
-            files = {"file": (archive_path.name, fh, "application/octet-stream")}
-            r = self._http.post("/api/session/import", files=files)
+            r = self._http.post(
+                "/api/session/import",
+                content=fh,
+                headers=headers,
+            )
 
         if r.status_code == 401:
             raise AuthError("Authentication failed")
@@ -187,7 +216,7 @@ class Client:
         if not wait:
             return import_id
 
-        return self._wait_for_import(import_id, poll_interval, timeout)
+        return self._wait_for_import(import_id, poll_interval, timeout, on_progress)
 
     def export_session(
         self,
@@ -196,6 +225,7 @@ class Client:
         *,
         timeout: float | None = None,
         chunk_size: int = 1024 * 1024,
+        include_runtime: bool = False,
     ) -> Path:
         """Export a session as a tar.gz archive (streaming).
 
@@ -215,6 +245,11 @@ class Client:
             timeout: Per-request timeout in seconds. ``None`` disables the
                 read timeout for this call (recommended for large archives).
             chunk_size: Bytes per ``iter_bytes`` chunk.
+            include_runtime: When True, the server includes sandbox session
+                pickles (live kernel variable dumps + per-snapshot
+                ``session.pkl.zst``). These can be multi-GB and are only
+                loadable on re-import with ``trust=True`` on a trusted
+                instance. Default False produces smaller, portable archives.
 
         Returns:
             Resolved ``Path`` of the downloaded archive.
@@ -253,6 +288,7 @@ class Client:
             with self._http.stream(
                 "GET",
                 f"/api/session/{session_id}/export",
+                params={"include_runtime": "true"} if include_runtime else None,
                 timeout=req_timeout,
             ) as r:
                 if r.status_code == 401:
@@ -281,6 +317,7 @@ class Client:
         import_id: str,
         poll_interval: float,
         timeout: Optional[int],
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> str:
         start = time.time()
         while True:
@@ -289,6 +326,12 @@ class Client:
                 raise AuthError("Authentication failed")
             r.raise_for_status()
             info = r.json()
+            if on_progress is not None:
+                try:
+                    on_progress(info)
+                except Exception:
+                    # Caller's progress hook must never break the import loop.
+                    pass
             st = info.get("status")
             if st == "completed":
                 session_id = info.get("session_id")
@@ -297,8 +340,36 @@ class Client:
                 return session_id
             if st == "failed":
                 raise ImportFailed(import_id, info.get("error", "unknown"))
+            if st == "cancelled":
+                raise ImportFailed(import_id, info.get("error", "cancelled"))
             if timeout is not None and (time.time() - start) > timeout:
                 raise TimeoutError(
                     f"Import {import_id} did not complete within {timeout}s"
                 )
             time.sleep(poll_interval)
+
+    def cancel_import(self, import_id: str) -> Dict[str, Any]:
+        """Request cancellation of an in-progress tar.gz import.
+
+        Cooperative cancel — the server stops between archive members. Already-
+        completed or failed jobs are returned unchanged with ``cancelled=False``.
+
+        Args:
+            import_id: The import job id returned from :meth:`import_session`
+                (when called with ``wait=False``).
+
+        Returns:
+            The server's cancel response dict.
+
+        Raises:
+            AuthError: If authentication fails.
+            ScaiError: If the import id is not found or another HTTP error occurs.
+        """
+        r = self._http.post(f"/api/session/import/{import_id}/cancel")
+        if r.status_code == 401:
+            raise AuthError("Authentication failed")
+        if r.status_code == 404:
+            raise ScaiError(f"Import job not found: {import_id}")
+        if r.status_code >= 400:
+            raise ScaiError(f"Cancel failed: HTTP {r.status_code}: {r.text}")
+        return r.json()

@@ -70,7 +70,9 @@ def test_import_session_zip_returns_session_id(tmp_path):
             assert sid == "imported-123"
             args, kwargs = mock_post.call_args
             assert args[0] == "/api/session/import"
-            assert "files" in kwargs
+            assert "content" in kwargs
+            assert kwargs["headers"]["X-Filename"] == "session.zip"
+            assert kwargs["headers"]["Content-Type"] == "application/octet-stream"
 
 
 def test_import_session_missing_file_raises(tmp_path):

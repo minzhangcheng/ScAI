@@ -20,9 +20,13 @@ def client():
 
 
 def test_import_without_auth_returns_401(client):
-    # Minimal multipart payload: tiny tar.gz stub is fine — auth check happens first.
-    files = {"file": ("session.tar.gz", io.BytesIO(b"\x1f\x8b\x08\x00" + b"\x00" * 8), "application/gzip")}
-    resp = client.post("/api/session/import", files=files)
+    # Raw octet-stream upload — server reads request.stream() directly.
+    # Auth check happens before body is touched, so a tiny stub is fine.
+    resp = client.post(
+        "/api/session/import",
+        content=b"\x1f\x8b\x08\x00" + b"\x00" * 8,
+        headers={"X-Filename": "session.tar.gz", "Content-Type": "application/octet-stream"},
+    )
     assert resp.status_code == 401
     body = resp.json()
     assert "auth" in body.get("detail", "").lower()

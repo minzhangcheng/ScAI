@@ -1395,12 +1395,12 @@ class GoogleDeepResearchClient:
         await self.client.aclose()
 
     def _check_response(self, response: httpx.Response, context: str) -> None:
-        """Raise HTTPStatusError for non-success responses with logging.
+        """Raise HTTPStatusError for 4xx/5xx responses with logging.
 
-        Matches raise_for_status() behavior (raises on any non-2xx including 3xx)
-        while adding structured warning logs for debugging.
+        Matches raise_for_status() behavior (raises on 4xx/5xx only, lets 3xx
+        pass through) while adding structured warning logs for debugging.
         """
-        if not response.is_success:
+        if response.is_error:
             body = response.text
             logger.warning(
                 f"[DeepResearch] {context} {response.status_code} from {response.url} "
