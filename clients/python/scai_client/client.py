@@ -36,7 +36,7 @@ class Client:
         *,
         api_key: Optional[str] = None,
         jwt: Optional[str] = None,
-        timeout: int = 300,
+        timeout: int = 3600,
     ):
         if not api_key and not jwt:
             raise AuthError("Either api_key or jwt must be provided")

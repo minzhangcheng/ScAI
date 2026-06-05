@@ -497,23 +497,27 @@ async def import_state(
         except ImportCancelled:
             logger.info(f"Import {import_job_id}: cancelled during upload")
             async with _import_jobs_lock:
-                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user"}
+                created_at = _import_jobs.get(import_job_id, {}).get("created_at", time.time())
+                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "created_at": created_at}
             tmp_path.unlink(missing_ok=True)
             return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
         except Exception as e:
             logger.error(f"Import {import_job_id}: upload failed: {e}")
             async with _import_jobs_lock:
-                _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": f"Upload failed: {str(e)}"}
+                created_at = _import_jobs.get(import_job_id, {}).get("created_at", time.time())
+                _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": f"Upload failed: {str(e)}", "created_at": created_at}
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Upload failed: {str(e)}")
 
         async with _import_jobs_lock:
             job = _import_jobs.get(import_job_id, {})
             cancel_flag = job.get("cancel_requested", False)
+            created_at = job.get("created_at", time.time())
             archive_size = bytes_written
             _import_jobs[import_job_id] = {
                 "status": "pending",
                 "phase": "pending",
+                "created_at": created_at,
                 "bytes_total": archive_size,
                 "bytes_processed": archive_size,
                 "files_total": 0,
@@ -524,7 +528,7 @@ async def import_state(
         if cancel_flag:
             tmp_path.unlink(missing_ok=True)
             async with _import_jobs_lock:
-                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user"}
+                _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "created_at": created_at}
             return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
 
         background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id, user_id, trust)
@@ -575,9 +579,11 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
     # Move into the extracting phase; preserve cancel flag set during upload.
     async with _import_jobs_lock:
         prev = _import_jobs.get(import_job_id, {})
+        created_at = prev.get("created_at", time.time())
         _import_jobs[import_job_id] = {
             "status": "extracting",
             "phase": "extracting",
+            "created_at": created_at,
             "bytes_total": archive_size,
             "bytes_processed": 0,
             "files_total": 0,
@@ -598,6 +604,7 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
             _import_jobs[import_job_id] = {
                 "status": "completed",
                 "phase": "completed",
+                "created_at": created_at,
                 "session_id": state.id,
                 "name": state.name,
             }
@@ -608,15 +615,15 @@ async def _process_import_job(tmp_path_str: str, import_job_id: str, user_id: st
         if extracted_session_id:
             await asyncio.to_thread(_cleanup_partial_session, extracted_session_id)
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user"}
+            _import_jobs[import_job_id] = {"status": "cancelled", "phase": "cancelled", "error": "cancelled by user", "created_at": created_at}
     except HTTPException as e:
         logger.error(f"Import {import_job_id}: failed (HTTPException): {e.detail}")
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": e.detail}
+            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": e.detail, "created_at": created_at}
     except Exception as e:
         logger.exception(f"Import {import_job_id}: failed with exception")
         async with _import_jobs_lock:
-            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": str(e)}
+            _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": str(e), "created_at": created_at}
     finally:
         Path(tmp_path_str).unlink(missing_ok=True)
 

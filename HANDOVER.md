@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.16 · **Last updated**: 2026-06-04
+**Version**: 0.25.17 · **Last updated**: 2026-06-04
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.25.x — LLM resilience, sandbox hardening, frontend refactoring (2026-05-27 → present)**
+
+- `0.25.17` — import job `created_at` survival, SDK default timeout, vite preview proxy (2026-06-04):
+  - **Import job `created_at` preservation**: Every job state transition (pending/extracting/completed/failed/cancelled) now carries forward `created_at` from the previous state instead of dropping it. Fixes a bug where the stale-job cleanup task in `session_cleanup.py` could never evict failed/cancelled jobs because `created_at` was lost on transition.
+  - **SDK default timeout**: `Client.__init__` default `timeout` raised from 300s to 3600s — multi-GB archive uploads + extraction can legitimately exceed 5 minutes.
+  - **Vite preview proxy**: Preview server configuration now proxies `/api` and `/ws` through to the backend, so production-like `vite preview` sessions work without CORS issues.
 
 - `0.25.15` — import progress tracking, live cancel, trust-based pickle restore, blob round-trip & SDK overhaul (2026-06-04):
   - **Raw octet-stream streaming upload**: Import route reads `request.stream()` with `X-Filename`/`X-Import-Id`/`X-Trust` headers instead of multipart FormData. Eliminates Starlette's `SpooledTemporaryFile` which caused ~50 min of redundant disk I/O for multi-GB archives.

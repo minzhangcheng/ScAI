@@ -23,5 +23,15 @@ export default defineConfig({
   preview: {
     port: 3000,
     allowedHosts: true,
+    proxy: {
+      '/api': {
+        target: `http://${backendHost}:${backendPort}`,
+        changeOrigin: true
+      },
+      '/ws': {
+        target: `ws://${backendHost}:${backendPort}`,
+        ws: true
+      }
+    }
   }
 })
