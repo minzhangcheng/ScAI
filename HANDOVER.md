@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.17 · **Last updated**: 2026-06-04
+**Version**: 0.25.18 · **Last updated**: 2026-06-04
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.25.x — LLM resilience, sandbox hardening, frontend refactoring (2026-05-27 → present)**
+
+- `0.25.18` — import request logging, vite & CLI timeout hardening (2026-06-04):
+  - **Import request logging**: `import_state()` logs structured metadata on every request (filename, content_length, trust, client IP, X-Forwarded-For, user_id, import_id) with `import_start_time` timing. Upload failure logs include `exc_info=True` for full stack traces.
+  - **Vite timeout hardening**: New `disableRequestTimeout()` plugin sets `requestTimeout`/`headersTimeout` to 0 on both dev and preview servers. Proxy timeouts raised to 24h (86400000ms) so multi-GB uploads through `vite dev`/`vite preview` don't get silently aborted.
+  - **CLI timeout**: `session_manager.py` creates the SDK client with `timeout=86400` (24h) to match the server-side import polling behavior — large archives can take hours to transfer and extract.
 
 - `0.25.17` — import job `created_at` survival, SDK default timeout, vite preview proxy (2026-06-04):
   - **Import job `created_at` preservation**: Every job state transition (pending/extracting/completed/failed/cancelled) now carries forward `created_at` from the previous state instead of dropping it. Fixes a bug where the stale-job cleanup task in `session_cleanup.py` could never evict failed/cancelled jobs because `created_at` was lost on transition.

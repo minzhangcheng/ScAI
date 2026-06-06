@@ -442,15 +442,18 @@ async def import_state(
     For zip/json: streams to an in-memory buffer with a size cap, then processes
     inline.
     """
+    import_start_time = time.time()
     user_id = getattr(request.state, "user_id", "")
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required to import sessions")
 
     filename = (request.headers.get("x-filename") or "").strip()
     if not filename:
+        logger.warning("Import rejected: missing X-Filename header from client %s", request.client)
         raise HTTPException(status_code=400, detail="X-Filename header is required")
     # Reject obviously malicious filenames before they touch disk paths.
     if '/' in filename or '\\' in filename or '\x00' in filename:
+        logger.warning("Import rejected: bad X-Filename %r from client %s", filename, request.client)
         raise HTTPException(status_code=400, detail="X-Filename must not contain path separators")
 
     import_id = request.headers.get("x-import-id") or None
@@ -458,6 +461,14 @@ async def import_state(
 
     _cl_hdr = request.headers.get("content-length")
     content_length = int(_cl_hdr) if _cl_hdr and _cl_hdr.isdigit() else 0
+
+    logger.info(
+        "Import request received: filename=%r, content_length=%s, trust=%s, client=%s, "
+        "user_id=%s, import_id=%s, x-forwarded-for=%s",
+        filename, content_length, trust, request.client,
+        user_id[:8] if user_id else "", import_id,
+        request.headers.get("x-forwarded-for", "N/A"),
+    )
 
     if filename.endswith(('.tar.gz', '.tgz')):
         # ---- tar.gz: stream body directly to disk, then extract in background ----
@@ -502,7 +513,7 @@ async def import_state(
             tmp_path.unlink(missing_ok=True)
             return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
         except Exception as e:
-            logger.error(f"Import {import_job_id}: upload failed: {e}")
+            logger.error("Import %s: upload failed after %.1fs: %s", import_job_id, time.time() - import_start_time, e, exc_info=True)
             async with _import_jobs_lock:
                 created_at = _import_jobs.get(import_job_id, {}).get("created_at", time.time())
                 _import_jobs[import_job_id] = {"status": "failed", "phase": "failed", "error": f"Upload failed: {str(e)}", "created_at": created_at}
@@ -532,6 +543,11 @@ async def import_state(
             return APIResponse(success=False, message="Import cancelled", data={"import_id": import_job_id, "status": "cancelled"})
 
         background_tasks.add_task(_process_import_job, str(tmp_path), import_job_id, user_id, trust)
+
+        logger.info(
+            "Import %s: upload complete (%d bytes, %.1fs), returning 200 with import_id",
+            import_job_id, bytes_written, time.time() - import_start_time,
+        )
 
         return APIResponse(
             success=True,

@@ -130,7 +130,9 @@ def main():
 
     args = parser.parse_args()
 
-    client = Client(base_url=args.url, api_key=args.api_key)
+    # Use 24h timeout for large file uploads (41GB+ archives can take hours).
+    # The import_session method also has its own poll timeout (None = no limit).
+    client = Client(base_url=args.url, api_key=args.api_key, timeout=86400)
 
     try:
         if args.command == "list":
