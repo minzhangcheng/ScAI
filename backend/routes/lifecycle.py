@@ -30,6 +30,15 @@ from backend.routes._helpers import teardown_running_workflow
 
 logger = logging.getLogger(__name__)
 
+# HITL gates that pause the workflow waiting on explicit user input. Kept as a
+# single source of truth so adding a new WAITING_* gate only touches one place.
+WAITING_HITL_STATUSES = frozenset({
+    TaskStatus.WAITING_INPUT,
+    TaskStatus.WAITING_ANNOTATION,
+    TaskStatus.WAITING_PLAN_REVIEW,
+    TaskStatus.WAITING_SPECIES_INPUT,
+})
+
 
 async def _resume_workflow(session_id, state, signal_fn=None):
     """Transition state to RUNNING, persist, and optionally signal the workflow."""
@@ -55,6 +64,8 @@ def resolve_hitl_skip_target(state):
     if reason == WaitInputReason.AGENT_DISABLED.value:
         info = state.agent_disabled_info or {}
         return info.get("node_name", ""), info.get("generation", 0)
+    if reason in (WaitInputReason.SPECIES_INPUT.value, WaitInputReason.GENE_SPECIES_MISMATCH.value):
+        return "species_input", 0  # sentinel: lifecycle will call signal_species_input("")
     # Unknown or None reason — round-completion gate uses signal_continue.
     # Fail-closed: if a new WaitInputReason is added that has its own gate,
     # this must be updated to handle it (otherwise signal_continue would deadlock).
@@ -110,23 +121,14 @@ async def _pause_analysis_locked(session_id: str, user_id: str):
     # Accept RUNNING and any WAITING_* state. Pausing while waiting for HITL
     # input still snapshots sandbox and clears the cooperative gate so when
     # the user later resumes from the gate, the agent loop also honors pause.
-    _pausable = {
-        TaskStatus.RUNNING,
-        TaskStatus.WAITING_INPUT,
-        TaskStatus.WAITING_ANNOTATION,
-        TaskStatus.WAITING_PLAN_REVIEW,
-    }
+    _pausable = {TaskStatus.RUNNING} | WAITING_HITL_STATUSES
     if state.status not in _pausable:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot pause from status '{state.status}'"
         )
 
-    if state.status in (
-        TaskStatus.WAITING_INPUT,
-        TaskStatus.WAITING_ANNOTATION,
-        TaskStatus.WAITING_PLAN_REVIEW,
-    ):
+    if state.status in WAITING_HITL_STATUSES:
         state.pre_pause_status = state.status
     else:
         state.pre_pause_status = None
@@ -230,12 +232,30 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
             message="Session is waiting for plan review. Submit /plan-review to approve, skip, or modify the plan.",
             data={"needs_reconnect": False},
         )
+    elif state.status == TaskStatus.WAITING_SPECIES_INPUT:
+        # Continue from species-input wait by sending an empty signal
+        # (workflow treats empty input as "use suggestion / auto-skip").
+        # An explicit submission goes through /interaction/species-input instead.
+        state.status = TaskStatus.RUNNING
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if workflow:
+            workflow.signal_species_input("")
+            return APIResponse(
+                success=True,
+                message="Continuing analysis (species input auto-skipped)"
+            )
+        else:
+            await _pause_and_restart_ws(session_id, state)
+            return APIResponse(
+                success=True,
+                message="Continuing analysis",
+                data={"needs_reconnect": True},
+            )
     elif state.status == TaskStatus.PAUSED:
-        if state.pre_pause_status in (
-            TaskStatus.WAITING_INPUT,
-            TaskStatus.WAITING_ANNOTATION,
-            TaskStatus.WAITING_PLAN_REVIEW,
-        ):
+        if state.pre_pause_status in WAITING_HITL_STATUSES:
             restored_status = state.pre_pause_status
             state.status = restored_status
             state.pre_pause_status = None
@@ -252,11 +272,7 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
             # asked to unpause; they must still submit an explicit action via
             # /choose-direction, /confirm-annotation, or /plan-review to
             # advance past the restored WAITING_* gate.
-            if state.status in (
-                TaskStatus.WAITING_INPUT,
-                TaskStatus.WAITING_ANNOTATION,
-                TaskStatus.WAITING_PLAN_REVIEW,
-            ):
+            if state.status in WAITING_HITL_STATUSES:
                 message = (
                     "Analysis resumed; awaiting explicit user input via the "
                     "appropriate gate endpoint"
@@ -300,8 +316,7 @@ async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequ
 async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysisRequest):
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    if state.status not in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
-                             TaskStatus.WAITING_ANNOTATION, TaskStatus.WAITING_PLAN_REVIEW, TaskStatus.GENERATING_REPORT):
+    if state.status not in ({TaskStatus.RUNNING, TaskStatus.GENERATING_REPORT} | WAITING_HITL_STATUSES):
         if state.status == TaskStatus.PAUSED:
             return APIResponse(success=True, message="Analysis is already paused")
         return APIResponse(success=True, message=f"Analysis is {state.status.value}")
@@ -344,11 +359,20 @@ async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysis
         if state.status == TaskStatus.WAITING_INPUT:
             skip_target = resolve_hitl_skip_target(state)
             if skip_target is not None:
+                node_name, generation = skip_target
+                if node_name == "species_input":
+                    # Species-input gate — released via signal_species_input
+                    if state.original_max_rounds is None:
+                        state.original_max_rounds = state.max_rounds
+                    state.max_rounds = state.current_round
+                    state.status = TaskStatus.RUNNING
+                    await _resume_workflow(session_id, state,
+                        signal_fn=lambda w: w.signal_species_input(""))
+                    return APIResponse(success=True, message="Skipping species input, generating report...")
                 # LLM-failure OR disabled-agent gate — both wait on
                 # _llm_failure_events[node] and are released by
                 # signal_llm_failure_action. Using signal_continue here would
                 # leave the gate blocked forever (deadlock).
-                node_name, generation = skip_target
                 if state.original_max_rounds is None:
                     state.original_max_rounds = state.max_rounds
                 state.max_rounds = state.current_round
@@ -384,6 +408,16 @@ async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysis
             state.status = TaskStatus.RUNNING
             await _resume_workflow(session_id, state,
                 signal_fn=lambda w: w.signal_plan_review("skip"))
+            return APIResponse(success=True, message="Generating report...")
+        elif state.status == TaskStatus.WAITING_SPECIES_INPUT:
+            # Workflow is blocked at _species_event.wait() inside planning or
+            # gene validation callback. Release via empty signal (auto-skip).
+            if state.original_max_rounds is None:
+                state.original_max_rounds = state.max_rounds
+            state.max_rounds = state.current_round
+            state.status = TaskStatus.RUNNING
+            await _resume_workflow(session_id, state,
+                signal_fn=lambda w: w.signal_species_input(""))
             return APIResponse(success=True, message="Generating report...")
         else:
             # RUNNING - mid-agent execution: cancel task, start report generation

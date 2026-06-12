@@ -62,6 +62,8 @@ class LlmFailureAction(str, Enum):
 class WaitInputReason(str, Enum):
     LLM_FAILURE = "llm_failure"
     AGENT_DISABLED = "agent_disabled"
+    SPECIES_INPUT = "species_input"
+    GENE_SPECIES_MISMATCH = "gene_species_mismatch"
 
 
 class StateSyncChangeType(str, Enum):
@@ -69,6 +71,10 @@ class StateSyncChangeType(str, Enum):
     LLM_RETRY = "llm_retry"
     AGENT_DISABLED = "agent_disabled"
     AGENT_RESUMED = "agent_resumed"
+    SPECIES_INPUT = "species_input"
+    GENE_SPECIES_MISMATCH = "gene_species_mismatch"
+    SPECIES_RESOLVED = "species_resolved"
+    SPECIES_AUTO_SKIPPED = "species_auto_skipped"
 
 
 # Core agents whose absence blocks the workflow. Disabling any of these

@@ -11,7 +11,8 @@ import type { Session, RoundResult, FigureReviewStatus } from '../stores/appStor
 
 const VALID_STATUSES: readonly Session['status'][] = [
   'pending', 'running', 'paused', 'waiting_input', 'waiting_annotation',
-  'waiting_plan_review', 'completed', 'failed', 'generating_report',
+  'waiting_plan_review', 'waiting_species_input', 'completed', 'failed',
+  'generating_report',
 ]
 
 function opt<K extends string, V>(key: K, value: V | null | undefined): Partial<Record<K, V>> {
@@ -129,6 +130,9 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
     ...opt('integratedReport', data.integrated_report ?? undefined),
     ...opt('explorationReportUrl', data.exploration_report_url),
     ...opt('analysisPhase', data.analysis_phase),
+    ...opt('species', data.species),
+    ...opt('speciesResolved', data.species_resolved),
+    ...opt('speciesGenesValidated', data.species_genes_validated),
   }
 
   const storeUpdates: TransformedLoadResponse['storeUpdates'] = {

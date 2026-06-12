@@ -4,11 +4,11 @@
  * across hooks, stores, and components.
  */
 
-import type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, BiochemistryIndicator, PublicationFigure, PublicationTable, RoundResult, GraphicAbstract } from './stores/appStore'
+import type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, BiochemistryIndicator, PublicationFigure, PublicationTable, RoundResult, GraphicAbstract, SpeciesInputInfo } from './stores/appStore'
 import type { TranslationKey } from './i18n/translations'
 
 // Re-export for convenience
-export type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, BiochemistryIndicator, PublicationFigure, PublicationTable, RoundResult, GraphicAbstract, TranslationKey }
+export type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, BiochemistryIndicator, PublicationFigure, PublicationTable, RoundResult, GraphicAbstract, SpeciesInputInfo, TranslationKey }
 
 // ============================================================
 // Backend API response types (snake_case as returned by server)
@@ -39,6 +39,10 @@ export interface SessionLoadResponse {
   agent_errors?: RawAgentError[]
   snapshot_count?: number
   messages?: RawMessage[]
+  species?: string
+  species_resolved?: boolean
+  species_genes_validated?: boolean
+  species_input_info?: Record<string, unknown>
 }
 
 export interface RawTreatmentGroup {

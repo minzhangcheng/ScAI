@@ -479,6 +479,13 @@ Please provide a detailed literature review report with specific citation inform
     planReviewStage1: '阶段 1: QC+聚类+注释',
     planReviewStage2: '阶段 2: 下游分析',
     planReviewStageFull: '全量分析',
+
+    // Species input dialog
+    speciesInputTitle: '物种信息',
+    speciesGeneValidationTitle: '基因名验证',
+    speciesInputPlaceholder: '请输入物种名称，如 Homo sapiens、Mus musculus...',
+    speciesGeneValidationPlaceholder: '请输入正确的物种名称，或输入"保持当前设置"...',
+    waitingSpeciesInput: '等待物种信息输入...',
   },
 
   en: {
@@ -957,6 +964,13 @@ Please provide a detailed literature review report with specific citations.`,
     planReviewStage1: 'Stage 1: QC+Clustering+Annotation',
     planReviewStage2: 'Stage 2: Downstream Analysis',
     planReviewStageFull: 'Full Analysis',
+
+    // Species input dialog
+    speciesInputTitle: 'Species Information',
+    speciesGeneValidationTitle: 'Gene Name Validation',
+    speciesInputPlaceholder: 'Enter species name, e.g., Homo sapiens, Mus musculus...',
+    speciesGeneValidationPlaceholder: 'Enter correct species name, or type "keep" to continue...',
+    waitingSpeciesInput: 'Waiting for species input...',
   }
 } as const
 

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 GRAPH_RECURSION_LIMIT = 100
 
 
+from .helpers import wait_with_skip_time
 from .retry import with_retry, MAX_NODE_RETRIES
 from .state import WorkflowState, make_initial_workflow_state
 from .routing import RoutingMixin
@@ -66,7 +67,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     @staticmethod
     def _set_status(state: AnalysisState, status: TaskStatus):
         state.status = status
-        if status == TaskStatus.WAITING_INPUT:
+        if status in (TaskStatus.WAITING_INPUT, TaskStatus.WAITING_SPECIES_INPUT):
             state.waiting_input_started_at = datetime.now()
         else:
             state.waiting_input_started_at = None
@@ -123,6 +124,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # Event for blocking during plan review
         self._plan_review_event = asyncio.Event()
         self._plan_review_action = None  # "approve" | "skip" | dict with user modifications
+
+        # Event for blocking during species input (inference or gene validation)
+        self._species_event = asyncio.Event()
+        self._species_user_response: Optional[str] = None
 
         # LLM failure intervention — serialized via Lock
         self._llm_failure_lock = asyncio.Lock()
@@ -296,6 +301,11 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self._plan_review_action = {"action": action, "user_input": user_input}
         self._plan_review_event.set()
 
+    def signal_species_input(self, user_input: str):
+        """Signal that user has submitted species-related input."""
+        self._species_user_response = user_input
+        self._species_event.set()
+
     def signal_llm_failure_action(self, node_name: str, action: str, generation: int) -> bool:
         """Signal the workflow to handle an LLM failure with the given action.
 
@@ -426,6 +436,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             message_callback=self._agent_message_callback,
             supervisor_callback=self._supervisor_callback,
             technique_agent=self.technique_agent,
+            species_validation_callback=self._species_validation_callback,
         )
         self.bioinformatics_agent.set_session(self.session_id)
         self.bioinformatics_agent._pause_event = self._pause_event
@@ -956,6 +967,9 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self._continue_event.clear()
         self._annotation_event.clear()
         self._plan_review_event.clear()
+        self._plan_review_action = None
+        self._species_event.clear()
+        self._species_user_response = None
 
         config = {"configurable": {"thread_id": thread_id}}
         state = await self.compiled_graph.aget_state(config)

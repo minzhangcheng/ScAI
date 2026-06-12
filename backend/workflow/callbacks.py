@@ -2,8 +2,9 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from ..constants import PLAN_REVISION_KEYWORDS, PLAN_REVISION_NEEDED_TAG
-from ..models.schemas import AgentType, AnalysisState, ClusterAnnotation, PublicationFigure
+from ..constants import PLAN_REVISION_KEYWORDS, PLAN_REVISION_NEEDED_TAG, StateSyncChangeType, WaitInputReason
+from ..models.schemas import AgentType, AnalysisState, ClusterAnnotation, PublicationFigure, TaskStatus
+from .helpers import wait_with_skip_time
 
 logger = logging.getLogger(__name__)
 
@@ -444,3 +445,68 @@ Approve if quality_score >= 7."""
             self._sup_rejections.pop(figure.name, None)
 
         return review
+
+    async def _species_validation_callback(
+        self,
+        gene_names: List[str],
+        species: str,
+        assessment: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """HITL callback for gene-species mismatch. Returns action dict."""
+        analysis_state = self._current_analysis_state
+        if analysis_state is None:
+            return {"action": "keep", "user_input": ""}
+
+        analysis_state.species_input_info = {
+            "source": "gene_validation",
+            "species": species,
+            "sample_genes": gene_names[:20],
+            "pi_assessment": assessment.get("reasoning", ""),
+            "likely_species": assessment.get("likely_species", ""),
+            "suggestions": [
+                f"Change species to {assessment.get('likely_species', 'unknown')}",
+                "Keep current species and continue",
+            ],
+        }
+
+        original_status = analysis_state.status
+        try:
+            self._species_event.clear()
+            self._species_user_response = None
+            analysis_state.wait_input_reason = WaitInputReason.GENE_SPECIES_MISMATCH.value
+            self._set_status(analysis_state, TaskStatus.WAITING_SPECIES_INPUT)
+            await self._send_state_sync(analysis_state, StateSyncChangeType.GENE_SPECIES_MISMATCH.value)
+
+            signaled = await wait_with_skip_time(
+                self._species_event,
+                analysis_state.round_wait_seconds,
+                self.session_id,
+                "gene_species_mismatch",
+            )
+
+            if not signaled:
+                await self._send_state_sync(analysis_state, StateSyncChangeType.SPECIES_AUTO_SKIPPED.value)
+                return {"action": "keep", "user_input": ""}
+
+            user_input = self._species_user_response or ""
+            await self._send_state_sync(analysis_state, StateSyncChangeType.SPECIES_RESOLVED.value)
+
+            try:
+                action = await self.pi_agent.decide_species_action(user_input, species, assessment)
+            except Exception:
+                action = {"action": "keep", "user_input": user_input}
+
+            if action.get("action") == "change_species" and action.get("new_species"):
+                analysis_state.species = action["new_species"]
+                analysis_state.species_resolved = True
+                await self._send_message(
+                    "status",
+                    f"Species updated to {action['new_species']} (per user input)",
+                    AgentType.PI,
+                )
+
+            return {**action, "user_input": user_input}
+        finally:
+            analysis_state.species_input_info = None
+            analysis_state.wait_input_reason = None
+            self._set_status(analysis_state, original_status)

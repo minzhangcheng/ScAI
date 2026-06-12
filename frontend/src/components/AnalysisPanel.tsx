@@ -14,6 +14,7 @@ import LlmTimeoutDialog from './LlmTimeoutDialog'
 import LlmModifySubDialog from './LlmModifySubDialog'
 import { useCountdownTimer } from '../hooks/useCountdownTimer'
 import { SnapshotPanel } from './SnapshotPanel'
+import { TextInputDialog } from './TextInputDialog'
 import { ConfirmDialog } from './ConfirmDialog'
 import {
   Play,
@@ -94,6 +95,10 @@ export function AnalysisPanel() {
   const llmModifySaved = useAppStore(s => s.llmModifySaved)
   const roundWaitSeconds = useAppStore(s => s.roundWaitSeconds)
   const maxRounds = useAppStore(s => s.maxRounds)
+
+  const speciesInputInfo = useAppStore(s => s.speciesInputInfo)
+  const showSpeciesInputDialog = useAppStore(s => s.showSpeciesInputDialog)
+  const clearSpeciesInputState = useAppStore(s => s.clearSpeciesInputState)
 
   // Round results state
   const [expandedRound, setExpandedRound] = useState<number | null>(null)
@@ -626,6 +631,19 @@ export function AnalysisPanel() {
     }
   }, [currentSession])
 
+  const handleSpeciesInput = useCallback(async (input: string) => {
+    if (!currentSession) return
+    try {
+      await apiFetch(`/session/${currentSession.id}/species-input`, {
+        method: 'POST',
+        body: JSON.stringify({ input }),
+      })
+      clearSpeciesInputState()
+    } catch (error) {
+      console.error('Failed to submit species input:', error)
+    }
+  }, [currentSession, clearSpeciesInputState])
+
   const handleLlmModifyAgent = useCallback(() => {
     setShowLlmTimeoutDialog(false)
     useAppStore.getState().setLlmModifyPending(true)
@@ -686,6 +704,8 @@ export function AnalysisPanel() {
       }
     } else if (currentSession?.status === 'waiting_plan_review') {
       setShowPlanReviewDialog(true)
+    } else if (currentSession?.status === 'waiting_species_input') {
+      useAppStore.getState().setShowSpeciesInputDialog(true)
     }
   }, [currentSession?.status, currentSession?.currentRound, explorationReportData, feedbackRoundData])
 
@@ -702,7 +722,11 @@ export function AnalysisPanel() {
   // Uses wsConnect from the store (managed by App.tsx) to avoid duplicate WebSocket instances
   useEffect(() => {
     if (currentSession &&
-        (currentSession.status === 'running' || currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation' || currentSession.status === 'waiting_plan_review') &&
+        (currentSession.status === 'running' ||
+         currentSession.status === 'waiting_input' ||
+         currentSession.status === 'waiting_annotation' ||
+         currentSession.status === 'waiting_plan_review' ||
+         currentSession.status === 'waiting_species_input') &&
         !wsConnected && wsConnect) {
       wsConnect()
     }
@@ -831,7 +855,7 @@ export function AnalysisPanel() {
   }
 
   const isPaused = currentSession.status === 'paused'
-  const isWaitingInput = currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation' || currentSession.status === 'waiting_plan_review'
+  const isWaitingInput = currentSession.status === 'waiting_input' || currentSession.status === 'waiting_annotation' || currentSession.status === 'waiting_plan_review' || currentSession.status === 'waiting_species_input'
   const isRunning = currentSession.status === 'running'
   const isCompleted = currentSession.status === 'completed'
   const isFailed = currentSession.status === 'failed'
@@ -976,6 +1000,8 @@ export function AnalysisPanel() {
                   <span className="font-medium">
                     {currentSession.status === 'waiting_annotation'
                       ? (language === 'zh' ? '等待注释确认' : 'Waiting for Annotation')
+                      : currentSession.status === 'waiting_species_input'
+                      ? t('waitingSpeciesInput')
                       : (language === 'zh' ? '等待输入' : 'Waiting for Input')}
                   </span>
                 </button>
@@ -1391,6 +1417,25 @@ export function AnalysisPanel() {
           onReturnToSettings={handleLlmReturnToSettings}
           onReturnToTimeout={handleLlmReturnToTimeout}
           language={language}
+        />
+      )}
+
+      {/* Species Input Dialog */}
+      {showSpeciesInputDialog && speciesInputInfo && currentSession && (
+        <TextInputDialog
+          title={speciesInputInfo.source === 'pi_inference'
+            ? t('speciesInputTitle')
+            : t('speciesGeneValidationTitle')}
+          description={speciesInputInfo.context || ''}
+          suggestions={speciesInputInfo.suggestions}
+          placeholder={speciesInputInfo.source === 'pi_inference'
+            ? t('speciesInputPlaceholder')
+            : t('speciesGeneValidationPlaceholder')}
+          language={language}
+          countdownSeconds={roundWaitSeconds}
+          resetKey={speciesInputInfo.source}
+          onSubmit={handleSpeciesInput}
+          onClose={() => clearSpeciesInputState()}
         />
       )}
 

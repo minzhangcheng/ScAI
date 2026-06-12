@@ -6,7 +6,7 @@ from datetime import datetime
 from html import escape as _html_escape
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from ..constants import LlmFailureAction, PI_DECIDE_SIGNAL
+from ..constants import LlmFailureAction, PI_DECIDE_SIGNAL, WaitInputReason, StateSyncChangeType
 from ..models.schemas import AgentType, AnalysisPhase, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
 from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
@@ -20,6 +20,7 @@ else:
 logger = logging.getLogger(__name__)
 
 MAX_PLANNING_ROUNDS = 5
+MAX_SPECIES_INFERENCE_ATTEMPTS = 3
 
 
 def _consume_user_plan_feedback(state: dict) -> str:
@@ -57,6 +58,98 @@ class PlanningMixin:
                 "dialogue": analysis_state.plan_dialogue_history or [],
             }
             return state
+
+        # ── Species inference (Round 1 only) ─────────────────────────────
+        if analysis_state.current_round == 1 and not analysis_state.species:
+            await self._send_message("status", "Inferring species from project information...", AgentType.PI)
+
+            inference = await self.pi_agent.infer_species(analysis_state)
+
+            if inference.get("confidence") == "high" and inference.get("species"):
+                analysis_state.species = inference["species"]
+                analysis_state.species_resolved = True
+                await self._send_message(
+                    "status",
+                    f"Species inferred: {inference['species']} ({inference.get('reasoning', '')})",
+                    AgentType.PI,
+                )
+                await self._send_state_sync(analysis_state, StateSyncChangeType.SPECIES_RESOLVED.value)
+            else:
+                # Low confidence or failure — HITL loop (max 3 iterations)
+                original_status = analysis_state.status
+                try:
+                    for attempt in range(MAX_SPECIES_INFERENCE_ATTEMPTS):
+                        analysis_state.species_input_info = {
+                            "source": "pi_inference",
+                            "suggestions": inference.get("suggestions", []),
+                            "context": inference.get("reasoning", "Unable to determine species automatically"),
+                        }
+
+                        self._species_event.clear()
+                        self._species_user_response = None
+                        analysis_state.wait_input_reason = WaitInputReason.SPECIES_INPUT.value
+                        self._set_status(analysis_state, TaskStatus.WAITING_SPECIES_INPUT)
+                        await self._send_state_sync(analysis_state, StateSyncChangeType.SPECIES_INPUT.value)
+
+                        signaled = await wait_with_skip_time(
+                            self._species_event,
+                            analysis_state.round_wait_seconds,
+                            self.session_id,
+                            "species_input",
+                        )
+
+                        if not signaled:
+                            suggestions = inference.get("suggestions", [])
+                            if suggestions:
+                                analysis_state.species = suggestions[0]
+                                analysis_state.species_resolved = True
+                                await self._send_message(
+                                    "status",
+                                    f"Species auto-selected: {suggestions[0]} (timeout)",
+                                    AgentType.PI,
+                                )
+                            break
+
+                        user_input = self._species_user_response or ""
+                        inference = await self.pi_agent.infer_species_from_hint(analysis_state, user_input)
+
+                        if inference.get("confidence") == "high" and inference.get("species"):
+                            analysis_state.species = inference["species"]
+                            analysis_state.species_resolved = True
+                            await self._send_message(
+                                "status",
+                                f"Species confirmed: {inference['species']}",
+                                AgentType.PI,
+                            )
+                            break
+                    else:
+                        suggestions = inference.get("suggestions", [])
+                        if suggestions:
+                            analysis_state.species = suggestions[0]
+                            analysis_state.species_resolved = True
+                            await self._send_message(
+                                "status",
+                                f"Species set to {suggestions[0]} (max attempts reached)",
+                                AgentType.PI,
+                            )
+
+                    if analysis_state.species_resolved:
+                        await self._send_state_sync(analysis_state, StateSyncChangeType.SPECIES_RESOLVED.value)
+                    else:
+                        await self._send_state_sync(analysis_state, StateSyncChangeType.SPECIES_AUTO_SKIPPED.value)
+                        await self._send_message(
+                            "status",
+                            "Species unresolved; later gene validation will attempt correction.",
+                            AgentType.PI,
+                        )
+                        logger.info(
+                            f"[{self.session_id}] Species not resolved after HITL — "
+                            f"will rely on gene validation"
+                        )
+                finally:
+                    analysis_state.species_input_info = None
+                    analysis_state.wait_input_reason = None
+                    self._set_status(analysis_state, original_status)
 
         # Reset plan-related state for new round
         analysis_state.current_plan = None

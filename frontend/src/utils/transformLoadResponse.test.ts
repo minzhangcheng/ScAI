@@ -171,4 +171,19 @@ describe('transformLoadResponse', () => {
     const result = transformLoadResponse(rest)
     expect(result.sessionUpdates.name).toBeUndefined()
   })
+
+  it('maps species fields and accepts waiting_species_input status', () => {
+    const data: any = {
+      session_id: 's1',
+      status: 'waiting_species_input',
+      species: 'Mus musculus',
+      species_resolved: true,
+      species_genes_validated: false,
+    }
+    const result = transformLoadResponse(data)
+    expect(result.sessionUpdates.status).toBe('waiting_species_input')
+    expect(result.sessionUpdates.species).toBe('Mus musculus')
+    expect(result.sessionUpdates.speciesResolved).toBe(true)
+    expect(result.sessionUpdates.speciesGenesValidated).toBe(false)
+  })
 })

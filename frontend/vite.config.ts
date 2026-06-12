@@ -8,12 +8,16 @@ function disableRequestTimeout(): Plugin {
   return {
     name: 'disable-request-timeout',
     configureServer(server) {
-      server.httpServer!.requestTimeout = 0
-      server.httpServer!.headersTimeout = 0
+      if (server.httpServer) {
+        server.httpServer.requestTimeout = 0
+        server.httpServer.headersTimeout = 0
+      }
     },
     configurePreviewServer(server) {
-      server.httpServer!.requestTimeout = 0
-      server.httpServer!.headersTimeout = 0
+      if (server.httpServer) {
+        server.httpServer.requestTimeout = 0
+        server.httpServer.headersTimeout = 0
+      }
     },
   }
 }

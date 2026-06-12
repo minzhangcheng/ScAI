@@ -886,6 +886,29 @@ export function useWebSocket() {
               useAppStore.getState().clearLlmFailureState()
             } else if (syncContent.change_type === 'agent_resumed') {
               useAppStore.getState().clearLlmFailureState()
+            } else if (
+              syncContent.change_type === 'species_input' ||
+              syncContent.change_type === 'gene_species_mismatch'
+            ) {
+              if (syncContent.species_input_info) {
+                const store = useAppStore.getState()
+                const info = syncContent.species_input_info
+                store.setSpeciesInputInfo({
+                  source: info.source,
+                  suggestions: Array.isArray(info.suggestions) ? info.suggestions : [],
+                  context: info.context || info.pi_assessment || '',
+                  species: info.species,
+                  sampleGenes: info.sample_genes,
+                  piAssessment: info.pi_assessment,
+                  likelySpecies: info.likely_species,
+                })
+                store.setShowSpeciesInputDialog(true)
+              }
+            } else if (
+              syncContent.change_type === 'species_resolved' ||
+              syncContent.change_type === 'species_auto_skipped'
+            ) {
+              useAppStore.getState().clearSpeciesInputState()
             }
 
             updateSession({

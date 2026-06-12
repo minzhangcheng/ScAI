@@ -5,7 +5,7 @@ import { getToken, setToken, clearToken } from '../utils/authStorage'
 
 // Types
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor' | 'technique'
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'waiting_annotation' | 'waiting_plan_review' | 'generating_report'
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'waiting_annotation' | 'waiting_plan_review' | 'waiting_species_input' | 'generating_report'
 export type FigureReviewStatus = 'pending' | 'approved' | 'accepted_with_reservations' | 'revision_requested'
 
 
@@ -135,6 +135,10 @@ export interface Session {
   explorationReportUrl?: string
   multiDirectionCorrelation?: string
   stateVersion?: number
+  // Species inference state
+  species?: string
+  speciesResolved?: boolean
+  speciesGenesValidated?: boolean
 }
 
 export interface AgentPrompts {
@@ -231,6 +235,16 @@ export interface LlmFailureInfo {
   nodeName: string
   generation: number
   reason?: 'llm_failure' | 'agent_disabled'
+}
+
+export interface SpeciesInputInfo {
+  source: 'pi_inference' | 'gene_validation'
+  suggestions: string[]
+  context: string
+  species?: string
+  sampleGenes?: string[]
+  piAssessment?: string
+  likelySpecies?: string
 }
 
 interface AppState {
@@ -396,6 +410,13 @@ interface AppState {
   llmModifySaved: boolean
   setLlmModifySaved: (saved: boolean) => void
   clearLlmFailureState: () => void
+
+  // Species input user intervention
+  speciesInputInfo: SpeciesInputInfo | null
+  showSpeciesInputDialog: boolean
+  setSpeciesInputInfo: (info: SpeciesInputInfo | null) => void
+  setShowSpeciesInputDialog: (show: boolean) => void
+  clearSpeciesInputState: () => void
 
   // Internal: true after Zustand persist finishes hydrating from localStorage.
   _hydrated: boolean
@@ -617,6 +638,16 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
         showLlmTimeoutDialog: false,
         llmModifyPending: false,
         llmModifySaved: false,
+      }),
+
+      // Species input user intervention
+      speciesInputInfo: null,
+      showSpeciesInputDialog: false,
+      setSpeciesInputInfo: (info) => set({ speciesInputInfo: info }),
+      setShowSpeciesInputDialog: (show) => set({ showSpeciesInputDialog: show }),
+      clearSpeciesInputState: () => set({
+        speciesInputInfo: null,
+        showSpeciesInputDialog: false,
       }),
 
       // Auth state

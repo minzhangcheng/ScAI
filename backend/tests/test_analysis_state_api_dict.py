@@ -73,6 +73,8 @@ class TestAnalysisStateApiDictRoundTrip:
             "plan_dialogue_history", "agent_errors",
             "publication_figures", "publication_tables", "graphic_abstract",
             "integrated_report",
+            "species", "species_resolved", "species_genes_validated",
+            "species_input_info",
         }
         assert set(api.keys()) == expected_keys
 

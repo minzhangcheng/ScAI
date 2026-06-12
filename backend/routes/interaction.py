@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from backend.constants import PI_DECIDE_SIGNAL
 from backend.models.api_requests import (
     HumanInputRequest, AnnotationConfirmation, SupplementaryAnalysisRequest,
-    DirectionChoice, PlanReviewRequest,
+    DirectionChoice, PlanReviewRequest, SpeciesInputRequest,
 )
 from backend.models.schemas import AnalysisPhase, APIResponse, TaskStatus
 from backend.services.session_store import (
@@ -313,3 +313,22 @@ async def submit_plan_review(session_id: str, request: Request, body: PlanReview
 
         workflow.signal_plan_review(action, user_input)
     return APIResponse(success=True, message=f"Plan review action '{action}' received")
+
+
+@router.post("/{session_id}/species-input")
+async def species_input(session_id: str, request: Request, body: SpeciesInputRequest):
+    """User submits species-related input (inference or gene validation)."""
+    user_id = getattr(request.state, "user_id", "")
+    sess_lock = get_session_lock(session_id)
+    async with sess_lock:
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        if state.status != TaskStatus.WAITING_SPECIES_INPUT:
+            raise HTTPException(status_code=400, detail="Session is not waiting for species input")
+
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="No active workflow")
+
+        workflow.signal_species_input(body.input)
+    return APIResponse(success=True, message="Species input received")

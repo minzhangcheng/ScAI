@@ -59,6 +59,7 @@ class MessagingMixin:
                     "wait_input_reason": analysis_state.wait_input_reason,
                     "llm_failure_info": analysis_state.llm_failure_info,
                     "agent_disabled_info": analysis_state.agent_disabled_info,
+                    "species_input_info": analysis_state.species_input_info,
                 }
             )
             try:

@@ -40,6 +40,7 @@ class TaskStatus(str, Enum):
     WAITING_INPUT = "waiting_input"
     WAITING_ANNOTATION = "waiting_annotation"  # Paused for user annotation confirmation
     WAITING_PLAN_REVIEW = "waiting_plan_review"  # Paused for user plan review/approval
+    WAITING_SPECIES_INPUT = "waiting_species_input"  # Paused for user species input
     PAUSED = "paused"
     GENERATING_REPORT = "generating_report"
 
@@ -441,7 +442,13 @@ class AnalysisState(BaseModel):
 
     # Initial inputs
     initial_instruction: str = ""
-    
+
+    # Species identification (global, visible to all agents)
+    species: str = ""
+    species_resolved: bool = False
+    species_genes_validated: bool = False
+    species_input_info: Optional[Dict[str, Any]] = None
+
     # Agent messages history
     messages: List[AgentMessage] = Field(default_factory=list)
 
@@ -577,6 +584,10 @@ class AnalysisState(BaseModel):
         "publication_tables": "publication_tables",
         "graphic_abstract": "graphic_abstract",
         "integrated_report": "integrated_report",
+        "species": "species",
+        "species_resolved": "species_resolved",
+        "species_genes_validated": "species_genes_validated",
+        "species_input_info": "species_input_info",
     }
 
     # --- Data helper methods ---

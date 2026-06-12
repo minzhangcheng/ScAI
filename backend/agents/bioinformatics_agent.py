@@ -316,6 +316,24 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "validate_species_genes",
+            "description": "Validate whether gene names in the loaded data match the expected species. Call after loading data, before clustering. Randomly samples gene names from the dataset.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gene_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of ~50 randomly sampled gene names from adata.var_names"
+                    }
+                },
+                "required": ["gene_names"]
+            }
+        }
+    },
 ]
 
 
@@ -361,6 +379,7 @@ class BioinformaticsAgent(BaseAgent):
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
         supervisor_callback: Optional[Callable[['AnalysisStep', List[str]], Awaitable[SupervisorEvalResult]]] = None,
         technique_agent=None,
+        species_validation_callback: Optional[Callable[[List[str], str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
     ):
         super().__init__(
             agent_type=AgentType.BIOINFORMATICS,
@@ -374,6 +393,7 @@ class BioinformaticsAgent(BaseAgent):
         self.figure_review_callback = figure_review_callback
         self.supervisor_callback = supervisor_callback
         self.technique_agent = technique_agent
+        self.species_validation_callback = species_validation_callback
 
         # Track execution history
         self.code_history: List[CodeExecution] = []
@@ -929,6 +949,14 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             self._build_notebook_context(),
             self._build_analysis_context(),
         ]
+        if state.species:
+            parts.append(
+                f"## Species\nThe species for this analysis is: {state.species}\n"
+                f"Use this species for all organism-dependent operations "
+                f"(gene naming conventions, pathway databases, etc.).\n"
+                f"After loading data, call validate_species_genes with ~50 randomly "
+                f"sampled gene names to verify species consistency."
+            )
         return "\n\n".join(p for p in parts if p)
 
     # ---- Context compaction (volume-based) ----
@@ -1235,6 +1263,105 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             logger.warning(f"[Bioinformatics] AnnData discovery failed: {e}")
 
         return (None, None)
+
+    async def _auto_validate_species_genes(self) -> bool:
+        """Automatically validate gene names against session species.
+
+        Returns True only if validation actually completed (sandbox sampling + PI
+        assessment ran). Returns False on any early exit so callers can decide
+        whether to mark the gate as resolved.
+        """
+        state = self._current_analysis_state
+        if not state or not state.species:
+            return False
+
+        # Sample gene names from sandbox
+        sample_code = (
+            "import json as _json\n"
+            "import random as _rnd\n"
+            "for _name, _obj in list(globals().items()):\n"
+            "    if hasattr(_obj, 'var_names') and not _name.startswith('_'):\n"
+            "        _genes = list(_obj.var_names)\n"
+            "        _sample = _rnd.sample(_genes, min(50, len(_genes)))\n"
+            "        print(_json.dumps(_sample))\n"
+            "        break\n"
+        )
+        import json as _json_mod
+        try:
+            result = await self.sandbox.execute(sample_code, save_to_history=False, skip_safety_check=True)
+            if not result.output or result.error:
+                return False
+            # Scan all lines, return the first one that parses as a JSON list.
+            gene_names = None
+            for _line in (result.output or "").splitlines():
+                _line = _line.strip()
+                if not _line:
+                    continue
+                try:
+                    _parsed = _json_mod.loads(_line)
+                except Exception:
+                    continue
+                if isinstance(_parsed, list):
+                    gene_names = _parsed
+                    break
+            if gene_names is None:
+                logger.warning("[Bioinformatics] Could not locate JSON gene list in sandbox output")
+                return False
+        except Exception as e:
+            logger.warning(f"[Bioinformatics] Failed to sample gene names: {e}")
+            return False
+
+        # Call PI LLM to assess match
+        assessment = await self._assess_gene_species_match(gene_names, state.species)
+
+        if assessment.get("match", True):
+            await self._notify("status",
+                f"Gene names validated: consistent with {state.species}")
+            return True
+
+        # Mismatch — trigger HITL if callback available
+        if self.species_validation_callback:
+            action = await self.species_validation_callback(gene_names, state.species, assessment)
+            if action.get("action") == "custom":
+                self.analysis_context["species_user_directive"] = action.get("user_input", "")
+            return True
+        else:
+            await self._notify("warning",
+                f"Gene names may not match {state.species}: {assessment.get('reasoning', '')}")
+            return False
+
+    async def _assess_gene_species_match(self, gene_names: list, species: str) -> dict:
+        """Ask PI LLM whether gene names match the expected species."""
+        gene_sample = ", ".join(gene_names[:50])
+        prompt = f"""Examine these gene names sampled from a dataset and determine if they match species "{species}".
+
+Gene names: {gene_sample}
+
+Gene naming conventions:
+- Human (Homo sapiens): ALL UPPERCASE (TP53, BRCA1, CD4, GAPDH)
+- Mouse (Mus musculus): Capitalize first letter only (Tp53, Brca1, Cd4, Gapdh)
+- Rat (Rattus norvegicus): Similar to mouse (Tp53, Brca1, Cd4, Gapdh)
+
+IMPORTANT: Reply with ONLY a JSON object, no other text:
+{{"match": true/false, "likely_species": "scientific name if different", "reasoning": "brief explanation", "suggestions": ["alternative species"]}}"""
+        try:
+            if self.pi_callback:
+                response = await self.pi_callback(prompt, "species_validation")
+            else:
+                logger.warning("[Bioinformatics] pi_callback is None — skipping gene-species assessment")
+                return {"match": True}
+            if not response:
+                logger.warning("[Bioinformatics] Empty pi_callback response for gene-species assessment — defaulting to match=True")
+                return {"match": True}
+            from backend.utils.formatting import safe_parse_json as _safe_parse_json2
+            result = _safe_parse_json2(response)
+            if result is not None:
+                return result
+            logger.warning("[Bioinformatics] Could not parse JSON from gene-species assessment response — defaulting to match=True")
+            return {"match": True}
+        except Exception as e:
+            logger.warning(f"[Bioinformatics] Gene-species assessment failed: {e}")
+            return {"match": True}
 
     async def generate_analysis_plan(
         self,
@@ -2413,6 +2540,19 @@ finally:
                         self._force_skip_counter = 0
                         self._force_skip_error_type = None
 
+                        # Auto-validate species-gene match after data loading (Round 1 only).
+                        # _auto_validate_species_genes is self-guarded: it scans the sandbox
+                        # for any object with `var_names` and returns early if none is found,
+                        # so we do not need _discover_adata_in_sandbox (which requires a
+                        # clustering column that doesn't exist yet at load time).
+                        if (self._current_analysis_state
+                                and self._current_analysis_state.species
+                                and not self._current_analysis_state.species_genes_validated
+                                and self._current_analysis_state.current_round == 1):
+                            validated = await self._auto_validate_species_genes()
+                            if validated:
+                                self._current_analysis_state.species_genes_validated = True
+
                     tool_result = f"Execution {'successful' if not result.error else 'failed'}.\n"
                     if result.output:
                         tool_result += f"Output:\n{result.output}\n"
@@ -2560,6 +2700,12 @@ finally:
                     cluster_markers = args.get("cluster_markers", {})
                     tissue = args.get("tissue", "")
                     organism = args.get("organism", "mouse")
+                    # Override with session species if available
+                    if self._current_analysis_state and self._current_analysis_state.species:
+                        llm_organism = organism
+                        organism = self._current_analysis_state.species
+                        if llm_organism != organism:
+                            logger.info(f"[Bioinformatics] organism overridden: {llm_organism} -> {organism}")
                     cluster_key_hint = args.get("cluster_key") or None
                     rank_key_hint = args.get("rank_key") or "rank_genes_groups"
 
@@ -3025,6 +3171,44 @@ finally:
                         agent_reasoning=agent_reasoning,
                         code_description=f"Score: {score_def.score_name} via {score_def.method}",
                     ))
+
+                elif tool_name == "validate_species_genes":
+                    gene_names = args.get("gene_names", [])
+                    state = self._current_analysis_state
+                    if not state or not state.species:
+                        tool_result = "No species set in session. Skipping validation."
+                    else:
+                        assessment = await self._assess_gene_species_match(gene_names, state.species)
+                        if assessment.get("match", True):
+                            tool_result = f"Gene names are consistent with {state.species}. Proceed with analysis."
+                        else:
+                            if self.species_validation_callback:
+                                action = await self.species_validation_callback(
+                                    gene_names, state.species, assessment
+                                )
+                                if action.get("action") == "change_species":
+                                    tool_result = f"Species updated to {action.get('new_species', '')}. Proceed."
+                                elif action.get("action") == "custom":
+                                    self.analysis_context["species_user_directive"] = action.get("user_input", "")
+                                    tool_result = f"User instruction received. Proceed with analysis."
+                                else:
+                                    tool_result = f"Keeping species as {state.species}. Proceed with caution."
+                            else:
+                                tool_result = (
+                                    f"Warning: gene names may not match {state.species}. "
+                                    f"{assessment.get('reasoning', '')}. Proceeding anyway."
+                                )
+                        # Validation actually ran here (_assess_gene_species_match completed
+                        # above); unlike the auto-validation hook, every branch in this tool
+                        # call executes the assessment, so the flag can be set unconditionally.
+                        if self._current_analysis_state:
+                            self._current_analysis_state.species_genes_validated = True
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": tool_result,
+                    })
+                    continue
 
                 elif tool_name == "lookup_documentation":
                     function_path = args.get("function_path", "")

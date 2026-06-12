@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.25.18 · **Last updated**: 2026-06-04
+**Version**: 0.26.1 · **Last updated**: 2026-06-11
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,21 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.25.x — LLM resilience, sandbox hardening, frontend refactoring (2026-05-27 → present)**
+**0.26.x — Species identification HITL & gene validation (2026-06-11 → present)**
+
+- `0.26.1` — species identification HITL, gene-species mismatch validation, WAITING_HITL_STATUSES refactor (2026-06-11):
+  - **Species inference at Round 1**: PI agent infers species from project info with HITL loop (max 3 attempts) — `infer_species()`, `infer_species_from_hint()`, `decide_species_action()`. Low-confidence inference pauses for user input via `TextInputDialog`.
+  - **Gene-species mismatch HITL**: New `_species_validation_callback()` in bioinformatics agent pauses workflow when detected, allowing user to correct species mid-analysis. `decide_species_action()` classifies user intent (change/keep/custom).
+  - **New state fields**: `species`, `species_resolved`, `species_genes_validated`, `species_input_info` in `AnalysisState`; new `TaskStatus.WAITING_SPECIES_INPUT`; new `WaitInputReason` and `StateSyncChangeType` values for `SPECIES_INPUT` / `GENE_SPECIES_MISMATCH` / `SPECIES_RESOLVED` / `SPECIES_AUTO_SKIPPED`.
+  - **`WAITING_HITL_STATUSES` constant**: Single `frozenset` in `lifecycle.py` replaces scattered inline `WAITING_*` tuple checks across pause/resume/stop.
+  - **`prepend_species()` helper**: Injects species context into bioinformatics/pathology/biochemistry/literature agent task prompts.
+  - **`SpeciesInputRequest` model**: New Pydantic request body with `Annotated[str, StringConstraints]`.
+  - **`POST /{session_id}/species-input` endpoint**: New interaction route for user species input.
+  - **Frontend**: `SpeciesInputInfo` store type, `TextInputDialog` integration, `state_sync` handlers for species events.
+  - **i18n**: New `speciesInputTitle`, `speciesGeneValidationTitle`, `speciesInputPlaceholder`, `speciesGeneValidationPlaceholder`, `waitingSpeciesInput` keys.
+  - **Lifecycle integration**: Pause/resume/stop all handle `WAITING_SPECIES_INPUT` status — empty signal on resume auto-skips, stop with summarize forces completion.
+
+**0.25.x — LLM resilience, sandbox hardening, frontend refactoring (2026-05-27 → 2026-06-04)**
 
 - `0.25.18` — import request logging, vite & CLI timeout hardening (2026-06-04):
   - **Import request logging**: `import_state()` logs structured metadata on every request (filename, content_length, trust, client IP, X-Forwarded-For, user_id, import_id) with `import_start_time` timing. Upload failure logs include `exc_info=True` for full stack traces.

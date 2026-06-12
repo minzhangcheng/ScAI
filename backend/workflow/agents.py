@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
-from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, STAGE1_KEYWORDS
+from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, STAGE1_KEYWORDS
 from .retry import with_retry
 
 if TYPE_CHECKING:
@@ -170,6 +170,8 @@ class AgentNodesMixin:
                 "\n\nCurrent round biochemistry findings:\n"
                 + "\n".join(f"- {f}" for f in biochem_findings)
             )
+
+        task_instruction = prepend_species(task_instruction, analysis_state.species)
 
         # Let exceptions propagate to @with_retry decorator for proper retry handling
         result = await self.pathology_agent.process(
@@ -736,6 +738,8 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         if previous_context:
             task_instruction += previous_context
 
+        task_instruction = prepend_species(task_instruction, analysis_state.species)
+
         # Biochemistry runs first — no current-round cross-agent results available.
         # The biochemistry agent's _get_other_agent_context() will fall back to
         # previous round results from state.round_results for round 2+.
@@ -866,6 +870,8 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             if previous_lit_context:
                 merged_topic += f"\n{previous_lit_context}\nFocus on aspects NOT already covered above."
 
+            merged_topic = prepend_species(merged_topic, analysis_state.species)
+
             logger.info(f"[{self.session_id}] Deep Research mode: merging {len(limited_topics)} topics into one query")
             dr_result = await self.literature_agent.process(
                 analysis_state, merged_topic, use_deep_research=True,
@@ -885,6 +891,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                         enriched = gap_topic
                         if previous_lit_context:
                             enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
+                        enriched = prepend_species(enriched, analysis_state.species)
                         gap_result = await self.literature_agent.process(
                             analysis_state, enriched, use_deep_research=True,
                             current_round_findings=current_round_findings,
@@ -898,6 +905,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 enriched_topic = topic
                 if previous_lit_context:
                     enriched_topic = f"{topic}\n{previous_lit_context}\nFocus on aspects NOT already covered above."
+                enriched_topic = prepend_species(enriched_topic, analysis_state.species)
                 result = await self.literature_agent.process(
                     analysis_state,
                     enriched_topic,

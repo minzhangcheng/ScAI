@@ -3,9 +3,9 @@
 Extracted verbatim from backend/main.py to decouple route handlers from
 the FastAPI app module.
 """
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from backend.models.schemas import DEFAULT_ROUND_WAIT_SECONDS
 
@@ -163,5 +163,10 @@ class PlanReviewRequest(BaseModel):
     """Request body for plan review actions."""
     action: Literal["approve", "skip", "modify"] = "skip"
     user_input: str = Field(default="", max_length=5000)
+
+
+class SpeciesInputRequest(BaseModel):
+    """Request body for species-related user input (inference or gene validation)."""
+    input: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
 
 

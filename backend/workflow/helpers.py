@@ -134,6 +134,17 @@ def _get_task_text(t) -> str:
     return str(t).lower()
 
 
+def prepend_species(text: str, species: str) -> str:
+    """Prefix a task/topic string with the analysis species, if both are set.
+
+    No-op when either the species or the text is empty, so callers can apply it
+    unconditionally instead of repeating the same guard at each injection site.
+    """
+    if species and text:
+        return f"Species: {species}\n\n{text}"
+    return text
+
+
 def _normalize_tasks(tasks: list) -> List[str]:
     """Convert task items to strings — LLMs sometimes return dicts instead of plain strings."""
     result = []
