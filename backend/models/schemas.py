@@ -1,7 +1,7 @@
 """
 Data models for the Multi-Agent Single-Cell Analysis System
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
@@ -415,6 +415,11 @@ class AnalysisState(BaseModel):
     exploration_report: Optional[ExplorationReport] = None
     user_chosen_direction: Optional[str] = None  # User's chosen direction for innovation phase (backward compat)
     current_round_direction: str = ""  # Active direction for current innovation round (preserved after user_chosen_direction is consumed)
+
+    @field_validator("current_round_direction", mode="before")
+    @classmethod
+    def _coerce_none_round_direction(cls, v):
+        return "" if v is None else v
 
     # Multi-direction workflow
     user_chosen_directions: List[Dict[str, str]] = Field(default_factory=list)

@@ -52,6 +52,10 @@ def _write_session_json(session_id: str, json_str: str) -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(json_str)
+            # mkstemp hardcodes 0600; align with the other session files
+            # (state.json/blobs are 0644) so the metadata isn't accidentally
+            # owner-only. Isolation is enforced at the app layer, not via mode.
+            os.chmod(tmp_path, 0o644)
             os.replace(tmp_path, session_file)
             logger.info(f"Session {session_id} saved to disk")
         except Exception:

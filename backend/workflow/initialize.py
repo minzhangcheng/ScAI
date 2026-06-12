@@ -36,7 +36,7 @@ class InitializeMixin:
                 f"[{self.session_id}] Direction consumed at round entry: "
                 f"{consumed.get('direction', '')[:80]} (remaining queue: {len(analysis_state.directions_queue)})"
             )
-        analysis_state.current_round_direction = None
+        analysis_state.current_round_direction = ""
 
         # P3-5: business default — if resuming in INNOVATION after round 1 with
         # no direction chosen and no pending input, default to PI_DECIDE so the

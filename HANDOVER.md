@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.26.1 · **Last updated**: 2026-06-11
+**Version**: 0.26.2 · **Last updated**: 2026-06-12
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.26.x — Species identification HITL & gene validation (2026-06-11 → present)**
+
+- `0.26.2` — current_round_direction None→"" coercion, session file chmod, default project description revision (2026-06-12):
+  - **`current_round_direction` None coercion**: Added `field_validator` on `AnalysisState.current_round_direction` that coerces `None` to `""` at deserialization. Prevents `AttributeError` when legacy sessions or downstream code assigns `None`. Workflow `initialize.py` and `planning.py` changed all `= None` assignments to `= ""` to match the declared `str` type.
+  - **Session file chmod alignment**: `_write_session_json` now calls `os.chmod(tmp_path, 0o644)` before `os.replace` so the temp file from `mkstemp` (which hardcodes 0600) matches the permissions of other session files (state.json, blobs). Isolation is at the app layer, not via mode bits.
+  - **Default project description revision**: `Sidebar.tsx` default project description shortened and cleaned up — removed redundant line breaks, simplified wording (e.g., "copper and iron ions" → "copper metabolism", "ZnT1/Ctr1" → "ZnT1/CTR1").
+  - **New test**: `test_current_round_direction_coercion.py` — verifies None→"" coercion and valid string preservation.
 
 - `0.26.1` — species identification HITL, gene-species mismatch validation, WAITING_HITL_STATUSES refactor (2026-06-11):
   - **Species inference at Round 1**: PI agent infers species from project info with HITL loop (max 3 attempts) — `infer_species()`, `infer_species_from_hint()`, `decide_species_action()`. Low-confidence inference pauses for user input via `TextInputDialog`.

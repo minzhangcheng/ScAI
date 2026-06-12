@@ -220,7 +220,7 @@ class PlanningMixin:
                     )
                 except Exception as e:
                     # Direction stays in queue (never popped) — no re-insert needed
-                    analysis_state.current_round_direction = None
+                    analysis_state.current_round_direction = ""
                     logger.exception(f"[{self.session_id}] innovation_instruction failed, direction stays in queue")
                     raise
                 # P1-1: do NOT pop the queue here. The direction is committed
