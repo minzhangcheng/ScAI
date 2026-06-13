@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.26.2 · **Last updated**: 2026-06-12
+**Version**: 0.26.3 · **Last updated**: 2026-06-12
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,13 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.26.x — Species identification HITL & gene validation (2026-06-11 → present)**
+
+- `0.26.3` — literature DR decomposition, report model label tracking, refactoring (2026-06-12):
+  - **Literature DR task decomposition**: `PIAgent.plan_deep_research_tasks()` uses a PI LLM call to decide whether literature topics are complex enough to split into 2-5 independent Deep Research sub-tasks (serial calls, each autonomous). `_literature_research` in `agents.py` refactored: multi-task DR path (one serial call per decomposed sub-task) vs legacy merged DR path with PubMed gap fallback. Topic limit raised from 3→5.
+  - **Report literature model label**: New `literature_actual_model` field on `AnalysisState` records the resolved display label (e.g., "Google Deep Research", "openai/o4-mini-deep-research", or the literature synthesis model). `LiteratureAgent.resolve_model_label()` maps search_mode to label. Report generator appendix and config table use `build_agent_models_appendix()` / `resolve_literature_model()` to show the actually-used model instead of the configured default.
+  - **Refactoring**: `PIAgent._format_completed_results()` extracted as a static helper, reused by `plan_agent_tasks` and `plan_deep_research_tasks` to keep the findings-summary formatting consistent.
+  - **Cache restoration**: Literature cache-hit path now restores `literature_actual_model` from cached search_modes so the report stays accurate when execution is served entirely from cache.
+  - **5 new test files**: `test_literature_dr_decompose.py`, `test_literature_model_label.py`, `test_plan_deep_research_tasks.py`, `test_report_appendix_literature_model.py`, `test_report_literature_model.py`.
 
 - `0.26.2` — current_round_direction None→"" coercion, session file chmod, default project description revision (2026-06-12):
   - **`current_round_direction` None coercion**: Added `field_validator` on `AnalysisState.current_round_direction` that coerces `None` to `""` at deserialization. Prevents `AttributeError` when legacy sessions or downstream code assigns `None`. Workflow `initialize.py` and `planning.py` changed all `= None` assignments to `= ""` to match the declared `str` type.

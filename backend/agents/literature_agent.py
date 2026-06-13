@@ -112,6 +112,22 @@ class LiteratureAgent(BaseAgent):
     def fallback_llm_client(self) -> OpenAICompatibleClient:
         return self._provider.get_llm_client("pi")
 
+    def resolve_model_label(self, search_mode: str) -> str:
+        """Map a ``search_mode`` string (from _do_research) to a display label
+        for the final report's Literature row.
+
+        - gemini_deep_research -> "Google Deep Research"
+        - deep_research        -> the configured DR model (or lit model if unset)
+        - everything else (pubmed_llm, quick_search, "(fallback from ...)") ->
+          the literature synthesis model (matches the legacy report value)
+        """
+        mode = (search_mode or "").strip()
+        if mode == "gemini_deep_research":
+            return "Google Deep Research"
+        if mode == "deep_research":
+            return self.deep_research_model or self.model
+        return self.model
+
     async def process(
         self,
         state: AnalysisState,

@@ -42,6 +42,16 @@ from .sections import SectionsMixin
 logger = logging.getLogger(__name__)
 
 
+def build_agent_models_appendix(state) -> dict:
+    """Agent->model map saved into the report appendix. Overrides the literature
+    entry with the actually-used model label (DR vs PubMed) when recorded."""
+    models = {k: v for k, v in state.custom_models.items()} if state.custom_models else {}
+    actual = getattr(state, "literature_actual_model", None)
+    if actual:
+        models["literature"] = actual
+    return models
+
+
 class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMCallsMixin, PIReviewMixin, PlanningMixin, SectionsMixin):
     """
     Generates detailed research reports based on analysis results.
@@ -362,7 +372,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             "project_name": state.name,
             "project_description": state.initial_instruction,
             "created_at": state.created_at.isoformat() if hasattr(state.created_at, 'isoformat') else str(state.created_at),
-            "agent_models": {k: v for k, v in state.custom_models.items()} if state.custom_models else {},
+            "agent_models": build_agent_models_appendix(state),
             "agent_temperatures": {k: v for k, v in state.custom_temperatures.items()} if state.custom_temperatures else {},
             "treatment_groups": [
                 {"name": g.name, "description": g.description, "sample_count": g.sample_count}

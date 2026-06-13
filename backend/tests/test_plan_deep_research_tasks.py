@@ -1,0 +1,61 @@
+"""PI.plan_deep_research_tasks: complexity decision + task-list clamping."""
+import pytest
+
+from backend.agents.pi_agent import PIAgent
+
+
+class _FakePI(PIAgent):
+    """Bypass PIAgent.__init__; stub the LLM round-trip."""
+    def __init__(self, response: str):
+        self._response = response
+
+    async def chat(self, prompt, temperature=0.3):
+        return self._response
+
+
+@pytest.mark.asyncio
+async def test_decompose_true_returns_clamped_tasks():
+    # 6 tasks returned, must clamp to 5
+    resp = (
+        '{"decompose": true, "tasks": '
+        '["t1","t2","t3","t4","t5","t6"]}'
+    )
+    pi = _FakePI(resp)
+    out = await pi.plan_deep_research_tasks(
+        topics=["original"], completed_results={}, overall_strategy="",
+        research_objective="obj", state=None,
+    )
+    assert out["decompose"] is True
+    assert out["tasks"] == ["t1", "t2", "t3", "t4", "t5"]
+
+
+@pytest.mark.asyncio
+async def test_decompose_false_keeps_simple():
+    pi = _FakePI('{"decompose": false, "tasks": ["t1"]}')
+    out = await pi.plan_deep_research_tasks(
+        topics=["a", "b"], completed_results={}, overall_strategy="",
+        research_objective="obj", state=None,
+    )
+    assert out["decompose"] is False
+
+
+@pytest.mark.asyncio
+async def test_bad_json_falls_back_to_no_decompose():
+    pi = _FakePI("not json at all")
+    out = await pi.plan_deep_research_tasks(
+        topics=["a", "b"], completed_results={}, overall_strategy="",
+        research_objective="obj", state=None,
+    )
+    assert out == {"decompose": False, "tasks": ["a", "b"]}
+
+
+@pytest.mark.asyncio
+async def test_decompose_true_but_one_task_is_not_complex():
+    # decompose asked but only one usable task -> downgrade to non-decompose
+    pi = _FakePI('{"decompose": true, "tasks": ["only-one"]}')
+    out = await pi.plan_deep_research_tasks(
+        topics=["a", "b"], completed_results={}, overall_strategy="",
+        research_objective="obj", state=None,
+    )
+    assert out["decompose"] is False
+    assert out["tasks"] == ["only-one"]

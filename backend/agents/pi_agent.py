@@ -1505,6 +1505,19 @@ Provide your analysis in a clear, structured markdown format.
         response = await self.chat(prompt, temperature=0.3)
         return response
 
+    @staticmethod
+    def _format_completed_results(completed_results: Dict[str, List[str]]) -> str:
+        """Render completed-agent findings into a markdown summary for planning
+        prompts. Each agent contributes up to 5 findings, truncated to 200 chars."""
+        parts = []
+        for key, findings in (completed_results or {}).items():
+            label = key.replace("_findings", "").capitalize()
+            parts.append(
+                f"### {label} Findings\n"
+                + "\n".join(f"- {f[:200]}" for f in findings[:5])
+            )
+        return "\n\n".join(parts)
+
     async def plan_agent_tasks(
         self,
         agent_name: str,
@@ -1533,16 +1546,7 @@ Provide your analysis in a clear, structured markdown format.
         if not completed_results:
             return original_tasks
 
-        # Build completed results summary
-        results_parts = []
-        for key, findings in completed_results.items():
-            label = key.replace("_findings", "").capitalize()
-            truncated = findings[:5]
-            results_parts.append(
-                f"### {label} Findings\n"
-                + "\n".join(f"- {f[:200]}" for f in truncated)
-            )
-        results_summary = "\n\n".join(results_parts)
+        results_summary = self._format_completed_results(completed_results)
 
         data_summary = state.build_experimental_design_summary() if state else "Not available"
 
@@ -1592,6 +1596,82 @@ Keep tasks actionable and specific. Do NOT remove core tasks unless truly unnece
             logger.warning(f"[PI] Dynamic planning failed for {agent_name}: {e}")
 
         return original_tasks
+
+    async def plan_deep_research_tasks(
+        self,
+        topics: List[str],
+        completed_results: Dict[str, List[str]],
+        overall_strategy: str = "",
+        research_objective: str = "",
+        state: Optional[AnalysisState] = None,
+    ) -> Dict[str, Any]:
+        """Decide whether literature research is complex enough to split into
+        multiple independent Deep Research (DR) sub-tasks.
+
+        Returns ``{"decompose": bool, "tasks": [str, ...]}``. When ``decompose``
+        is True the caller issues one DR call per task (serial, capped at 5).
+        When False the caller merges all topics into a single DR call (legacy
+        behavior). Falls back to ``{"decompose": False, "tasks": topics}`` on any
+        parse/LLM error.
+        """
+        MAX_DR_TASKS = 5
+
+        results_summary = self._format_completed_results(completed_results) or "None yet."
+
+        prompt = f"""You are the PI coordinating a literature review that will be \
+executed with a Deep Research engine (each call autonomously runs multi-round \
+web/literature search and synthesis).
+
+## Research Objective
+{research_objective}
+
+## Overall Strategy
+{overall_strategy or "Not available"}
+
+## Completed Agent Results (this round)
+{results_summary}
+
+## Candidate Literature Topics
+{chr(10).join(f"- {t}" for t in topics)}
+
+Decide whether this literature work is COMPLEX enough to warrant splitting into \
+SEVERAL independent Deep Research tasks, each investigated separately and deeply, \
+versus merging everything into ONE comprehensive Deep Research query.
+
+Split (decompose=true) ONLY when the topics span genuinely distinct questions that \
+each deserve their own focused deep investigation. For closely related or simple \
+topics, prefer a single merged query (decompose=false).
+
+Return a JSON object:
+{{
+    "decompose": true/false,
+    "tasks": ["focused task 1", "focused task 2", ...]
+}}
+
+If decompose is true, provide between 2 and {MAX_DR_TASKS} self-contained tasks \
+(each a complete standalone research brief). If decompose is false, "tasks" may \
+echo the candidate topics."""
+
+        try:
+            response = await self.chat(prompt, temperature=0.3)
+            result = self._safe_parse_json(response, default={})
+            decompose = bool(result.get("decompose", False))
+            tasks = result.get("tasks", [])
+            if not (isinstance(tasks, list) and all(isinstance(t, str) for t in tasks) and tasks):
+                tasks = list(topics)
+                decompose = False
+            tasks = tasks[:MAX_DR_TASKS]
+            # Decomposition only makes sense with 2+ tasks.
+            if decompose and len(tasks) < 2:
+                decompose = False
+            logger.info(
+                f"[PI] Deep Research planning: decompose={decompose}, "
+                f"{len(tasks)} task(s)"
+            )
+            return {"decompose": decompose, "tasks": tasks}
+        except Exception as e:
+            logger.warning(f"[PI] plan_deep_research_tasks failed: {e}")
+            return {"decompose": False, "tasks": list(topics)}
 
     async def process_human_guidance(
         self,

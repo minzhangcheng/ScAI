@@ -473,6 +473,9 @@ class AnalysisState(BaseModel):
     
     # Literature reports
     literature_reports: List[LiteratureReport] = Field(default_factory=list)
+
+    # Resolved label of the literature model(s) actually used (DR vs PubMed), for the report
+    literature_actual_model: Optional[str] = None
     
     # Round results
     round_results: List[RoundResult] = Field(default_factory=list)

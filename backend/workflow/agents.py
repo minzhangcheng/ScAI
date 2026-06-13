@@ -770,6 +770,16 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             "biochemistry_result": result
         }
 
+    def _literature_model_label(self, search_modes) -> str:
+        """Resolve a list of literature search_modes into deduplicated,
+        comma-joined display labels for the report (e.g. "Google Deep Research")."""
+        labels = []
+        for mode in search_modes or []:
+            label = self.literature_agent.resolve_model_label(mode)
+            if label and label not in labels:
+                labels.append(label)
+        return ", ".join(labels)
+
     @with_retry("literature_research")
     async def _literature_research(self, state: WorkflowState) -> WorkflowState:
         """Literature agent researches relevant topics.
@@ -789,6 +799,12 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         cached = cache_hit(analysis_state, AgentType.LITERATURE)
         if cached is not None:
             logger.info(f"[{self.session_id}] literature cache hit, skipping re-execution")
+            # Restore the actually-used model label so the report stays accurate
+            # even when literature execution is served entirely from cache.
+            if not analysis_state.literature_actual_model:
+                label = self._literature_model_label(cached.get("search_modes", []))
+                if label:
+                    analysis_state.literature_actual_model = label
             await self._send_message("result", cached, AgentType.LITERATURE)
             return {
                 **state,
@@ -860,44 +876,79 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         # Check if Deep Research mode is available (merges topics into one call)
         is_deep_research = self.literature_agent.is_deep_research_available
 
-        limited_topics = topics[:3]
+        limited_topics = topics[:5]
 
         if is_deep_research and limited_topics:
-            # === Deep Research: merge topics, one call ===
-            merged_topic = "Please conduct a comprehensive literature review covering the following aspects:\n"
-            for i, t in enumerate(limited_topics, 1):
-                merged_topic += f"{i}. {t}\n"
-            if previous_lit_context:
-                merged_topic += f"\n{previous_lit_context}\nFocus on aspects NOT already covered above."
-
-            merged_topic = prepend_species(merged_topic, analysis_state.species)
-
-            logger.info(f"[{self.session_id}] Deep Research mode: merging {len(limited_topics)} topics into one query")
-            dr_result = await self.literature_agent.process(
-                analysis_state, merged_topic, use_deep_research=True,
-                current_round_findings=current_round_findings
+            # Ask PI whether to split into multiple independent DR sub-tasks.
+            dr_plan = await self.pi_agent.plan_deep_research_tasks(
+                topics=limited_topics,
+                completed_results=self._collect_current_round_results(state),
+                overall_strategy=instructions.get("overview", ""),
+                research_objective=analysis_state.initial_instruction,
+                state=analysis_state,
             )
-            results = [dr_result]
 
-            # Evaluate coverage — fallback to PubMed for gaps
-            if len(limited_topics) > 1:
-                gaps = await self._evaluate_dr_coverage(limited_topics, dr_result)
-                if gaps:
-                    logger.info(f"[{self.session_id}] Deep Research gaps detected, PubMed fallback for: {gaps}")
-                    await self._send_message("status", f"Supplementing {len(gaps)} topic(s) via PubMed...", AgentType.LITERATURE)
-                    # Temporarily switch to PubMed mode so _do_research() routes
-                    # to _multi_round_pubmed() instead of retrying Deep Research
-                    for gap_topic in gaps:
-                        enriched = gap_topic
-                        if previous_lit_context:
-                            enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
-                        enriched = prepend_species(enriched, analysis_state.species)
-                        gap_result = await self.literature_agent.process(
-                            analysis_state, enriched, use_deep_research=True,
-                            current_round_findings=current_round_findings,
-                            mode_override="pubmed_llm",
+            if dr_plan.get("decompose") and len(dr_plan.get("tasks", [])) > 1:
+                # === Multi-task DR: one serial DR call per sub-task ===
+                # plan_deep_research_tasks already caps the list at MAX_DR_TASKS.
+                dr_tasks = dr_plan["tasks"]
+                logger.info(
+                    f"[{self.session_id}] Deep Research decomposed into "
+                    f"{len(dr_tasks)} sub-tasks"
+                )
+                results = []
+                for i, dr_task in enumerate(dr_tasks, 1):
+                    await self._send_message(
+                        "status",
+                        f"Deep Research sub-task {i}/{len(dr_tasks)} in progress...",
+                        AgentType.LITERATURE,
+                    )
+                    enriched = dr_task
+                    if previous_lit_context:
+                        enriched = (
+                            f"{dr_task}\n{previous_lit_context}\n"
+                            f"Focus on aspects NOT already covered above."
                         )
-                        results.append(gap_result)
+                    enriched = prepend_species(enriched, analysis_state.species)
+                    r = await self.literature_agent.process(
+                        analysis_state, enriched, use_deep_research=True,
+                        current_round_findings=current_round_findings,
+                    )
+                    results.append(r)
+            else:
+                # === Legacy merged DR: one call + PubMed gap fill ===
+                merged_topic = "Please conduct a comprehensive literature review covering the following aspects:\n"
+                for i, t in enumerate(limited_topics, 1):
+                    merged_topic += f"{i}. {t}\n"
+                if previous_lit_context:
+                    merged_topic += f"\n{previous_lit_context}\nFocus on aspects NOT already covered above."
+
+                merged_topic = prepend_species(merged_topic, analysis_state.species)
+
+                logger.info(f"[{self.session_id}] Deep Research mode: merging {len(limited_topics)} topics into one query")
+                dr_result = await self.literature_agent.process(
+                    analysis_state, merged_topic, use_deep_research=True,
+                    current_round_findings=current_round_findings
+                )
+                results = [dr_result]
+
+                # Evaluate coverage — fallback to PubMed for gaps
+                if len(limited_topics) > 1:
+                    gaps = await self._evaluate_dr_coverage(limited_topics, dr_result)
+                    if gaps:
+                        logger.info(f"[{self.session_id}] Deep Research gaps detected, PubMed fallback for: {gaps}")
+                        await self._send_message("status", f"Supplementing {len(gaps)} topic(s) via PubMed...", AgentType.LITERATURE)
+                        for gap_topic in gaps:
+                            enriched = gap_topic
+                            if previous_lit_context:
+                                enriched = f"{gap_topic}\n{previous_lit_context}\nFocus on aspects NOT already covered."
+                            enriched = prepend_species(enriched, analysis_state.species)
+                            gap_result = await self.literature_agent.process(
+                                analysis_state, enriched, use_deep_research=True,
+                                current_round_findings=current_round_findings,
+                                mode_override="pubmed_llm",
+                            )
+                            results.append(gap_result)
         else:
             # === PubMed mode: per-topic search ===
             results = []
@@ -920,13 +971,20 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         combined_result = {
             "topics": topics,
             "findings": [],
-            "reports": []
+            "reports": [],
+            "search_modes": [],
         }
 
         for r in results:
             combined_result["findings"].extend(r.get("findings", []))
             if r.get("report"):
                 combined_result["reports"].append(r["report"])
+            if r.get("search_mode"):
+                combined_result["search_modes"].append(r["search_mode"])
+
+        label = self._literature_model_label(combined_result["search_modes"])
+        if label:
+            analysis_state.literature_actual_model = label
 
         logger.info(f"[{self.session_id}] Literature research completed: {len(combined_result['findings'])} findings from {len(topics)} topics")
 

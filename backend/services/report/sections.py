@@ -7,6 +7,13 @@ from backend.services.reproducibility import KEY_PACKAGES, REPRODUCIBILITY_DIR_N
 from typing import Dict, Any, List, Optional
 
 
+def resolve_literature_model(state, default: str) -> str:
+    """Literature row model for the report: prefer the actually-used label
+    (DR vs PubMed) recorded during analysis, else the configured default."""
+    actual = getattr(state, "literature_actual_model", None)
+    return actual if actual else default
+
+
 class SectionsMixin:
     """Provides abstract, conclusions, and appendix methods for report generation."""
 
@@ -284,11 +291,17 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             ("Literature", "literature", "literature_model"),
             ("Painter", "painter", "painter_model"),
         ]
+        def _model_for(key, model_attr):
+            base = state.custom_models.get(key, getattr(default_models, model_attr, "-"))
+            if key == "literature":
+                return resolve_literature_model(state, default=base)
+            return base
+
         config_rows = [
             (
                 display_name,
                 key,
-                state.custom_models.get(key, getattr(default_models, model_attr, "-")),
+                _model_for(key, model_attr),
                 state.custom_temperatures.get(key, getattr(default_temps, key, "-")),
             )
             for display_name, key, model_attr in agent_keys
