@@ -18,7 +18,19 @@ from ..models.schemas import (
     DATA_TYPE_SCRNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient
-from ..constants import PI_REVIEW_FALLBACK_DECISION, STOP_KEYWORDS
+from ..constants import (
+    CONTINUE_SIGNAL,
+    PI_DECIDE_SIGNAL,
+    PI_REVIEW_FALLBACK_DECISION,
+    STOP_KEYWORDS,
+)
+
+# Synthetic control sentinels that bypass the stop/continue LLM classifier and
+# deterministically continue the workflow → (response text, reason) per signal.
+_CONTROL_SIGNAL_RESULTS = {
+    CONTINUE_SIGNAL: ("Continuing to next round of analysis.", "User requested to continue"),
+    PI_DECIDE_SIGNAL: ("Proceeding with PI-selected research directions.", "PI to autonomously select directions"),
+}
 
 
 def _build_default_bio_tasks(state: AnalysisState, detailed: bool = False) -> list:
@@ -1871,17 +1883,23 @@ If no additional data is needed, return empty lists.
         uploaded_files = uploaded_files or []
         logger.info(f"[PI] Processing user input: {user_message[:100] if user_message else 'no message'}... ({len(uploaded_files)} files)")
 
-        # Quick path: [CONTINUE] marker means just continue without additional processing
-        if user_message and user_message.strip() == '[CONTINUE]':
-            logger.info("[PI] Continue marker detected, proceeding to next round")
+        # Quick path: synthetic control sentinels must deterministically continue
+        # and NOT be sent to the stop/continue LLM classifier — that path can
+        # non-deterministically return action="stop" and end the analysis after
+        # Round 1. [PI_DECIDE] (set by no-wait mode in synthesis.py) means "let
+        # the PI autonomously pick research directions"; _pi_planning's
+        # select_best_directions() later consumes it via user_chosen_direction.
+        if user_message and user_message.strip() in _CONTROL_SIGNAL_RESULTS:
+            response, reason = _CONTROL_SIGNAL_RESULTS[user_message.strip()]
+            logger.info(f"[PI] Control sentinel {user_message.strip()} detected, proceeding to next round")
             return {
                 "action": "continue",
-                "response": "Continuing to next round of analysis.",
+                "response": response,
                 "file_assignments": {},
                 "biochemistry_values": {},
                 "adjusted_instructions": None,
                 "focus_areas": [],
-                "reason": "User requested to continue"
+                "reason": reason,
             }
 
         # Build file description
