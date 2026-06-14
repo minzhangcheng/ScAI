@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.26.4 · **Last updated**: 2026-06-12
+**Version**: 0.26.6 · **Last updated**: 2026-06-12
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,16 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.26.x — Species identification HITL & gene validation (2026-06-11 → present)**
+
+- `0.26.6` — supervisor report path aligned with services/report shared modules (2026-06-12):
+  - **Supervisor `_build_score_definitions_html` → shared module**: Replaced inline HTML table with `build_score_definitions_section_html()` from `score_section.py`, so the supervisor-generated report appendix uses the same enhanced rendering (Computation Method column, collapsible gene list, CSV download link) as the main report.
+  - **Supervisor `_build_report_files` writes score CSV + literature report**: `write_score_definitions_csv()` now called during supervisor report file assembly, and `write_literature_report()` writes `literature_report.html` when `literature_reports` exist — both previously only done by the main report generator.
+  - **Supervisor appendix literature model label**: `_build_appendix` now calls `resolve_literature_model()` for the literature agent model, showing the actually-used mode (Deep Research vs PubMed) instead of the configured synthesis model.
+  - **Supervisor appendix literature download link**: `_build_appendix_html_section` includes `render_literature_download_li()` when `literature_report` is present in appendix metadata.
+  - **`friendly_method` scanpy prefix normalization**: `score_section.py` now normalizes `scanpy.tl.*` → `sc.tl.*` before lookup, so `scanpy.tl.score_genes` resolves to the same friendly description as `sc.tl.score_genes`.
+  - **Test**: `test_score_section.py` extended with `scanpy.tl.score_genes` normalization assertion.
+
+- `0.26.5` — *(skipped — consolidated into 0.26.6)*
 
 - `0.26.4` — score definitions shared module, literature report download, FetchError class (2026-06-12):
   - **Shared `score_section.py`**: New module extracting score definitions HTML rendering and CSV export from `variants.py`, `regenerator.py`, and `generator.py` into a single DRY source. `build_score_definitions_section_html()` and `write_score_definitions_csv()` are the two public functions, used by all three callers plus the exploration report.

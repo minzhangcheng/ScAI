@@ -27,7 +27,12 @@ def friendly_method(method: str) -> str:
     """Return a plain-language aggregation description for a known method, else ''."""
     if not method:
         return ""
-    return METHOD_AGGREGATION.get(method.strip(), "")
+    key = method.strip()
+    # `scanpy.tl.*` and `sc.tl.*` are the same function under scanpy's two import
+    # names; normalize to the canonical `sc.` prefix so the map needs one entry.
+    if key.startswith("scanpy."):
+        key = "sc." + key[len("scanpy."):]
+    return METHOD_AGGREGATION.get(key, "")
 
 
 def _normalize(sd: Union[Dict[str, Any], Any]) -> Dict[str, Any]:

@@ -1777,6 +1777,13 @@ Report generation model call failed due to API connection error. Please refer to
                        "literature", "painter", "supervisor")
         agent_models = {a: self._provider.get_model(a) for a in agent_names}
         agent_temperatures = {a: self._provider.get_temperature(a) for a in agent_names}
+        # Show the model/mode actually used by the literature agent (Deep Research
+        # vs the auxiliary PubMed LLM), not just the configured synthesis model.
+        from ..services.report.sections import resolve_literature_model
+        from ..services.report.literature_files import LITERATURE_REPORT_FILENAME
+        agent_models["literature"] = resolve_literature_model(
+            state, default=agent_models["literature"]
+        )
 
         return {
             "project_name": state.name,
@@ -1808,6 +1815,7 @@ Report generation model call failed due to API connection error. Please refer to
                 "annotation_report": "annotation_context_report.html",
             },
             "notebook_filename": f"{state.id}.ipynb",
+            "literature_report": LITERATURE_REPORT_FILENAME if state.literature_reports else "",
         }
 
     @staticmethod
@@ -2240,8 +2248,24 @@ Report generation model call failed due to API connection error. Please refer to
                 except Exception as e:
                     logger.warning(f"Could not copy table {tbl_path}: {e}")
 
-        # Copy notebook to output for download
+        # Score definitions CSV — backs the "Download CSV" link in the section.
+        try:
+            from ..services.report.score_section import write_score_definitions_csv
+            write_score_definitions_csv(report.get("score_definitions", []), tables_out)
+        except Exception as e:
+            logger.warning(f"Could not write score_definitions.csv: {e}")
+
         _analysis_state = report.get("_analysis_state")
+
+        # Combined literature research report (linked from the appendix).
+        if _analysis_state and _analysis_state.literature_reports:
+            try:
+                from ..services.report.literature_files import write_literature_report
+                write_literature_report(_analysis_state.literature_reports, output_path)
+            except Exception as e:
+                logger.warning(f"Could not write literature report: {e}")
+
+        # Copy notebook to output for download
         if _analysis_state:
             from ..config import get_session_states
             notebook_src = Path(get_session_states(_analysis_state.id)) / f"{_analysis_state.id}.ipynb"
@@ -2256,53 +2280,10 @@ Report generation model call failed due to API connection error. Please refer to
 
     @staticmethod
     def _build_score_definitions_html(report: Dict) -> str:
-        """Build score definitions HTML table from report data."""
-        import html as html_module
-        score_defs = report.get("score_definitions", [])
-        if not score_defs:
-            return ""
-        rows = ""
-        for sd in score_defs:
-            genes_raw = sd.get("gene_list", [])
-            genes = html_module.escape(", ".join(genes_raw[:10]))
-            if len(genes_raw) > 10:
-                genes += f" ... ({len(genes_raw)} total)"
-            params = sd.get("parameters", {})
-            params_str = html_module.escape(
-                ", ".join(f"{k}={v}" for k, v in params.items()) if params else "default"
-            )
-            rows += f"""<tr>
-                <td>{html_module.escape(sd.get("score_name", ""))}</td>
-                <td><code>{html_module.escape(sd.get("method", ""))}</code></td>
-                <td>{html_module.escape(sd.get("description", ""))}</td>
-                <td>{params_str}</td>
-                <td>{genes}</td>
-                <td>{html_module.escape(sd.get("gene_list_source", "") or "N/A")}</td>
-            </tr>"""
-        return f"""
-        <div class="score-definitions" id="score-definitions">
-            <div class="section-header">
-                <h2>Score Definitions</h2>
-            </div>
-            <div class="section-content">
-                <p>The following scores were computed during the analysis. Each score's methodology is documented for transparency and reproducibility.</p>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Score Name</th>
-                            <th>Method</th>
-                            <th>Description</th>
-                            <th>Parameters</th>
-                            <th>Gene List</th>
-                            <th>Source</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {rows}
-                    </tbody>
-                </table>
-            </div>
-        </div>"""
+        """Build the enhanced 'Score Definitions' section (shared with the
+        services/report path so the two stay in sync)."""
+        from ..services.report.score_section import build_score_definitions_section_html
+        return build_score_definitions_section_html(report.get("score_definitions", []))
 
     def _build_appendix_html_section(self, report: Dict) -> str:
         """Build appendix HTML section from report data."""
@@ -2431,8 +2412,9 @@ Report generation model call failed due to API connection error. Please refer to
         # Related Reports & Downloads
         related = appendix.get("related_reports", {})
         notebook = appendix.get("notebook_filename", "")
+        literature_report = appendix.get("literature_report", "")
 
-        if related or notebook:
+        if related or notebook or literature_report:
             parts.append('<h3>Related Reports &amp; Downloads</h3>')
             parts.append('<ul>')
             if related.get("exploration_report"):
@@ -2441,6 +2423,9 @@ Report generation model call failed due to API connection error. Please refer to
             if related.get("annotation_report"):
                 parts.append(f'<li><a href="{esc(related["annotation_report"])}" download>'
                              f'Annotation Context Report</a></li>')
+            if literature_report:
+                from ..services.report.literature_files import render_literature_download_li
+                parts.append(render_literature_download_li(literature_report))
             if notebook:
                 parts.append(f'<li><a href="{esc(notebook)}" download>'
                              f'Analysis Notebook (.ipynb)</a></li>')

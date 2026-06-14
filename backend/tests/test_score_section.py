@@ -3,6 +3,7 @@ from backend.services.report.score_section import friendly_method, _normalize, b
 
 def test_friendly_method_known():
     assert "Mean expression" in friendly_method("sc.tl.score_genes")
+    assert "Mean expression" in friendly_method("scanpy.tl.score_genes")
     assert "ssGSEA" in friendly_method("gseapy.ssgsea") or "GSEA" in friendly_method("gseapy.ssgsea")
     assert "decoupler" in friendly_method("dc.run_ulm").lower()
 
