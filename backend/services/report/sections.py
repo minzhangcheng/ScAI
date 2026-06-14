@@ -3,6 +3,7 @@ import html as html_module
 import json
 
 from backend.config import get_session_workspace
+from backend.services.report.literature_files import render_literature_download_li
 from backend.services.reproducibility import KEY_PACKAGES, REPRODUCIBILITY_DIR_NAME
 from typing import Dict, Any, List, Optional
 
@@ -506,6 +507,9 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         # Notebook
         notebook_label = "Analysis Notebook (.ipynb)"
         dl_items.append(f'<li><a href="{esc(state.id)}.ipynb" download style="color:#4f46e5;">{notebook_label}</a></li>')
+        # Literature research report (deep research / PubMed full reports)
+        if state.literature_reports:
+            dl_items.append(render_literature_download_li())
 
         dl_title = "Related Reports & Downloads"
         downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'

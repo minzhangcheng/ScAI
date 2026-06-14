@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.26.3 · **Last updated**: 2026-06-12
+**Version**: 0.26.4 · **Last updated**: 2026-06-12
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,17 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.26.x — Species identification HITL & gene validation (2026-06-11 → present)**
+
+- `0.26.4` — score definitions shared module, literature report download, FetchError class (2026-06-12):
+  - **Shared `score_section.py`**: New module extracting score definitions HTML rendering and CSV export from `variants.py`, `regenerator.py`, and `generator.py` into a single DRY source. `build_score_definitions_section_html()` and `write_score_definitions_csv()` are the two public functions, used by all three callers plus the exploration report.
+  - **Enhanced HTML display**: New "Computation Method" column with biologist-friendly plain-language descriptions (e.g., "Mean expression of the gene set, relative to a random control gene set" for `sc.tl.score_genes`) derived from a `METHOD_AGGREGATION` map. Full gene list in collapsible `<details>` element (no longer truncated at 10). CSV download link above the table.
+  - **CSV to `tables/` directory**: `write_score_definitions_csv()` now writes to `tables/score_definitions.csv` instead of report root, so it flows into the download-all-tables ZIP archive automatically.
+  - **Download buttons always attempt tables**: `DownloadButtons.tsx` now always fires the tables-download request (catches 404 gracefully via `FetchError` instead of skipping when `tables.length === 0`), ensuring `score_definitions.csv` is always downloadable.
+  - **`FetchError` class**: New `frontend/src/utils/download.ts` export — `FetchError` extends `Error` with a `status` property, enabling callers to distinguish HTTP errors (e.g., 404) from network failures.
+  - **Literature report download**: New `backend/services/report/literature_files.py` module — `build_literature_report_html()` renders all `LiteratureReport` entries into a single self-contained HTML document with references; `write_literature_report()` persists it as `literature_report.html` in the report output dir. Generator writes it during report creation; regenerator and sections appendix both include a download link via `render_literature_download_li()`.
+  - **Regenerator sync**: `generate_html_report()` now also regenerates `score_definitions.csv` into `tables/` during re-gen, keeping the CSV in sync with the HTML.
+  - **CSS**: New `.score-definitions details.score-genes` styles for the collapsible gene list (indigo cursor, break-word, muted text).
+  - **Test**: `test_score_section.py` — 10 tests covering friendly_method, normalize, HTML rendering (all genes present, download link, friendly computation, XSS escape), CSV writing (empty, content, full gene list).
 
 - `0.26.3` — literature DR decomposition, report model label tracking, refactoring (2026-06-12):
   - **Literature DR task decomposition**: `PIAgent.plan_deep_research_tasks()` uses a PI LLM call to decide whether literature topics are complex enough to split into 2-5 independent Deep Research sub-tasks (serial calls, each autonomous). `_literature_research` in `agents.py` refactored: multi-task DR path (one serial call per decomposed sub-task) vs legacy merged DR path with PubMed gap fallback. Topic limit raised from 3→5.

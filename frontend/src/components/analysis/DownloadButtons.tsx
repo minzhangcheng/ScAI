@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useAppStore, PublicationFigure, PublicationTable } from '../../stores/appStore'
 import { useTranslation } from '../../i18n/translations'
-import { fetchAndDownload } from '../../utils/download'
+import { fetchAndDownload, FetchError } from '../../utils/download'
 import { useSelfClearingError } from '../../hooks/useSelfClearingError'
 import { ErrorBanner } from '../shared/ErrorBanner'
 import {
@@ -80,22 +80,28 @@ export function DownloadButtons({ figures, tables = [] }: DownloadButtonsProps) 
     setDownloadError(null)
     setDownloading('all')
     try {
-      const downloads = [
-        fetchAndDownload(
-          `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
-          `figures_${currentSession.id}.zip`,
-          { method: 'POST' },
-        ),
-      ]
-      if (tables.length > 0) {
+      const downloads: Promise<void>[] = []
+      if (figures.length > 0) {
         downloads.push(
           fetchAndDownload(
-            `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
-            `tables_${currentSession.id}.zip`,
+            `${API_BASE}/session/${currentSession.id}/report/download-all-figures`,
+            `figures_${currentSession.id}.zip`,
             { method: 'POST' },
           ),
         )
       }
+      // Always attempt the tables zip — it includes score_definitions.csv even
+      // when there are no publication tables. Ignore 404 (no tables directory).
+      downloads.push(
+        fetchAndDownload(
+          `${API_BASE}/session/${currentSession.id}/report/download-all-tables`,
+          `tables_${currentSession.id}.zip`,
+          { method: 'POST' },
+        ).catch((e) => {
+          if (e instanceof FetchError && e.status === 404) return
+          throw e
+        }),
+      )
       await Promise.all(downloads)
       showSuccess('all')
     } catch (e) {

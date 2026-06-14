@@ -522,6 +522,18 @@ tr:hover {
     padding: 24px;
 }
 
+.score-definitions details.score-genes summary {
+    cursor: pointer;
+    color: var(--primary, #4f46e5);
+    font-weight: 500;
+}
+
+.score-definitions details.score-genes > div {
+    font-size: 0.85em;
+    color: #475569;
+    word-break: break-word;
+}
+
 @media print {
     body {
         background: white;

@@ -1,5 +1,13 @@
 import { authHeaders } from '../hooks/useApi'
 
+/** Error thrown by fetchAndDownload on a non-OK response, carrying the HTTP status. */
+export class FetchError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message)
+    this.name = 'FetchError'
+  }
+}
+
 /**
  * Download a Blob as a file by creating a temporary anchor element.
  * Handles Object URL lifecycle (create + revoke).
@@ -31,7 +39,7 @@ export async function fetchAndDownload(
   const response = await fetch(url, { ...options, headers: mergedHeaders })
   if (!response.ok) {
     const errorText = (await response.text().catch(() => 'Unknown error')).slice(0, 1000)
-    throw new Error(`Download failed (${response.status}): ${errorText}`)
+    throw new FetchError(response.status, `Download failed (${response.status}): ${errorText}`)
   }
   const blob = await response.blob()
   downloadBlob(blob, filename)

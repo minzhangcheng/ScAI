@@ -18,7 +18,9 @@ from typing import Dict, Any, Iterable, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
-from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, render_report_html, render_table_html
+from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, render_report_html
+from backend.services.report.score_section import build_score_definitions_section_html, write_score_definitions_csv
+from backend.services.report.literature_files import render_literature_download_li
 from backend.config import get_session_logs
 
 
@@ -297,45 +299,6 @@ def _build_analysis_log_from_report(report: dict, language: str, figures_dir: Pa
     '''
 
 
-def _build_score_definitions_from_report(report: dict, language: str) -> str:
-    """Build score definitions HTML from report.json data."""
-    score_defs = report.get("score_definitions", [])
-    if not score_defs:
-        return ""
-    esc = html_module.escape
-    rows = []
-    for sd in score_defs:
-        gene_list = sd.get("gene_list", [])
-        genes = esc(", ".join(gene_list[:10]))
-        if len(gene_list) > 10:
-            genes += f" ... ({len(gene_list)} total)"
-        params = sd.get("parameters", {})
-        params_str = esc(", ".join(f"{k}={v}" for k, v in params.items()) if params else "default")
-        rows.append([
-            esc(sd.get("score_name", "")),
-            f"<code>{esc(sd.get('method', ''))}</code>",
-            esc(sd.get("description", "")),
-            params_str,
-            genes,
-            esc(sd.get("gene_list_source", "") or "N/A"),
-        ])
-    table_html = render_table_html(
-        headers=["Score Name", "Method", "Description", "Parameters", "Gene List", "Source"],
-        rows=rows,
-        style="font-size:0.9em",
-    )
-    return f"""
-        <div class="section" id="score-definitions">
-            <div class="section-header">
-                <h2>Score Definitions</h2>
-            </div>
-            <div class="section-content">
-                <p>The following scores were computed during the analysis. Each score's methodology is documented for transparency and reproducibility.</p>
-                {table_html}
-            </div>
-        </div>"""
-
-
 def _build_appendix_from_report(report: dict, language: str, session_id: Optional[str] = None) -> str:
     """Build appendix HTML from the appendix data stored in report.json."""
     appendix = report.get("appendix")
@@ -529,7 +492,8 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
     downloads_html = ""
     related = appendix.get("related_reports", {})
     notebook = appendix.get("notebook_filename", "")
-    if related or notebook:
+    literature_report = appendix.get("literature_report", "")
+    if related or notebook or literature_report:
         dl_title = "Related Reports & Downloads"
         dl_items = []
         if related.get("exploration_report"):
@@ -541,6 +505,8 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
         if notebook:
             label = "Analysis Notebook (.ipynb)"
             dl_items.append(f'<li><a href="{esc(notebook)}" download style="color:#4f46e5;">{label}</a></li>')
+        if literature_report:
+            dl_items.append(render_literature_download_li(literature_report))
         downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'
 
     return f"""
@@ -835,7 +801,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
     analysis_log_html = ""
 
     # Build score definitions HTML from report.json data if available
-    score_definitions_html = _build_score_definitions_from_report(report, language) if report.get("score_definitions") else ""
+    score_definitions_html = build_score_definitions_section_html(report.get("score_definitions", []))
     if score_definitions_html:
         score_toc_label = "Score Definitions"
         toc_items.append(
@@ -877,4 +843,10 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         f.write(html_content)
 
     logger.info("HTML report saved to: %s", html_path)
+
+    # Regenerate score_definitions.csv into tables/ so the CSV stays in sync
+    score_csv = write_score_definitions_csv(report.get("score_definitions", []), tables_dir)
+    if score_csv is not None:
+        logger.info("Score definitions CSV regenerated: %s", score_csv)
+
     return html_path

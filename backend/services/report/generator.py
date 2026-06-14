@@ -29,7 +29,8 @@ from backend.utils.llm_client import OpenAICompatibleClient
 from backend.utils.checkpoint import CheckpointManager
 from backend.utils.image_utils import compress_image_to_base64, categorize_figures
 from backend.config import STATE_DIR, WORKSPACE_DIR, get_session_states, get_session_dir, get_session_workspace, get_session_uploads, default_config
-from .variants import _build_score_definitions_html_section
+from .score_section import build_score_definitions_section_html, write_score_definitions_csv
+from .literature_files import write_literature_report, LITERATURE_REPORT_FILENAME
 from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, _make_figure_block, _safe_parse_json, _build_figure_description_map, render_report_html
 from .analysis_log import AnalysisLogMixin
 from .figures import FiguresMixin
@@ -427,6 +428,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 "annotation_report": "annotation_context_report.html",
             },
             "notebook_filename": f"{state.id}.ipynb",
+            "literature_report": LITERATURE_REPORT_FILENAME if state.literature_reports else "",
         }
 
         report = {
@@ -473,6 +475,11 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 _shutil.copy2(str(notebook_src), str(self.output_dir / f"{state.id}.ipynb"))
             except Exception as e:
                 logger.warning(f"Could not copy notebook: {e}")
+
+        # Write the combined literature research report for appendix download
+        lit_path = write_literature_report(state.literature_reports, self.output_dir)
+        if lit_path is not None:
+            logger.info(f"Literature report saved to: {lit_path}")
 
         report["reproducibility_path"] = self._maybe_generate_reproducibility_bundle(
             state=state,
@@ -866,7 +873,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         # Build score definitions HTML
         score_definitions_html = ""
         if state is not None and state.score_definitions:
-            score_definitions_html = _build_score_definitions_html_section(state)
+            score_definitions_html = build_score_definitions_section_html(state.score_definitions)
             score_toc_label = "Score Definitions"
             toc_items.append(
                 f'<li><a href="#score-definitions">{score_toc_label}</a>'
@@ -925,18 +932,11 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
 
         logger.info(f"HTML report saved to: {html_path}")
 
-        # Save score definitions CSV alongside the report
+        # Save score definitions CSV into tables/ so it flows into download-all-tables
         if state is not None and state.score_definitions:
-            import csv
-            csv_path = self.output_dir / "score_definitions.csv"
-            with open(csv_path, "w", encoding="utf-8", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["Score Name", "Method", "Description", "Parameters", "Gene List", "Gene List Source", "Round Number"])
-                for sd in state.score_definitions:
-                    params_str = ", ".join(f"{k}={v}" for k, v in sd.parameters.items()) if sd.parameters else ""
-                    genes_str = ", ".join(sd.gene_list) if sd.gene_list else ""
-                    writer.writerow([sd.score_name, sd.method, sd.description, params_str, genes_str, sd.gene_list_source or "", sd.round_number])
-            logger.info(f"Score definitions CSV saved to: {csv_path}")
+            csv_path = write_score_definitions_csv(state.score_definitions, self.output_dir / "tables")
+            if csv_path is not None:
+                logger.info(f"Score definitions CSV saved to: {csv_path}")
 
         return html_path
 
