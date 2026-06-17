@@ -8,6 +8,7 @@ export function Setup() {
   const nav = useNavigate()
   const language = useAppStore(s => s.language)
   const zh = language === 'zh'
+  const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -33,7 +34,7 @@ export function Setup() {
     setLoading(true)
     setErr('')
     try {
-      const body: Record<string, string> = { password }
+      const body: Record<string, string> = { username: username.trim(), password }
       if (email.trim()) {
         body.email = email.trim()
       }
@@ -56,6 +57,22 @@ export function Setup() {
       {err && (
         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">{err}</div>
       )}
+
+      <div>
+        <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '用户名' : 'Username'}</label>
+        <input
+          type="text"
+          value={username}
+          onChange={e => setUsername(e.target.value)}
+          required
+          minLength={3}
+          maxLength={64}
+          pattern="[a-zA-Z0-9_-]+"
+          title={zh ? '只能包含字母、数字、下划线和连字符' : 'Only letters, numbers, underscore and hyphen are allowed'}
+          className="w-full px-3 py-2 border border-surface-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:border-accent-500"
+          placeholder={zh ? '管理员用户名' : 'Admin username'}
+        />
+      </div>
 
       <div>
         <label className="block text-sm font-medium text-surface-600 mb-1">{zh ? '邮箱（可选）' : 'Email (optional)'}</label>

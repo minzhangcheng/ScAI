@@ -275,9 +275,36 @@ function CreateUserPrompt({ open, onClose, onConfirm }: CreateUserPromptProps) {
   )
 }
 
+// Editable enum cell: a read-only badge for the current user's own row, an
+// inline <select> for everyone else.
+function EnumCell({ isSelf, value, options, onChange }: {
+  isSelf: boolean
+  value: string
+  options: string[]
+  onChange: (value: string) => void
+}) {
+  if (isSelf) {
+    return (
+      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+        {value}
+      </span>
+    )
+  }
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="text-sm border border-surface-200 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
+    >
+      {options.map((o) => <option key={o} value={o}>{o}</option>)}
+    </select>
+  )
+}
+
 export function Admin() {
   const logout = useAppStore(s => s.logout)
   const language = useAppStore(s => s.language)
+  const authUser = useAppStore(s => s.authUser)
   const navigate = useNavigate()
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
@@ -344,6 +371,14 @@ export function Admin() {
     await fetchUsers()
   }
 
+  const handleRoleChange = async (userId: string, newRole: string) => {
+    await apiFetch(`/admin/users/${userId}/role`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role: newRole }),
+    })
+    await fetchUsers()
+  }
+
   const handleAdminChangePassword = async (userId: string, newPassword: string) => {
     await apiFetch(`/admin/users/${userId}/password`, {
       method: 'POST',
@@ -374,6 +409,12 @@ export function Admin() {
             </h1>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => navigate('/')}
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
+            >
+              {zh ? '返回' : 'Back'}
+            </button>
             <button
               onClick={() => setShowPasswordPrompt(true)}
               className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
@@ -451,7 +492,7 @@ export function Admin() {
                 </tr>
               ) : (
                 users.map((user) => {
-                  const isAdmin = user.role === 'admin'
+                  const isSelf = user.id === authUser?.id
                   return (
                     <tr key={user.id} className="hover:bg-surface-50 transition-colors">
                       <td className="px-6 py-4">
@@ -463,38 +504,28 @@ export function Admin() {
                         </div>
                       </td>
                       <td className="px-6 py-4">
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                          isAdmin
-                            ? 'bg-purple-100 text-purple-700'
-                            : 'bg-blue-100 text-blue-700'
-                        }`}>
-                          {user.role}
-                        </span>
+                        <EnumCell
+                          isSelf={isSelf}
+                          value={user.role}
+                          options={['user', 'admin']}
+                          onChange={(role) => handleRoleChange(user.id, role)}
+                        />
                       </td>
                       <td className="px-6 py-4">
-                        {isAdmin ? (
-                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700`}>
-                            {user.status}
-                          </span>
-                        ) : (
-                          <select
-                            value={user.status}
-                            onChange={(e) => handleStatusChange(user.id, e.target.value)}
-                            className="text-sm border border-surface-200 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-accent-500/20 focus:border-accent-500"
-                          >
-                            <option value="pending">pending</option>
-                            <option value="readonly">readonly</option>
-                            <option value="active">active</option>
-                          </select>
-                        )}
+                        <EnumCell
+                          isSelf={isSelf}
+                          value={user.status}
+                          options={user.role === 'admin' ? ['readonly', 'active'] : ['pending', 'readonly', 'active']}
+                          onChange={(status) => handleStatusChange(user.id, status)}
+                        />
                       </td>
                       <td className="px-6 py-4 text-sm text-surface-600">
                         {formatDate(user.created_at)}
                       </td>
                       <td className="px-6 py-4">
-                        {isAdmin ? (
+                        {isSelf ? (
                           <span className="text-xs text-surface-400 italic">
-                            {zh ? '不可删除' : 'Cannot delete'}
+                            {zh ? '本人' : 'You'}
                           </span>
                         ) : (
                           <div className="flex items-center gap-4">

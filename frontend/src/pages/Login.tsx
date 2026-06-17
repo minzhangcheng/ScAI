@@ -32,12 +32,7 @@ export function Login() {
     setErr('')
     try {
       await login(username, password)
-      const authUser = useAppStore.getState().authUser
-      if (authUser?.role === 'admin') {
-        nav('/admin')
-      } else {
-        nav('/')
-      }
+      nav('/')
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Invalid credentials')
     } finally {

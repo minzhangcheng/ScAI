@@ -8,6 +8,7 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
   const authReady = useAppStore(s => s.authReady)
   if (!authReady) return <LoadingScreen />
   if (!authUser) return <Navigate to="/login" replace />
-  if (authUser.role === 'admin') return <Navigate to="/admin" replace />
+  // Admins use the normal analysis app too; they reach the admin panel via the
+  // sidebar "User Admin" link (see Sidebar). Do not force-redirect them to /admin.
   return <>{children}</>
 }

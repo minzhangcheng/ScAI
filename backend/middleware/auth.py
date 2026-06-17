@@ -182,21 +182,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # Admin role: restrict to specific paths
-        if user.role == "admin":
-            allowed = (
-                path.startswith("/api/admin/") or
-                path.startswith("/api/auth/profile/") or
-                path == "/api/config" or path.startswith("/api/config/") or
-                path.startswith("/api/user/") or
-                path == "/api/auth/me" or
-                path == "/api/auth/logout"
-            )
-            if not allowed:
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "Admin access limited to specific paths"},
-                )
+        # Admin role: full access (management paths + analysis paths).
+        # Session ownership is still enforced at the route layer via
+        # require_session_ownership, so admins only see their own sessions.
 
         # Readonly status: block non-GET mutations (except logout)
         if user.status == "readonly":

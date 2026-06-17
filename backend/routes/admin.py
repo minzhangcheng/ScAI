@@ -32,6 +32,10 @@ class SetStatusRequest(BaseModel):
     status: str  # "pending" | "readonly" | "active"
 
 
+class SetRoleRequest(BaseModel):
+    role: str  # "admin" | "user"
+
+
 class SetPasswordRequest(BaseModel):
     new_password: str  # min 8 chars expected by caller
 
@@ -80,7 +84,7 @@ async def set_user_status(
     req: SetStatusRequest,
     admin_id: str = Depends(require_admin),
 ):
-    """Set a user's status. Admin cannot modify their own status."""
+    """Set a user's status. Admin cannot modify their own status; admin users cannot be pending."""
     if uid == admin_id:
         raise HTTPException(status_code=403, detail="Cannot modify your own status")
     if req.status not in ("pending", "readonly", "active"):
@@ -89,10 +93,42 @@ async def set_user_status(
     target = await db.get_user_by_id(uid)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if target.role == "admin" and req.status == "pending":
+        raise HTTPException(status_code=400, detail="Admin users cannot be set to pending")
     success = await db.set_user_status(uid, req.status)
     if not success:
         raise HTTPException(status_code=404, detail="User not found")
     return {"message": f"User status updated to {req.status}"}
+
+
+@router.patch("/users/{uid}/role")
+async def set_user_role(
+    uid: str,
+    req: SetRoleRequest,
+    admin_id: str = Depends(require_admin),
+):
+    """Change a user's role. Cannot change your own role. Promoting a pending user to admin activates them."""
+    if uid == admin_id:
+        raise HTTPException(status_code=403, detail="Cannot modify your own role")
+    if req.role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="Invalid role value")
+    db: AppDB = await get_db()
+    target = await db.get_user_by_id(uid)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if req.role != "admin" and target.role == "admin":
+        if await db.count_admins() <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot demote the last remaining admin",
+            )
+    new_status = None
+    if req.role == "admin" and target.status == "pending":
+        new_status = "active"
+    success = await db.set_user_role(uid, req.role, status=new_status)
+    if not success:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"message": f"User role updated to {req.role}"}
 
 
 @router.post("/users/{uid}/password")
@@ -118,8 +154,7 @@ async def delete_user(
 ):
     """
     Delete a user and all their data (cascade delete).
-    Admin cannot delete themselves.
-    Cannot delete another admin.
+    Admin cannot delete themselves, but may delete other users (including other admins).
     """
     if uid == admin_id:
         raise HTTPException(status_code=403, detail="Cannot delete yourself")
@@ -127,7 +162,10 @@ async def delete_user(
     target = await db.get_user_by_id(uid)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    if target.role == "admin":
-        raise HTTPException(status_code=403, detail="Cannot delete another admin")
+    if target.role == "admin" and await db.count_admins() <= 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete the last remaining admin",
+        )
     await delete_user_data(uid)
     return None

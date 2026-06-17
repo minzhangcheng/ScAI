@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useSession, apiFetch, generateId, authHeaders } from '../hooks/useApi'
 import { useAppStore } from '../stores/appStore'
 import { getTargetTab, selectPrioritySession, selectCompletedSession, selectPendingSession } from '../utils/sessionPriority'
@@ -11,6 +12,7 @@ import { AboutDialog } from './AboutDialog'
 import {
   Plus,
   Settings,
+  Shield,
   Dna,
   Trash2,
   RefreshCw,
@@ -39,6 +41,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
+  const navigate = useNavigate()
   const { currentSession, setCurrentSession, clearMessages, language, roundWaitSeconds, setRoundWaitSeconds, reportGenerated, setOpenSessionBrowserCallback, authUser, _hydrated } = useAppStore()
   const { createSession, loadSession, listSessions, deleteSession, updateSessionInfo, updateRoundWait } = useSession()
   const isReadOnly = authUser?.status === 'readonly'
@@ -1032,6 +1035,15 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
 
         {/* UserMenu + About stacked */}
         <div className="flex flex-col gap-1 pt-1">
+          {authUser?.role === 'admin' && (
+            <button
+              onClick={() => navigate('/admin')}
+              className="flex items-center gap-2 px-3 py-2 text-sm text-surface-600 hover:bg-surface-100 rounded-lg transition-colors"
+            >
+              <Shield className="w-4 h-4" aria-hidden="true" />
+              {language === 'zh' ? '用户管理' : 'User Admin'}
+            </button>
+          )}
           {authUser && <UserMenu />}
           <AboutDialog />
         </div>

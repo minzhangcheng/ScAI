@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.9 · **Last updated**: 2026-06-17
+**Version**: 0.28.1 · **Last updated**: 2026-06-17
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,27 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.27.x — (2026-06-17 → present)**
+**0.28.x — (2026-06-17 → present)**
+
+- `0.28.1` — Admin management, last-admin guard, error_parsing hyphenated skip, frontend refinements (2026-06-17):
+  - **Admin custom username**: Setup flow requires a custom admin username instead of hardcoded `"admin"`. `create_admin_if_missing()` accepts a required `username` parameter; logs a warning if it differs from an existing admin's username. Setup page gets a username input with validation (3-64 chars, alphanumeric/underscore/hyphen). Tests updated.
+  - **Admin role management**: New `PATCH /admin/users/{uid}/role` endpoint for promoting/demoting user roles. Role dropdown on admin page (`EnumCell` reusable component) for non-self users. Promoting a pending user to admin auto-activates them. Cannot demote the last remaining admin (409 Conflict via `count_admins()`).
+  - **Admin delete guard**: Admins can now delete other admin users (previously forbidden), but deleting the last remaining admin returns 409 Conflict.
+  - **Admin status guard**: Admin users cannot be set to `pending` status; admin status dropdown excludes `pending` option.
+  - **Self user row**: Role/status/delete cells show read-only display for the current user's own row.
+  - **Login routing fix**: Admin users no longer auto-redirect to `/admin` on login — go to main app root instead.
+  - **Admin sidebar link**: "User Admin" (用户管理) button in sidebar, visible only to admin users, navigates to `/admin`.
+  - **Back button on Admin page**: Added "Back" (返回) button to navigate back to main app.
+  - **Version centralized**: `VERSION` constant extracted to `backend/constants.py`; `main.py` and `root.py` import from it. AboutDialog fetches version dynamically from backend `/api` endpoint. Version fetch failure logged via `devWarn` instead of silent catch.
+  - **Swallowed-error hyphenated skip detection**: `_SKIP_DECISION_RE` regex extended to match `skip-velocity` (hyphenated) in addition to `skip_velocity` and `skip velocity`. Two new tests in `test_error_parsing.py`.
+  - **Minor fixes**: `test_literature_dr_decompose.py` missing trailing newline added.
+  - **ProtectedRoute admin redirect removed**: Admin users were previously
+    force-redirected to `/admin` by `ProtectedRoute` for every non-login
+    page. Removed this guard so admins can use the normal analysis app; they
+    reach the admin panel via the sidebar "User Admin" link. Complements the
+    login routing fix above.
+
+**0.27.x — (2026-06-17 → 2026-06-17)**
 
 - `0.27.9` — Gemini Deep Research decomposition short-circuit (2026-06-17):
   - **Workflow short-circuit**: When `literature_mode == "gemini_deep_research"`, `_literature_research` skips the PI agent's `plan_deep_research_tasks()` call and directly merges all topics into a single comprehensive Deep Research query. Gemini Deep Research self-decomposes internally, so the extra PI call is unnecessary and could over-split topics.

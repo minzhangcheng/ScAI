@@ -1,4 +1,5 @@
 """SQLite database access layer for users and API keys."""
+import logging
 import aiosqlite
 import uuid
 import time
@@ -7,6 +8,8 @@ from typing import Optional, List, Dict
 from datetime import datetime, timezone
 
 from backend.models.user import User, ApiKey
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -180,6 +183,21 @@ class AppDB:
             await db.commit()
             return cur.rowcount > 0
 
+    async def set_user_role(self, uid: str, role: str, *, status: Optional[str] = None) -> bool:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            if status is not None:
+                cur = await db.execute(
+                    "UPDATE users SET role=?, status=? WHERE id=?",
+                    (role, status, uid),
+                )
+            else:
+                cur = await db.execute(
+                    "UPDATE users SET role=? WHERE id=?",
+                    (role, uid),
+                )
+            await db.commit()
+            return cur.rowcount > 0
+
     async def delete_user(self, uid: str) -> bool:
         async with aiosqlite.connect(self.path, timeout=30) as db:
             await db.execute("PRAGMA foreign_keys = ON")
@@ -206,12 +224,15 @@ class AppDB:
         meta = await self.get_meta("admin_initialized")
         return meta == "1"
 
-    async def create_admin_if_missing(self, *, password_hash: str, email: Optional[str] = None) -> tuple[str, bool]:
+    async def create_admin_if_missing(self, *, username: str, password_hash: str, email: Optional[str] = None) -> tuple[str, bool]:
         """
-        Get existing admin or create new one if not exists.
+        Get existing admin or create a new one if none exists.
 
         Returns (admin_id, created) where created is True if a new admin was inserted.
-        If admin already exists and email is provided, updates the admin's email.
+        `username` is ONLY applied when creating a new admin; if an admin already
+        exists and the supplied username differs, a warning is logged and the stored
+        username is kept unchanged. When an admin already exists and a non-empty
+        email is provided, the admin's email is updated.
         """
         async with aiosqlite.connect(self.path, timeout=30) as db:
             db.row_factory = aiosqlite.Row
@@ -220,6 +241,16 @@ class AppDB:
             )
             row = await cur.fetchone()
             if row is not None:
+                cur2 = await db.execute(
+                    "SELECT username FROM users WHERE id=?", (row["id"],)
+                )
+                existing = await cur2.fetchone()
+                if existing is not None and existing["username"] != username:
+                    logger.warning(
+                        "create_admin_if_missing called with username=%r but an "
+                        "admin already exists as %r; keeping existing username",
+                        username, existing["username"],
+                    )
                 if email:
                     await db.execute("UPDATE users SET email=? WHERE id=?", (email, row["id"]))
                     await db.commit()
@@ -227,7 +258,7 @@ class AppDB:
             uid = str(uuid.uuid4())
             await db.execute(
                 "INSERT INTO users(id,email,username,password_hash,created_at,role,status) VALUES(?,?,?,?,?,?,?)",
-                (uid, email, "admin", password_hash, datetime.now(timezone.utc).isoformat(), "admin", "active"),
+                (uid, email, username, password_hash, datetime.now(timezone.utc).isoformat(), "admin", "active"),
             )
             await db.commit()
             return uid, True

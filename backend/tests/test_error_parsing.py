@@ -79,3 +79,13 @@ def test_detect_swallowed_error_legit_data_skip_returns_none():
 def test_detect_swallowed_error_empty_returns_none():
     assert detect_swallowed_error("") is None
     assert detect_swallowed_error(None) is None
+
+
+def test_hyphenated_skip_decision_detected():
+    output = "AttributeError: 'X' object has no attribute 'y'\nskip-velocity"
+    assert detect_swallowed_error(output) == "AttributeError"
+
+
+def test_underscore_skip_decision_still_detected():
+    output = "ValueError: bad input\nskip_trajectory"
+    assert detect_swallowed_error(output) == "ValueError"

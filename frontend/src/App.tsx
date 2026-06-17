@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from './stores/appStore'
 import { useConfig, useWebSocket, useUserConfig } from './hooks/useApi'
 import { useTranslation } from './i18n/translations'
+import { devWarn } from './utils/logger'
 import { ConfigPanel } from './components/ConfigPanel'
 import { Sidebar } from './components/Sidebar'
 import { AnalysisPanel } from './components/AnalysisPanel'
@@ -88,7 +89,9 @@ function App() {
           const data = await res.json()
           if (data.version) useAppStore.getState().setAppVersion(data.version)
         }
-      } catch { /* ignore */ }
+      } catch (err) {
+        devWarn('Failed to fetch app version', err)
+      }
     })()
   }, [])
 

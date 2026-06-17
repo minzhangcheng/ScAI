@@ -57,7 +57,7 @@ def extract_error_type(error_text: str) -> str:
 
 
 _SKIP_DECISION_RE = re.compile(
-    r"skip[_ ](?:velocity|trajectory|analysis|step)"
+    r"skip[-_ ](?:velocity|trajectory|analysis|step)"
     r"|['\"]decision['\"]\s*:\s*['\"]skip"
     r"|\bskipping\b",
     re.IGNORECASE,
