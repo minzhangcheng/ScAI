@@ -418,6 +418,10 @@ interface AppState {
   setShowSpeciesInputDialog: (show: boolean) => void
   clearSpeciesInputState: () => void
 
+  // App version (fetched from backend at startup)
+  appVersion: string
+  setAppVersion: (version: string) => void
+
   // Internal: true after Zustand persist finishes hydrating from localStorage.
   _hydrated: boolean
 }
@@ -607,6 +611,9 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       // Read mode
       readMode: false,
       setReadMode: (mode) => set({ readMode: mode }),
+
+      appVersion: '',
+      setAppVersion: (version) => set({ appVersion: version }),
 
       sessionLoading: false,
       setSessionLoading: (loading) => set({ sessionLoading: loading }),

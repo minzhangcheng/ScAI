@@ -1,9 +1,11 @@
 """Shared constants for the ScAI backend.
 
-Single source of truth for node-to-agent mappings, action enums,
-and LLM failure intervention constants.
+Single source of truth for version string, node-to-agent mappings,
+action enums, and LLM failure intervention constants.
 """
 from enum import Enum
+
+VERSION = "0.27.9"
 
 
 # ── Node → Agent mapping ───────────────────────────────────────────

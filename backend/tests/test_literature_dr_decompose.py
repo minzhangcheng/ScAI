@@ -54,8 +54,10 @@ class _LitAgent:
 class _PIAgent:
     def __init__(self, plan):
         self._plan = plan
+        self.called = False
 
     async def plan_deep_research_tasks(self, **kwargs):
+        self.called = True
         return self._plan
 
 
@@ -99,3 +101,24 @@ async def test_no_decompose_merges_into_single_call():
     # so _evaluate_dr_coverage finds no gaps)
     assert len(lit.calls) == 1
     assert "comprehensive literature review" in lit.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_gemini_mode_short_circuits_to_merged():
+    # Gemini Deep Research self-decomposes internally: the workflow must skip
+    # the PI planning call and go straight to a single merged DR call, even if
+    # PI would otherwise have asked to decompose.
+    lit = _LitAgent()
+    lit.literature_mode = "gemini_deep_research"
+    pi = _PIAgent({"decompose": True, "tasks": ["TA", "TB"]})
+    host = _Host(lit, pi)
+    state = {
+        "analysis_state": _state(),
+        "current_instructions": {"literature_topics": ["x", "y"], "overview": ""},
+        "pi_instructions": {"literature_topics": ["x", "y"], "overview": ""},
+    }
+    out = await host._literature_research(state)
+    assert pi.called is False                # PI decomposition short-circuited
+    assert len(lit.calls) == 1               # single merged DR call
+    assert "comprehensive literature review" in lit.calls[0]
+    assert out["literature_result"]["findings"]

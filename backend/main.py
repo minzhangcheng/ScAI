@@ -42,6 +42,7 @@ from .models.schemas import (
     WebSocketMessage, AgentType, TreatmentGroup, DataFile, BiochemistryIndicator,
     DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
+from .constants import VERSION
 from .workflow import SingleCellAnalysisWorkflow
 from .utils.llm_client import OpenAICompatibleClient, LLMManager
 from .utils.upload import ChunkedUploadManager, stream_save_file
@@ -145,7 +146,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ScAI - Single Cell Sequencing Analysis Driven by AI",
     description="Integrated & Intelligent Single Cell Analysis System with pathology, bioinformatics, and biochemistry analysis",
-    version="0.27.8",
+    version=VERSION,
     lifespan=lifespan,
 )
 

@@ -79,6 +79,19 @@ function App() {
     }
   }, [isResizing, handleMouseMove, handleMouseUp])
 
+  // Fetch app version from backend on startup
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api', { method: 'GET' })
+        if (res.ok) {
+          const data = await res.json()
+          if (data.version) useAppStore.getState().setAppVersion(data.version)
+        }
+      } catch { /* ignore */ }
+    })()
+  }, [])
+
   // Check API config status based on user role; sync config to store
   useEffect(() => {
     const run = async () => {

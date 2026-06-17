@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.8 · **Last updated**: 2026-06-17
+**Version**: 0.27.9 · **Last updated**: 2026-06-17
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.9` — Gemini Deep Research decomposition short-circuit (2026-06-17):
+  - **Workflow short-circuit**: When `literature_mode == "gemini_deep_research"`, `_literature_research` skips the PI agent's `plan_deep_research_tasks()` call and directly merges all topics into a single comprehensive Deep Research query. Gemini Deep Research self-decomposes internally, so the extra PI call is unnecessary and could over-split topics.
+  - **Test**: `test_literature_dr_decompose.py` — `test_gemini_mode_short_circuits_to_merged` verifies the PI decomposition is skipped and a single merged DR call is made.
+  - **Cleanup**: Deleted 3 completed implementation plan files (`pi-decide-fast-path`, `painter-images-api-retry`, `bioinformatics-swallowed-error-tech-agent`).
 
 - `0.27.8` — swallowed-error detection & Technique Agent doc lookup (2026-06-17):
   - **`detect_swallowed_error()` in `error_parsing.py`**: New function that detects technical errors the agent caught in try/except and then chose to skip. Requires both a skip/abandon decision keyword AND a known `TECHNICAL_ERROR_TYPES` token (repr or str form). Prevents false positives for legit data-driven skips and transient errors the agent later fixes.

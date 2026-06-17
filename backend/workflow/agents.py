@@ -879,14 +879,24 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         limited_topics = topics[:5]
 
         if is_deep_research and limited_topics:
-            # Ask PI whether to split into multiple independent DR sub-tasks.
-            dr_plan = await self.pi_agent.plan_deep_research_tasks(
-                topics=limited_topics,
-                completed_results=self._collect_current_round_results(state),
-                overall_strategy=instructions.get("overview", ""),
-                research_objective=analysis_state.initial_instruction,
-                state=analysis_state,
-            )
+            lit_mode = getattr(self.literature_agent, "literature_mode", "")
+            if lit_mode == "gemini_deep_research":
+                # Gemini Deep Research self-decomposes internally; skip the extra
+                # PI planning call and always merge into one comprehensive query.
+                logger.info(
+                    f"[{self.session_id}] Gemini Deep Research: skipping "
+                    f"decomposition, merging {len(limited_topics)} topics"
+                )
+                dr_plan = {"decompose": False, "tasks": limited_topics}
+            else:
+                # Ask PI whether to split into multiple independent DR sub-tasks.
+                dr_plan = await self.pi_agent.plan_deep_research_tasks(
+                    topics=limited_topics,
+                    completed_results=self._collect_current_round_results(state),
+                    overall_strategy=instructions.get("overview", ""),
+                    research_objective=analysis_state.initial_instruction,
+                    state=analysis_state,
+                )
 
             if dr_plan.get("decompose") and len(dr_plan.get("tasks", [])) > 1:
                 # === Multi-task DR: one serial DR call per sub-task ===

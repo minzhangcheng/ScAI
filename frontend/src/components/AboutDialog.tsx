@@ -5,7 +5,7 @@ import { useAppStore } from '../stores/appStore'
 
 export function AboutDialog() {
   const [open, setOpen] = useState(false)
-  const { language } = useAppStore()
+  const { language, appVersion } = useAppStore()
   const zh = language === 'zh'
 
   return (
@@ -49,7 +49,7 @@ export function AboutDialog() {
                     : 'Single Cell Sequencing Analysis Driven by AI'}
                 </p>
                 <div className="mt-2 inline-block px-3 py-1 bg-accent-100 text-accent-700 text-xs font-medium rounded-full">
-                  v0.27.8
+                  {appVersion ? `v${appVersion}` : 'ScAI'}
                 </div>
               </div>
 
