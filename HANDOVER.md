@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.26.7 · **Last updated**: 2026-06-16
+**Version**: 0.27.8 · **Last updated**: 2026-06-17
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,15 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.26.x — Species identification HITL & gene validation (2026-06-11 → present)**
+**0.27.x — (2026-06-17 → present)**
+
+- `0.27.8` — swallowed-error detection & Technique Agent doc lookup (2026-06-17):
+  - **`detect_swallowed_error()` in `error_parsing.py`**: New function that detects technical errors the agent caught in try/except and then chose to skip. Requires both a skip/abandon decision keyword AND a known `TECHNICAL_ERROR_TYPES` token (repr or str form). Prevents false positives for legit data-driven skips and transient errors the agent later fixes.
+  - **Bioinfo agent integration**: `_detect_and_lookup_swallowed_error()` method consults the Technique Agent (`lookup_from_error`) for API documentation when a swallowed error is detected. `_build_swallowed_error_feedback()` generates steering messages that guide the agent to fix and retry instead of skipping.
+  - **Execution loop injection**: Swallowed-error detection runs unconditionally after every code execution step. When detected, the feedback is appended to the tool result before it's sent back to the LLM, guiding the agent toward the correct API call.
+  - **Test**: `test_error_parsing.py` — 5 tests covering scvelo case, str-form error, no-skip-keyword (returns None), data-driven skip (returns None), empty/None output.
+
+**0.26.x — Species identification HITL & gene validation (2026-06-11 → 2026-06-16)**
 
 - `0.26.7` — painter retry extraction, _images_api_attempt method, shared _retry_with_backoff (2026-06-16):
   - **Shared `_retry_with_backoff()` helper**: Extracted the 3× inline exponential-backoff retry loops (Revision, Chat generation, Images API) into a single reusable `_retry_with_backoff()` function. Client errors (4xx) break out immediately without retrying; transient errors use `2^attempt` delay. All call sites unified under the same retry logic.

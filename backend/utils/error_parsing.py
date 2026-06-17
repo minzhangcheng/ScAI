@@ -1,6 +1,6 @@
 """Shared utilities for parsing Python error tracebacks."""
 import re
-from typing import FrozenSet
+from typing import FrozenSet, Optional
 
 # Error types that indicate API misuse (worth looking up docs)
 API_ERROR_TYPES: FrozenSet[str] = frozenset({
@@ -54,3 +54,37 @@ def extract_error_type(error_text: str) -> str:
             if err_type and ' ' not in err_type and err_type[0].isupper():
                 return err_type
     return ""
+
+
+_SKIP_DECISION_RE = re.compile(
+    r"skip[_ ](?:velocity|trajectory|analysis|step)"
+    r"|['\"]decision['\"]\s*:\s*['\"]skip"
+    r"|\bskipping\b",
+    re.IGNORECASE,
+)
+
+
+def detect_swallowed_error(output) -> Optional[str]:
+    """Detect a technical error that agent code caught (printed) and then chose
+    to skip, instead of letting it surface as a hard execution error.
+
+    Returns the technical error type (e.g. 'AttributeError') when BOTH hold:
+      1. the output contains an abandon/skip decision keyword, AND
+      2. a known TECHNICAL_ERROR_TYPES token appears in repr ('Foo(') or
+         str ('Foo:') form.
+    Otherwise returns None. Requiring (1) keeps legit data-driven skips and
+    transient errors the agent later fixes from triggering a false positive.
+    """
+    if not output:
+        return None
+    text = strip_ansi(output)
+    if not _SKIP_DECISION_RE.search(text):
+        return None
+    best_idx = None
+    best_type = None
+    for etype in TECHNICAL_ERROR_TYPES:
+        m = re.search(rf"\b{re.escape(etype)}\s*[(:]", text)
+        if m and (best_idx is None or m.start() < best_idx):
+            best_idx = m.start()
+            best_type = etype
+    return best_type

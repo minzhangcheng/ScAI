@@ -38,7 +38,7 @@ from ..models.schemas import (
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError, EMPTY_CONTENT_PLACEHOLDER
 from ..utils.tool_messages import tool_calls_are_paired, append_missing_tool_results
 from ..constants import PLAN_REVISION_NEEDED_TAG
-from ..utils.error_parsing import strip_ansi, extract_error_type, TECHNICAL_ERROR_TYPES
+from ..utils.error_parsing import strip_ansi, extract_error_type, TECHNICAL_ERROR_TYPES, detect_swallowed_error
 from .supervisor_agent import SupervisorEvalResult
 
 # Pre-compiled pattern for detecting manual cell_type assignment in code
@@ -343,6 +343,27 @@ TOOLS = [
 KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
     t["function"]["name"] for t in TOOLS
 )
+
+
+def _build_swallowed_error_feedback(error_type: str, doc_hint: str) -> str:
+    """Build the steering message injected when agent code caught a technical
+    error and tried to skip the step. Pure function (no I/O) for testability."""
+    msg = (
+        f"\n[System] Your code caught a {error_type} and recorded a skip/abandon "
+        f"decision. A skip is ONLY acceptable when the DATA is genuinely "
+        f"incompatible (e.g. missing spliced/unspliced layers, no overlapping "
+        f"barcodes). If this was an API or version error, do NOT skip: it is "
+        f"fixable. Correct the call and retry, or fall back to an equivalent "
+        f"method (e.g. DPT/PAGA for trajectory) instead of dropping the analysis."
+    )
+    if doc_hint:
+        msg += f"\n[API Documentation]\n{doc_hint}"
+    else:
+        msg += (
+            "\nCall lookup_documentation(function_path=...) for the failing "
+            "function before retrying."
+        )
+    return msg
 
 
 class BioinformaticsAgent(BaseAgent):
@@ -848,7 +869,14 @@ PACKAGE API LOOKUP:
   If unsure about the correct API for any package (decoupler, gseapy, scvelo, cellrank, etc.),
   call lookup_documentation BEFORE writing code.
   Example: lookup_documentation(function_path="decoupler.op.collectri")
-  The system will also automatically look up documentation if you hit the same API error twice.
+  The system automatically consults the Technique Agent for documentation when it detects a
+  repeated OR caught-and-skipped API error, but you must NOT rely on that as an excuse to skip.
+  NEVER swallow an API error (AttributeError / TypeError / ImportError / ModuleNotFoundError) with
+  try/except and then record a skip decision. An API or version mismatch (e.g. a function that does
+  not exist in the installed version) is FIXABLE: call lookup_documentation for the failing function,
+  correct the call, and retry. Only skip an analysis when the DATA itself is incompatible (e.g. no
+  spliced/unspliced layers, no overlapping barcodes), and even then fall back to an equivalent method
+  (e.g. DPT/PAGA for trajectory) instead of dropping the analysis entirely.
 
 DEFENSIVE CODING (CRITICAL — prevents KeyError / empty DataFrame crashes):
   When iterating over clusters or cell types for DE/enrichment analysis, ALWAYS check for empty results:
@@ -1329,6 +1357,33 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             await self._notify("warning",
                 f"Gene names may not match {state.species}: {assessment.get('reasoning', '')}")
             return False
+
+    async def _detect_and_lookup_swallowed_error(self, result, code: str):
+        """Detect a technical error the agent caught in-code (try/except) and then
+        skipped, and consult the Technique Agent for the correct API.
+
+        Such errors never surface as ``result.error``, so the consecutive-error
+        counter and the Supervisor technique trigger never see them. Returns
+        ``(swallowed_type, doc_hint)``; ``(None, "")`` when there is nothing to do
+        (hard error already surfaced, no swallowed error, or no technique agent).
+        """
+        if result.error:
+            return None, ""
+        swallowed_type = detect_swallowed_error(result.output or "")
+        if not swallowed_type or not self.technique_agent:
+            return swallowed_type, ""
+        logger.info(
+            f"[Bioinformatics] Detected swallowed {swallowed_type} with "
+            f"skip decision; consulting Technique Agent"
+        )
+        try:
+            doc_hint = await self.technique_agent.lookup_from_error(
+                self.sandbox, result.output or "", code
+            ) or ""
+        except Exception as e:
+            logger.warning(f"[Bioinformatics] Swallowed-error doc lookup failed: {e}")
+            doc_hint = ""
+        return swallowed_type, doc_hint
 
     async def _assess_gene_species_match(self, gene_names: list, species: str) -> dict:
         """Ask PI LLM whether gene names match the expected species."""
@@ -2531,6 +2586,13 @@ finally:
                         await self._notify("figure", fig)
                         all_figures.append(fig)
                         _step_figures.append(fig)
+                    # Catch technical errors the agent swallowed in-code (try/except)
+                    # and then skipped. Computed unconditionally (returns (None, "")
+                    # on the hard-error path) so the consumer below always has a value
+                    # — no UnboundLocalError and no stale carry-over across iterations.
+                    swallowed_type, swallowed_doc_hint = (
+                        await self._detect_and_lookup_swallowed_error(result, code)
+                    )
                     if result.error:
                         await self._notify("error", result.error)
                         consecutive_errors += 1
@@ -2574,7 +2636,12 @@ finally:
                             )
                     if result.figures:
                         tool_result += f"Generated {len(result.figures)} figure(s).\n"
-                    
+
+                    if swallowed_type:
+                        tool_result += _build_swallowed_error_feedback(
+                            swallowed_type, swallowed_doc_hint
+                        )
+
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,

@@ -10,6 +10,7 @@ from backend.utils.error_parsing import (
     CODE_GEN_ERROR_TYPES,
     strip_ansi,
     extract_error_type,
+    detect_swallowed_error,
 )
 
 
@@ -43,3 +44,38 @@ def test_strip_ansi():
 def test_extract_error_type():
     assert extract_error_type("Traceback:\n  File ...\nKeyError: 'foo'") == "KeyError"
     assert extract_error_type("") == ""
+
+
+def test_detect_swallowed_error_scvelo_case():
+    """Caught AttributeError repr + skip decision → returns 'AttributeError'."""
+    output = (
+        "Innovation phase package status: {'scvelo': 'available'}\n"
+        "{'condition': 'Con', 'status': 'failed', "
+        "'error': \"AttributeError(\\\"module 'scvelo' has no attribute 'read'\\\")\", "
+        "'decision': 'skip_velocity'}"
+    )
+    assert detect_swallowed_error(output) == "AttributeError"
+
+
+def test_detect_swallowed_error_str_form():
+    """Str-form 'ValueError: ...' with a 'skipping' keyword is detected."""
+    output = "ValueError: not enough cells\nskipping trajectory analysis"
+    assert detect_swallowed_error(output) == "ValueError"
+
+
+def test_detect_swallowed_error_no_skip_keyword_returns_none():
+    """A technical error with NO skip/abandon decision must NOT trigger (the
+    agent may fix it on the next step — do not nag)."""
+    output = "AttributeError(\"module 'scvelo' has no attribute 'read'\")\nRetrying with read_loom..."
+    assert detect_swallowed_error(output) is None
+
+
+def test_detect_swallowed_error_legit_data_skip_returns_none():
+    """A data-driven skip with no technical error token must NOT trigger."""
+    output = "No spliced/unspliced layers present; skip_velocity"
+    assert detect_swallowed_error(output) is None
+
+
+def test_detect_swallowed_error_empty_returns_none():
+    assert detect_swallowed_error("") is None
+    assert detect_swallowed_error(None) is None
