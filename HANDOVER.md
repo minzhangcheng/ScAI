@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.26.6 · **Last updated**: 2026-06-12
+**Version**: 0.26.7 · **Last updated**: 2026-06-16
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.26.x — Species identification HITL & gene validation (2026-06-11 → present)**
+
+- `0.26.7` — painter retry extraction, _images_api_attempt method, shared _retry_with_backoff (2026-06-16):
+  - **Shared `_retry_with_backoff()` helper**: Extracted the 3× inline exponential-backoff retry loops (Revision, Chat generation, Images API) into a single reusable `_retry_with_backoff()` function. Client errors (4xx) break out immediately without retrying; transient errors use `2^attempt` delay. All call sites unified under the same retry logic.
+  - **`_images_api_attempt()` method**: Extracted the single-attempt Images API call (`/v1/images/generations`) with `b64_json`→URL response-format fallback, standard/non-standard response extraction, and `content_filter`/error-field diagnostics into a dedicated method. Images API strategy now wrapped in `_retry_with_backoff()` instead of inline retry.
+  - **Test**: `test_painter_retry.py` — 4 tests covering transient→success retry, 4xx client-error skip, exhaustion after 3 failures, and b64_json→no-format fallback preservation.
 
 - `0.26.6` — supervisor report path aligned with services/report shared modules (2026-06-12):
   - **Supervisor `_build_score_definitions_html` → shared module**: Replaced inline HTML table with `build_score_definitions_section_html()` from `score_section.py`, so the supervisor-generated report appendix uses the same enhanced rendering (Computation Method column, collapsible gene list, CSV download link) as the main report.

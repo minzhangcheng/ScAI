@@ -51,6 +51,45 @@ def _is_client_error(exc: Exception) -> bool:
     return False
 
 
+async def _retry_with_backoff(
+    fn,
+    *,
+    max_attempts: int = 3,
+    log_prefix: str = "",
+    session_id: str = "",
+) -> Any:
+    """Call *fn* with exponential-backoff retry, skipping on client errors.
+
+    Args:
+        fn: Async callable to attempt.
+        max_attempts: Total attempts before giving up.
+        log_prefix: Prefix for warning log messages (e.g. "Images API").
+        session_id: Session ID for log correlation.
+
+    Returns:
+        The return value of *fn* on success.
+
+    Raises:
+        The last exception if all attempts fail or a client error is hit.
+    """
+    last_error: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return await fn()
+        except Exception as e:
+            last_error = e
+            if _is_client_error(e):
+                break
+            if attempt < max_attempts - 1:
+                delay = 2 ** attempt
+                logger.warning(
+                    f"[{session_id}][Painter] {log_prefix} attempt {attempt + 1} failed: {e}, "
+                    f"retrying in {delay}s"
+                )
+                await asyncio.sleep(delay)
+    raise last_error  # type: ignore[misc]
+
+
 class PainterAgent(BaseAgent):
     """
     Painter Agent using OpenRouter (or other OpenAI-compatible API) for image generation.
@@ -241,37 +280,31 @@ class PainterAgent(BaseAgent):
                 )
                 user_content = [{"type": "text", "text": text_only_prompt}]
 
-            last_error = None
-            for attempt in range(3):
-                try:
-                    response = await self.llm_client.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": self.system_prompt},
-                            {"role": "user", "content": user_content}
-                        ],
-                        temperature=self.config.temperature,
-                        max_tokens=4096,
-                        extra_body={
-                            "modalities": ["image", "text"]
-                        }
-                    )
-                    new_image = self._extract_image_from_response(response)
-                    logger.info(f"[{self.session_id}][Painter] Graphic abstract revision successful")
-                    return new_image
-                except Exception as e:
-                    last_error = e
-                    # Don't retry client errors (4xx) — they'll always fail
-                    if _is_client_error(e):
-                        break
-                    if attempt < 2:
-                        delay = 2 ** attempt
-                        logger.warning(
-                            f"[{self.session_id}][Painter] Revision attempt {attempt + 1} failed: {e}, "
-                            f"retrying in {delay}s"
-                        )
-                        await asyncio.sleep(delay)
-            raise last_error
+            async def _do_revise():
+                response = await self.llm_client.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": user_content}
+                    ],
+                    temperature=self.config.temperature,
+                    max_tokens=4096,
+                    extra_body={
+                        "modalities": ["image", "text"]
+                    }
+                )
+                new_image = self._extract_image_from_response(response)
+                logger.info(f"[{self.session_id}][Painter] Graphic abstract revision successful")
+                return new_image
+
+            try:
+                return await _retry_with_backoff(
+                    _do_revise,
+                    log_prefix="Revision",
+                    session_id=self.session_id,
+                )
+            except Exception:
+                raise  # let outer handler wrap as ValueError
 
         except Exception as e:
             logger.exception(f"[{self.session_id}][Painter] Error revising graphic abstract")
@@ -620,31 +653,25 @@ The graphic abstract should tell the story of the research at a glance, highligh
             # Strategy 1: Try chat completions with modalities (works on OpenRouter)
             chat_error = None
             if not _skip_chat_modalities:
-                last_error = None
-                for attempt in range(3):
-                    try:
-                        response = await self.llm_client.client.chat.completions.create(
-                            model=self.model,
-                            messages=messages,
-                            temperature=self.config.temperature,
-                            extra_body={
-                                "modalities": ["image", "text"]
-                            }
-                        )
-                        return self._extract_image_from_response(response)
-                    except Exception as e:
-                        last_error = e
-                        # Don't retry client errors (4xx) — they'll always fail
-                        if _is_client_error(e):
-                            break
-                        if attempt < 2:
-                            delay = 2 ** attempt
-                            logger.warning(
-                                f"[{self.session_id}][Painter] Chat generation attempt {attempt + 1} failed: {e}, "
-                                f"retrying in {delay}s"
-                            )
-                            await asyncio.sleep(delay)
-                chat_error = last_error
+                async def _chat_attempt():
+                    response = await self.llm_client.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=self.config.temperature,
+                        extra_body={
+                            "modalities": ["image", "text"]
+                        }
+                    )
+                    return self._extract_image_from_response(response)
+
+                try:
+                    return await _retry_with_backoff(
+                        _chat_attempt,
+                        log_prefix="Chat generation",
+                        session_id=self.session_id,
+                    )
+                except Exception as e:
+                    chat_error = e
             else:
                 provider = "Google AI Studio" if _is_google_ai_studio else "Zhipu"
                 logger.info(
@@ -659,96 +686,15 @@ The graphic abstract should tell the story of the research at a glance, highligh
                 f"{'skipped' if _skip_chat_modalities else f'failed ({chat_error})'}, "
                 f"trying Images API fallback"
             )
+            # Strategy 2 retries transient failures (timeouts / 5xx) with
+            # exponential backoff, mirroring Strategy 1. Client errors (4xx,
+            # except retriable 429) break out immediately.
             try:
-                # Zhipu AI does not support response_format="b64_json" parameter;
-                # skip it and use the default URL response format.
-                if _is_zhipu:
-                    logger.info(
-                        f"[{self.session_id}][Painter] Zhipu AI detected, "
-                        f"using default URL response format"
-                    )
-                    response = await self.llm_client.client.images.generate(
-                        model=self.model,
-                        prompt=prompt,
-                    )
-                else:
-                    # Try with b64_json first (OpenAI, Google AI Studio, n1n.ai)
-                    # then fall back without it (SiliconFlow only supports URL responses)
-                    try:
-                        response = await self.llm_client.client.images.generate(
-                            model=self.model,
-                            prompt=prompt,
-                            n=1,
-                            response_format="b64_json",
-                        )
-                    except Exception as b64_err:
-                        # Only fall back for client errors (400/422 = unsupported param);
-                        # propagate transient/auth errors immediately
-                        if not _is_client_error(b64_err):
-                            raise
-                        logger.info(
-                            f"[{self.session_id}][Painter] Images API with b64_json failed ({b64_err}), "
-                            f"trying without response_format"
-                        )
-                        response = await self.llm_client.client.images.generate(
-                            model=self.model,
-                            prompt=prompt,
-                            n=1,
-                        )
-
-                # Debug: log raw response for diagnosis
-                raw = None
-                if hasattr(response, 'model_dump'):
-                    raw = response.model_dump()
-                    logger.info(f"[{self.session_id}][Painter] Images API raw response keys: {list(raw.keys())}")
-                    logger.debug(f"[{self.session_id}][Painter] Images API raw response: {raw}")
-                else:
-                    logger.debug(f"[{self.session_id}][Painter] Images API response type: {type(response)}, attrs: {dir(response)}")
-
-                # Extract image from response
-                if response.data and len(response.data) > 0:
-                    img_item = response.data[0]
-                    # Prefer b64_json (OpenAI, Google AI Studio)
-                    if hasattr(img_item, 'b64_json') and img_item.b64_json:
-                        return img_item.b64_json
-                    # Fall back to URL and download (SiliconFlow returns temporary URLs)
-                    if hasattr(img_item, 'url') and img_item.url:
-                        logger.info(f"[{self.session_id}][Painter] Downloading image from URL")
-                        return await self._download_image_as_base64(img_item.url)
-
-                # SiliconFlow non-standard: 'images' array
-                # Zhipu / standard: 'data' array
-                if raw is not None:
-
-                    # Check error field first (Zhipu may return 500 with data=None)
-                    if 'error' in raw and raw['error']:
-                        error_info = raw['error']
-                        error_msg = error_info.get('message', str(error_info)) if isinstance(error_info, dict) else str(error_info)
-                        logger.warning(f"[{self.session_id}][Painter] Images API returned error: {error_info}")
-                        raise ValueError(f"Images API error: {error_msg}")
-
-                    # Check content_filter for 审核拦截
-                    if 'content_filter' in raw and raw['content_filter']:
-                        logger.warning(f"[{self.session_id}][Painter] Content filter triggered: {raw['content_filter']}")
-
-                    # SiliconFlow non-standard: 'images' array
-                    if 'images' in raw and raw['images']:
-                        for img in raw['images']:
-                            url = img.get('url', '') if isinstance(img, dict) else ''
-                            if url:
-                                logger.info(f"[{self.session_id}][Painter] Downloading image from non-standard response")
-                                return await self._download_image_as_base64(url)
-
-                    # Zhipu / standard: 'data' array
-                    if 'data' in raw and raw['data']:
-                        img_data = raw['data'][0]
-                        if isinstance(img_data, dict):
-                            url = img_data.get('url', '')
-                            if url:
-                                logger.info(f"[{self.session_id}][Painter] Downloading image from standard response (data[0].url)")
-                                return await self._download_image_as_base64(url)
-
-                raise ValueError("Images API returned no image data")
+                return await _retry_with_backoff(
+                    lambda: self._images_api_attempt(prompt, is_zhipu=_is_zhipu),
+                    log_prefix="Images API",
+                    session_id=self.session_id,
+                )
             except Exception as images_error:
                 logger.warning(
                     f"[{self.session_id}][Painter] Images API also failed: {images_error}"
@@ -765,6 +711,109 @@ The graphic abstract should tell the story of the research at a glance, highligh
         except Exception as e:
             logger.exception(f"[{self.session_id}][Painter] Error generating image")
             raise ValueError(f"Image generation failed: {e}") from e
+
+    async def _images_api_attempt(self, prompt: str, *, is_zhipu: bool = False) -> str:
+        """One attempt at the Images API (/v1/images/generations).
+
+        Handles the b64_json -> URL response-format fallback for providers that
+        do not support the ``response_format`` parameter (e.g. SiliconFlow), and
+        extracts the image from both standard (``data``) and non-standard
+        (``images``) response shapes.
+
+        Args:
+            prompt: The image generation prompt.
+            is_zhipu: Whether the provider is Zhipu AI (pre-computed by caller).
+
+        Raises on any failure so the caller can decide whether to retry.
+        """
+        # Zhipu AI does not support response_format="b64_json" parameter;
+        # skip it and use the default URL response format.
+        if is_zhipu:
+            logger.info(
+                f"[{self.session_id}][Painter] Zhipu AI detected, "
+                f"using default URL response format"
+            )
+            response = await self.llm_client.client.images.generate(
+                model=self.model,
+                prompt=prompt,
+            )
+        else:
+            # Try with b64_json first (OpenAI, Google AI Studio, n1n.ai)
+            # then fall back without it (SiliconFlow only supports URL responses)
+            try:
+                response = await self.llm_client.client.images.generate(
+                    model=self.model,
+                    prompt=prompt,
+                    n=1,
+                    response_format="b64_json",
+                )
+            except Exception as b64_err:
+                # Only fall back for client errors (400/422 = unsupported param);
+                # propagate transient/auth errors immediately
+                if not _is_client_error(b64_err):
+                    raise
+                logger.info(
+                    f"[{self.session_id}][Painter] Images API with b64_json failed ({b64_err}), "
+                    f"trying without response_format"
+                )
+                response = await self.llm_client.client.images.generate(
+                    model=self.model,
+                    prompt=prompt,
+                    n=1,
+                )
+
+        # Debug: log raw response for diagnosis
+        raw = None
+        if hasattr(response, 'model_dump'):
+            raw = response.model_dump()
+            logger.debug(f"[{self.session_id}][Painter] Images API raw response keys: {list(raw.keys())}")
+            logger.debug(f"[{self.session_id}][Painter] Images API raw response: {raw}")
+        else:
+            logger.debug(f"[{self.session_id}][Painter] Images API response type: {type(response)}")
+
+        # Extract image from response
+        if response.data and len(response.data) > 0:
+            img_item = response.data[0]
+            # Prefer b64_json (OpenAI, Google AI Studio)
+            if hasattr(img_item, 'b64_json') and img_item.b64_json:
+                return img_item.b64_json
+            # Fall back to URL and download (SiliconFlow returns temporary URLs)
+            if hasattr(img_item, 'url') and img_item.url:
+                logger.info(f"[{self.session_id}][Painter] Downloading image from URL")
+                return await self._download_image_as_base64(img_item.url)
+
+        # SiliconFlow non-standard: 'images' array
+        # Zhipu / standard: 'data' array
+        if raw is not None:
+            # Check error field first (Zhipu may return 500 with data=None)
+            if 'error' in raw and raw['error']:
+                error_info = raw['error']
+                error_msg = error_info.get('message', str(error_info)) if isinstance(error_info, dict) else str(error_info)
+                logger.warning(f"[{self.session_id}][Painter] Images API returned error: {error_info}")
+                raise ValueError(f"Images API error: {error_msg}")
+
+            # Check content_filter for 审核拦截
+            if 'content_filter' in raw and raw['content_filter']:
+                logger.warning(f"[{self.session_id}][Painter] Content filter triggered: {raw['content_filter']}")
+
+            # SiliconFlow non-standard: 'images' array
+            if 'images' in raw and raw['images']:
+                for img in raw['images']:
+                    url = img.get('url', '') if isinstance(img, dict) else ''
+                    if url:
+                        logger.info(f"[{self.session_id}][Painter] Downloading image from non-standard response")
+                        return await self._download_image_as_base64(url)
+
+            # Zhipu / standard: 'data' array
+            if 'data' in raw and raw['data']:
+                img_data = raw['data'][0]
+                if isinstance(img_data, dict):
+                    url = img_data.get('url', '')
+                    if url:
+                        logger.info(f"[{self.session_id}][Painter] Downloading image from standard response (data[0].url)")
+                        return await self._download_image_as_base64(url)
+
+        raise ValueError("Images API returned no image data")
 
     async def process(
         self,

@@ -1,7 +1,7 @@
 
 # ScAI User Guide
 
-**Version**: 0.26.6 · **Last Updated**: 2026-06-12
+**Version**: 0.26.7 · **Last Updated**: 2026-06-16
 
 > Also available in: [中文 (Chinese)](user-guide-zh.md)
 
