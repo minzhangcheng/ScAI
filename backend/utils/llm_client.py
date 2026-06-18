@@ -3,10 +3,12 @@ LLM client utilities using OpenAI SDK for OpenAI-compatible APIs
 Supports OpenRouter, OpenAI, and other compatible endpoints
 """
 import base64
+import html
 import httpx
 import asyncio
 import json
 import logging
+import re
 import time
 from uuid import uuid4
 from typing import List, Dict, Any, Optional, AsyncGenerator, Union, Callable, Awaitable, Tuple
@@ -1374,6 +1376,7 @@ class GoogleDeepResearchClient:
 
     DEFAULT_MODEL = "deep-research-preview-04-2026"
     API_REVISION = "2026-05-20"
+    GROUNDING_REDIRECT_MARKER = "grounding-api-redirect"
 
     def __init__(self, api_key: str, proxy_url: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key
@@ -1606,7 +1609,88 @@ class GoogleDeepResearchClient:
                         "uri": uri
                     })
                     seen_uris.add(uri)
-    
+
+    async def _resolve_redirect(self, url: str) -> str:
+        """Resolve a Vertex grounding-api-redirect URL to the real article URL.
+
+        Reads the 302 ``Location`` header without following it further. Returns
+        the original ``url`` unchanged for non-grounding URLs or on any failure
+        (the redirect links are time-sensitive, so a miss must not break the
+        literature flow). Relative ``Location`` values are joined against the
+        request URL to produce an absolute URL.
+        """
+        if not url or self.GROUNDING_REDIRECT_MARKER not in url:
+            return url
+        try:
+            resp = await self.client.get(
+                url, follow_redirects=False, timeout=15.0
+            )
+            if resp.is_redirect:
+                location = resp.headers.get("location")
+                if location:
+                    # Handle relative Location headers (e.g. "/article/123").
+                    if not location.startswith(("http://", "https://")):
+                        location = str(httpx.URL(resp.url).join(location))
+                    return location
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
+            logger.warning(f"[DeepResearch] redirect resolve failed for {url[:80]}: {e}")
+        return url
+
+    _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+    async def _fetch_title(self, url: str) -> str:
+        """Fetch ``url`` and return its HTML ``<title>`` text, or '' on failure.
+
+        Only parses ``text/html`` responses; collapses internal whitespace and
+        unescapes HTML entities. A browser-ish User-Agent avoids trivial bot
+        blocks. Any error yields '' so the caller can fall back.
+        """
+        try:
+            resp = await self.client.get(
+                url,
+                follow_redirects=True,
+                timeout=15.0,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; ScAI-LiteratureBot/1.0)"},
+            )
+            if "html" not in resp.headers.get("content-type", "").lower():
+                return ""
+            match = self._TITLE_RE.search(resp.text)
+            if match:
+                title = html.unescape(match.group(1))
+                return re.sub(r"\s+", " ", title).strip()
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
+            logger.warning(f"[DeepResearch] title fetch failed for {url[:80]}: {e}")
+        return ""
+
+    async def _enrich_source(self, source: Dict[str, str]) -> Dict[str, str]:
+        """Resolve one source's redirect URL and backfill its title if empty."""
+        real_url = await self._resolve_redirect(source.get("uri", ""))
+        title = source.get("title") or ""
+        if not title and real_url:
+            title = await self._fetch_title(real_url)
+        return {"title": title, "uri": real_url}
+
+    async def enrich_sources(
+        self, sources: List[Dict[str, str]]
+    ) -> List[Dict[str, str]]:
+        """Resolve redirects + backfill titles for all sources, concurrently.
+
+        Order is preserved so the report's inline ``[cite: N]`` markers stay
+        aligned with the References list. Network failures degrade to the
+        original URL / empty title per-source (handled in ``_enrich_source``).
+        Concurrency is capped to avoid triggering rate limits on academic
+        sites (nih.gov, researchgate.net, etc.).
+        """
+        if not sources:
+            return sources
+        sem = asyncio.Semaphore(5)
+
+        async def _bounded_enrich(s):
+            async with sem:
+                return await self._enrich_source(s)
+
+        return list(await asyncio.gather(*(_bounded_enrich(s) for s in sources)))
+
     async def research(self, query: str) -> Dict[str, Any]:
         """
         Convenience method to start research and wait for results
@@ -1618,7 +1702,9 @@ class GoogleDeepResearchClient:
             Research results with report and sources
         """
         interaction_id = await self.start_research(query)
-        return await self.poll_research(interaction_id)
+        result = await self.poll_research(interaction_id)
+        result["sources"] = await self.enrich_sources(result.get("sources", []))
+        return result
 
 
 class LLMManager:

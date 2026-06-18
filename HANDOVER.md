@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.4 · **Last updated**: 2026-06-18
+**Version**: 0.27.5 · **Last updated**: 2026-06-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,13 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.5` — Deep Research citation URL resolution & title backfill, concurrency-safe enrichment (2026-06-18):
+  - **Vertex grounding redirect resolution**: `_resolve_redirect()` reads the `Location` header from 302 responses for `grounding-api-redirect` URLs, returning the real article URL. Handles relative `Location` headers, non-redirect responses, and network errors gracefully (falls back to original URL). Time-sensitive expired redirect links degrade safely.
+  - **HTML title backfill**: `_fetch_title()` fetches each source URL and extracts its `<title>` tag from HTML responses. Unescapes HTML entities (`&amp;` → `&`), collapses internal whitespace, and returns `""` on non-HTML responses, missing `<title>`, or network errors. Uses a browser-ish User-Agent to avoid trivial bot blocks.
+  - **`enrich_sources()`**: Concurrently resolves redirects and backfills missing titles for all sources, preserving order so inline `[cite: N]` markers stay aligned. Concurrency capped at 5 via `asyncio.Semaphore` to avoid rate-limiting academic sites.
+  - **`research()` integration**: Every research call now automatically enriches sources as the final step before returning — no caller-side changes needed.
+  - **17 new tests**: `test_deep_research_enrich.py` with `httpx.MockTransport` — covers redirect resolution (302 follow, skip, missing Location, HTTP error, relative URL, expired), title extraction (HTML, attributes, newlines, non-HTML, error, missing), source enrichment (resolve+titles, preserve existing), order preservation, empty input, failure fallback, and end-to-end `research()` integration.
 
 - `0.27.4` — Exploration-failed HITL dialog, sandbox exec lock, phase instruction refactoring, gate skip notes (2026-06-18):
   - **Exploration-failed user dialog**: When Stage 1 (QC/clustering/annotation) does not complete, the workflow sends an `exploration_failed` WebSocket message with a stable `reason` code and surfaces an actionable dialog (`ExplorationFailedDialog`) with three options: "Go to Data Panel" (review/re-upload data), "Continue" (retry Stage 1), or "Stop Analysis". Rather than silently advancing rounds toward `max_rounds`, the system stays in `EXPLORATION` phase — the user must explicitly act. `resolve_round_phase()` in `planning.py` only advances to `INNOVATION` when `exploration_report` exists.
