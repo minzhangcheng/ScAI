@@ -7,7 +7,7 @@ from functools import wraps
 from ..constants import LlmFailureAction, NODE_TO_RESULT_KEY
 from ..models.schemas import AgentType
 from ..utils.llm_client import UpstreamExhaustedError
-from .helpers import _retry_backoff_delay
+from .helpers import _retry_backoff_delay, WorkflowTerminatedError
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,12 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                     if action == LlmFailureAction.RETRY:
                         attempt = 0
                         continue  # re-enter while loop
+                    if action == LlmFailureAction.TERMINATE:
+                        # User chose to abort the whole analysis at the gate.
+                        raise WorkflowTerminatedError(
+                            f"User terminated analysis at node {node_name} "
+                            f"after LLM failure"
+                        ) from last_error
                     # skip
                     result_key = NODE_TO_RESULT_KEY.get(node_name, f"{node_name}_result")
                     return {
@@ -88,6 +94,12 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                             "status": "failed"
                         }
                     }
+
+                except WorkflowTerminatedError:
+                    # User chose to abort (e.g. TERMINATE at a HITL gate, or a
+                    # disabled-agent terminate). Must propagate, not be retried
+                    # by the generic handler below.
+                    raise
 
                 except Exception as e:
                     last_error = e

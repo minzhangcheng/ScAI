@@ -54,9 +54,9 @@ from ..utils.sandbox import LocalJupyterSandbox
 from ..config import SystemConfig, get_session_workspace, get_session_states
 
 
-class WorkflowTerminatedError(RuntimeError):
-    """Raised when the user chooses Terminate in a disabled-agent dialog."""
-    pass
+# Defined in helpers.py (dependency-free) and re-exported here for backward
+# compatibility — existing code imports it via `from .core import WorkflowTerminatedError`.
+from .helpers import WorkflowTerminatedError  # noqa: E402,F401
 
 
 class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, CallbacksMixin, AnnotationMixin, PlanningMixin, AgentNodesMixin, SynthesisMixin, InitializeMixin, GraphMixin, ReportingMixin):
@@ -152,8 +152,9 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         """Block workflow, show LlmTimeoutDialog, wait for user action.
 
         Returns:
-            LlmFailureAction.RETRY — user clicked Retry (caller should clear caches and retry)
-            LlmFailureAction.SKIP  — user clicked Skip or Terminate
+            LlmFailureAction.RETRY     — user clicked Retry (caller should clear caches and retry)
+            LlmFailureAction.SKIP      — user clicked Skip
+            LlmFailureAction.TERMINATE — user clicked Terminate (caller should abort)
         """
         async with self._llm_failure_lock:
             logger.error(
@@ -211,7 +212,37 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             if self._settings_provider is not None:
                 self._settings_provider._client_cache.clear()
             return LlmFailureAction.RETRY
+        if action == LlmFailureAction.TERMINATE.value:
+            return LlmFailureAction.TERMINATE
         return LlmFailureAction.SKIP
+
+    async def _pathology_llm_intervention_callback(
+        self,
+        error: UpstreamExhaustedError,
+        image_label: str,
+    ) -> LlmFailureAction:
+        """Image-level LLM-failure HITL for the pathology agent.
+
+        Unlike the node-level @with_retry gate (which restarts the whole node),
+        this is invoked from inside PathologyAgent per LLM call, so RETRY re-runs
+        only the failing call and SKIP drops only the current image. Reuses the
+        same LlmTimeoutDialog infrastructure via _wait_for_llm_intervention.
+        """
+        logger.warning(
+            f"[{self.session_id}] Pathology LLM failure on image '{image_label}': "
+            f"{error}"
+        )
+        analysis_state = self._current_analysis_state
+        if analysis_state is None:
+            # No state to drive the HITL dialog — fall back to skipping the image.
+            logger.error(
+                f"[{self.session_id}] Pathology intervention requested but "
+                f"_current_analysis_state is None; skipping image '{image_label}'"
+            )
+            return LlmFailureAction.SKIP
+        return await self._wait_for_llm_intervention(
+            error, "pathology_analysis", analysis_state
+        )
 
     async def _wait_for_disabled_agent_intervention(
         self,
@@ -450,6 +481,9 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 max_tiles=50,
             )
             self.pathology_agent.set_session(self.session_id)
+            self.pathology_agent.llm_intervention_callback = (
+                self._pathology_llm_intervention_callback
+            )
         else:
             self.pathology_agent = None
             logger.info(f"[{self.session_id}] Pathology agent disabled (empty model)")

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.2 · **Last updated**: 2026-06-18
+**Version**: 0.27.3 · **Last updated**: 2026-06-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,14 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.3` — Pathology Agent image-level LLM-failure HITL with per-image skip, terminate propagation (2026-06-18):
+  - **Image-level LLM-failure HITL**: New `PathologyAgent._call_llm_with_hitl()` wraps every LLM vision/chat call (`chat_with_vision` for overview, tile batches, and findings synthesis) with an LLM-failure dialog. On `UpstreamExhaustedError`, the user can choose RETRY (re-attempt only the failing call), SKIP (drop only the current image), or TERMINATE (abort the whole analysis).
+  - **Per-image skip via `_ImageSkipRequested`**: New internal sentinel exception caught by `process()` to skip just the failing image and continue with the remainder. The skipped image is recorded in the results with a clear user-facing error message.
+  - **`WorkflowTerminatedError` moved to `helpers.py`**: Moved from `core.py` to the dependency-free `helpers.py` so low-level modules like `retry.py` can catch it without circular imports. Re-exported from `core.py` for backward compatibility.
+  - **`with_retry` TERMINATE handling**: `with_retry` now handles `LlmFailureAction.TERMINATE` (raises `WorkflowTerminatedError`) and catches `WorkflowTerminatedError` before the generic exception handler so it propagates cleanly without being retried as a regular error.
+  - **`_wait_for_llm_intervention` returns TERMINATE**: Extended return values to include `LlmFailureAction.TERMINATE` alongside the existing `RETRY` and `SKIP`.
+  - **Callback wiring**: `_pathology_llm_intervention_callback()` drives the HITL dialog via the existing `_wait_for_llm_intervention` infrastructure, with a fallback to SKIP when `_current_analysis_state` is unavailable.
 
 - `0.27.2` — Google Deep Research response extraction rewrite, frontend round parsing fix (2026-06-18):
   - **Deep Research `visualization: "off"`**: Set `visualization` to `"off"` in `agent_config` to suppress agent-generated charts/images — only the textual report is consumed, so keeping images out keeps the response light and the parser simple.

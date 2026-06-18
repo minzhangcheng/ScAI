@@ -9,6 +9,14 @@ from ..models.schemas import AgentRoundCache, AgentType
 logger = logging.getLogger(__name__)
 
 
+class WorkflowTerminatedError(RuntimeError):
+    """Raised when the user chooses Terminate at a HITL gate (disabled-agent or
+    LLM-failure dialog). Propagates up to the workflow run loop, which aborts the
+    analysis gracefully. Defined here (a dependency-free module) so low-level
+    modules like retry.py can catch it without importing core.py."""
+    pass
+
+
 async def wait_with_skip_time(
     event: asyncio.Event,
     wait_seconds: int,

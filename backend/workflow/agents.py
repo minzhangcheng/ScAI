@@ -87,6 +87,9 @@ class AgentNodesMixin:
     async def _pathology_analysis(self, state: WorkflowState) -> WorkflowState:
         """Pathology agent analyzes images"""
         analysis_state = state["analysis_state"]
+        # Required by _pathology_llm_intervention_callback to drive the
+        # image-level LLM-failure HITL dialog.
+        self._current_analysis_state = analysis_state
 
         cached = cache_hit(analysis_state, AgentType.PATHOLOGY)
         if cached is not None:

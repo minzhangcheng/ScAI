@@ -1,22 +1,32 @@
 """
 Pathology Agent - Analyzes histology images
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable, Awaitable
 import json
 import logging
 import os
 
 from .base import BaseAgent
+from ..constants import LlmFailureAction
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, DataFile
 )
 from ..utils.image_utils import (
     process_pathology_image, create_overview_image, load_image
 )
-from ..utils.llm_client import OpenAICompatibleClient
+from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
+
+
+class _ImageSkipRequested(Exception):
+    """Internal sentinel: user chose to skip the current pathology image at the
+    LLM-failure HITL gate. Caught by process() to skip only this image."""
+    def __init__(self, image_label: str, last_error: Optional[BaseException] = None):
+        self.image_label = image_label
+        self.last_error = last_error
+        super().__init__(f"Pathology image skipped by user: {image_label}")
 
 
 class PathologyAgent(BaseAgent):
@@ -42,6 +52,14 @@ class PathologyAgent(BaseAgent):
         )
         self.tile_size = tile_size
         self.max_tiles = max_tiles
+        # HITL callback invoked when an LLM vision/chat call is exhausted
+        # (UpstreamExhaustedError). Signature:
+        #   async (error: UpstreamExhaustedError, image_label: str) -> LlmFailureAction
+        # When unset, the agent preserves the legacy behaviour of skipping the
+        # failed image silently (handled by process()).
+        self.llm_intervention_callback: Optional[
+            Callable[[UpstreamExhaustedError, str], Awaitable[LlmFailureAction]]
+        ] = None
         
     async def process(
         self,
@@ -74,7 +92,26 @@ class PathologyAgent(BaseAgent):
                 all_findings.extend(result.get("findings", []))
                 detailed_results.append(result)
                 logger.info(f"[PathologyAgent] Image {i+1} analysis complete: {len(result.get('findings', []))} findings")
+            except _ImageSkipRequested as skip:
+                # User chose SKIP at the LLM-failure HITL gate: drop just this
+                # image and continue with the rest. The user was already notified
+                # via the intervention dialog, so this is no longer a silent skip.
+                logger.warning(
+                    f"[PathologyAgent] Image {img_info.filename} skipped by user "
+                    f"after LLM failure"
+                )
+                detailed_results.append({
+                    "image_id": img_info.id,
+                    "error": f"Skipped by user after LLM failure: {skip.last_error}",
+                    "skipped": True,
+                    "findings": []
+                })
             except Exception as e:
+                # WorkflowTerminatedError (user chose TERMINATE) is a subclass of
+                # RuntimeError — let it propagate so the workflow aborts.
+                from ..workflow.helpers import WorkflowTerminatedError
+                if isinstance(e, WorkflowTerminatedError):
+                    raise
                 logger.exception(f"[PathologyAgent] Failed to analyze image {img_info.filename}")
                 detailed_results.append({
                     "image_id": img_info.id,
@@ -106,6 +143,55 @@ class PathologyAgent(BaseAgent):
             "images_analyzed": len(images_to_analyze)
         }
     
+    async def _call_llm_with_hitl(
+        self,
+        call_factory: Callable[[], Awaitable[Any]],
+        image_label: str,
+        step_label: str,
+    ) -> Any:
+        """Run a single LLM vision/chat call with LLM-failure HITL.
+
+        On UpstreamExhaustedError (the LLM client already exhausted its own
+        retries), pause and ask the user what to do:
+          - RETRY     → re-attempt only this one LLM call
+          - SKIP      → skip the whole current image (raise _ImageSkipRequested)
+          - TERMINATE → abort the analysis (raise WorkflowTerminatedError)
+
+        When no intervention callback is wired, the error propagates unchanged so
+        the per-image handler in process() skips the image (legacy behaviour).
+        """
+        while True:
+            try:
+                return await call_factory()
+            except UpstreamExhaustedError as e:
+                if self.llm_intervention_callback is None:
+                    # No HITL wired — let process() handle as a per-image failure.
+                    raise
+                logger.warning(
+                    f"[PathologyAgent] LLM exhausted at '{step_label}' for "
+                    f"{image_label}; awaiting user intervention"
+                )
+                action = await self.llm_intervention_callback(e, image_label)
+                if action == LlmFailureAction.RETRY:
+                    logger.info(
+                        f"[PathologyAgent] User chose RETRY for '{step_label}' "
+                        f"({image_label})"
+                    )
+                    continue
+                if action == LlmFailureAction.TERMINATE:
+                    # Lazy import avoids circular import (workflow imports agents).
+                    from ..workflow.helpers import WorkflowTerminatedError
+                    raise WorkflowTerminatedError(
+                        f"User terminated analysis at pathology '{step_label}' "
+                        f"after LLM failure"
+                    ) from e
+                # SKIP (or any other action) → skip just this image
+                logger.info(
+                    f"[PathologyAgent] User chose SKIP for {image_label} "
+                    f"(at '{step_label}')"
+                )
+                raise _ImageSkipRequested(image_label, last_error=e) from e
+
     async def _analyze_image(
         self,
         image_info: DataFile,
@@ -185,12 +271,16 @@ Please reply in JSON format:
 }}
 """
             
-            overview_result = await self.llm_client.chat_with_vision(
-                model=self.model,
-                text_prompt=overview_prompt,
-                images=[overview],
-                temperature=0.3,
-                request_timeout=180.0  # 3 min for single overview image
+            overview_result = await self._call_llm_with_hitl(
+                lambda: self.llm_client.chat_with_vision(
+                    model=self.model,
+                    text_prompt=overview_prompt,
+                    images=[overview],
+                    temperature=0.3,
+                    request_timeout=180.0  # 3 min for single overview image
+                ),
+                image_label=image_info.filename,
+                step_label="overview analysis",
             )
             
             # Parse overview result (handle None)
@@ -238,12 +328,16 @@ Be concise but thorough for each tile.
                 
                 # Dynamic timeout: 120s base + 30s per image
                 batch_timeout = 120.0 + 30.0 * len(batch_tiles)
-                batch_result = await self.llm_client.chat_with_vision(
-                    model=self.model,
-                    text_prompt=batch_prompt,
-                    images=batch_tiles,
-                    temperature=0.3,
-                    request_timeout=batch_timeout
+                batch_result = await self._call_llm_with_hitl(
+                    lambda bt=batch_prompt, imgs=batch_tiles, to=batch_timeout: self.llm_client.chat_with_vision(
+                        model=self.model,
+                        text_prompt=bt,
+                        images=imgs,
+                        temperature=0.3,
+                        request_timeout=to
+                    ),
+                    image_label=image_info.filename,
+                    step_label=f"tile batch {batch_idx + 1}/{num_batches}",
                 )
                 
                 # Parse batch results (handle None)
@@ -295,7 +389,11 @@ Reply in JSON format:
 }}
 """
             
-            combined_result = await self.chat(combined_prompt, temperature=0.3)
+            combined_result = await self._call_llm_with_hitl(
+                lambda: self.chat(combined_prompt, temperature=0.3),
+                image_label=image_info.filename,
+                step_label="findings synthesis",
+            )
             final_data = self._safe_parse_json(combined_result, default={"raw_response": combined_result}, agent_label="PathologyAgent")
             
             logger.info(f"[PathologyAgent] Image analysis complete: {len(final_data.get('findings', []))} findings")
