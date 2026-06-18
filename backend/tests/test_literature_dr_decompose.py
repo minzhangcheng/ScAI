@@ -30,9 +30,12 @@ class _LitAgent:
         self.calls = []
 
     async def process(self, state, topic, **kwargs):
-        self.calls.append(topic)
-        return {"findings": [f"finding for {topic[:30]}"], "report": f"report {topic[:30]}",
-                "search_mode": "deep_research"}
+        self.calls.append({"topic": topic, "kwargs": kwargs})
+        return {
+            "findings": [f"finding for {topic[:30]}"],
+            "report": f"report {topic[:30]}",
+            "search_mode": "deep_research",
+        }
 
     async def chat_without_history(self, prompt, temperature=0.2):
         """Simulate full coverage — no gaps."""
@@ -52,13 +55,19 @@ class _LitAgent:
 
 
 class _PIAgent:
-    def __init__(self, plan):
+    def __init__(self, plan, brief="ROUND BRIEF"):
         self._plan = plan
+        self._brief = brief
         self.called = False
+        self.brief_calls = []
 
     async def plan_deep_research_tasks(self, **kwargs):
         self.called = True
         return self._plan
+
+    async def generate_round_research_brief(self, **kwargs):
+        self.brief_calls.append(kwargs)
+        return self._brief
 
 
 def _state():
@@ -79,9 +88,9 @@ async def test_decompose_runs_one_call_per_task():
     # one DR call per decomposed task (3 tasks → 3 calls)
     assert len(lit.calls) == 3
     # Each call should contain the task text (prefixed by species)
-    assert "TA" in lit.calls[0]
-    assert "TB" in lit.calls[1]
-    assert "TC" in lit.calls[2]
+    assert "TA" in lit.calls[0]["topic"]
+    assert "TB" in lit.calls[1]["topic"]
+    assert "TC" in lit.calls[2]["topic"]
     # Combined findings should contain all 3
     assert len(out["literature_result"]["findings"]) == 3
 
@@ -100,7 +109,7 @@ async def test_no_decompose_merges_into_single_call():
     # merged path -> exactly one DR call (chat_without_history returns "[]"
     # so _evaluate_dr_coverage finds no gaps)
     assert len(lit.calls) == 1
-    assert "comprehensive literature review" in lit.calls[0]
+    assert "comprehensive literature review" in lit.calls[0]["topic"]
 
 
 @pytest.mark.asyncio
@@ -120,5 +129,67 @@ async def test_gemini_mode_short_circuits_to_merged():
     out = await host._literature_research(state)
     assert pi.called is False                # PI decomposition short-circuited
     assert len(lit.calls) == 1               # single merged DR call
-    assert "comprehensive literature review" in lit.calls[0]
+    assert "comprehensive literature review" in lit.calls[0]["topic"]
     assert out["literature_result"]["findings"]
+
+
+@pytest.mark.asyncio
+async def test_decomposed_round_passes_pi_research_brief():
+    lit = _LitAgent()
+    pi = _PIAgent({"decompose": True, "tasks": ["TA", "TB"]}, brief="ROUND BRIEF")
+    host = _Host(lit, pi)
+    state = {
+        "analysis_state": _state(),
+        "current_instructions": {"literature_topics": ["x"], "overview": ""},
+        "pi_instructions": {"literature_topics": ["x"], "overview": ""},
+    }
+
+    await host._literature_research(state)
+
+    assert [c["kwargs"].get("research_brief") for c in lit.calls] == ["ROUND BRIEF", "ROUND BRIEF"]
+    assert len(pi.brief_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_merged_round_passes_pi_research_brief():
+    lit = _LitAgent()
+    pi = _PIAgent({"decompose": False, "tasks": ["x", "y"]}, brief="MERGED BRIEF")
+    host = _Host(lit, pi)
+    state = {
+        "analysis_state": _state(),
+        "current_instructions": {"literature_topics": ["x", "y"], "overview": ""},
+        "pi_instructions": {"literature_topics": ["x", "y"], "overview": ""},
+    }
+
+    await host._literature_research(state)
+
+    assert len(lit.calls) == 1
+    assert lit.calls[0]["kwargs"].get("research_brief") == "MERGED BRIEF"
+    assert len(pi.brief_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_round_brief_empty_uses_safe_topic_without_previous_context():
+    class _PreviousContextHost(_Host):
+        def _build_previous_findings_context(self, state, who):
+            return "PREVIOUS LITERATURE CONTEXT SHOULD NOT FALL BACK"
+
+    lit = _LitAgent()
+    pi = _PIAgent(
+        {"decompose": True, "tasks": ["focused macrophage topic", "second topic"]},
+        brief="   ",
+    )
+    host = _PreviousContextHost(lit, pi)
+    state = {
+        "analysis_state": _state(),
+        "current_instructions": {"literature_topics": ["x"], "overview": ""},
+        "pi_instructions": {"literature_topics": ["x"], "overview": ""},
+    }
+
+    await host._literature_research(state)
+
+    assert lit.calls[0]["kwargs"].get("research_brief") is None
+    assert "focused macrophage topic" in lit.calls[0]["topic"]
+    assert "PREVIOUS LITERATURE CONTEXT" not in lit.calls[0]["topic"]
+    assert "Focus on aspects NOT already covered" not in lit.calls[0]["topic"]
+    assert "PREVIOUS LITERATURE CONTEXT" in pi.brief_calls[0]["topic"]

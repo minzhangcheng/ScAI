@@ -17,6 +17,25 @@ class WorkflowTerminatedError(RuntimeError):
     pass
 
 
+async def safe_pi_brief(make_awaitable, session_id: str, label: str) -> Optional[str]:
+    """Run a PI brief factory, returning a stripped brief or None.
+
+    ``make_awaitable`` is a zero-arg callable that produces the PI brief
+    coroutine; it is invoked inside the try so that even attribute/lookup errors
+    on the PI agent degrade gracefully. Centralizes the brief-fallback contract
+    shared by the annotation and research-round wiring: any empty/whitespace
+    output or exception yields None so the caller falls back to the focused topic
+    (never the old injection).
+    """
+    try:
+        brief = await make_awaitable()
+        brief = (brief or "").strip()
+        return brief or None
+    except Exception as e:
+        logger.warning(f"[{session_id}] {label} brief generation failed: {e}")
+        return None
+
+
 async def wait_with_skip_time(
     event: asyncio.Event,
     wait_seconds: int,

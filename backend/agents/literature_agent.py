@@ -51,6 +51,17 @@ class LiteratureAgent(BaseAgent):
     - Gemini Deep Research → PubMed + LLM → quick_search (LLM knowledge only)
     """
 
+    # Citation-format footer for the deep_research-LLM prompt. This text is a
+    # load-bearing contract with _extract_references_from_text's regex — keep it
+    # verbatim. PI-authored briefs never include citation-format directives.
+    _DEEP_RESEARCH_CITATION_FOOTER = (
+        "IMPORTANT - Citation format:\n"
+        "For each cited paper, provide a reference list at the end in this exact format:\n"
+        "[N] Author et al. (Year). Title. Journal. URL_or_DOI\n"
+        "Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. "
+        "Nature. https://doi.org/10.1038/xxx"
+    )
+
     def __init__(
         self,
         settings_provider: 'AgentSettingsProvider',
@@ -144,6 +155,7 @@ class LiteratureAgent(BaseAgent):
         topic = kwargs.get("topic", instruction)
         use_deep_research = kwargs.get("use_deep_research", True)
         current_round_findings = kwargs.get("current_round_findings", None)
+        research_brief = kwargs.get("research_brief")
 
         logger.info(
             f"[Literature] Processing topic: {topic[:100]}... "
@@ -151,7 +163,7 @@ class LiteratureAgent(BaseAgent):
         )
 
         if use_deep_research:
-            return await self._do_research(topic, state, current_round_findings=current_round_findings, mode_override=mode_override)
+            return await self._do_research(topic, state, current_round_findings=current_round_findings, mode_override=mode_override, research_brief=research_brief)
         else:
             return await self._quick_search(topic, state)
 
@@ -165,7 +177,8 @@ class LiteratureAgent(BaseAgent):
         state: Optional[AnalysisState] = None,
         pubmed_max_results: Optional[int] = None,
         current_round_findings: Optional[List[str]] = None,
-        mode_override: Optional[str] = None
+        mode_override: Optional[str] = None,
+        research_brief: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Route to configured research mode with fallback chain.
@@ -184,9 +197,9 @@ class LiteratureAgent(BaseAgent):
 
         try:
             if mode == "deep_research":
-                result = await self._deep_research_via_chat(topic, state, current_round_findings=current_round_findings)
+                result = await self._deep_research_via_chat(topic, state, research_brief=research_brief)
             elif mode == "gemini_deep_research":
-                result = await self._multi_round_gemini(topic, state)
+                result = await self._multi_round_gemini(topic, state, research_brief=research_brief)
             elif mode == "pubmed_llm":
                 result = await self._multi_round_pubmed(
                     topic, state, pubmed_max_results=pubmed_max_results,
@@ -227,7 +240,8 @@ class LiteratureAgent(BaseAgent):
     async def _multi_round_gemini(
         self,
         topic: str,
-        state: Optional[AnalysisState] = None
+        state: Optional[AnalysisState] = None,
+        research_brief: Optional[str] = None
     ) -> Dict[str, Any]:
         """Single Gemini Deep Research call via Google Interactions API.
 
@@ -238,7 +252,7 @@ class LiteratureAgent(BaseAgent):
         if not self._deep_research:
             raise ValueError("Google API Key not configured for Gemini Deep Research")
 
-        query = self._build_research_query(topic, state)
+        query = research_brief if research_brief else topic
         logger.info(f"[Literature] Gemini Deep Research: {query[:200]}")
 
         result = await self._deep_research.research(query)
@@ -260,7 +274,7 @@ class LiteratureAgent(BaseAgent):
         self,
         topic: str,
         state: Optional[AnalysisState] = None,
-        current_round_findings: Optional[List[str]] = None
+        research_brief: Optional[str] = None
     ) -> Dict[str, Any]:
         """Deep research via OpenRouter chat API (OpenAI o4, Perplexity sonar, etc.).
 
@@ -270,38 +284,15 @@ class LiteratureAgent(BaseAgent):
         if not self.deep_research_model:
             raise ValueError("deep_research_model not configured for deep_research mode")
 
-        ctx = self._build_research_context(topic, state, current_round_findings=current_round_findings)
+        if research_brief:
+            body = research_brief
+        else:
+            body = (
+                "Conduct a literature review on the following topic.\n\n"
+                f"Research topic: {topic}"
+            )
 
-        # Build optional context sections
-        extra_sections = []
-        if ctx["treatment_groups"]:
-            extra_sections.append(f"Treatment groups: {', '.join(ctx['treatment_groups'])}")
-        if ctx["biochemistry_indicators"]:
-            extra_sections.append(f"Biochemistry indicators: {', '.join(ctx['biochemistry_indicators'][:8])}")
-        if ctx["previous_findings"]:
-            extra_sections.append(f"Previous analysis findings:\n{ctx['previous_findings'][:500]}")
-        if ctx["current_round_findings"]:
-            extra_sections.append(f"Current round findings:\n{ctx['current_round_findings'][:300]}")
-        extra_block = "\n\n".join(extra_sections)
-
-        prompt = f"""Conduct a comprehensive biomedical literature review on the following topic.
-
-Research topic: {topic}
-
-Experimental background:
-{ctx["initial_instruction"][:500] if ctx["initial_instruction"] else "Not available."}
-
-{extra_block}
-
-Please provide:
-1. A comprehensive review covering key findings, molecular mechanisms, and clinical relevance
-2. Current research consensus and major unresolved questions
-3. Implications for the experimental context described above
-
-IMPORTANT - Citation format:
-For each cited paper, provide a reference list at the end in this exact format:
-[N] Author et al. (Year). Title. Journal. URL_or_DOI
-Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. Nature. https://doi.org/10.1038/xxx"""
+        prompt = f"{body}\n\n{self._DEEP_RESEARCH_CITATION_FOOTER}"
 
         logger.info(
             f"[Literature] Deep Research via {self.deep_research_model}: "
@@ -1071,17 +1062,6 @@ Note: If you are not certain about specific citation information, please clearly
 
         return context
 
-    def _build_research_query(
-        self,
-        topic: str,
-        state: Optional[AnalysisState] = None
-    ) -> str:
-        """Build a plain-text research query string (backward compatible)."""
-        parts = [topic]
-        if state and state.initial_instruction:
-            parts.append(state.initial_instruction[:200])
-        return " ".join(parts)
-
     async def _extract_findings(self, report: str) -> List[str]:
         """Extract key findings from a literature report."""
         prompt = f"""
@@ -1163,6 +1143,7 @@ Please return in JSON format:
         pi_initial_query: Optional[str] = None,
         pi_evaluate_fn: Optional[Callable] = None,
         skip_matching: bool = False,
+        pi_research_brief: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Two-phase cluster annotation: one literature search + LLM matching.
@@ -1247,7 +1228,7 @@ Please return in JSON format:
             # Default: Literature Agent handles everything (original behavior)
             # Also used for deep_research/gemini modes where PI query guidance doesn't apply
             research_result = await self._do_research(
-                topic, state, pubmed_max_results=50
+                topic, state, pubmed_max_results=50, research_brief=pi_research_brief
             )
 
         literature_report = research_result.get("report", "")

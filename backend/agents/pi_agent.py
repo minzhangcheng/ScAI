@@ -1,7 +1,7 @@
 """
 PI Agent - Principal Investigator that coordinates all agents
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import asyncio
 import json
 import re
@@ -820,6 +820,42 @@ Respond in JSON:
         
         return result
 
+    # Shared "Rules:" footer for PI-authored Deep Research briefs. The
+    # citation-format directive is intentionally excluded — the Literature Agent
+    # appends its own (parser-coupled) footer.
+    _BRIEF_RULES = (
+        "Rules:\n"
+        "- Write the brief as direct instructions to a deep-research agent (what to search and synthesize).\n"
+        "- Do NOT include any citation or reference-format instructions.\n"
+        "- Do NOT quote or restate the full experimental background."
+    )
+
+    @staticmethod
+    def _summarize_cluster_markers(
+        cluster_markers: Dict[str, List[str]]
+    ) -> Tuple[str, int, str]:
+        """Sample marker genes across clusters → (gene_sample, n_clusters, markers_summary)."""
+        all_genes: set = set()
+        for genes in cluster_markers.values():
+            all_genes.update(genes[:10])
+        gene_sample = ", ".join(list(all_genes)[:20])
+        n_clusters = len(cluster_markers)
+        markers_summary = "\n".join(
+            f"  Cluster {cid}: {', '.join(genes[:8])}"
+            for cid, genes in list(cluster_markers.items())[:15]
+        )
+        return gene_sample, n_clusters, markers_summary
+
+    @staticmethod
+    def _brief_background_block(state: Optional[AnalysisState]) -> str:
+        """Background section for a PI brief: experimental goal as reference only ('' if none)."""
+        if state and getattr(state, "initial_instruction", ""):
+            return (
+                "\n\nBackground (reference only — decide what is relevant, do NOT "
+                f"copy verbatim):\n{state.initial_instruction[:500]}"
+            )
+        return ""
+
     async def generate_annotation_search_query(
         self,
         cluster_markers: Dict[str, List[str]],
@@ -834,19 +870,7 @@ Respond in JSON:
         """
         logger.info(f"[PI] Generating annotation search query for {organism} {tissue}")
 
-        # Sample top genes across clusters (same logic as literature_agent.annotate_clusters)
-        all_genes: set = set()
-        for genes in cluster_markers.values():
-            all_genes.update(genes[:10])
-        gene_sample = ", ".join(list(all_genes)[:20])
-
-        n_clusters = len(cluster_markers)
-
-        # Build cluster markers summary for context
-        markers_summary = "\n".join(
-            f"  Cluster {cid}: {', '.join(genes[:8])}"
-            for cid, genes in list(cluster_markers.items())[:15]
-        )
+        gene_sample, n_clusters, markers_summary = self._summarize_cluster_markers(cluster_markers)
 
         # Experimental background from state
         background = ""
@@ -888,6 +912,81 @@ Return ONLY the PubMed query string, nothing else."""
         query = re.sub(r'^```\w*\n?', '', query)
         query = re.sub(r'\n?```$', '', query)
         return query.strip()
+
+    async def generate_annotation_research_brief(
+        self,
+        cluster_markers: Dict[str, List[str]],
+        organism: str,
+        tissue: str,
+        state: Optional[AnalysisState] = None,
+    ) -> str:
+        """Write a FOCUSED Deep Research brief for cell-type annotation.
+
+        Produces prose instructions for the deep-research model, using the
+        experimental background as reference only (no injection). Returns the
+        stripped brief; an empty string signals the caller to fall back.
+        """
+        gene_sample, n_clusters, markers_summary = self._summarize_cluster_markers(cluster_markers)
+        background = self._brief_background_block(state)
+
+        prompt = f"""You are a principal investigator writing a Deep Research brief to identify cell types
+in a single-cell RNA sequencing dataset.
+
+Organism: {organism}
+Tissue: {tissue}
+Number of clusters: {n_clusters}
+Key marker genes across clusters: {gene_sample}
+
+Cluster marker genes (top genes per cluster):
+{markers_summary}{background}
+
+This is a cell-type annotation task. Decide the search scope, then write a FOCUSED Deep Research
+brief about marker genes and cell-type signatures for {organism} {tissue} that will help map these
+clusters to known cell types. Do NOT expand into disease mechanisms, treatments, or
+experimental-group comparisons unless a specific marker directly requires it.
+
+{self._BRIEF_RULES}
+
+Return ONLY the research brief text."""
+
+        response = await self.chat_without_history(prompt, temperature=0.3)
+        return (response or "").strip()
+
+    async def generate_round_research_brief(
+        self,
+        topic: str,
+        current_round_findings: Optional[List[str]] = None,
+        state: Optional[AnalysisState] = None,
+    ) -> str:
+        """Write a Deep Research brief for a regular research round.
+
+        PI judges breadth (broad survey vs focused deep-dive) from the topic and
+        findings, drawing on experimental background only where relevant. Returns
+        the stripped brief; an empty string signals the caller to fall back.
+        """
+        findings_block = ""
+        if current_round_findings:
+            joined = "; ".join(current_round_findings[:5])
+            findings_block = f"\n\nFindings so far this round:\n{joined}"
+
+        background = self._brief_background_block(state)
+
+        prompt = f"""You are a principal investigator writing a Deep Research brief for a biomedical
+literature review.
+
+Research direction (topic):
+{topic}{findings_block}{background}
+
+Given the research direction and the findings so far, judge whether this needs a broad survey or a
+focused deep-dive, then write the Deep Research brief accordingly. Draw on the experimental
+background only where it is directly relevant to the topic.
+
+{self._BRIEF_RULES}
+
+Return ONLY the research brief text."""
+
+        response = await self.chat_without_history(prompt, temperature=0.3)
+        return (response or "").strip()
 
     async def evaluate_annotation_search_results(
         self,

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
-from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, STAGE1_KEYWORDS
+from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
 from .retry import with_retry
 
 if TYPE_CHECKING:
@@ -857,6 +857,37 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 labels.append(label)
         return ", ".join(labels)
 
+    async def _generate_round_brief(self, topic, current_round_findings, state):
+        """Ask PI for a research-round Deep Research brief (None on failure/empty)."""
+        return await safe_pi_brief(
+            lambda: self.pi_agent.generate_round_research_brief(
+                topic=topic,
+                current_round_findings=current_round_findings,
+                state=state,
+            ),
+            self.session_id,
+            "round",
+        )
+
+    def _safe_literature_fallback_topic(self, topic: str, species: str = "") -> str:
+        """Focused topic safe to send directly to deep research when PI brief is unavailable."""
+        return prepend_species(topic, species)
+
+    def _round_brief_topic_context(
+        self,
+        topic: str,
+        species: str,
+        previous_lit_context: str,
+    ) -> str:
+        """Richer PI-only context for authoring a round research brief."""
+        enriched = topic
+        if previous_lit_context:
+            enriched = (
+                f"{topic}\n{previous_lit_context}\n"
+                f"Focus on aspects NOT already covered above."
+            )
+        return prepend_species(enriched, species)
+
     @with_retry("literature_research")
     async def _literature_research(self, state: WorkflowState) -> WorkflowState:
         """Literature agent researches relevant topics.
@@ -990,32 +1021,42 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                         f"Deep Research sub-task {i}/{len(dr_tasks)} in progress...",
                         AgentType.LITERATURE,
                     )
-                    enriched = dr_task
-                    if previous_lit_context:
-                        enriched = (
-                            f"{dr_task}\n{previous_lit_context}\n"
-                            f"Focus on aspects NOT already covered above."
-                        )
-                    enriched = prepend_species(enriched, analysis_state.species)
+                    fallback_topic = self._safe_literature_fallback_topic(
+                        dr_task, analysis_state.species
+                    )
+                    brief_topic = self._round_brief_topic_context(
+                        dr_task, analysis_state.species, previous_lit_context
+                    )
+                    sub_brief = await self._generate_round_brief(
+                        brief_topic, current_round_findings, analysis_state
+                    )
                     r = await self.literature_agent.process(
-                        analysis_state, enriched, use_deep_research=True,
+                        analysis_state, fallback_topic, use_deep_research=True,
                         current_round_findings=current_round_findings,
+                        research_brief=sub_brief,
                     )
                     results.append(r)
             else:
                 # === Legacy merged DR: one call + PubMed gap fill ===
-                merged_topic = "Please conduct a comprehensive literature review covering the following aspects:\n"
+                merged_base_topic = "Please conduct a comprehensive literature review covering the following aspects:\n"
                 for i, t in enumerate(limited_topics, 1):
-                    merged_topic += f"{i}. {t}\n"
-                if previous_lit_context:
-                    merged_topic += f"\n{previous_lit_context}\nFocus on aspects NOT already covered above."
+                    merged_base_topic += f"{i}. {t}\n"
 
-                merged_topic = prepend_species(merged_topic, analysis_state.species)
+                merged_fallback_topic = self._safe_literature_fallback_topic(
+                    merged_base_topic, analysis_state.species
+                )
+                merged_brief_topic = self._round_brief_topic_context(
+                    merged_base_topic, analysis_state.species, previous_lit_context
+                )
 
                 logger.info(f"[{self.session_id}] Deep Research mode: merging {len(limited_topics)} topics into one query")
+                merged_brief = await self._generate_round_brief(
+                    merged_brief_topic, current_round_findings, analysis_state
+                )
                 dr_result = await self.literature_agent.process(
-                    analysis_state, merged_topic, use_deep_research=True,
-                    current_round_findings=current_round_findings
+                    analysis_state, merged_fallback_topic, use_deep_research=True,
+                    current_round_findings=current_round_findings,
+                    research_brief=merged_brief,
                 )
                 results = [dr_result]
 

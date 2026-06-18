@@ -6,7 +6,7 @@ from ..models.schemas import (
     AgentType, AnalysisState, AnnotationConfirmationState,
     ClusterAnnotation, TaskStatus,
 )
-from .helpers import wait_with_skip_time
+from .helpers import safe_pi_brief, wait_with_skip_time
 
 if TYPE_CHECKING:
     from .state import WorkflowState
@@ -99,6 +99,19 @@ class AnnotationMixin:
             for cid, info in annotations.items()
             if isinstance(info, dict)
         ]
+
+    async def _generate_annotation_brief(self, cluster_markers, organism, tissue, state):
+        """Ask PI for a focused annotation Deep Research brief (None on failure/empty)."""
+        return await safe_pi_brief(
+            lambda: self.pi_agent.generate_annotation_research_brief(
+                cluster_markers=cluster_markers,
+                organism=organism,
+                tissue=tissue,
+                state=state,
+            ),
+            self.session_id,
+            "annotation",
+        )
 
     async def _annotate_clusters_callback(
         self,
@@ -196,6 +209,14 @@ class AnnotationMixin:
                 AgentType.LITERATURE
             )
 
+        # For deep-research modes, PI authors a focused annotation brief
+        # (None → annotate_clusters falls back to its self-built focused topic).
+        annotation_brief = None
+        if lit_mode in ("gemini_deep_research", "deep_research"):
+            annotation_brief = await self._generate_annotation_brief(
+                cluster_markers, organism, tissue, state
+            )
+
         # Step 1: Literature Agent executes search
         try:
             if pi_search_guided:
@@ -222,6 +243,7 @@ class AnnotationMixin:
                     tissue=tissue,
                     state=state,
                     skip_matching=True,
+                    pi_research_brief=annotation_brief,
                 )
         except Exception as e:
             error_msg = f"Cluster annotation failed: {str(e)}"
@@ -257,6 +279,7 @@ class AnnotationMixin:
                         organism=organism,
                         tissue=tissue,
                         state=state,
+                        pi_research_brief=annotation_brief,
                     )
                 except Exception as e2:
                     logger.error(f"[{self.session_id}] Literature fallback also failed: {e2}")

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.5 · **Last updated**: 2026-06-18
+**Version**: 0.27.6 · **Last updated**: 2026-06-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,13 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.6` — PI-generated Deep Research briefs, zero direct context injection (2026-06-18):
+  - **PI-authored research briefs**: Two new `PIAgent` methods — `generate_annotation_research_brief()` (focused marker-driven brief for cell-type annotation) and `generate_round_research_brief()` (breadth-judging brief for regular research rounds). Both present experimental background as "reference only" — PI decides relevance instead of mechanical concatenation. Shared `_summarize_cluster_markers()` and `_brief_background_block()` helpers. `_BRIEF_RULES` footer prohibits citation-format directives (the Literature Agent appends its own parser-coupled footer).
+  - **Literature Agent consumption**: `research_brief` parameter threaded through `process()` → `_do_research()` → `_multi_round_gemini()` / `_deep_research_via_chat()`. When brief is present, it replaces the old injected-context prompt body verbatim (Gemini: `query = brief`; DR-LLM: `body = brief` + citation footer). When absent (PI failure/empty), falls back to the focused topic — never reverts to the old injection behavior. `_deep_research_via_chat()` removes the hardcoded experimental-context template. `_build_research_query()` deleted. New `_DEEP_RESEARCH_CITATION_FOOTER` constant preserves the load-bearing parser contract.
+  - **Workflow wiring**: `annotation.py` generates per-mode briefs for `deep_research`/`gemini_deep_research` modes and passes `pi_research_brief` to `annotate_clusters()`. `agents.py` generates per-sub-task and merged round briefs passed as `research_brief` to `literature_agent.process()`. Both use `safe_pi_brief()` from `helpers.py` — wraps brief factory with try/except + empty→None fallback.
+  - **Deleted design spec**: `docs/superpowers/specs/2026-06-18-pi-generated-research-prompts-design.md` (implemented and superseded).
+  - **3+1 new/updated test files**: `test_pi_research_briefs.py` (annotation/round brief content, background reference-only, whitespace), `test_research_brief_threading.py` (DR-LLM brief+footer, Gemini brief, fallback no-injection), `test_brief_wiring_helpers.py` (brief→None on empty/exception), `test_literature_dr_decompose.py` extended (brief threading through decomposed/merged calls, empty brief fallback).
 
 - `0.27.5` — Deep Research citation URL resolution & title backfill, concurrency-safe enrichment (2026-06-18):
   - **Vertex grounding redirect resolution**: `_resolve_redirect()` reads the `Location` header from 302 responses for `grounding-api-redirect` URLs, returning the real article URL. Handles relative `Location` headers, non-redirect responses, and network errors gracefully (falls back to original URL). Time-sensitive expired redirect links degrade safely.
