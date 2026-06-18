@@ -13,8 +13,14 @@ class _Harness(AgentNodesMixin, PlanningMixin):
     def __init__(self):
         self.session_id = "t"
         self.pi_agent = MagicMock()
+        self.pi_agent.infer_species = AsyncMock(return_value={
+            "confidence": "high",
+            "species": "mouse",
+            "reasoning": "test inference",
+        })
         self.pi_agent.reset_history = MagicMock()
         self._send_message = AsyncMock()
+        self._send_state_sync = AsyncMock()
 
     async def call_pi_planning(self, state):
         fn = getattr(self._pi_planning, "__wrapped__", self._pi_planning)

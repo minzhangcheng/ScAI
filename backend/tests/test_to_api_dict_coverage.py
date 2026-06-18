@@ -28,6 +28,7 @@ _EXCLUDED_FIELDS = {
     "code_history",
     "analysis_log",
     "literature_reports",
+    "literature_actual_model",
     "sandbox_state",
     "config_snapshot",
     "pending_human_input",
