@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.3 · **Last updated**: 2026-06-18
+**Version**: 0.27.4 · **Last updated**: 2026-06-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,20 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.4` — Exploration-failed HITL dialog, sandbox exec lock, phase instruction refactoring, gate skip notes (2026-06-18):
+  - **Exploration-failed user dialog**: When Stage 1 (QC/clustering/annotation) does not complete, the workflow sends an `exploration_failed` WebSocket message with a stable `reason` code and surfaces an actionable dialog (`ExplorationFailedDialog`) with three options: "Go to Data Panel" (review/re-upload data), "Continue" (retry Stage 1), or "Stop Analysis". Rather than silently advancing rounds toward `max_rounds`, the system stays in `EXPLORATION` phase — the user must explicitly act. `resolve_round_phase()` in `planning.py` only advances to `INNOVATION` when `exploration_report` exists.
+  - **`classify_exploration_failure()`**: Pure function in `synthesis.py` maps internal bioinformatics result to stable reason codes (`"analysis_error"` or `"did_not_converge"`). The dialog displays localized reason text via new i18n keys (`explorationFailedReason_did_not_converge` / `explorationFailedReason_analysis_error`). Never leaks raw internal status strings to the frontend. Tested in `test_exploration_failure_reason.py`.
+  - **`_check_gate_keyword` escape tracking**: Returns a third `escaped` boolean, True only when a mandatory gate is force-released after max rejections without the analysis actually being performed. `build_gate_skip_note()` appends a `[LIMITATION]` note to findings for each escaped gate (bulk/scRNA cross-validation, deconvolution, innovation bulk validation). `test_escaped_notes_scope.py` guards against `NameError` from nested-scope initialization.
+  - **Sandbox exec lock (`_exec_lock`)**: New `asyncio.Lock` preventing concurrent `execute()` and `save_session()` coroutines from reading the same ZMQ socket simultaneously (which would trigger libzmq abort). `execute()` acquires the lock; internal methods (`_execute_unlocked`) skip it for trusted kernel-init/restore code. `save_session()` now holds the lock while writing.
+  - **Phase instruction extraction**: Inline bioinformatics phase instructions moved from `agents.py` into module-level pure functions for unit-testability. Stage2 now recovers executable tasks from the approved plan rather than defaulting to generic goals.
+  - **STAGE1_KEYWORDS cleanup**: Removed bulk-keyword filter tokens — Stage 1 is strictly QC/clustering/annotation; condition-level DEG belongs to Stage 2.
+  - **Pathology severity score**: `severity_label_to_score()` maps textual severity to canonical 0-4 scale. Overview data enriched with `severity_score`. Agent prompt updated to mention the 0-4 scale. `_summarize_status()` returns `"error"` only when every image failed.
+  - **Shared `save_graphic_abstract_image()`**: New function in `image_utils.py` decodes base64, flattens RGBA/palette modes onto white background, saves JPEG. Supervisor `persist_graphic_abstract()` delegates to this shared helper (removed inline PIL code) and reads base64 directly from `analysis_state.graphic_abstract` instead of a dict pass-through. `services/report/generator.py` also uses it. `test_save_graphic_abstract_image.py` verifies RGBA→RGB JPEG.
+  - **Agent prompts cleanup**: Removed modality-branched workflow constants from `agent_prompts.py`. Added proper painter and technique agent system prompts.
+  - **`with_retry` clears `failed_node`**: On successful execution, sets `result["failed_node"] = None` so stale failure state from previous retries does not persist downstream.
+  - **Context mixin includes literature**: `_collect_current_round_results` and previous-round fallback now include `literature_findings` alongside biochemistry/pathology/bioinformatics findings.
+  - **15 new test files**: `test_agent_prompts_nonempty`, `test_escaped_notes_scope`, `test_exploration_failure_reason`, `test_exploration_retry_guard`, `test_gate_keyword_skip_note`, `test_no_dead_modality_helpers`, `test_pathology_severity_scale`, `test_pathology_soft_failure_status`, `test_planning_context_literature`, `test_retry_clears_failed_node`, `test_sandbox_exec_lock`, `test_save_graphic_abstract_image`, `test_stage1_keyword_filter`, `test_stage2_instruction`, `test_supervisor_report_ga`.
 
 - `0.27.3` — Pathology Agent image-level LLM-failure HITL with per-image skip, terminate propagation (2026-06-18):
   - **Image-level LLM-failure HITL**: New `PathologyAgent._call_llm_with_hitl()` wraps every LLM vision/chat call (`chat_with_vision` for overview, tile batches, and findings synthesis) with an LLM-failure dialog. On `UpstreamExhaustedError`, the user can choose RETRY (re-attempt only the failing call), SKIP (drop only the current image), or TERMINATE (abort the whole analysis).

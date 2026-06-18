@@ -617,6 +617,13 @@ class LocalJupyterSandbox:
         self._session_restore_failed = False  # Track if session restore failed
         self._kernel_dead = False  # Set when kernel restart fails
         self._restarting = False  # reentrancy guard for _restart_kernel
+        self._init_exec_lock()
+
+    def _init_exec_lock(self):
+        """Single lock serializing every coroutine that drives the kernel client
+        sockets (execute + save_session). Two coroutines reading the same ZMQ
+        socket concurrently triggers libzmq abort (see src/msg.cpp warning)."""
+        self._exec_lock = asyncio.Lock()
 
     async def start(self) -> dict:
         """Start the Jupyter kernel
@@ -926,7 +933,7 @@ def check_and_fix_nan(adata, fix=True):
 print(f"Environment initialized with SEED={SEED} for reproducibility")
 print("Helper functions available: get_seed(), check_and_fix_nan(adata)")
 """.replace('__SESSION_ID__', self.session_id)
-        result = await self.execute(init_code, save_to_history=False, skip_safety_check=True)
+        result = await self._execute_unlocked(init_code, save_to_history=False, skip_safety_check=True)
         if result.output:
             logger.debug("Kernel init stdout: %s", result.output[:1000])
 
@@ -1101,7 +1108,7 @@ _pathlib.Path.rmdir = _sandboxed_path_rmdir
 print(f"Working directory set to: {{os.getcwd()}}")
 print(f"I/O sandbox active: writes restricted to session directory")
 """
-        path_result = await self.execute(path_setup_code, save_to_history=False, skip_safety_check=True)
+        path_result = await self._execute_unlocked(path_setup_code, save_to_history=False, skip_safety_check=True)
         if path_result.output:
             logger.debug("Kernel path-setup stdout: %s", path_result.output[:1000])
 
@@ -1146,7 +1153,7 @@ except Exception as e:
     print(f"__SCAI_RESTORE_ERROR__: {{type(e).__name__}}: {{e}}")
     raise
 """
-        result = await self.execute(restore_code, save_to_history=False, skip_safety_check=True)
+        result = await self._execute_unlocked(restore_code, save_to_history=False, skip_safety_check=True)
 
         if result.success and "Session restored:" in (result.output or ""):
             self._session_restored = True
@@ -1182,11 +1189,12 @@ except Exception as e:
         held simultaneously, which previously OOM-killed the kernel and crashed
         the parent backend via libzmq fq.cpp abort).
         """
-        session_path = str(self.notebook_state.session_path.absolute())
-        escaped_path = repr(session_path)
-        logger.info(f"Saving session to {session_path}")
+        async with self._exec_lock:
+            session_path = str(self.notebook_state.session_path.absolute())
+            escaped_path = repr(session_path)
+            logger.info(f"Saving session to {session_path}")
 
-        save_code = f"""
+            save_code = """\
 import dill
 import os
 try:
@@ -1216,7 +1224,7 @@ _skipped_vars = []  # P1-11: report what could not be persisted
 
 # Write to a temp file then atomically replace, so a mid-write crash can't
 # corrupt the only good pkl.
-_tmp_path = {escaped_path} + '.tmp'
+_tmp_path = """ + escaped_path + """ + '.tmp'
 _saved_count = 0
 try:
     with open(_tmp_path, 'wb') as _f:
@@ -1237,7 +1245,7 @@ try:
                     type(_e).__name__,
                     str(_e)[:200],
                 ))
-    os.replace(_tmp_path, {escaped_path})
+    os.replace(_tmp_path, """ + escaped_path + """)
 except Exception:
     try:
         os.remove(_tmp_path)
@@ -1245,46 +1253,46 @@ except Exception:
         pass
     raise
 
-print(f"Session saved: {{_saved_count}} variables")
+print(f"Session saved: {_saved_count} variables")
 if _skipped_vars:
     for _sv in _skipped_vars:
-        print(f"__SCAI_SAVE_SKIPPED__\\t{{_sv[0]}}\\t{{_sv[1]}}\\t{{_sv[2]}}\\t{{_sv[3]}}")
-    print(f"__SCAI_SAVE_SKIPPED_COUNT__: {{len(_skipped_vars)}}")
+        print(f"__SCAI_SAVE_SKIPPED__\\t{_sv[0]}\\t{_sv[1]}\\t{_sv[2]}\\t{_sv[3]}")
+    print(f"__SCAI_SAVE_SKIPPED_COUNT__: {len(_skipped_vars)}")
 """
-        result = await self.execute(save_code, save_to_history=False, skip_safety_check=True)
+            result = await self._execute_unlocked(save_code, save_to_history=False, skip_safety_check=True)
 
-        if result.success:
-            skipped = []
-            for line in (result.output or "").splitlines():
-                if line.startswith("__SCAI_SAVE_SKIPPED__\t"):
-                    parts = line.split("\t")
-                    if len(parts) >= 5:
-                        skipped.append({
-                            "name": parts[1],
-                            "type": parts[2],
-                            "exc": parts[3],
-                            "msg": parts[4],
-                        })
-            if skipped:
-                for sv in skipped:
+            if result.success:
+                skipped = []
+                for line in (result.output or "").splitlines():
+                    if line.startswith("__SCAI_SAVE_SKIPPED__\t"):
+                        parts = line.split("\t")
+                        if len(parts) >= 5:
+                            skipped.append({
+                                "name": parts[1],
+                                "type": parts[2],
+                                "exc": parts[3],
+                                "msg": parts[4],
+                            })
+                if skipped:
+                    for sv in skipped:
+                        logger.warning(
+                            f"[{self.session_id}] save_session: skipping unpicklable "
+                            f"variable '{sv['name']}' ({sv['type']}): "
+                            f"{sv['exc']}: {sv['msg']}"
+                        )
                     logger.warning(
-                        f"[{self.session_id}] save_session: skipping unpicklable "
-                        f"variable '{sv['name']}' ({sv['type']}): "
-                        f"{sv['exc']}: {sv['msg']}"
+                        f"[{self.session_id}] save_session: {len(skipped)} variables were "
+                        f"not persisted and will be unavailable on restore: "
+                        f"{[sv['name'] for sv in skipped]}"
                     )
-                logger.warning(
-                    f"[{self.session_id}] save_session: {len(skipped)} variables were "
-                    f"not persisted and will be unavailable on restore: "
-                    f"{[sv['name'] for sv in skipped]}"
-                )
-                self._last_save_skipped = skipped
+                    self._last_save_skipped = skipped
+                else:
+                    self._last_save_skipped = []
+                logger.info("Session saved successfully")
             else:
-                self._last_save_skipped = []
-            logger.info("Session saved successfully")
-        else:
-            logger.warning(f"Failed to save session: {result.error}")
+                logger.warning(f"Failed to save session: {result.error}")
 
-        return result.success
+            return result.success
 
     async def _restart_kernel(self) -> None:
         """Restart the kernel, then best-effort restore the session.
@@ -1363,6 +1371,25 @@ if _skipped_vars:
         skip_safety_check: bool = False
     ) -> CodeExecutionResult:
         """Execute code in the kernel.
+
+        Args:
+            code: Python code to execute
+            save_to_history: Whether to save successful execution to notebook history
+            skip_safety_check: If True, skip dangerous-pattern validation.
+                Only set this for trusted internal code (e.g. kernel init, session restore).
+        """
+        async with self._exec_lock:
+            return await self._execute_unlocked(
+                code, save_to_history=save_to_history, skip_safety_check=skip_safety_check
+            )
+
+    async def _execute_unlocked(
+        self,
+        code: str,
+        save_to_history: bool = True,
+        skip_safety_check: bool = False
+    ) -> CodeExecutionResult:
+        """Execute code in the kernel (unlocked — caller must hold _exec_lock).
 
         Args:
             code: Python code to execute

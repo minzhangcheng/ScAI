@@ -965,7 +965,9 @@ class WebSocketMessage(BaseModel):
         "supervisor_feedback", "supervisor_checkpoint", "supervisor_summary",
         "snapshot_count",
         # Collaborative planning
-        "plan_review", "plan_approved"
+        "plan_review", "plan_approved",
+        # Exploration failure (likely a data problem) — prompt user to check data
+        "exploration_failed",
     ]
     agent: Optional[AgentType] = None
     content: Any

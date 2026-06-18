@@ -20,6 +20,25 @@ from ..utils.settings_provider import AgentSettingsProvider
 logger = logging.getLogger(__name__)
 
 
+def _summarize_status(detailed_results, all_findings) -> str:
+    """'error' if every image failed (no findings and all carry an error);
+    otherwise 'completed'."""
+    if not detailed_results:
+        return "error"
+    any_success = any(not r.get("error") and r.get("findings") for r in detailed_results)
+    if not any_success and not all_findings:
+        return "error"
+    return "completed"
+
+
+def severity_label_to_score(label: str) -> int:
+    """Map textual severity tiers to the canonical 0-4 numeric scale.
+    normal=0, mild=1, moderate=2, marked=3, severe=4. Unknown -> 0."""
+    return {"normal": 0, "mild": 1, "moderate": 2, "marked": 3, "severe": 4}.get(
+        (label or "").strip().lower(), 0
+    )
+
+
 class _ImageSkipRequested(Exception):
     """Internal sentinel: user chose to skip the current pathology image at the
     LLM-failure HITL gate. Caught by process() to skip only this image."""
@@ -134,14 +153,19 @@ class PathologyAgent(BaseAgent):
         else:
             synthesis = {"summary": "No images were successfully analyzed"}
         
-        return {
-            "status": "completed",
+        status = _summarize_status(detailed_results, all_findings)
+        result = {
+            "status": status,
             "findings": all_findings,
             "detailed_results": detailed_results,
             "synthesis": synthesis,
             "suggested_staining": synthesis.get("suggested_staining", []),
-            "images_analyzed": len(images_to_analyze)
+            "images_analyzed": len(images_to_analyze),
         }
+        if status == "error":
+            errors = [r.get("error") for r in detailed_results if r.get("error")]
+            result["error"] = "; ".join(e for e in errors if e) or "All pathology image analyses failed"
+        return result
     
     async def _call_llm_with_hitl(
         self,
@@ -266,7 +290,7 @@ Please reply in JSON format:
 {{
     "overall_structure": "Overall structure description",
     "regional_changes": "Regional changes description",
-    "severity": "mild/moderate/severe/normal",
+    "severity": "one of: normal | mild | moderate | marked | severe (will be mapped to a 0-4 score)",
     "areas_of_interest": ["Area 1 requiring detailed observation", ...]
 }}
 """
@@ -398,6 +422,15 @@ Reply in JSON format:
             
             logger.info(f"[PathologyAgent] Image analysis complete: {len(final_data.get('findings', []))} findings")
             
+            # Map the overview-level textual severity onto the canonical 0-4
+            # numeric scale so downstream consumers have a single, consistent
+            # scalar. The detailed tile-level severity_score is emitted separately
+            # below (final_data). overview_data keeps the raw LLM "severity" text.
+            if isinstance(overview_data, dict) and "severity_score" not in overview_data:
+                overview_data["severity_score"] = severity_label_to_score(
+                    overview_data.get("severity", "")
+                )
+
             return {
                 "image_id": image_info.id,
                 "image_type": image_info.data_type,

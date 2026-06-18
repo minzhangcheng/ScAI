@@ -67,6 +67,8 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                         await asyncio.sleep(_retry_backoff_delay(attempt))
 
                     result = await func(self, state)
+                    if isinstance(result, dict):
+                        result["failed_node"] = None
                     return result
 
                 except UpstreamExhaustedError as e:

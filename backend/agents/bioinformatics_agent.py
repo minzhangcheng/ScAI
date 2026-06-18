@@ -30,6 +30,14 @@ from ..utils.formatting import format_revision_history, truncate_for_llm
 # Configure logger
 logger = logging.getLogger(__name__)
 
+
+def build_gate_skip_note(gate_label: str) -> str:
+    """Visible note appended to findings when a mandatory gate is released after
+    max rejections without the analysis actually being performed."""
+    return (f"[LIMITATION] The mandatory '{gate_label}' analysis was NOT completed "
+            f"after repeated attempts and was released by the gate. Downstream "
+            f"conclusions should not assume this validation was performed.")
+
 from ..models.schemas import (
     AgentType, AnalysisPhase, AnalysisState, MessageRole, CodeExecution,
     PublicationFigure, FigureReviewStatus, AnalysisStep, PlanStage,
@@ -498,28 +506,27 @@ class BioinformaticsAgent(BaseAgent):
 
     @staticmethod
     def _check_gate_keyword(lowered_codes, keywords, reject_count, max_rejections, gate_label):
-        """Check if any keyword appears in lowered code history.
-
-        Returns (new_reject_count, should_reject).
-        If should_reject is False, the gate passes (keyword found or escape hatch triggered).
+        """Returns (new_reject_count, should_reject, escaped).
+        escaped is True ONLY when the gate is force-released after hitting
+        max_rejections (the mandatory analysis was NOT actually performed).
         """
         code_mentions = any(any(kw in lc for kw in keywords) for lc in lowered_codes)
         if code_mentions:
-            return reject_count, False
+            return reject_count, False, False
 
         if reject_count >= max_rejections:
             logger.warning(
                 f"[Bioinformatics] {gate_label}: max rejections reached, "
                 "allowing report_findings"
             )
-            return reject_count, False
+            return reject_count, False, True
 
         new_count = reject_count + 1
         logger.warning(
             f"[Bioinformatics] report_findings rejected: {gate_label} "
             f"(rejection {new_count}/{max_rejections})"
         )
-        return new_count, True
+        return new_count, True, False
 
     def _validate_code(self, code: str) -> Tuple[bool, str]:
         """
@@ -3039,6 +3046,11 @@ finally:
                     has_bulk_data = state.has_bulk_rnaseq()
                     lowered_codes = [ce.code.lower() for ce in self.code_history if ce.code]
 
+                    # Notes appended when a mandatory gate is released after max
+                    # rejections. Initialized in the common scope so every branch
+                    # (exploration / stage1 / innovation) can read it post-gate.
+                    _escaped_notes = []
+
                     # Gate 0 (mandatory annotate_clusters) always applies in exploration;
                     # Gates 1-3 are Stage 2 tasks, skip in stage1.
                     if state.analysis_phase == AnalysisPhase.EXPLORATION and planning_stage != "stage1":
@@ -3080,7 +3092,7 @@ finally:
 
                         # Gate 2: Bulk/scRNA-seq cross-validation
                         if has_scrna_data and has_bulk_data:
-                            integration_reject_count, rejected = self._check_gate_keyword(
+                            integration_reject_count, rejected, escaped = self._check_gate_keyword(
                                 lowered_codes,
                                 ["venn", "pseudobulk", "overlap", "intersect",
                                  "matplotlib_venn", "venn2", "venn3"],
@@ -3110,10 +3122,12 @@ finally:
                                     findings=[], findings_summary="REJECTED: bulk/scRNA-seq cross-validation not performed",
                                 ))
                                 continue
+                            if escaped:
+                                _escaped_notes.append(build_gate_skip_note("bulk/scRNA-seq cross-validation"))
 
                         # Gate 3: Cell-type deconvolution
                         if has_scrna_data and has_bulk_data:
-                            deconv_reject_count, rejected = self._check_gate_keyword(
+                            deconv_reject_count, rejected, escaped = self._check_gate_keyword(
                                 lowered_codes,
                                 ["deconvolution", "nnls", "scaden", "least_squares"],
                                 deconv_reject_count, MAX_DECONV_REJECTIONS,
@@ -3140,10 +3154,12 @@ finally:
                                     findings=[], findings_summary="REJECTED: cell-type deconvolution not performed",
                                 ))
                                 continue
+                            if escaped:
+                                _escaped_notes.append(build_gate_skip_note("cell-type deconvolution"))
 
                     # Gate 4: INNOVATION-phase bulk direction validation
                     elif state.analysis_phase == AnalysisPhase.INNOVATION and has_bulk_data and has_scrna_data:
-                        innovation_bulk_reject_count, rejected = self._check_gate_keyword(
+                        innovation_bulk_reject_count, rejected, escaped = self._check_gate_keyword(
                             lowered_codes,
                             ["bulk_", "merged_counts"],
                             innovation_bulk_reject_count, MAX_INNOVATION_BULK_REJECTIONS,
@@ -3171,11 +3187,17 @@ finally:
                                 findings_summary="REJECTED: innovation-phase bulk direction validation missing",
                             ))
                             continue
+                        if escaped:
+                            _escaped_notes.append(build_gate_skip_note("innovation-phase bulk direction validation"))
 
                     has_substantive_work = True
                     findings = args.get("findings", [])
                     summary = args.get("summary", "")
                     suggestions = args.get("suggestions", [])
+
+                    for note in _escaped_notes:
+                        if note not in findings:
+                            findings.append(note)
 
                     all_findings.extend(findings)
 

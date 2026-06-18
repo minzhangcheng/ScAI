@@ -486,6 +486,16 @@ Please provide a detailed literature review report with specific citation inform
     speciesInputPlaceholder: '请输入物种名称，如 Homo sapiens、Mus musculus...',
     speciesGeneValidationPlaceholder: '请输入正确的物种名称，或输入"保持当前设置"...',
     waitingSpeciesInput: '等待物种信息输入...',
+
+    // Exploration failed dialog (likely a data problem)
+    explorationFailedTitle: '探索阶段未成功',
+    explorationFailedMessage: '探索阶段（Stage 1：质控/聚类/注释）未能成功完成。这通常是因为上传的数据存在问题（格式、内容或缺失字段）。请检查或重新上传数据后继续重试 Stage 1，或停止分析。',
+    explorationFailedReasonLabel: '原因',
+    explorationFailedReason_did_not_converge: '分析未能收敛（已达最大步数或未完成）',
+    explorationFailedReason_analysis_error: '分析过程中发生错误',
+    explorationFailedGoToData: '前往数据面板',
+    explorationFailedContinue: '继续（重试 Stage 1）',
+    explorationFailedStop: '停止分析',
   },
 
   en: {
@@ -971,6 +981,16 @@ Please provide a detailed literature review report with specific citations.`,
     speciesInputPlaceholder: 'Enter species name, e.g., Homo sapiens, Mus musculus...',
     speciesGeneValidationPlaceholder: 'Enter correct species name, or type "keep" to continue...',
     waitingSpeciesInput: 'Waiting for species input...',
+
+    // Exploration failed dialog (likely a data problem)
+    explorationFailedTitle: 'Exploration Stage Did Not Complete',
+    explorationFailedMessage: 'Exploration (Stage 1: QC / clustering / annotation) did not complete successfully. This is most often caused by a problem with the uploaded data (format, contents, or missing fields). Please review or re-upload your data, then continue to retry Stage 1 — or stop the analysis.',
+    explorationFailedReasonLabel: 'Reason',
+    explorationFailedReason_did_not_converge: 'Analysis did not converge (reached the step limit or did not finish)',
+    explorationFailedReason_analysis_error: 'An error occurred during analysis',
+    explorationFailedGoToData: 'Go to Data Panel',
+    explorationFailedContinue: 'Continue (retry Stage 1)',
+    explorationFailedStop: 'Stop Analysis',
   }
 } as const
 

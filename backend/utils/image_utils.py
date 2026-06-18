@@ -325,3 +325,24 @@ def categorize_figures(figures_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
             categories["other"].append(fig_info)
 
     return categories
+
+
+def save_graphic_abstract_image(image_base64: str, figures_dir) -> Optional[str]:
+    """Decode a base64 graphic-abstract image, flatten RGBA/palette modes onto a
+    white background, and save it as ``figures_dir/graphic_abstract.jpg`` (JPEG,
+    quality 90). Returns the output path, or None when no image data is given.
+
+    Shared by the live supervisor report path and services/report/generator so
+    both produce identical, valid JPEGs (see memory: two-report-generators)."""
+    if not image_base64:
+        return None
+    figures_dir = Path(figures_dir)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    out_path = figures_dir / "graphic_abstract.jpg"
+    img = Image.open(io.BytesIO(base64.b64decode(image_base64)))
+    if img.mode in ("RGBA", "P"):
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+        img = bg
+    img.save(out_path, "JPEG", quality=90, optimize=True)
+    return str(out_path)

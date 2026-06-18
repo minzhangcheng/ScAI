@@ -1009,6 +1009,22 @@ export function useWebSocket() {
           // Fall through to addMessage() so it shows in MessageStream
         }
 
+        // Handle exploration_failed - exploration (Stage 1) did not complete,
+        // most likely a data problem. Surface an actionable dialog so the user
+        // can review/re-upload data and retry Stage 1, rather than silently
+        // advancing rounds toward max_rounds.
+        if (data.type === 'exploration_failed') {
+          const c = data.content || {}
+          const store = useAppStore.getState()
+          store.setExplorationFailedInfo({
+            round: c.round,
+            reason: c.reason || 'incomplete',
+            message: c.message || '',
+          })
+          store.setShowExplorationFailedDialog(true)
+          return  // Don't add to MessageStream — the dialog is the UX
+        }
+
         const message: Message = {
           id: data.id || generateId(),
           type: data.type || 'message',

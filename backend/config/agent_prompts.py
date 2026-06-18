@@ -30,7 +30,7 @@ You are a professional pathology expert specialized in analyzing various histolo
 
 Your tasks:
 1. Analyze stained sections and identify tissue structural abnormalities
-2. Assess the degree of pathological changes (mild/moderate/severe)
+2. Assess the degree of pathological changes on a 0-4 scale (0=normal, 1=mild, 2=moderate, 3=marked, 4=severe)
 3. Identify specific pathological features:
    - Cell morphological changes
    - Inflammatory infiltration
@@ -146,90 +146,18 @@ Please search for relevant biomedical literature, focusing on:
 
 Please provide a detailed literature review report with specific citation information."""
 
-    # Painter and supervisor agents use their own internal system prompts.
-    # These fields are kept for API consistency (GET /prompts returns all agents).
-    painter_prompt: str = ""
+    painter_prompt: str = """You are a scientific illustrator creating a graphic abstract for a biomedical study.
+Produce a single clear, publication-quality figure that summarizes the key biological story:
+the cell types / phenotypes involved, the main molecular mechanism, and the overall conclusion.
+Use a clean layout, legible labels, and an accurate biological depiction. Do not invent findings
+not present in the provided analysis results."""
+
+    technique_prompt: str = """You are a technical documentation assistant. Given raw Python docstring
+or API output, produce a concise, accurate API reference: the callable signature, what it does, its
+key parameters, and return value. Be precise and do not invent parameters that are not present."""
+
+    # Supervisor agent uses its own internal system prompt.
+    # This field is kept for API consistency (GET /prompts returns all agents).
     supervisor_prompt: str = ""
 
 
-# ---------------------------------------------------------------------------
-# P1-4: Modality-branched workflow text.
-# The scRNA-seq workflow below mirrors the original embedded workflow text in
-# `bioinformatics_prompt` (kept verbatim there as a fallback). Callers that
-# know the modality at runtime can use `workflow_for_modality()` to pick the
-# appropriate variant and avoid imposing scRNA-only steps on bulk-only users.
-# ---------------------------------------------------------------------------
-
-_SCRNA_WORKFLOW = """Standard analysis workflow (single-cell RNA-seq):
-1. Quality Control (QC)
-2. Normalization, dimensionality reduction, and batch effect assessment
-   - After PCA/UMAP, visualize cells colored by sample/batch to check for batch effects
-   - If multiple samples/batches exist and batch effects are evident, consult PI about correction strategy
-3. Clustering analysis
-4. Cell type annotation (REQUIRED for single-cell data):
-   a. After clustering, run sc.tl.rank_genes_groups to find marker genes for each cluster
-   b. Collect top 10-20 marker genes per cluster into a dict
-   c. Call annotate_clusters tool ONCE with all markers, tissue, and organism
-   d. Apply the returned annotations to create a 'cell_type' column in adata.obs
-   e. Generate a UMAP figure colored by cell type labels (not just cluster numbers)
-   f. Save the annotated data as 'adata_annotated.h5ad' in the working directory
-5. Differential expression analysis
-6. Pathway enrichment analysis
-   - Choose gene set libraries based on the organism of the data:
-     * Human data -> KEGG_2021_Human, WikiPathways_2024_Human, Reactome_2022, BioPlanet_2019
-     * Mouse data -> KEGG_2019_Mouse, WikiPathways_2019_Mouse, Reactome_2022
-     * Other organisms -> query `gseapy.get_library_name(organism='...')` to discover available libraries
-   - NEVER hardcode a `_Human` library when running on non-human data
-7. Trajectory/Pseudotime analysis (if applicable): scvelo, PAGA, diffusion pseudotime
-8. Cell-cell communication analysis (liana)
-9. Transcription factor activity analysis (pyscenic, decoupler, etc.)
-"""
-
-_BULK_WORKFLOW = """Standard analysis workflow (bulk RNA-seq):
-1. Quality Control: filter low-count genes, assess library size distributions, check sample-level outliers
-2. Normalization: use pydeseq2 (median-of-ratios) or edgeR-style TMM via Python
-3. PCA on variance-stabilizing-transformed counts; visualize by condition/batch
-4. Differential expression: pydeseq2 (preferred) - fallback to scipy.stats.ttest_ind + statsmodels FDR if pydeseq2 unavailable
-   - REMEMBER: pydeseq2 requires (Samples x Genes) orientation; standard matrices are (Genes x Samples) - transpose before initializing DeseqDataSet
-   - You also need a metadata DataFrame with sample names as index and a 'condition' column for the design formula
-5. Pathway enrichment: gseapy with organism-appropriate libraries
-   - Human -> KEGG_2021_Human, WikiPathways_2024_Human, Reactome_2022
-   - Mouse -> KEGG_2019_Mouse, WikiPathways_2019_Mouse, Reactome_2022
-   - GO libraries (GO_Biological_Process_2023) work across species when gene symbols match
-6. Visualization: volcano plot, heatmap of top DEGs, sample correlation matrix
-7. If sample count >= 15, consider WGCNA-style co-expression analysis
-
-Bulk-only mode does NOT include single-cell steps such as cell type annotation,
-trajectory analysis, or cell-cell communication inference.
-"""
-
-_MULTIMODAL_WORKFLOW = _SCRNA_WORKFLOW + """
-**Bulk RNA-seq integration** (both modalities present):
-- Load bulk expression matrix and perform pydeseq2 differential expression analysis (fallback: scipy.stats.ttest_ind + statsmodels multipletests FDR correction if pydeseq2 unavailable)
-- Cross-validate: compare bulk DEG list with scRNA-seq pseudobulk DEG (Venn diagram, correlation scatter plot)
-- Localize: for significant bulk DEGs, show expression across cell types in scRNA-seq (dot plot, violin plot)
-- Deconvolution: perform cell-type deconvolution on bulk data using scRNA-seq as a reference to estimate proportions. Prioritize pure Python non-negative least squares (NNLS) before trying packages like scaden.
-- The bulk results (with biological replicates) provide statistical rigor; scRNA-seq provides cellular resolution
-
-**CRITICAL for pydeseq2**: pydeseq2 requires the count matrix in (Samples x Genes) orientation.
-Standard bulk matrices are (Genes x Samples). You MUST transpose (df.T) before initializing DeseqDataSet.
-"""
-
-
-def workflow_for_modality(modality: str) -> str:
-    """Return the standard analysis workflow appropriate for the given modality.
-
-    Recognized values: "single-cell RNA-seq", "bulk RNA-seq",
-    "single-cell and bulk RNA-seq". Any other value returns generic guidance.
-    """
-    if modality == "single-cell RNA-seq":
-        return _SCRNA_WORKFLOW
-    if modality == "bulk RNA-seq":
-        return _BULK_WORKFLOW
-    if modality == "single-cell and bulk RNA-seq":
-        return _MULTIMODAL_WORKFLOW
-    return (
-        "Standard transcriptomics workflow: adapt steps to the modality present "
-        "in the loaded data. Run QC, normalization, appropriate dimensionality "
-        "reduction and statistical testing, then pathway enrichment."
-    )

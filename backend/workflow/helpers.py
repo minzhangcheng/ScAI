@@ -57,15 +57,14 @@ def _retry_backoff_delay(attempt: int) -> float:
     return min(2 ** attempt + random.uniform(0, 1), 30)
 
 
-# Stage1 keyword set for filtering bioinformatics tasks
+# Stage1 keyword set for filtering bioinformatics tasks.
+# Stage1 = QC + clustering + annotation ONLY. Condition-level DEG (incl. bulk
+# DESeq2/volcano) belongs to Stage2 — see agents.py stage1 phase_instruction
+# which explicitly forbids DEG. Do NOT add deseq/bulk/volcano/vst/tmm here.
 STAGE1_KEYWORDS = frozenset([
-    # scRNA-seq exploration
     "qc", "quality", "filter", "normaliz", "cluster", "umap", "pca",
     "dimension", "annotat", "cell type", "doublet", "batch", "harmony",
     "hvg", "preprocess", "load", "inspect", "merg", "integrat",
-    # bulk RNA-seq exploration
-    "deseq", "pydeseq2", "volcano", "bulk", "library_size",
-    "count_matrix", "vst", "tmm",
 ])
 
 

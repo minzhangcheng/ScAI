@@ -21,7 +21,7 @@ export interface AuthUser {
 
 export interface Message {
   id: string
-  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report' | 'direction_correlation' | 'plan_review' | 'plan_approved'
+  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report' | 'exploration_failed' | 'direction_correlation' | 'plan_review' | 'plan_approved'
   agent?: AgentType
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   content: any  // Message content varies significantly by type (string | object | figure | findings etc.)
@@ -247,6 +247,12 @@ export interface SpeciesInputInfo {
   likelySpecies?: string
 }
 
+export interface ExplorationFailedInfo {
+  round: number
+  reason: string
+  message?: string
+}
+
 interface AppState {
   // Language
   language: Language
@@ -418,6 +424,13 @@ interface AppState {
   setShowSpeciesInputDialog: (show: boolean) => void
   clearSpeciesInputState: () => void
 
+  // Exploration failed user intervention (likely a data problem — prompt user)
+  explorationFailedInfo: ExplorationFailedInfo | null
+  showExplorationFailedDialog: boolean
+  setExplorationFailedInfo: (info: ExplorationFailedInfo | null) => void
+  setShowExplorationFailedDialog: (show: boolean) => void
+  clearExplorationFailedState: () => void
+
   // App version (fetched from backend at startup)
   appVersion: string
   setAppVersion: (version: string) => void
@@ -454,6 +467,8 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
         showLlmTimeoutDialog: false,
         llmModifyPending: false,
         llmModifySaved: false,
+        explorationFailedInfo: null,
+        showExplorationFailedDialog: false,
       }),
       updateSession: (updates) => set((state) => ({
         currentSession: state.currentSession 
@@ -655,6 +670,16 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       clearSpeciesInputState: () => set({
         speciesInputInfo: null,
         showSpeciesInputDialog: false,
+      }),
+
+      // Exploration failed user intervention
+      explorationFailedInfo: null,
+      showExplorationFailedDialog: false,
+      setExplorationFailedInfo: (info) => set({ explorationFailedInfo: info }),
+      setShowExplorationFailedDialog: (show) => set({ showExplorationFailedDialog: show }),
+      clearExplorationFailedState: () => set({
+        explorationFailedInfo: null,
+        showExplorationFailedDialog: false,
       }),
 
       // Auth state

@@ -988,8 +988,8 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
         Clears the cooperative pause gate FIRST so the bioinformatics agent's
         autonomous loop and the @with_retry wrapper block at their next check,
-        then waits for any in-flight sandbox.execute to drain (kernel
-        serializes execute and save_session naturally) before persisting state.
+        then waits for any in-flight sandbox.execute to drain via the shared
+        _exec_lock (see LocalJupyterSandbox._init_exec_lock) before persisting state.
         """
         logger.info(f"[{self.session_id}] Pausing workflow for thread {thread_id}")
         # Block waiters before doing anything else — once cleared, the next time

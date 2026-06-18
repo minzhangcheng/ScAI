@@ -352,20 +352,12 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         graphic_abstract_path = None
         if state.graphic_abstract and state.graphic_abstract.image_base64:
             try:
-                import base64 as b64mod
-                import io as _io
-                from PIL import Image as _PILImage
-                ga_jpg = self.figures_dir / "graphic_abstract.jpg"
-                ga_bytes = b64mod.b64decode(state.graphic_abstract.image_base64)
-                ga_img = _PILImage.open(_io.BytesIO(ga_bytes))
-                if ga_img.mode in ('RGBA', 'P'):
-                    bg = _PILImage.new('RGB', ga_img.size, (255, 255, 255))
-                    bg.paste(ga_img, mask=ga_img.split()[-1] if ga_img.mode == 'RGBA' else None)
-                    ga_img = bg
-                ga_img.save(ga_jpg, 'JPEG', quality=90, optimize=True)
-                graphic_abstract_path = str(ga_jpg)
-                logger.info(f"Saved graphic abstract to {ga_jpg}")
-            except Exception as e:
+                from ...utils.image_utils import save_graphic_abstract_image
+                graphic_abstract_path = save_graphic_abstract_image(
+                    state.graphic_abstract.image_base64, self.figures_dir
+                )
+                logger.info(f"Saved graphic abstract to {graphic_abstract_path}")
+            except Exception:
                 logger.exception("Failed to save graphic abstract")
 
         # Build appendix data for report.json (so regenerate can use it)

@@ -31,6 +31,7 @@ from ..models.schemas import AgentType, AnalysisState, AnalysisStep, PlanStage
 from ..utils.error_parsing import API_ERROR_TYPES, CODE_GEN_ERROR_TYPES, extract_error_type, TECHNICAL_ERROR_TYPES
 from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..utils.settings_provider import AgentSettingsProvider
+from ..utils.image_utils import save_graphic_abstract_image
 
 # Section IDs that represent specific/targeted analysis
 _SPECIFIC_SECTION_IDS = frozenset({
@@ -191,6 +192,15 @@ def _serialize_record(r, round_number: int) -> Dict:
     d["timestamp"] = r.timestamp.isoformat()
     d["round_number"] = round_number
     return d
+
+
+def persist_graphic_abstract(graphic_abstract, figures_dir) -> "str | None":
+    """Write the (image-mode) graphic abstract to figures_dir/graphic_abstract.jpg
+    and return its path. Returns None for text-mode (no image_base64) or absence."""
+    if graphic_abstract is None:
+        return None
+    b64 = getattr(graphic_abstract, "image_base64", "") or ""
+    return save_graphic_abstract_image(b64, figures_dir)
 
 
 class SupervisorAgent:
@@ -793,6 +803,17 @@ class SupervisorAgent:
         report_id = str(uuid.uuid4())
         appendix_data = self._build_appendix(analysis_state, stats)
 
+        # Persist graphic abstract for downloadable zip. Wrapped so a
+        # malformed/unopenable image degrades gracefully (ga_path stays None;
+        # the HTML embed still uses the base64 from analysis_state) instead of
+        # crashing report generation — matches services/report/generator.py.
+        ga_obj = getattr(analysis_state, "graphic_abstract", None)
+        ga_path = None
+        try:
+            ga_path = persist_graphic_abstract(ga_obj, output_path / "figures")
+        except Exception:
+            logger.exception("Failed to save graphic abstract")
+
         report = {
             "id": report_id,
             "session_id": analysis_state.id,
@@ -802,7 +823,7 @@ class SupervisorAgent:
             "conclusions": conclusions,
             "figures": report_figures,
             "tables": table_list,
-            "graphic_abstract_path": None,  # GraphicAbstract only has image_base64, no file path
+            "graphic_abstract_path": ga_path,  # Path for zip download
             "generated_at": datetime.now().isoformat(),
             "status": "completed",
             "progress": 100,
@@ -822,7 +843,9 @@ class SupervisorAgent:
 
         await _progress(90, "Generating HTML report...")
 
-        # Temporarily attach analysis_state for HTML generation (not serialized to JSON)
+        # Temporarily attach analysis_state for HTML generation. It is NOT
+        # serialized into report.json; it is popped back off after HTML rendering
+        # so it never leaks into the on-disk report or downstream consumers.
         report["_analysis_state"] = analysis_state
 
         # Generate HTML
@@ -2178,6 +2201,17 @@ Report generation model call failed due to API connection error. Please refer to
 
         generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+        # Graphic abstract HTML (derived from analysis_state, embedded as <img>)
+        _ga_obj = getattr(analysis_state, "graphic_abstract", None) if analysis_state else None
+        ga_b64 = (getattr(_ga_obj, "image_base64", "") or "") if _ga_obj else ""
+        ga_html = ""
+        if ga_b64:
+            ga_html = (
+                '<section id="graphic-abstract"><h2>Graphic Abstract</h2>'
+                f'<figure><img src="data:image/jpeg;base64,{ga_b64}" '
+                'alt="Graphic Abstract" style="max-width:100%"/></figure></section>'
+            )
+
         html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2205,6 +2239,7 @@ Report generation model call failed due to API connection error. Please refer to
             {self._markdown_to_html(abstract)}
         </div>
 
+        {ga_html}
         {"".join(sections_html)}
 
         <div class="conclusions">

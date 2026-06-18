@@ -12,6 +12,7 @@ import { ValidationDialog } from './ValidationDialog'
 import { StopDialog } from './StopDialog'
 import LlmTimeoutDialog from './LlmTimeoutDialog'
 import LlmModifySubDialog from './LlmModifySubDialog'
+import ExplorationFailedDialog from './ExplorationFailedDialog'
 import { useCountdownTimer } from '../hooks/useCountdownTimer'
 import { SnapshotPanel } from './SnapshotPanel'
 import { TextInputDialog } from './TextInputDialog'
@@ -99,6 +100,11 @@ export function AnalysisPanel() {
   const speciesInputInfo = useAppStore(s => s.speciesInputInfo)
   const showSpeciesInputDialog = useAppStore(s => s.showSpeciesInputDialog)
   const clearSpeciesInputState = useAppStore(s => s.clearSpeciesInputState)
+
+  // Exploration failed user intervention
+  const explorationFailedInfo = useAppStore(s => s.explorationFailedInfo)
+  const showExplorationFailedDialog = useAppStore(s => s.showExplorationFailedDialog)
+  const clearExplorationFailedState = useAppStore(s => s.clearExplorationFailedState)
 
   // Round results state
   const [expandedRound, setExpandedRound] = useState<number | null>(null)
@@ -592,6 +598,25 @@ export function AnalysisPanel() {
       setStopping(false)
     }
   }, [stopAnalysis])
+
+  // ── Exploration failed handlers ──────────────────────────────────
+  // Exploration (Stage 1) did not complete — most often a data problem.
+  // The workflow is paused at the round gate; these actions hand control
+  // back to the user without auto-advancing rounds.
+  const handleExplorationFailedGoToData = useCallback(() => {
+    clearExplorationFailedState()
+    useAppStore.getState().setActiveTab('data')
+  }, [clearExplorationFailedState])
+
+  const handleExplorationFailedContinue = useCallback(() => {
+    // Close the dialog; the user will retry Stage 1 via the normal continue flow.
+    clearExplorationFailedState()
+  }, [clearExplorationFailedState])
+
+  const handleExplorationFailedStop = useCallback(() => {
+    clearExplorationFailedState()
+    handleStop('immediate')
+  }, [clearExplorationFailedState, handleStop])
 
   // ── LLM failure handlers ──────────────────────────────────────────
 
@@ -1436,6 +1461,18 @@ export function AnalysisPanel() {
           resetKey={speciesInputInfo.source}
           onSubmit={handleSpeciesInput}
           onClose={() => clearSpeciesInputState()}
+        />
+      )}
+
+      {/* Exploration Failed Dialog (likely a data problem) */}
+      {showExplorationFailedDialog && explorationFailedInfo && currentSession && (
+        <ExplorationFailedDialog
+          open={showExplorationFailedDialog}
+          info={explorationFailedInfo}
+          language={language}
+          onGoToData={handleExplorationFailedGoToData}
+          onContinue={handleExplorationFailedContinue}
+          onStop={handleExplorationFailedStop}
         />
       )}
 

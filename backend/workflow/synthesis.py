@@ -23,6 +23,17 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def classify_exploration_failure(bio) -> str:
+    """Map the internal bioinformatics result to a STABLE reason code for the UI.
+
+    Never leak raw internal status strings (e.g. 'max_steps_reached',
+    'completed_with_fallback') to the frontend — the dialog localizes off this
+    code. Returns one of: 'analysis_error', 'did_not_converge'."""
+    if isinstance(bio, dict) and bio.get("error"):
+        return "analysis_error"
+    return "did_not_converge"
+
+
 def _should_force_next_round(analysis_state: AnalysisState) -> bool:
     """Return True when workflow must honor pending work instead of stopping on convergence.
 
@@ -184,6 +195,27 @@ class SynthesisMixin:
             # Transition to innovation phase for next round
             analysis_state.analysis_phase = AnalysisPhase.INNOVATION
             logger.info(f"[{self.session_id}] Transitioning to innovation phase")
+
+        elif analysis_state.analysis_phase == AnalysisPhase.EXPLORATION:
+            # Exploration did NOT succeed (bioinformatics stage1 failed/incomplete).
+            # Most often this means the uploaded data has a problem. Surface an
+            # explicit prompt so the user can fix/re-upload data and retry stage 1,
+            # rather than silently advancing rounds toward max_rounds.
+            bio = state.get("bioinformatics_result") or {}
+            reason_code = classify_exploration_failure(bio)
+            await self._send_message(
+                "exploration_failed",
+                {
+                    "round": round_result.round_number,
+                    "reason": reason_code,
+                },
+                AgentType.PI,
+            )
+            logger.warning(
+                f"[{self.session_id}] Exploration failed (reason={reason_code}; "
+                f"raw_status={bio.get('status')!r} raw_error={bio.get('error')!r}); "
+                f"staying in EXPLORATION, prompting user to check data"
+            )
 
         analysis_state.round_results.append(round_result)
         # Round is now canonical in round_results; clear the per-round cache

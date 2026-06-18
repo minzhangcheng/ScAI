@@ -29,6 +29,19 @@ def _consume_user_plan_feedback(state: dict) -> str:
     return value
 
 
+def resolve_round_phase(current_round: int, current_phase: str,
+                        has_exploration_report: bool) -> str:
+    """Decide the analysis phase when entering round 2+.
+
+    Only advance EXPLORATION -> INNOVATION once exploration actually produced a
+    report (i.e. stage1 succeeded). If exploration failed last round there is no
+    report; stay in EXPLORATION so the user can retry stage 1 next round —
+    honoring the guard documented in synthesis._exploration_round_succeeded."""
+    if current_phase == "innovation":
+        return "innovation"
+    return "innovation" if has_exploration_report else "exploration"
+
+
 class PlanningMixin:
     """Mixin providing planning-dialogue methods. Composed into SingleCellAnalysisWorkflow."""
     @with_retry("pi_planning")
@@ -200,169 +213,182 @@ class PlanningMixin:
                 analysis_state.initial_instruction
             )
         else:
-            # Round 2+: Innovation phase — hypothesis-driven targeted analysis
-            if analysis_state.analysis_phase != "innovation":
-                analysis_state.analysis_phase = AnalysisPhase.INNOVATION
+            # Round 2+: advance to INNOVATION only if exploration produced a report;
+            # otherwise stay in EXPLORATION so the user can retry stage 1.
+            resolved = resolve_round_phase(
+                current_round=analysis_state.current_round,
+                current_phase=analysis_state.analysis_phase.value,
+                has_exploration_report=analysis_state.exploration_report is not None,
+            )
+            analysis_state.analysis_phase = (
+                AnalysisPhase.INNOVATION if resolved == "innovation" else AnalysisPhase.EXPLORATION
+            )
 
-            # Check directions_queue first (multi-direction mode), then single direction
-            user_direction = analysis_state.user_chosen_direction
-            if analysis_state.directions_queue:
-                # Multi-direction mode: peek first, pop only on success
-                current_dir = analysis_state.directions_queue[0]
-                dir_text = current_dir.get("direction", "")
-                dir_notes = current_dir.get("notes", "")
-                logger.info(f"[{self.session_id}] Innovation phase: direction from queue → {dir_text[:100]} (remaining: {len(analysis_state.directions_queue) - 1})")
-                # Set current direction immediately so retry has correct context
-                analysis_state.current_round_direction = dir_text
-                try:
+            if resolved == "exploration":
+                # Retry stage 1: re-run the exploration instruction, no direction selection.
+                instructions = await self.pi_agent.initial_exploration_instruction(
+                    analysis_state, analysis_state.initial_instruction
+                )
+            else:
+                # Check directions_queue first (multi-direction mode), then single direction
+                user_direction = analysis_state.user_chosen_direction
+                if analysis_state.directions_queue:
+                    # Multi-direction mode: peek first, pop only on success
+                    current_dir = analysis_state.directions_queue[0]
+                    dir_text = current_dir.get("direction", "")
+                    dir_notes = current_dir.get("notes", "")
+                    logger.info(f"[{self.session_id}] Innovation phase: direction from queue → {dir_text[:100]} (remaining: {len(analysis_state.directions_queue) - 1})")
+                    # Set current direction immediately so retry has correct context
+                    analysis_state.current_round_direction = dir_text
+                    try:
+                        instructions = await self.pi_agent.innovation_instruction(
+                            analysis_state, dir_text, notes=dir_notes
+                        )
+                    except Exception as e:
+                        # Direction stays in queue (never popped) — no re-insert needed
+                        analysis_state.current_round_direction = ""
+                        logger.exception(f"[{self.session_id}] innovation_instruction failed, direction stays in queue")
+                        raise
+                    # P1-1: do NOT pop the queue here. The direction is committed
+                    # at the start of the NEXT round via _initialize_round, only if
+                    # this round completes successfully (LangGraph checkpoint confirms).
+                    # current_round_direction (set above) is the in-flight marker.
+                    # Clear single direction field
+                    analysis_state.user_chosen_direction = None
+                elif user_direction and user_direction not in ("", PI_DECIDE_SIGNAL):
+                    logger.info(f"[{self.session_id}] Innovation phase: user-directed → {user_direction[:100]}")
+                    instructions = await self.pi_agent.innovation_instruction(
+                        analysis_state, user_direction
+                    )
+                    # Preserve direction for bio agent phase_instruction and synthesis prompt
+                    analysis_state.current_round_direction = user_direction
+                    # Consume the direction to avoid reusing in next round
+                    analysis_state.user_chosen_direction = None
+                elif user_direction == PI_DECIDE_SIGNAL or (not user_direction and analysis_state.current_round == 2):
+                    # PI autonomously selects 2 best directions
+                    logger.info(f"[{self.session_id}] Innovation phase: PI selecting best directions")
+                    selected_dirs = await self.pi_agent.select_best_directions(analysis_state)
+                    # Set up multi-direction queue
+                    analysis_state.user_chosen_directions = selected_dirs
+                    # Pop first direction, rest goes to queue
+                    first_dir = selected_dirs[0] if selected_dirs else {"direction": "Continue analysis", "notes": ""}
+                    analysis_state.directions_queue = selected_dirs[1:] if len(selected_dirs) > 1 else []
+                    analysis_state.max_rounds = len(selected_dirs) + 1  # Round 1 + N direction rounds
+                    dir_text = first_dir.get("direction", "")
+                    dir_notes = first_dir.get("notes", "")
                     instructions = await self.pi_agent.innovation_instruction(
                         analysis_state, dir_text, notes=dir_notes
                     )
-                except Exception as e:
-                    # Direction stays in queue (never popped) — no re-insert needed
-                    analysis_state.current_round_direction = ""
-                    logger.exception(f"[{self.session_id}] innovation_instruction failed, direction stays in queue")
-                    raise
-                # P1-1: do NOT pop the queue here. The direction is committed
-                # at the start of the NEXT round via _initialize_round, only if
-                # this round completes successfully (LangGraph checkpoint confirms).
-                # current_round_direction (set above) is the in-flight marker.
-                # Clear single direction field
-                analysis_state.user_chosen_direction = None
-            elif user_direction and user_direction not in ("", PI_DECIDE_SIGNAL):
-                logger.info(f"[{self.session_id}] Innovation phase: user-directed → {user_direction[:100]}")
-                instructions = await self.pi_agent.innovation_instruction(
-                    analysis_state, user_direction
-                )
-                # Preserve direction for bio agent phase_instruction and synthesis prompt
-                analysis_state.current_round_direction = user_direction
-                # Consume the direction to avoid reusing in next round
-                analysis_state.user_chosen_direction = None
-            elif user_direction == PI_DECIDE_SIGNAL or (not user_direction and analysis_state.current_round == 2):
-                # PI autonomously selects 2 best directions
-                logger.info(f"[{self.session_id}] Innovation phase: PI selecting best directions")
-                selected_dirs = await self.pi_agent.select_best_directions(analysis_state)
-                # Set up multi-direction queue
-                analysis_state.user_chosen_directions = selected_dirs
-                # Pop first direction, rest goes to queue
-                first_dir = selected_dirs[0] if selected_dirs else {"direction": "Continue analysis", "notes": ""}
-                analysis_state.directions_queue = selected_dirs[1:] if len(selected_dirs) > 1 else []
-                analysis_state.max_rounds = len(selected_dirs) + 1  # Round 1 + N direction rounds
-                dir_text = first_dir.get("direction", "")
-                dir_notes = first_dir.get("notes", "")
-                instructions = await self.pi_agent.innovation_instruction(
-                    analysis_state, dir_text, notes=dir_notes
-                )
-                analysis_state.current_round_direction = dir_text
-                analysis_state.user_chosen_direction = None
-            else:
-                # Subsequent innovation rounds (3+): use previous round's next_steps
+                    analysis_state.current_round_direction = dir_text
+                    analysis_state.user_chosen_direction = None
+                else:
+                    # Subsequent innovation rounds (3+): use previous round's next_steps
+                    last_round = analysis_state.get_latest_round()
+                    instructions = {
+                        "pathology_tasks": [],
+                        "bioinformatics_tasks": [],
+                        "biochemistry_tasks": [],
+                        "literature_topics": []
+                    }
+
+                    # Extract tasks for each agent
+                    prefix_map = {
+                        "[Pathology]": "pathology_tasks",
+                        "[Bioinformatics]": "bioinformatics_tasks",
+                        "[Biochemistry]": "biochemistry_tasks",
+                        "[Literature]": "literature_topics",
+                    }
+                    for step in (last_round.next_steps if last_round else []):
+                        for prefix, key in prefix_map.items():
+                            if step.startswith(prefix):
+                                instructions[key].append(step.split("] ", 1)[1].strip() if "] " in step else step[len(prefix):].strip())
+                                break
+
+                    # Add overview for round 3+ so PI dynamic planning has strategic context
+                    if last_round:
+                        summary = last_round.pi_summary or "Continue analysis based on previous round findings."
+                        instructions["overview"] = summary[:500]
+
                 last_round = analysis_state.get_latest_round()
-                instructions = {
-                    "pathology_tasks": [],
-                    "bioinformatics_tasks": [],
-                    "biochemistry_tasks": [],
-                    "literature_topics": []
+
+                # Fallback: if prefix matching extracted no tasks at all
+                all_empty = not any([
+                    instructions["pathology_tasks"],
+                    instructions["bioinformatics_tasks"],
+                    instructions["biochemistry_tasks"],
+                    instructions["literature_topics"]
+                ])
+                if all_empty and last_round:
+                    if last_round.next_steps:
+                        # First fallback: assign unprefixed next_steps to bioinformatics
+                        instructions["bioinformatics_tasks"] = last_round.next_steps
+                        logger.warning(
+                            f"[{self.session_id}] No prefixed tasks found in next_steps, "
+                            f"falling back to bioinformatics-only with raw next_steps"
+                        )
+                    elif last_round.pi_summary:
+                        # Second fallback: use PI summary
+                        fallback_context = last_round.pi_summary[:500]
+                        fallback = f"Continue analysis based on previous round findings. Context: {fallback_context}"
+                        instructions["bioinformatics_tasks"] = [fallback]
+                        instructions["literature_topics"] = [f"Literature search related to: {fallback_context[:200]}"]
+                        logger.warning(
+                            f"[{self.session_id}] No next_steps available, "
+                            f"using PI summary as fallback for bioinformatics and literature"
+                        )
+
+                # Build skip_nodes from PI's agent activation decision
+                agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
+                reanalysis_agents = set(last_round.reanalysis_agents) if last_round else set()
+                agents_to_activate.add("bioinformatics")  # Always activate bioinformatics
+
+                # Default disable logic (from round 2 onwards): skip pathology/biochemistry if no new data
+                if analysis_state.current_round >= 2:
+                    new_pathology_files = [f for f in state.get("new_data_files", []) if f.get("section") == "pathology"]
+                    new_biochemistry_files = [f for f in state.get("new_data_files", []) if f.get("section") == "biochemistry"]
+
+                    # Pathology: default disabled unless new data or PI explicitly requests reanalysis
+                    if not new_pathology_files and "pathology" not in reanalysis_agents:
+                        agents_to_activate.discard("pathology")
+                        logger.info(f"[{self.session_id}] Default disabling pathology: no new data and no reanalysis request")
+
+                    # Biochemistry: default disabled unless new data or PI explicitly requests reanalysis
+                    if not new_biochemistry_files and "biochemistry" not in reanalysis_agents:
+                        agents_to_activate.discard("biochemistry")
+                        logger.info(f"[{self.session_id}] Default disabling biochemistry: no new data and no reanalysis request")
+
+                # Reconcile: if prefix parsing found tasks for an agent, ensure it's activated
+                task_to_agent = {
+                    "pathology_tasks": "pathology",
+                    "bioinformatics_tasks": "bioinformatics",
+                    "biochemistry_tasks": "biochemistry",
+                    "literature_topics": "literature",
                 }
+                for task_key, agent_key in task_to_agent.items():
+                    if instructions.get(task_key) and agent_key not in agents_to_activate:
+                        agents_to_activate.add(agent_key)
+                        logger.info(
+                            f"[{self.session_id}] Auto-activated {agent_key}: "
+                            f"has tasks but was not in agents_for_next_round"
+                        )
 
-                # Extract tasks for each agent
-                prefix_map = {
-                    "[Pathology]": "pathology_tasks",
-                    "[Bioinformatics]": "bioinformatics_tasks",
-                    "[Biochemistry]": "biochemistry_tasks",
-                    "[Literature]": "literature_topics",
+                skip_nodes = []
+                agent_node_map = {
+                    "pathology": "pathology_analysis",
+                    "biochemistry": "biochemistry_analysis",
+                    "literature": "literature_research",
                 }
-                for step in (last_round.next_steps if last_round else []):
-                    for prefix, key in prefix_map.items():
-                        if step.startswith(prefix):
-                            instructions[key].append(step.split("] ", 1)[1].strip() if "] " in step else step[len(prefix):].strip())
-                            break
+                for agent_key, node_name in agent_node_map.items():
+                    if agent_key not in agents_to_activate:
+                        skip_nodes.append(node_name)
 
-                # Add overview for round 3+ so PI dynamic planning has strategic context
-                if last_round:
-                    summary = last_round.pi_summary or "Continue analysis based on previous round findings."
-                    instructions["overview"] = summary[:500]
-
-            last_round = analysis_state.get_latest_round()
-
-            # Fallback: if prefix matching extracted no tasks at all
-            all_empty = not any([
-                instructions["pathology_tasks"],
-                instructions["bioinformatics_tasks"],
-                instructions["biochemistry_tasks"],
-                instructions["literature_topics"]
-            ])
-            if all_empty and last_round:
-                if last_round.next_steps:
-                    # First fallback: assign unprefixed next_steps to bioinformatics
-                    instructions["bioinformatics_tasks"] = last_round.next_steps
-                    logger.warning(
-                        f"[{self.session_id}] No prefixed tasks found in next_steps, "
-                        f"falling back to bioinformatics-only with raw next_steps"
-                    )
-                elif last_round.pi_summary:
-                    # Second fallback: use PI summary
-                    fallback_context = last_round.pi_summary[:500]
-                    fallback = f"Continue analysis based on previous round findings. Context: {fallback_context}"
-                    instructions["bioinformatics_tasks"] = [fallback]
-                    instructions["literature_topics"] = [f"Literature search related to: {fallback_context[:200]}"]
-                    logger.warning(
-                        f"[{self.session_id}] No next_steps available, "
-                        f"using PI summary as fallback for bioinformatics and literature"
-                    )
-
-            # Build skip_nodes from PI's agent activation decision
-            agents_to_activate = set(last_round.agents_for_next_round) if last_round else set()
-            reanalysis_agents = set(last_round.reanalysis_agents) if last_round else set()
-            agents_to_activate.add("bioinformatics")  # Always activate bioinformatics
-
-            # Default disable logic (from round 2 onwards): skip pathology/biochemistry if no new data
-            if analysis_state.current_round >= 2:
-                new_pathology_files = [f for f in state.get("new_data_files", []) if f.get("section") == "pathology"]
-                new_biochemistry_files = [f for f in state.get("new_data_files", []) if f.get("section") == "biochemistry"]
-
-                # Pathology: default disabled unless new data or PI explicitly requests reanalysis
-                if not new_pathology_files and "pathology" not in reanalysis_agents:
-                    agents_to_activate.discard("pathology")
-                    logger.info(f"[{self.session_id}] Default disabling pathology: no new data and no reanalysis request")
-
-                # Biochemistry: default disabled unless new data or PI explicitly requests reanalysis
-                if not new_biochemistry_files and "biochemistry" not in reanalysis_agents:
-                    agents_to_activate.discard("biochemistry")
-                    logger.info(f"[{self.session_id}] Default disabling biochemistry: no new data and no reanalysis request")
-
-            # Reconcile: if prefix parsing found tasks for an agent, ensure it's activated
-            task_to_agent = {
-                "pathology_tasks": "pathology",
-                "bioinformatics_tasks": "bioinformatics",
-                "biochemistry_tasks": "biochemistry",
-                "literature_topics": "literature",
-            }
-            for task_key, agent_key in task_to_agent.items():
-                if instructions.get(task_key) and agent_key not in agents_to_activate:
-                    agents_to_activate.add(agent_key)
+                if skip_nodes:
+                    activated = [k for k in agent_node_map if k in agents_to_activate]
                     logger.info(
-                        f"[{self.session_id}] Auto-activated {agent_key}: "
-                        f"has tasks but was not in agents_for_next_round"
+                        f"[{self.session_id}] Round {analysis_state.current_round}: "
+                        f"PI activated agents: bioinformatics + {activated}, "
+                        f"skipping: {skip_nodes}"
                     )
-
-            skip_nodes = []
-            agent_node_map = {
-                "pathology": "pathology_analysis",
-                "biochemistry": "biochemistry_analysis",
-                "literature": "literature_research",
-            }
-            for agent_key, node_name in agent_node_map.items():
-                if agent_key not in agents_to_activate:
-                    skip_nodes.append(node_name)
-
-            if skip_nodes:
-                activated = [k for k in agent_node_map if k in agents_to_activate]
-                logger.info(
-                    f"[{self.session_id}] Round {analysis_state.current_round}: "
-                    f"PI activated agents: bioinformatics + {activated}, "
-                    f"skipping: {skip_nodes}"
-                )
 
         # In innovation phase, merge adjusted_instructions as supplementary human guidance
         # (not replacing direction-based planning, but augmenting it)

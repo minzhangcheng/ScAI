@@ -55,6 +55,7 @@ class ContextMixin:
             ("biochemistry_result", "biochemistry_findings"),
             ("pathology_result", "pathology_findings"),
             ("bioinformatics_result", "bioinformatics_findings"),
+            ("literature_result", "literature_findings"),
         ]:
             result = state.get(result_key)
             if (result and result.get("findings")
@@ -74,7 +75,8 @@ class ContextMixin:
 
         # Reuse existing method for current-round wet-lab findings
         current_findings = self._collect_current_round_results(state)
-        for key in ("biochemistry_findings", "pathology_findings", "bioinformatics_findings"):
+        for key in ("biochemistry_findings", "pathology_findings",
+                    "bioinformatics_findings", "literature_findings"):
             if key in current_findings:
                 combined[key] = current_findings[key]
 
@@ -88,7 +90,10 @@ class ContextMixin:
                     combined["pathology_findings"] = prev_round.pathology_findings
                 if "bioinformatics_findings" not in combined and prev_round.bioinformatics_findings:
                     combined["bioinformatics_findings"] = prev_round.bioinformatics_findings
-                if "biochemistry_findings" in combined and "pathology_findings" in combined and "bioinformatics_findings" in combined:
+                if "literature_findings" not in combined and getattr(prev_round, "literature_findings", None):
+                    combined["literature_findings"] = prev_round.literature_findings
+                if all(k in combined for k in ("biochemistry_findings", "pathology_findings",
+                                               "bioinformatics_findings", "literature_findings")):
                     break
 
         return combined if combined else None
