@@ -1436,7 +1436,10 @@ class GoogleDeepResearchClient:
             "agent_config": {
                 "type": "deep-research",
                 "thinking_summaries": "auto",
-                "visualization": "auto",
+                # "off" disables agent-generated charts/images. We only consume
+                # the textual report, so suppressing inline images keeps the
+                # response light and the parser simple.
+                "visualization": "off",
                 "collaborative_planning": False,
             },
         }
@@ -1495,42 +1498,69 @@ class GoogleDeepResearchClient:
     def _extract_research_result(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract research result from Interactions API response.
 
-        New schema (Api-Revision 2026-05-20+): final text lives in `output_text`,
-        intermediate progress in `steps[]`. Legacy `outputs[]`/`output` kept for
-        defensive fallback.
+        Current schema (Api-Revision 2026-05-20, agent deep-research-preview-04-2026):
+        the interaction holds a `steps[]` timeline. The final report lives in
+        `model_output` steps as `content[]` blocks of `{"type": "text", "text",
+        "annotations": [...]}`; planning summaries live in `thought` steps as a
+        `summary[]` array. Citations are `url_citation` annotations on the text
+        blocks. Legacy `output_text`/`outputs[]`/`output` paths are kept as
+        defensive fallbacks for older revisions.
         """
         result = {
             "report": "",
             "sources": [],
             "thinking": []
         }
+        seen_uris = set()
 
-        # New schema: top-level output_text
-        output_text = data.get("output_text")
-        if isinstance(output_text, str) and output_text:
-            result["report"] = output_text
+        def _add_source(uri: str, title: str = "") -> None:
+            if uri and uri not in seen_uris:
+                seen_uris.add(uri)
+                result["sources"].append({"title": title, "uri": uri})
 
-        # New schema: steps[] — collect thinking summaries and grounding
+        # Current schema: steps[] timeline
         for step in data.get("steps", []) or []:
             if not isinstance(step, dict):
                 continue
             step_type = step.get("type", "")
-            # Thinking / planning summaries
-            summary = step.get("thinking_summary") or step.get("summary")
-            if isinstance(summary, str) and summary:
-                result["thinking"].append({"type": step_type, "text": summary})
-            # Final report fallback if output_text missing
-            if not result["report"]:
+
+            if step_type == "thought":
+                # Planning / reasoning summaries: summary is a list of text parts.
+                for part in step.get("summary", []) or []:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str) and part["text"]:
+                        result["thinking"].append({"type": step_type, "text": part["text"]})
+
+            elif step_type == "model_output":
+                # Final report text + inline citations live in content[] text blocks.
+                for block in step.get("content", []) or []:
+                    if not isinstance(block, dict) or block.get("type") != "text":
+                        continue
+                    if isinstance(block.get("text"), str):
+                        result["report"] += block["text"]
+                    for ann in block.get("annotations", []) or []:
+                        if isinstance(ann, dict) and ann.get("type") == "url_citation":
+                            _add_source(ann.get("url", ""), ann.get("title", ""))
+
+        # Legacy fallback: top-level output_text
+        if not result["report"]:
+            output_text = data.get("output_text")
+            if isinstance(output_text, str) and output_text:
+                result["report"] = output_text
+
+        # Legacy fallback: steps[].text / steps[].parts[].text + groundingMetadata
+        if not result["report"]:
+            for step in data.get("steps", []) or []:
+                if not isinstance(step, dict):
+                    continue
                 text = step.get("text")
                 if isinstance(text, str) and text:
                     result["report"] += text
                 for part in step.get("parts", []) or []:
                     if isinstance(part, dict) and isinstance(part.get("text"), str):
                         result["report"] += part["text"]
-            # Grounding can appear per-step
-            grounding = step.get("groundingMetadata") or step.get("grounding_metadata") or {}
-            if grounding:
-                self._extract_sources(grounding, result["sources"])
+                grounding = step.get("groundingMetadata") or step.get("grounding_metadata") or {}
+                if grounding:
+                    self._extract_sources(grounding, result["sources"])
 
         # Legacy fallback: outputs[]
         if not result["report"]:

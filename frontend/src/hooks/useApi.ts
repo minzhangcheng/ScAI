@@ -1038,8 +1038,11 @@ export function useWebSocket() {
         
         // Update currentRound from status messages
         if (data.type === 'status' && typeof data.content === 'string') {
-          // Parse "Starting round X analysis" or similar messages
-          const roundMatch = data.content.match(/[Rr]ound\s+(\d+)/i)
+          // Only match the analysis round marker ("Starting round X analysis").
+          // Must NOT match other status text that mentions "round", e.g. the
+          // planning dialogue's "Planning dialogue: round 3/5", which would
+          // otherwise overwrite currentRound with the dialogue iteration count.
+          const roundMatch = data.content.match(/Starting round\s+(\d+)/i)
           if (roundMatch) {
             const round = parseInt(roundMatch[1], 10)
             if (!isNaN(round)) {

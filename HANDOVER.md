@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.28.1 · **Last updated**: 2026-06-17
+**Version**: 0.27.2 · **Last updated**: 2026-06-18
 
 ## 1. Runtime Architecture
 
@@ -194,9 +194,15 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.28.x — (2026-06-17 → present)**
+**0.27.x — (2026-06-17 → present)**
 
-- `0.28.1` — Admin management, last-admin guard, error_parsing hyphenated skip, frontend refinements (2026-06-17):
+- `0.27.2` — Google Deep Research response extraction rewrite, frontend round parsing fix (2026-06-18):
+  - **Deep Research `visualization: "off"`**: Set `visualization` to `"off"` in `agent_config` to suppress agent-generated charts/images — only the textual report is consumed, so keeping images out keeps the response light and the parser simple.
+  - **Deep Research `_extract_research_result` rewrite**: Rewrote response extraction for the current Interactions API schema (`steps[]` timeline with `model_output` steps containing `content[]` text blocks and `url_citation` annotations, `thought` steps with `summary[]` arrays). Legacy `output_text`/`outputs[]`/`output` paths retained as defensive fallbacks.
+  - **Frontend `currentRound` parsing fix**: `useApi.ts` WebSocket handler now only matches `"Starting round X"` for `currentRound` updates, preventing the planning dialogue's `"Planning dialogue: round 3/5"` from incorrectly overwriting the analysis round counter.
+  - **Version corrections**: HANDOVER.md, user-guide.md, and user-guide-zh.md retroactively corrected from `0.28.1` to `0.27.1` for the previous release.
+
+- `0.27.1` — Admin management, last-admin guard, error_parsing hyphenated skip, frontend refinements (2026-06-17):
   - **Admin custom username**: Setup flow requires a custom admin username instead of hardcoded `"admin"`. `create_admin_if_missing()` accepts a required `username` parameter; logs a warning if it differs from an existing admin's username. Setup page gets a username input with validation (3-64 chars, alphanumeric/underscore/hyphen). Tests updated.
   - **Admin role management**: New `PATCH /admin/users/{uid}/role` endpoint for promoting/demoting user roles. Role dropdown on admin page (`EnumCell` reusable component) for non-self users. Promoting a pending user to admin auto-activates them. Cannot demote the last remaining admin (409 Conflict via `count_admins()`).
   - **Admin delete guard**: Admins can now delete other admin users (previously forbidden), but deleting the last remaining admin returns 409 Conflict.
@@ -214,20 +220,18 @@ Detailed release notes for every version are available through `git log` and rel
     reach the admin panel via the sidebar "User Admin" link. Complements the
     login routing fix above.
 
-**0.27.x — (2026-06-17 → 2026-06-17)**
+**0.26.x — Species identification HITL & gene validation (2026-06-11 → 2026-06-17)**
 
-- `0.27.9` — Gemini Deep Research decomposition short-circuit (2026-06-17):
+- `0.26.9` — Gemini Deep Research decomposition short-circuit (2026-06-17):
   - **Workflow short-circuit**: When `literature_mode == "gemini_deep_research"`, `_literature_research` skips the PI agent's `plan_deep_research_tasks()` call and directly merges all topics into a single comprehensive Deep Research query. Gemini Deep Research self-decomposes internally, so the extra PI call is unnecessary and could over-split topics.
   - **Test**: `test_literature_dr_decompose.py` — `test_gemini_mode_short_circuits_to_merged` verifies the PI decomposition is skipped and a single merged DR call is made.
   - **Cleanup**: Deleted 3 completed implementation plan files (`pi-decide-fast-path`, `painter-images-api-retry`, `bioinformatics-swallowed-error-tech-agent`).
 
-- `0.27.8` — swallowed-error detection & Technique Agent doc lookup (2026-06-17):
+- `0.26.8` — swallowed-error detection & Technique Agent doc lookup (2026-06-17):
   - **`detect_swallowed_error()` in `error_parsing.py`**: New function that detects technical errors the agent caught in try/except and then chose to skip. Requires both a skip/abandon decision keyword AND a known `TECHNICAL_ERROR_TYPES` token (repr or str form). Prevents false positives for legit data-driven skips and transient errors the agent later fixes.
   - **Bioinfo agent integration**: `_detect_and_lookup_swallowed_error()` method consults the Technique Agent (`lookup_from_error`) for API documentation when a swallowed error is detected. `_build_swallowed_error_feedback()` generates steering messages that guide the agent to fix and retry instead of skipping.
   - **Execution loop injection**: Swallowed-error detection runs unconditionally after every code execution step. When detected, the feedback is appended to the tool result before it's sent back to the LLM, guiding the agent toward the correct API call.
   - **Test**: `test_error_parsing.py` — 5 tests covering scvelo case, str-form error, no-skip-keyword (returns None), data-driven skip (returns None), empty/None output.
-
-**0.26.x — Species identification HITL & gene validation (2026-06-11 → 2026-06-16)**
 
 - `0.26.7` — painter retry extraction, _images_api_attempt method, shared _retry_with_backoff (2026-06-16):
   - **Shared `_retry_with_backoff()` helper**: Extracted the 3× inline exponential-backoff retry loops (Revision, Chat generation, Images API) into a single reusable `_retry_with_backoff()` function. Client errors (4xx) break out immediately without retrying; transient errors use `2^attempt` delay. All call sites unified under the same retry logic.
