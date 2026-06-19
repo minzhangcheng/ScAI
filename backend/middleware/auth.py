@@ -32,8 +32,10 @@ PUBLIC_PREFIXES = (
 PROTECTED_PREFIXES = (
     "/api/session/",
     "/api/v1/",
-    "/api/file/",
-    "/api/download/",
+    # Leaf endpoints with no sub-paths — matched without a trailing slash so the
+    # exact route path (/api/file, /api/download) is recognized, not just /api/file/*.
+    "/api/file",
+    "/api/download",
     "/api/auth/",
     "/api/admin/",
     "/api/user/",
@@ -48,8 +50,8 @@ PROTECTED_EXACT = {"/api/sessions"}
 # Paths where auth is optional - authentication is delegated to route layer
 # These are image/file endpoints embedded in HTML that browsers request without auth headers
 AUTH_OPTIONAL_PATHS = (
-    "/api/file/",     # file serving with path-based ownership check
-    "/api/download/",  # file download with path-based ownership check
+    "/api/file",     # file serving with path-based ownership check (<img src> / link, no auth header)
+    "/api/download",  # file download with path-based ownership check
 )
 
 # Suffixes under /api/session/<uuid>/ that are auth-optional

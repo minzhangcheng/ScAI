@@ -313,8 +313,14 @@ body {
 
 table {
     width: 100%;
+    max-width: 100%;
     border-collapse: collapse;
     font-size: 0.85rem;
+    /* Wide tables (many columns) scroll horizontally instead of overflowing
+       the page. display:block makes overflow-x take effect on the table itself,
+       covering both wrapped (.table-wrapper) and bare <table> elements. */
+    display: block;
+    overflow-x: auto;
 }
 
 th {

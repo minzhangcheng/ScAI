@@ -65,6 +65,15 @@ class TestAuthOptionalSuffixes:
     def test_download_prefix_kept(self):
         assert _is_auth_optional("/api/download/something") is True
 
+    # Leaf endpoints: the actual routes are /api/file and /api/download with the
+    # path passed as a query string, so the exact path (no trailing slash) must
+    # be auth-optional too — otherwise <img src>/download links 403.
+    def test_file_exact_path(self):
+        assert _is_auth_optional("/api/file") is True
+
+    def test_download_exact_path(self):
+        assert _is_auth_optional("/api/download") is True
+
     # Negative: unrelated paths
     def test_non_session_path(self):
         assert _is_auth_optional("/api/admin/users") is False

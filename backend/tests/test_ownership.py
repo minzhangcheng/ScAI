@@ -117,8 +117,11 @@ class TestOwnership:
         async def session_route(request):
             return PlainTextResponse("ok")
 
+        # /report/html is an auth-optional session suffix (HTML-embedded content
+        # browsers fetch without auth headers) — middleware delegates ownership
+        # to the route layer rather than rejecting.
         app = Starlette(
-            routes=[Route("/api/session/sess1/detail", session_route)],
+            routes=[Route("/api/session/sess1/report/html", session_route)],
             middleware=[(AuthMiddleware, [], {})],
         )
         client = TestClient(app)
@@ -126,7 +129,7 @@ class TestOwnership:
         # Token for a user that doesn't exist in DB
         token = create_access_token("unknown_user", "unknown_user")
         resp = client.get(
-            "/api/session/sess1/detail",
+            "/api/session/sess1/report/html",
             headers={"Authorization": f"Bearer {token}"},
         )
         # Middleware passes through; route would check ownership
@@ -144,14 +147,14 @@ class TestOwnership:
             return PlainTextResponse("ok")
 
         app = Starlette(
-            routes=[Route("/api/session/sess1/detail", session_route)],
+            routes=[Route("/api/session/sess1/report/html", session_route)],
             middleware=[(AuthMiddleware, [], {})],
         )
         client = TestClient(app)
 
         token = create_access_token("user_a", "user_a")
         resp = client.get(
-            "/api/session/sess1/detail",
+            "/api/session/sess1/report/html",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
@@ -204,14 +207,14 @@ class TestOwnership:
                 return PlainTextResponse("ok")
 
             app = Starlette(
-                routes=[Route("/api/session/sess3/detail", session_route)],
+                routes=[Route("/api/session/sess3/report/html", session_route)],
                 middleware=[(AuthMiddleware, [], {})],
             )
             client = TestClient(app)
 
             token = create_access_token("user_a", "user_a")
             resp = client.get(
-                "/api/session/sess3/detail",
+                "/api/session/sess3/report/html",
                 headers={"Authorization": f"Bearer {token}"},
             )
             assert resp.status_code == 200

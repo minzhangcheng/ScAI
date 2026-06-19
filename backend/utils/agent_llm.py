@@ -30,10 +30,15 @@ async def validate_file_path_ownership(
     Defense-in-depth: after determining sid, the resolved path must lie inside
     `get_session_dir(sid)` (which contains uploads, workspace, reports, states,
     logs subdirectories).
+
+    When `user_id` is None (no auth token — e.g. an HTML-embedded <img src> or a
+    download link that browsers fetch without an Authorization header), the path
+    is still confined to a single existing session directory and ownership is
+    delegated to `require_session_ownership`, which falls back to UUID-guard
+    (session-exists) verification. This mirrors the auth-optional figure/report
+    endpoints so embedded resources render without auth headers.
     """
     user_id = getattr(request.state, "user_id", None)
-    if not user_id:
-        raise HTTPException(status_code=403, detail="Not authenticated")
 
     try:
         resolved = Path(file_path).resolve()

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.7 · **Last updated**: 2026-06-18
+**Version**: 0.27.8 · **Last updated**: 2026-06-19
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.8` — Auth-optional exact-path fix for /api/file and /api/download, unauthenticated file-path ownership delegation, report table horizontal scroll (2026-06-19):
+  - **Middleware auth-optional paths**: Changed `PROTECTED_PREFIXES` and `AUTH_OPTIONAL_PATHS` from `/api/file/` and `/api/download/` (trailing-slash match, sub-path only) to `/api/file` and `/api/download` (exact-path match). The actual Starlette routes are `/api/file` and `/api/download` with the path passed as query string, so the trailing-slash version never matched the exact route — causing 403s on `<img src>` and download links in HTML reports where browsers fetch without auth headers.
+  - **Unauthenticated file-path ownership delegation**: `agent_llm.validate_file_path_ownership()` no longer rejects `user_id=None` outright. Instead, it delegates ownership to `require_session_ownership(user_id=None)` which falls back to UUID-guard (session-exists) verification — mirroring the auth-optional figure/report endpoints so embedded resources render without auth headers. Path-containment validation is unchanged for both authenticated and unauthenticated requests.
+  - **Report table horizontal scroll**: Added `max-width: 100%`, `display: block`, `overflow-x: auto` to all report tables — `table` (global CSS), `.direction-table`, `.steps-table`, and `.ann-table` — preventing wide tables with many columns from overflowing the page.
+  - **Test updates**: `test_auth_optional_paths.py` — new tests for `/api/file` and `/api/download` exact-path auth-optional. `test_file_path_ownership.py` — renamed `test_unauthenticated_rejected` → `test_unauthenticated_legit_path_delegates_uuid_guard` (now expects allow + UUID-guard), added `test_unauthenticated_invalid_path_still_rejected`. `test_ownership.py` — migrated from test route `/api/session/sess1/detail` to `/api/session/sess1/report/html` (a real auth-optional session suffix).
 
 - `0.27.7` — Test resilience: missing mocks in PI planning early-return test, new model field in API dict coverage (2026-06-18):
   - **`test_pi_planning_early_return.py`**: Added `infer_species` AsyncMock return value and `_send_state_sync` AsyncMock to `_Harness` — the PI planning node calls `infer_species` unconditionally since the 0.26.x species-inference addition, but the harness never provided a mock return, causing `TypeError: 'coroutine' object is not subscriptable` when `pi_planning` runs during agent-nodes-mixin round transitions.

@@ -279,8 +279,12 @@ def generate_exploration_report_html(
     /* Direction evaluation table */
     .direction-table {{
         width: 100%;
+        max-width: 100%;
         border-collapse: collapse;
         margin-top: 16px;
+        /* Wide tables scroll horizontally instead of overflowing the page. */
+        display: block;
+        overflow-x: auto;
     }}
 
     .direction-table th {{
@@ -808,7 +812,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 .segment-section {{ margin: 1.5rem 0; padding: 1rem; background: #f1f5f9; border-radius: 0.5rem; }}
 .segment-section h3 {{ color: #334155; margin-top: 0; font-size: 1rem; }}
 .segment-section h4 {{ color: #475569; font-size: 0.9rem; }}
-.steps-table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
+.steps-table {{ width: 100%; max-width: 100%; border-collapse: collapse; font-size: 0.85rem; display: block; overflow-x: auto; }}
 .steps-table th, .steps-table td {{ padding: 0.4rem 0.6rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
 .steps-table th {{ background: #e2e8f0; }}
 .success {{ color: #16a34a; }}
@@ -1154,7 +1158,7 @@ def generate_annotation_context_report_html(
         cursor: pointer; color: var(--text-secondary); font-size: 0.85rem; user-select: none;
     }}
     .lit-result {{ font-size: 0.88rem; color: var(--text-secondary); }}
-    .ann-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+    .ann-table {{ width: 100%; max-width: 100%; border-collapse: collapse; font-size: 0.9rem; display: block; overflow-x: auto; }}
     .ann-table th {{
         background: var(--primary-light); padding: 12px 16px; text-align: left;
         font-size: 0.85rem; color: var(--primary-color); border-bottom: 2px solid var(--border-color);

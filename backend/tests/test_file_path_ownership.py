@@ -103,10 +103,28 @@ async def test_legit_path_without_expected_session_id(patch_ownership):
 
 
 @pytest.mark.asyncio
-async def test_unauthenticated_rejected(patch_ownership):
-    """Request without user_id must be rejected."""
+async def test_unauthenticated_legit_path_delegates_uuid_guard(patch_ownership):
+    """No auth token (HTML-embedded <img>/download): a legit session path is allowed
+    and ownership is delegated to require_session_ownership with user_id=None
+    (UUID-guard), mirroring the auth-optional figure/report endpoints."""
+    sid = "noauth-sid"
+    workspace = get_session_workspace(sid)
+    workspace.mkdir(parents=True, exist_ok=True)
+    legit_file = str(workspace / "graphic_abstract.jpg")
+
+    req = MagicMock()
+    req.state.user_id = None
+    await agent_llm.validate_file_path_ownership(legit_file, req)
+    assert patch_ownership == [(sid, None)]
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_invalid_path_still_rejected(patch_ownership):
+    """No auth token does not relax path-containment checks: a path with no
+    'sessions/<sid>/' segment is still rejected before any ownership delegation."""
     req = MagicMock()
     req.state.user_id = None
     with pytest.raises(HTTPException) as exc:
-        await agent_llm.validate_file_path_ownership("/x", req)
+        await agent_llm.validate_file_path_ownership("/etc/passwd", req)
     assert exc.value.status_code == 403
+    assert patch_ownership == []
