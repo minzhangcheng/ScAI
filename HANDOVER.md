@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.6 · **Last updated**: 2026-06-18
+**Version**: 0.27.7 · **Last updated**: 2026-06-18
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.7` — Test resilience: missing mocks in PI planning early-return test, new model field in API dict coverage (2026-06-18):
+  - **`test_pi_planning_early_return.py`**: Added `infer_species` AsyncMock return value and `_send_state_sync` AsyncMock to `_Harness` — the PI planning node calls `infer_species` unconditionally since the 0.26.x species-inference addition, but the harness never provided a mock return, causing `TypeError: 'coroutine' object is not subscriptable` when `pi_planning` runs during agent-nodes-mixin round transitions.
+  - **`test_to_api_dict_coverage.py`**: Added `"literature_actual_model"` to `_EXCLUDED_FIELDS` — the `AnalysisState` model gained this field, and the coverage test tracks excluded (non-API-exported) fields explicitly.
 
 - `0.27.6` — PI-generated Deep Research briefs, zero direct context injection (2026-06-18):
   - **PI-authored research briefs**: Two new `PIAgent` methods — `generate_annotation_research_brief()` (focused marker-driven brief for cell-type annotation) and `generate_round_research_brief()` (breadth-judging brief for regular research rounds). Both present experimental background as "reference only" — PI decides relevance instead of mechanical concatenation. Shared `_summarize_cluster_markers()` and `_brief_background_block()` helpers. `_BRIEF_RULES` footer prohibits citation-format directives (the Literature Agent appends its own parser-coupled footer).
