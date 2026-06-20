@@ -49,7 +49,8 @@ async def test_dr_chat_uses_brief_with_footer():
     _patch_dr_chat(agent, captured)
     await agent._deep_research_via_chat("the topic", _fake_state("STUDY GOAL"),
                                         research_brief="FOCUSED BRIEF")
-    prompt = captured["messages"][0]["content"]
+    assert captured["messages"][0]["role"] == "system"
+    prompt = captured["messages"][-1]["content"]
     assert "FOCUSED BRIEF" in prompt
     assert LiteratureAgent._DEEP_RESEARCH_CITATION_FOOTER in prompt  # verbatim footer contract
     assert "STUDY GOAL" not in prompt               # no injection
@@ -64,7 +65,8 @@ async def test_dr_chat_fallback_is_slim():
     _patch_dr_chat(agent, captured)
     await agent._deep_research_via_chat("my topic", _fake_state("STUDY GOAL"),
                                         research_brief=None)
-    prompt = captured["messages"][0]["content"]
+    assert captured["messages"][0]["role"] == "system"
+    prompt = captured["messages"][-1]["content"]
     assert "my topic" in prompt
     assert LiteratureAgent._DEEP_RESEARCH_CITATION_FOOTER in prompt  # verbatim footer contract
     assert "STUDY GOAL" not in prompt

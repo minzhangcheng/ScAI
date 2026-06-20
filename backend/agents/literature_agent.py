@@ -62,6 +62,8 @@ class LiteratureAgent(BaseAgent):
         "Nature. https://doi.org/10.1038/xxx"
     )
 
+    _FINDINGS_EXTRACT_MAX_CHARS = 100000
+
     def __init__(
         self,
         settings_provider: 'AgentSettingsProvider',
@@ -312,7 +314,10 @@ class LiteratureAgent(BaseAgent):
             try:
                 response = await dr_client.chat(
                     model=self.deep_research_model,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
                     temperature=0.3,
                     max_tokens=None,
                     timeout=1800.0,
@@ -798,10 +803,19 @@ Respond in JSON format:
         search_history: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """LLM evaluates PubMed results and suggests refined queries."""
-        # Include truncated abstracts for better relevance judgment
+        # Include truncated abstracts for better relevance judgment.
+        # Sort by year (newest first) so recent rounds' articles are not dropped,
+        # then sample up to 30 (model context is ample).
+        def _year_key(a: Dict[str, str]) -> int:
+            try:
+                return int(str(a.get("year", "")).strip()[:4])
+            except (ValueError, TypeError):
+                return 0
+        sorted_articles = sorted(articles, key=_year_key, reverse=True)
+        sampled = sorted_articles[:30]
         articles_summary = "\n".join(
             f"- [{a.get('year', 'N/A')}] {a['title']}\n  Abstract: {a.get('abstract', 'N/A')}"
-            for a in articles[:15]
+            for a in sampled
         )
 
         # List all previous queries explicitly to prevent duplication
@@ -818,7 +832,7 @@ Topic: {topic}
 Previous queries (DO NOT repeat these):
 {previous_queries}
 
-Articles found ({len(articles)} total, showing first 15 with abstracts):
+Articles found ({len(articles)} total, showing {len(sampled)} most recent with abstracts):
 {articles_summary}
 
 Evaluation criteria:
@@ -1067,7 +1081,7 @@ Note: If you are not certain about specific citation information, please clearly
         prompt = f"""
 Extract key findings from the following literature review (in list form):
 
-{report[:10000]}
+{report[:self._FINDINGS_EXTRACT_MAX_CHARS]}
 
 Please list 3-5 most important findings, one per line.
 """

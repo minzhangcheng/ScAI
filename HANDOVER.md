@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.9 · **Last updated**: 2026-06-19
+**Version**: 0.27.10 · **Last updated**: 2026-06-19
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,17 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.10` — Literature Agent system prompt injection, PubMed eval year-sorted sampling, PI topic format rule, dict-repr task normalization, DR coverage single-topic gap fill (2026-06-19):
+  - **Deep Research system prompt injection**: `_deep_research_via_chat()` now sends `self.system_prompt` as a `{"role": "system"}` message before the user prompt — the DR-LLM (OpenAI o4, Perplexity sonar, etc.) receives the proper role definition instead of having it mixed into the user message. `_FINDINGS_EXTRACT_MAX_CHARS = 100000` (was hardcoded 10k) so long reports aren't aggressively truncated before findings extraction.
+  - **Literature prompt rewritten as system role**: `agent_prompts.literature_prompt` changed from a user-level request ("Please help me conduct literature research on {topic}") to a proper role-definition system prompt ("You are a professional biomedical literature researcher..."). Removes the unformatted `{topic}` placeholder; operating principles enforce citation rigor and output-format compliance.
+  - **PubMed eval year-sorted sampling**: `_evaluate_pubmed_results()` sorts articles by year descending before sampling up to 30 (was first 15), ensuring recent rounds' articles are not dropped. Prompt now reports `len(sampled)` instead of the hardcoded "first 15".
+  - **PI `_LITERATURE_TOPIC_FORMAT_RULE` constant**: Reusable rule string injected into `innovation_instruction` — instructs the PI to output `literature_topics` as plain natural-language strings (not `{"Topic": ..., "Rationale": ...}` dicts). Tested for constant existence and instruction reference.
+  - **Dict-repr task normalization**: `_normalize_tasks()` now parses dict-representation strings (e.g. `"{'Topic': 'X', 'Rationale': 'Y'}"`) via `ast.literal_eval` and renders them through the same `_dict_to_task_text()` path as real dicts. Extracted `_dict_to_task_text()` from `_normalize_tasks()` for reuse.
+  - **DR coverage single-topic gap fill**: Removed `len(limited_topics) > 1` guard on DR coverage evaluation — single-topic merged calls now also get PubMed gap-fill when the DR output is under-covered.
+  - **Literature topic context enrichment**: When building topics from other agents' findings (no PI decomposition), prepend `initial_instruction[:120]` as context prefix so the literature search is anchored to the research objective.
+  - **safe_pi_brief empty logging**: Added `logger.info` when the PI brief is empty (was silent), aiding debugging of brief-fallback paths.
+  - **7 new/updated test files** (total +160 lines): `test_literature_dr_system_prompt.py` (system message injection, max chars constant), `test_literature_prompt_role.py` (no `{topic}`, role-def pattern), `test_literature_topic_format_rule.py` (constant + instruction reference), `test_pubmed_eval_sampling.py` (year-sorted top-30), `test_safe_pi_brief_empty_log.py` (logging), `test_workflow_helpers.py` (dict-repr parsing), `test_research_brief_threading.py` (system message position update).
 
 - `0.27.9` — Multi-direction correlation trigger fix (P1-1 queue leak), innovation detailed-report segments, detailed_report_url exposure (2026-06-19):
   - **Multi-direction correlation trigger fix**: Extracted `_should_run_direction_correlation()` gating on completed innovation rounds ≥ chosen directions instead of `directions_queue` being empty. P1-1 peek-commit leaves the final direction's queue entry unpopped at the terminal round (no next-round init), so the old empty-queue criterion silently suppressed cross-direction correlation analysis for all terminal-round sessions. Same `innovation_rounds_done ≥ len(chosen)` logic applied to `max_rounds` extension guard in `_synthesis_check_convergence_condition`.

@@ -136,15 +136,22 @@ Please provide professional analysis opinions."""
 
     literature_prompt: str = """IMPORTANT: You MUST respond exclusively in English.
 
-Please help me conduct literature research on the topic: {topic}
+You are a professional biomedical literature researcher supporting a single-cell
+sequencing analysis team. You search, evaluate, and synthesize peer-reviewed
+biomedical literature with scientific rigor.
 
-Please search for relevant biomedical literature, focusing on:
-1. Related molecular mechanisms
-2. Known gene/pathway associations
-3. Clinical/experimental relevance
+Your areas of focus:
+1. Molecular mechanisms
+2. Known gene / pathway associations
+3. Clinical and experimental relevance
 4. Latest research progress
 
-Please provide a detailed literature review report with specific citation information."""
+Operating principles:
+- Ground every claim in the literature; never fabricate citations, PMIDs, or DOIs.
+- Follow the EXACT output format requested in each task — it may be a single PubMed
+  query string, a JSON object, or a structured prose review. Do not add extra prose
+  when a task asks for a query or JSON only.
+- When uncertain about specific citation details, state that explicitly."""
 
     painter_prompt: str = """You are a scientific illustrator creating a graphic abstract for a biomedical study.
 Produce a single clear, publication-quality figure that summarizes the key biological story:

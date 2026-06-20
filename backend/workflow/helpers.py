@@ -1,4 +1,5 @@
 """Pure helper functions for the workflow — no side effects, no class dependencies."""
+import ast
 import asyncio
 import logging
 import random
@@ -30,7 +31,10 @@ async def safe_pi_brief(make_awaitable, session_id: str, label: str) -> Optional
     try:
         brief = await make_awaitable()
         brief = (brief or "").strip()
-        return brief or None
+        if not brief:
+            logger.info(f"[{session_id}] {label} brief was empty; falling back to focused topic")
+            return None
+        return brief
     except Exception as e:
         logger.warning(f"[{session_id}] {label} brief generation failed: {e}")
         return None
@@ -171,35 +175,50 @@ def prepend_species(text: str, species: str) -> str:
     return text
 
 
+def _dict_to_task_text(t: dict) -> str:
+    """Render a task/topic dict into a single string, matching keys case-insensitively."""
+    lower = {str(k).lower(): v for k, v in t.items()}
+    parts: List[str] = []
+    for key in ("task", "description", "topic", "name"):
+        if key in lower:
+            parts.append(str(lower[key]))
+            break
+    if not parts:
+        parts.append(str(t))
+    if lower.get("rationale"):
+        parts.append(f"(Rationale: {lower['rationale']})")
+    if lower.get("recommended_methods"):
+        methods = lower["recommended_methods"]
+        if isinstance(methods, list):
+            parts.append(f"[Methods: {'; '.join(str(m) for m in methods)}]")
+        else:
+            parts.append(f"[Methods: {methods}]")
+    if lower.get("target_readouts"):
+        readouts = lower["target_readouts"]
+        if isinstance(readouts, list):
+            parts.append(f"[Readouts: {'; '.join(str(r) for r in readouts)}]")
+        else:
+            parts.append(f"[Readouts: {readouts}]")
+    return " ".join(parts)
+
+
 def _normalize_tasks(tasks: list) -> List[str]:
-    """Convert task items to strings — LLMs sometimes return dicts instead of plain strings."""
+    """Convert task items to strings — LLMs sometimes return dicts (or their repr) instead of plain strings."""
     result = []
     for t in tasks:
         if isinstance(t, str):
+            s = t.strip()
+            if s.startswith("{") and s.endswith("}"):
+                try:
+                    parsed = ast.literal_eval(s)
+                except (ValueError, SyntaxError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    result.append(_dict_to_task_text(parsed))
+                    continue
             result.append(t)
         elif isinstance(t, dict):
-            parts = []
-            for key in ("task", "description", "topic", "name"):
-                if key in t:
-                    parts.append(str(t[key]))
-                    break
-            if not parts:
-                parts.append(str(t))
-            if "rationale" in t:
-                parts.append(f"(Rationale: {t['rationale']})")
-            if "recommended_methods" in t and t["recommended_methods"]:
-                methods = t["recommended_methods"]
-                if isinstance(methods, list):
-                    parts.append(f"[Methods: {'; '.join(str(m) for m in methods)}]")
-                else:
-                    parts.append(f"[Methods: {methods}]")
-            if "target_readouts" in t and t["target_readouts"]:
-                readouts = t["target_readouts"]
-                if isinstance(readouts, list):
-                    parts.append(f"[Readouts: {'; '.join(str(r) for r in readouts)}]")
-                else:
-                    parts.append(f"[Readouts: {readouts}]")
-            result.append(" ".join(parts))
+            result.append(_dict_to_task_text(t))
         else:
             result.append(str(t))
     return result

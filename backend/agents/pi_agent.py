@@ -73,6 +73,15 @@ class PIAgent(BaseAgent):
     - Determine when to stop analysis
     """
 
+    _LITERATURE_TOPIC_FORMAT_RULE = (
+        "Format rule for `literature_topics`: output a JSON array of PLAIN "
+        "natural-language English strings — NOT Python dicts and NOT dict-like "
+        "strings. Each topic is one self-contained descriptive sentence, e.g. "
+        "\"Mitochondrial copper deficiency and cytochrome c oxidase impairment in "
+        "hepatocytes\". Do NOT wrap topics as {'Topic': ..., 'Rationale': ...}; "
+        "if you want to convey rationale, fold it into the sentence itself."
+    )
+
     def __init__(
         self,
         settings_provider: 'AgentSettingsProvider',
@@ -1310,6 +1319,7 @@ IMPORTANT:
 - Do NOT repeat analyses already completed in Round 1 (basic pipeline, annotation, etc.).
 - The Jupyter kernel retains all Round 1 variables — build upon existing results.
 - **Literature Verification Loop**: in `literature_topics`, explicitly ask the Literature Agent to search PubMed for recent evidence that SUPPORTS or REFUTES each bioinformatics task's hypothesis, and to flag any contradictory evidence prominently in its summary.
+- {self._LITERATURE_TOPIC_FORMAT_RULE}
 """
 
         prompt += f"""Reply in JSON format:

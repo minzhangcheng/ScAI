@@ -91,6 +91,22 @@ class TestNormalizeTasks:
         result = _normalize_tasks([42])
         assert result == ["42"]
 
+    def test_dict_repr_string_is_parsed(self):
+        result = _normalize_tasks(["{'Topic': 'Copper deficiency in hepatocytes', 'Rationale': 'mito'}"])
+        assert len(result) == 1
+        assert "Copper deficiency in hepatocytes" in result[0]
+        assert "Rationale: mito" in result[0]
+        assert "{'Topic'" not in result[0]
+
+    def test_dict_with_capitalized_keys(self):
+        result = _normalize_tasks([{"Topic": "X pathway", "Rationale": "Y"}])
+        assert "X pathway" in result[0]
+        assert "Rationale: Y" in result[0]
+
+    def test_plain_brace_string_not_a_dict_passthrough(self):
+        result = _normalize_tasks(["{not a dict}"])
+        assert result == ["{not a dict}"]
+
 
 class TestConstants:
     def test_stage1_keywords_is_frozenset(self):

@@ -954,7 +954,9 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                     (f[:80] if isinstance(f, str) else str(f)[:80])
                     for f in all_source_findings[:3]
                 ]
-                topics = [f"single cell sequencing {' '.join(short_findings)}"]
+                objective = (analysis_state.initial_instruction or "").strip()
+                objective_prefix = f"{objective[:120]} — " if objective else ""
+                topics = [f"{objective_prefix}single cell sequencing {' '.join(short_findings)}"]
             else:
                 # No findings from other agents — build topic from research objective and treatment groups
                 objective = analysis_state.initial_instruction or ""
@@ -1061,7 +1063,8 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 results = [dr_result]
 
                 # Evaluate coverage — fallback to PubMed for gaps
-                if len(limited_topics) > 1:
+                # (also runs for a single topic so under-covered DR output can be supplemented)
+                if limited_topics:
                     gaps = await self._evaluate_dr_coverage(limited_topics, dr_result)
                     if gaps:
                         logger.info(f"[{self.session_id}] Deep Research gaps detected, PubMed fallback for: {gaps}")
