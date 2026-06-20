@@ -808,6 +808,10 @@ class AnalysisState(BaseModel):
             f"/api/session/{self.id}/annotation-report/html"
             if getattr(self, 'annotation_report_html_path', None) else None
         )
+        result["detailed_report_url"] = (
+            f"/api/session/{self.id}/detailed-report/html"
+            if getattr(self, 'detailed_report_html_path', None) else None
+        )
         result["snapshot_count"] = len(self.snapshots)
 
         return result

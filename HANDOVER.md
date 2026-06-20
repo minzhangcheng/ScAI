@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.8 · **Last updated**: 2026-06-19
+**Version**: 0.27.9 · **Last updated**: 2026-06-19
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.9` — Multi-direction correlation trigger fix (P1-1 queue leak), innovation detailed-report segments, detailed_report_url exposure (2026-06-19):
+  - **Multi-direction correlation trigger fix**: Extracted `_should_run_direction_correlation()` gating on completed innovation rounds ≥ chosen directions instead of `directions_queue` being empty. P1-1 peek-commit leaves the final direction's queue entry unpopped at the terminal round (no next-round init), so the old empty-queue criterion silently suppressed cross-direction correlation analysis for all terminal-round sessions. Same `innovation_rounds_done ≥ len(chosen)` logic applied to `max_rounds` extension guard in `_synthesis_check_convergence_condition`.
+  - **Innovation detailed-report segments**: New `_should_build_innovation_segment()` — each innovation round now generates an incremental `DetailedReportSegment` (phase `innovation_round_{N}`). Keys off `round_result.phase` (not `analysis_state.analysis_phase`) to avoid a spurious `innovation_round_1` segment at the exploration round's synthesis (where `analysis_phase` is already flipped to `INNOVATION`). Deduplicates by phase for node-retry idempotency. Called from `_pi_synthesis` alongside the existing exploration-complete segment.
+  - **detailed_report_url exposure**: `AnalysisState.to_api_dict()` now emits `detailed_report_url` (the `/api/session/{id}/detailed-report/html` URL) when `detailed_report_html_path` is set, matching the existing `exploration_report_url` / `annotation_report_url` pattern. New test `test_detailed_report_url_exposed.py` covers both present and absent cases.
+  - **3 new test files** (143 total lines): `test_multi_direction_correlation_trigger.py` (bug replication, single-direction, no-retrigger, non-innovation guards), `test_innovation_detailed_segment.py` (new-segment, duplicate-guard, exploration-phase regression), `test_detailed_report_url_exposed.py`. Updated `test_analysis_state_api_dict.py` expected fields.
 
 - `0.27.8` — Auth-optional exact-path fix for /api/file and /api/download, unauthenticated file-path ownership delegation, report table horizontal scroll (2026-06-19):
   - **Middleware auth-optional paths**: Changed `PROTECTED_PREFIXES` and `AUTH_OPTIONAL_PATHS` from `/api/file/` and `/api/download/` (trailing-slash match, sub-path only) to `/api/file` and `/api/download` (exact-path match). The actual Starlette routes are `/api/file` and `/api/download` with the path passed as query string, so the trailing-slash version never matched the exact route — causing 403s on `<img src>` and download links in HTML reports where browsers fetch without auth headers.

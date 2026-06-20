@@ -58,6 +58,50 @@ def _consume_signal_then_clear(event: asyncio.Event) -> None:
     event.clear()
 
 
+def _should_run_direction_correlation(analysis_state) -> bool:
+    """Whether to run cross-direction correlation analysis.
+
+    Criterion: all chosen directions have completed their innovation rounds,
+    measured by 'completed innovation rounds >= number of chosen directions'
+    rather than 'directions_queue is empty'. Under P1-1 peek-commit the final
+    direction's queue entry is only popped on the next round's init, but the
+    terminal round has no next init, so the old empty-queue criterion would
+    silently skip this analysis.
+
+    Called after round_results.append(round_result), so the current round
+    is already counted.
+    """
+    chosen = analysis_state.user_chosen_directions
+    if len(chosen) <= 1:
+        return False
+    if analysis_state.analysis_phase != AnalysisPhase.INNOVATION:
+        return False
+    if analysis_state.multi_direction_correlation is not None:
+        return False
+    innovation_rounds_done = sum(
+        1 for r in analysis_state.round_results if r.phase == "innovation"
+    )
+    return innovation_rounds_done >= len(chosen)
+
+
+def _should_build_innovation_segment(analysis_state, round_result) -> bool:
+    """Whether to build a detailed-report segment for the just-completed round.
+
+    Keys off round_result.phase (captured before the exploration→innovation
+    transition) rather than analysis_state.analysis_phase, which is already
+    flipped to INNOVATION at the end of the exploration round and would
+    otherwise spawn a spurious 'innovation_round_1' segment for round 1.
+
+    Deduplicates by phase to stay idempotent across node retries.
+    """
+    if round_result.phase != "innovation":
+        return False
+    phase = f"innovation_round_{analysis_state.current_round}"
+    return not any(
+        s.phase == phase for s in analysis_state.detailed_report_segments
+    )
+
+
 class SynthesisMixin:
     """Mixin providing synthesis, user-input, and convergence methods. Composed into SingleCellAnalysisWorkflow."""
 
@@ -222,13 +266,13 @@ class SynthesisMixin:
         # so a later snapshot-restored round can't replay stale agent outputs.
         analysis_state.current_round_cache = None
 
-        # Multi-direction correlation analysis: trigger when queue is empty and multiple directions were selected
-        if (
-            not analysis_state.directions_queue
-            and len(analysis_state.user_chosen_directions) > 1
-            and analysis_state.analysis_phase == AnalysisPhase.INNOVATION
-            and analysis_state.multi_direction_correlation is None
-        ):
+        # Multi-direction correlation analysis: trigger once all chosen
+        # directions have completed their innovation rounds. NOTE: do NOT gate
+        # on `directions_queue` being empty — P1-1 peek-commit leaves the final
+        # direction in the queue at the terminal round (no next-round init to
+        # pop it), which silently suppressed this analysis. See
+        # _should_run_direction_correlation.
+        if _should_run_direction_correlation(analysis_state):
             try:
                 await self._send_message("status", "Analyzing correlations between research directions...", AgentType.PI)
                 # Build directions_with_results by matching direction names (not index)
@@ -258,6 +302,22 @@ class SynthesisMixin:
                 logger.info(f"[{self.session_id}] Multi-direction correlation analysis complete")
             except Exception as e:
                 logger.exception(f"[{self.session_id}] Direction correlation analysis failed")
+
+        # P1: innovation rounds also get an incremental detailed-report segment.
+        # Exploration round is already covered at the exploration_complete call above.
+        if _should_build_innovation_segment(analysis_state, round_result):
+            try:
+                await self._build_and_save_detailed_segment(
+                    analysis_state,
+                    f"innovation_round_{analysis_state.current_round}",
+                    f"Innovation Round {analysis_state.current_round} — Analysis Results",
+                    graph_state=state,
+                    round_result=round_result,
+                )
+            except Exception as e:
+                logger.exception(
+                    f"[{self.session_id}] Innovation detailed segment generation failed"
+                )
 
         # Save state after each round
         if self.state_callback:
@@ -473,9 +533,12 @@ class SynthesisMixin:
             # Don't extend if multi-direction mode has completed all directions
             # AND the user didn't provide real new input/files (only synthetic signals).
             # If the user explicitly typed instructions or uploaded files, honor their intent.
+            innovation_rounds_done = sum(
+                1 for r in analysis_state.round_results if r.phase == "innovation"
+            )
             multi_dir_completed = (
-                not analysis_state.directions_queue
-                and len(analysis_state.user_chosen_directions) > 1
+                len(analysis_state.user_chosen_directions) > 1
+                and innovation_rounds_done >= len(analysis_state.user_chosen_directions)
             )
             if multi_dir_completed and not has_real_text:
                 logger.info(f"[{self.session_id}] Multi-direction completed, not extending max_rounds")
