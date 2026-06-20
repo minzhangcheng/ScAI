@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.10 · **Last updated**: 2026-06-19
+**Version**: 0.27.11 · **Last updated**: 2026-06-19
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.11` — Gemini Deep Research poll transient-failure resilience (2026-06-19):
+  - **`GoogleDeepResearchClient._poll_research()`**: Wraps the HTTP GET in `try/except` for `httpx.TransportError` and `httpx.TimeoutException`. On transient network errors (disconnects, timeouts, DNS failures) during polling, logs a warning and retries after `poll_interval` instead of crashing the entire deep research call. Sustained failures still raise `TimeoutError` via the existing `max_wait` deadline.
+  - **New test**: `test_poll_research_resilience.py` (57 lines) — `test_poll_recovers_after_transient_disconnects()` (2 failures then success via `httpx.RemoteProtocolError`), `test_poll_sustained_failure_times_out_not_raises_raw()` (persistent `ConnectError` → `TimeoutError`, not a raw transport exception).
 
 - `0.27.10` — Literature Agent system prompt injection, PubMed eval year-sorted sampling, PI topic format rule, dict-repr task normalization, DR coverage single-topic gap fill (2026-06-19):
   - **Deep Research system prompt injection**: `_deep_research_via_chat()` now sends `self.system_prompt` as a `{"role": "system"}` message before the user prompt — the DR-LLM (OpenAI o4, Perplexity sonar, etc.) receives the proper role definition instead of having it mixed into the user message. `_FINDINGS_EXTRACT_MAX_CHARS = 100000` (was hardcoded 10k) so long reports aren't aggressively truncated before findings extraction.

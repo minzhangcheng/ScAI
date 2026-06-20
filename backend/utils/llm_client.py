@@ -1479,10 +1479,18 @@ class GoogleDeepResearchClient:
         start_time = time.time()
         
         while (time.time() - start_time) < max_wait:
-            response = await self.client.get(
-                url,
-                headers=self._default_headers,
-            )
+            try:
+                response = await self.client.get(
+                    url,
+                    headers=self._default_headers,
+                )
+            except (httpx.TransportError, httpx.TimeoutException) as e:
+                logger.warning(
+                    f"[DeepResearch] Poll transient error, will retry: "
+                    f"{type(e).__name__}: {str(e)[:100]}"
+                )
+                await asyncio.sleep(poll_interval)
+                continue
             self._check_response(response, f"poll_research interaction_id={interaction_id}")
             
             data = response.json()
