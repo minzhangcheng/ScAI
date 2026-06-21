@@ -11,9 +11,10 @@ import logging
 import re
 import time
 from uuid import uuid4
+from urllib.parse import urlparse, urlunparse
 from typing import List, Dict, Any, Optional, AsyncGenerator, Union, Callable, Awaitable, Tuple
 from dataclasses import dataclass, field
-from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError, AuthenticationError, PermissionDeniedError
+from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIError, InternalServerError, BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError
 
 from .llm_logger import get_llm_logger, LLMInteraction
 
@@ -205,6 +206,355 @@ def _extract_model_name(model: str) -> str:
     return model.split("/")[-1] if "/" in model else model
 
 
+# Deep-research 内置检索工具候选名（不同服务商/模型命名不一致）。
+_WEB_SEARCH_TOOL_NAMES = ["web_search_preview", "web_search"]
+
+
+def _is_deep_research_model(model: str) -> bool:
+    """True for deep-research models. Normalizes by removing hyphens so both
+    'o3-deep-research' and 'o4-deepresearch-mini' match 'deepresearch'."""
+    model_name = _extract_model_name(model).lower().replace("-", "")
+    return "deepresearch" in model_name
+
+
+# 两级协议探测缓存（模块级，跨 client 实例 / 跨 agent 共享，因协议只由 base_url+model 决定）。
+# 第一级：整站无 Responses 端点（base_url 级，与 model 无关）。
+_NO_RESPONSES_ENDPOINT: set = set()
+# 第二级：模型级协议选择。value ∈ {"responses","chat","anthropic"}
+_PROBE_CACHE: Dict[Tuple[str, str], str] = {}
+_PROBE_LOCKS: Dict[Tuple[str, str], asyncio.Lock] = {}
+
+
+def _url_path_suffix_protocol(base_url: str):
+    """Explicit endpoint override by URL path tail. Returns protocol or None.
+    Matches the path SUFFIX only (not arbitrary substring) to avoid false
+    positives like a domain literally containing 'responses'."""
+    path = urlparse(base_url).path.rstrip("/").lower()
+    if path.endswith("/responses"):
+        return "responses"
+    if path.endswith("/messages"):
+        return "anthropic"
+    if path.endswith("/chat/completions"):
+        return "chat"
+    return None
+
+
+def _route_protocol(base_url: str, model: str) -> str:
+    """Decide which protocol to use for (base_url, model).
+
+    Priority:
+      0. explicit endpoint URL suffix
+      1. base_url without '/v1'  -> anthropic
+      2. deep-research model     -> responses
+      3. base_url has no responses endpoint (cached) -> chat
+      4. probe cache hit
+      5. default 'responses' (caller will probe + fall back on endpoint-absent)
+    """
+    explicit = _url_path_suffix_protocol(base_url)
+    if explicit is not None:
+        return explicit
+    if "/v1" not in base_url:
+        return "anthropic"
+    if _is_deep_research_model(model):
+        return "responses"
+    if base_url in _NO_RESPONSES_ENDPOINT:
+        return "chat"
+    cached = _PROBE_CACHE.get((base_url, model))
+    if cached is not None:
+        return cached
+    return "responses"
+
+
+def _strip_path_suffix(base_url: str, suffixes: tuple) -> str:
+    """Strip the first matching endpoint suffix from a URL's path (case-insensitive),
+    preserving scheme/host/query. Used so a user-supplied full endpoint URL is not
+    double-appended by the SDK."""
+    p = urlparse(base_url)
+    path = p.path.rstrip("/")
+    low = path.lower()
+    for suf in suffixes:
+        if low.endswith(suf):
+            path = path[: -len(suf)]
+            break
+    return urlunparse(p._replace(path=path))
+
+
+def _openai_sdk_base_url(base_url: str) -> str:
+    """Normalize an OpenAI-family base_url for AsyncOpenAI: strip a trailing
+    /chat/completions or /responses so the SDK's own path append yields exactly
+    the user's endpoint."""
+    return _strip_path_suffix(base_url, ("/chat/completions", "/responses"))
+
+
+def _anthropic_sdk_base_url(base_url: str) -> str:
+    """Normalize a base_url for AsyncAnthropic: strip a trailing /v1/messages or
+    /messages so the SDK's own /v1/messages append is not doubled."""
+    return _strip_path_suffix(base_url, ("/v1/messages", "/messages"))
+
+
+def _responses_messages_to_input(messages: List[Dict[str, Any]]):
+    """Translate OpenAI chat messages to Responses (instructions, input[]).
+    The first system message becomes top-level `instructions`; all other
+    messages pass through as input items."""
+    instructions = None
+    items: List[Dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") == "system" and instructions is None:
+            instructions = msg.get("content")
+            continue
+        items.append(msg)
+    return instructions, items
+
+
+def _responses_translate_tools(tools: Optional[List[Dict[str, Any]]]):
+    """Chat function-tool format -> Responses flat function format. Built-in
+    tools (e.g. {'type':'web_search'}) pass through unchanged."""
+    if not tools:
+        return tools
+    out = []
+    for t in tools:
+        if isinstance(t, dict) and t.get("type") == "function" and "function" in t:
+            fn = t["function"]
+            flat = {"type": "function", "name": fn.get("name")}
+            if "description" in fn:
+                flat["description"] = fn["description"]
+            if "parameters" in fn:
+                flat["parameters"] = fn["parameters"]
+            out.append(flat)
+        else:
+            out.append(t)
+    return out
+
+
+def _responses_translate_tool_choice(tool_choice):
+    """auto/none/required pass through; specific-function dict is flattened."""
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function" and "function" in tool_choice:
+        return {"type": "function", "name": tool_choice["function"].get("name")}
+    return tool_choice
+
+
+def _anthropic_messages_translate(messages: List[Dict[str, Any]]):
+    """Translate canonical OpenAI-chat messages -> (system, anthropic_messages).
+    - first system message -> top-level `system`
+    - assistant.tool_calls -> tool_use content blocks
+    - role 'tool' -> user message with a tool_result block"""
+    system = None
+    out: List[Dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if role == "system" and system is None:
+            system = msg.get("content")
+            continue
+        if role == "tool":
+            out.append({"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": msg.get("tool_call_id"),
+                "content": msg.get("content"),
+            }]})
+            continue
+        if role == "assistant" and msg.get("tool_calls"):
+            blocks = []
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking"):
+                        blocks.append(block)
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        blocks.append(block)
+                    elif isinstance(block, str) and block:
+                        blocks.append({"type": "text", "text": block})
+            elif content:
+                blocks.append({"type": "text", "text": content})
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                blocks.append({"type": "tool_use", "id": tc.get("id"),
+                               "name": fn.get("name"), "input": args})
+            out.append({"role": "assistant", "content": blocks})
+            continue
+        out.append({"role": role, "content": msg.get("content")})
+    return system, out
+
+
+def _anthropic_translate_tools(tools: Optional[List[Dict[str, Any]]]):
+    if not tools:
+        return tools
+    out = []
+    for t in tools:
+        if isinstance(t, dict) and t.get("type") == "function" and "function" in t:
+            fn = t["function"]
+            spec = {"name": fn.get("name"), "input_schema": fn.get("parameters", {"type": "object"})}
+            if "description" in fn:
+                spec["description"] = fn["description"]
+            out.append(spec)
+    return out
+
+
+def _anthropic_translate_tool_choice(tool_choice):
+    """auto->{type:auto}; required->{type:any}; specific function->{type:tool,name};
+    none-> None (caller omits tools entirely, since Anthropic has no 'none')."""
+    if tool_choice in (None, "auto"):
+        return {"type": "auto"}
+    if tool_choice == "required":
+        return {"type": "any"}
+    if tool_choice == "none":
+        return None
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        return {"type": "tool", "name": tool_choice["function"].get("name")}
+    return {"type": "auto"}
+
+
+def _parse_anthropic_dump(dump: Dict[str, Any]):
+    """Parse an Anthropic Messages response (model_dump dict) into
+    (text, tool_calls, thinking_blocks, usage). thinking_blocks is None when
+    absent; when present it is a list of {'type':'thinking','thinking':...,
+    'signature':...} ready to be echoed verbatim on the next tool-call turn."""
+    text_parts: List[str] = []
+    tool_calls: List[ToolCall] = []
+    thinking_blocks: List[Dict[str, Any]] = []
+
+    for block in dump.get("content", []) or []:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text" and isinstance(block.get("text"), str):
+            text_parts.append(block["text"])
+        elif btype == "thinking":
+            tb = {"type": "thinking", "thinking": block.get("thinking", "")}
+            if block.get("signature"):
+                tb["signature"] = block["signature"]
+            thinking_blocks.append(tb)
+        elif btype == "tool_use":
+            tool_calls.append(ToolCall(
+                id=block.get("id") or f"anthropic_{uuid4().hex[:8]}",
+                name=block.get("name", ""),
+                arguments=block.get("input") or {},
+            ))
+
+    u = dump.get("usage") or {}
+    inp = u.get("input_tokens", 0) or 0
+    outp = u.get("output_tokens", 0) or 0
+    usage = {"prompt_tokens": inp, "completion_tokens": outp, "total_tokens": inp + outp}
+
+    return "\n".join(text_parts), tool_calls, (thinking_blocks or None), usage
+
+
+def _anthropic_restore_thinking(messages: List[Dict[str, Any]]):
+    """Inbound translation helper: if an assistant message carries thinking
+    blocks under 'reasoning_details', prepend them (with signature) back into
+    its content so Anthropic accepts the multi-turn tool-call replay. Returns a
+    new list; does not mutate inputs. Operates BEFORE _anthropic_messages_translate."""
+    out = []
+    for msg in messages:
+        rd = msg.get("reasoning_details") if isinstance(msg, dict) else None
+        if msg.get("role") == "assistant" and rd:
+            new_msg = {k: v for k, v in msg.items() if k != "reasoning_details"}
+            content = new_msg.get("content")
+            blocks = list(rd)
+            if isinstance(content, list):
+                blocks = blocks + content
+            elif content:
+                blocks = blocks + [{"type": "text", "text": content}]
+            new_msg["content"] = blocks
+            out.append(new_msg)
+        else:
+            out.append(msg)
+    return out
+
+
+def _parse_responses_dump(dump: Dict[str, Any]):
+    """Parse a Responses API response (already model_dump()'d to a dict) into
+    (text, tool_calls, citations, usage). citations is None when no
+    url_citation annotations are present."""
+    text_parts: List[str] = []
+    tool_calls: List[ToolCall] = []
+    citations: List[Dict[str, str]] = []
+    seen_uris = set()
+
+    for item in dump.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type")
+        if itype == "message":
+            for block in item.get("content", []) or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") in ("output_text", "text") and isinstance(block.get("text"), str):
+                    text_parts.append(block["text"])
+                for ann in block.get("annotations", []) or []:
+                    if isinstance(ann, dict) and ann.get("type") == "url_citation":
+                        uri = ann.get("url", "")
+                        if uri and uri not in seen_uris:
+                            seen_uris.add(uri)
+                            citations.append({"title": ann.get("title", ""), "url": uri})
+        elif itype == "function_call":
+            raw_args = item.get("arguments") or "{}"
+            parse_error = None
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError as e:
+                args = {}
+                parse_error = str(e)
+            tool_calls.append(ToolCall(
+                id=item.get("call_id") or item.get("id") or f"resp_{uuid4().hex[:8]}",
+                name=item.get("name", ""),
+                arguments=args,
+                parse_error=parse_error,
+                raw_arguments=raw_args if parse_error else None,
+            ))
+
+    u = dump.get("usage") or {}
+    usage = {
+        "prompt_tokens": u.get("input_tokens", 0) or 0,
+        "completion_tokens": u.get("output_tokens", 0) or 0,
+        "total_tokens": u.get("total_tokens", 0) or 0,
+    }
+    details = u.get("input_tokens_details") or {}
+    if details.get("cached_tokens"):
+        usage["cached_tokens"] = details["cached_tokens"]
+
+    return "\n".join(text_parts), tool_calls, (citations or None), usage
+
+
+def _inject_web_search_if_needed(model: str, tools: list) -> list:
+    """Auto-inject a built-in web search tool for deep-research models that
+    require one. No-op for non-DR models or when a search-tool variant is
+    already present. Preserves caller-provided tools."""
+    if not _is_deep_research_model(model):
+        return tools
+    existing = {t.get("type") for t in (tools or []) if isinstance(t, dict)}
+    for name in _WEB_SEARCH_TOOL_NAMES:
+        if name in existing:
+            return tools
+    return list(tools or []) + [{"type": _WEB_SEARCH_TOOL_NAMES[0]}]
+
+
+def _is_unknown_web_search_tool_error(error: Exception) -> bool:
+    """True when the error indicates an unrecognized tool type that is
+    one of the _WEB_SEARCH_TOOL_NAMES variants."""
+    s = str(error).lower()
+    if not any(kw in s for kw in (
+        "unknown tool", "unsupported tool", "not a valid tool",
+        "tool not found", "unrecognized tool",
+    )):
+        return False
+    for name in _WEB_SEARCH_TOOL_NAMES:
+        if name.lower() in s:
+            return True
+    return False
+
+
+def _swap_web_search_tool_name(tools: list, from_name: str, to_name: str) -> list:
+    """Return a new list with from_name replaced by to_name in dict type fields."""
+    return [
+        {**t, "type": to_name} if isinstance(t, dict) and t.get("type") == from_name else t
+        for t in tools
+    ]
+
+
 def _is_o_series(model_name: str) -> bool:
     """Check if a model name matches OpenAI o-series reasoning models."""
     for prefix in _OPENAI_REASONING_PREFIXES:
@@ -261,6 +611,45 @@ def is_tool_choice_error(error: Exception) -> bool:
         return False
     error_str = str(error).lower()
     return "tool_choice" in error_str or "tool choice" in error_str
+
+
+def is_responses_endpoint_absent(error: Exception) -> bool:
+    """True when the Responses endpoint itself is absent on this server.
+
+    This is a base_url-level property. A True result may populate
+    _NO_RESPONSES_ENDPOINT because every model on this base URL would fail the
+    Responses route.
+    """
+    if isinstance(error, NotFoundError):
+        return True
+    s = str(error).lower()
+    route_markers = (
+        "cannot post",
+        "unknown request url",
+        "no route",
+        "404 page not found",
+        "405 method not allowed",
+    )
+    return any(kw in s for kw in route_markers)
+
+
+def is_responses_chat_only_model(error: Exception) -> bool:
+    """True when Responses rejects this specific model and tells us to use
+    chat/completions. This is model-level and must not mark the whole base_url
+    as missing the Responses endpoint."""
+    return "only supported in v1/chat/completions" in str(error).lower()
+
+
+def is_endpoint_absent(error: Exception) -> bool:
+    """Compatibility wrapper for callers/tests that only need to know whether
+    Responses should fall back to chat for this request."""
+    return is_responses_endpoint_absent(error) or is_responses_chat_only_model(error)
+
+
+def is_responses_only_model(error: Exception) -> bool:
+    """True when a chat/completions error indicates the model is only served
+    via the Responses API (reactive chat -> responses fallback)."""
+    return "only supported in v1/responses" in str(error).lower()
 
 
 # Hard-quota markers: a 429 carrying any of these never recovers by waiting
@@ -524,6 +913,7 @@ class LLMResponse:
     model: str
     usage: Dict[str, int]
     raw_response: Any
+    citations: Optional[List[Dict[str, str]]] = None  # Responses API url_citation; None for chat/anthropic
 
 
 @dataclass
@@ -541,6 +931,18 @@ class ToolCall:
     raw_arguments: Optional[str] = None
 
 
+def _tool_calls_to_raw_assistant(text: Optional[str], tool_calls: List[ToolCall]) -> Dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": text or None,
+        "tool_calls": [
+            {"id": tc.id, "type": "function",
+             "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
+            for tc in tool_calls
+        ] or None,
+    }
+
+
 @dataclass
 class LLMToolResponse:
     """Response from LLM with tool calls"""
@@ -554,6 +956,214 @@ class LLMToolResponse:
     @property
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
+
+
+_ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
+
+
+class _AnthropicAdapter:
+    """Adapter for the Anthropic Messages API. anthropic SDK is imported lazily
+    so the module loads even when the package is absent (only this class needs it)."""
+
+    def __init__(self, api_key: str, base_url: str, http_client=None, agent_name: str = "unknown"):
+        from anthropic import AsyncAnthropic  # lazy import
+        kwargs = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        if http_client is not None:
+            kwargs["http_client"] = http_client
+        self.client = AsyncAnthropic(**kwargs)
+        self.agent_name = agent_name
+
+    def _build_params(self, model, messages, temperature, max_tokens,
+                      tools=None, tool_choice=None, skip_temperature=False) -> Dict[str, Any]:
+        prepared = _anthropic_restore_thinking(messages)
+        system, anth_messages = _anthropic_messages_translate(prepared)
+        params: Dict[str, Any] = {
+            "model": model,
+            "messages": anth_messages,
+            "max_tokens": max_tokens if max_tokens is not None else _ANTHROPIC_DEFAULT_MAX_TOKENS,
+        }
+        if system is not None:
+            params["system"] = system
+        if not skip_temperature:
+            eff_temp = _get_effective_temperature(model, temperature)
+            if eff_temp is not None:
+                params["temperature"] = eff_temp
+        choice = _anthropic_translate_tool_choice(tool_choice) if tool_choice is not None else None
+        # tool_choice 'none' -> choice is None -> omit tools entirely
+        if tools and not (tool_choice == "none"):
+            params["tools"] = _anthropic_translate_tools(tools)
+            if choice is not None:
+                params["tool_choice"] = choice
+        return params
+
+    def _to_tool_response(self, resp, model) -> LLMToolResponse:
+        dump = resp.model_dump()
+        text, tool_calls, thinking, usage = _parse_anthropic_dump(dump)
+        raw_assistant = _tool_calls_to_raw_assistant(text, tool_calls)
+        if thinking and tool_calls:
+            raw_assistant["reasoning_details"] = thinking
+        return LLMToolResponse(content=text or None, tool_calls=tool_calls,
+                               model=getattr(resp, "model", model), usage=usage,
+                               raw_response=resp, raw_assistant_message=raw_assistant)
+
+    async def complete(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False) -> LLMResponse:
+        params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
+        resp = await self.client.messages.create(**params)
+        dump = resp.model_dump()
+        text, _tc, _think, usage = _parse_anthropic_dump(dump)
+        return LLMResponse(content=text, model=getattr(resp, "model", model),
+                           usage=usage, raw_response=resp)
+
+    async def complete_with_tools(self, model, messages, tools, tool_choice,
+                                  temperature, max_tokens, skip_temperature=False) -> LLMToolResponse:
+        params = self._build_params(model, messages, temperature, max_tokens,
+                                    tools=tools, tool_choice=tool_choice, skip_temperature=skip_temperature)
+        resp = await self.client.messages.create(**params)
+        return self._to_tool_response(resp, model)
+
+    async def complete_vision(self, model, text_prompt, images, temperature,
+                              max_tokens, timeout=None, skip_temperature=False) -> LLMResponse:
+        content = [{"type": "text", "text": text_prompt}]
+        for img_b64 in images:
+            mime = _detect_image_mime_type(img_b64)
+            content.append({"type": "image", "source": {
+                "type": "base64", "media_type": mime, "data": img_b64}})
+        messages = [
+            {"role": "system", "content": ENGLISH_ENFORCEMENT},
+            {"role": "user", "content": content},
+        ]
+        params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
+        if timeout is not None:
+            params["timeout"] = timeout
+        resp = await self.client.messages.create(**params)
+        dump = resp.model_dump()
+        text, _tc, _think, usage = _parse_anthropic_dump(dump)
+        return LLMResponse(content=text, model=getattr(resp, "model", model),
+                           usage=usage, raw_response=resp)
+
+    async def stream(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False):
+        params = self._build_params(model, messages, temperature, max_tokens, skip_temperature=skip_temperature)
+        params["stream"] = True
+        stream = await self.client.messages.create(**params)
+        async for event in stream:
+            if getattr(event, "type", "") == "content_block_delta":
+                delta = getattr(event, "delta", None)
+                if delta is not None and getattr(delta, "type", "") == "text_delta":
+                    text = getattr(delta, "text", "")
+                    if text:
+                        yield text
+
+
+class _ResponsesAdapter:
+    """Adapter for the OpenAI Responses API (sync form). Holds an AsyncOpenAI
+    client and translates the canonical OpenAI-chat request shape to/from
+    Responses. Parsing operates on model_dump() dicts (see _parse_responses_dump)."""
+
+    def __init__(self, client: "AsyncOpenAI", agent_name: str = "unknown"):
+        self.client = client
+        self.agent_name = agent_name
+
+    def _build_params(self, model, messages, temperature, max_tokens, tools=None,
+                      tool_choice=None, stream=False, timeout=None, skip_temperature=False) -> Dict[str, Any]:
+        instructions, input_items = _responses_messages_to_input(messages)
+        params: Dict[str, Any] = {"model": model, "input": input_items}
+        if instructions is not None:
+            params["instructions"] = instructions
+        if not skip_temperature:
+            eff_temp = _get_effective_temperature(model, temperature)
+            if eff_temp is not None:
+                params["temperature"] = eff_temp
+        if max_tokens is not None:
+            params["max_output_tokens"] = max_tokens
+        if tools:
+            params["tools"] = _responses_translate_tools(_inject_web_search_if_needed(model, tools))
+        elif _is_deep_research_model(model):
+            params["tools"] = _responses_translate_tools(_inject_web_search_if_needed(model, []))
+        if tool_choice is not None:
+            params["tool_choice"] = _responses_translate_tool_choice(tool_choice)
+        if stream:
+            params["stream"] = True
+        if timeout is not None:
+            params["timeout"] = timeout
+        return params
+
+    async def _create_responses_with_fallback(self, params: Dict[str, Any]):
+        """Call responses.create with web_search tool name fallback.
+        On an unknown-tool error for an auto-injected web_search tool,
+        retries once with the alternate name."""
+        try:
+            return await self.client.responses.create(**params)
+        except Exception as e:
+            if not _is_unknown_web_search_tool_error(e):
+                raise
+            tools = params.get("tools")
+            if not tools:
+                raise
+            current_names = {t["type"] for t in tools
+                             if isinstance(t, dict) and t.get("type") in set(_WEB_SEARCH_TOOL_NAMES)}
+            if not current_names:
+                raise
+            tried_name = next(iter(current_names))
+            for alt in _WEB_SEARCH_TOOL_NAMES:
+                if alt != tried_name:
+                    logger.warning(
+                        f"[{self.agent_name}] Web search tool '{tried_name}' unknown,"
+                        f" retrying with '{alt}'"
+                    )
+                    params["tools"] = _swap_web_search_tool_name(tools, tried_name, alt)
+                    return await self.client.responses.create(**params)
+            raise
+
+    async def complete(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False) -> LLMResponse:
+        params = self._build_params(model, messages, temperature, max_tokens, timeout=timeout, skip_temperature=skip_temperature)
+        resp = await self._create_responses_with_fallback(params)
+        dump = resp.model_dump()
+        text, _tools, citations, usage = _parse_responses_dump(dump)
+        return LLMResponse(content=text, model=getattr(resp, "model", model),
+                           usage=usage, raw_response=resp, citations=citations)
+
+    async def complete_with_tools(self, model, messages, tools, tool_choice,
+                                  temperature, max_tokens, skip_temperature=False) -> LLMToolResponse:
+        params = self._build_params(model, messages, temperature, max_tokens,
+                                    tools=tools, tool_choice=tool_choice, skip_temperature=skip_temperature)
+        resp = await self._create_responses_with_fallback(params)
+        dump = resp.model_dump()
+        text, tool_calls, _citations, usage = _parse_responses_dump(dump)
+        raw_assistant = _tool_calls_to_raw_assistant(text, tool_calls)
+        return LLMToolResponse(content=text or None, tool_calls=tool_calls,
+                               model=getattr(resp, "model", model), usage=usage,
+                               raw_response=resp, raw_assistant_message=raw_assistant)
+
+    async def complete_vision(self, model, text_prompt, images, temperature,
+                              max_tokens, timeout=None, skip_temperature=False) -> LLMResponse:
+        content = [{"type": "input_text", "text": text_prompt}]
+        for img_b64 in images:
+            mime = _detect_image_mime_type(img_b64)
+            content.append({"type": "input_image", "image_url": f"data:{mime};base64,{img_b64}"})
+        messages = [
+            {"role": "system", "content": ENGLISH_ENFORCEMENT},
+            {"role": "user", "content": content},
+        ]
+        params = self._build_params(model, messages, temperature, max_tokens, timeout=timeout, skip_temperature=skip_temperature)
+        resp = await self._create_responses_with_fallback(params)
+        dump = resp.model_dump()
+        text, _tools, citations, usage = _parse_responses_dump(dump)
+        return LLMResponse(content=text, model=getattr(resp, "model", model),
+                           usage=usage, raw_response=resp, citations=citations)
+
+    async def stream(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False):
+        """Yield text deltas from a streaming Responses call. Connection
+        failures (incl. endpoint-absent) raise before any chunk is yielded."""
+        params = self._build_params(model, messages, temperature, max_tokens,
+                                    stream=True, timeout=timeout, skip_temperature=skip_temperature)
+        stream = await self._create_responses_with_fallback(params)
+        async for event in stream:
+            if getattr(event, "type", "") == "response.output_text.delta":
+                delta = getattr(event, "delta", None)
+                if delta:
+                    yield delta
 
 
 class OpenAICompatibleClient:
@@ -613,7 +1223,7 @@ class OpenAICompatibleClient:
 
         self.client = AsyncOpenAI(
             api_key=api_key,
-            base_url=self.base_url,
+            base_url=_openai_sdk_base_url(self.base_url),
             http_client=self.http_client,
             timeout=300.0,  # Safety net; deep research uses per-request timeout=1800 override
             max_retries=0,  # Disable SDK internal retries; retry_with_backoff handles all retries
@@ -622,6 +1232,10 @@ class OpenAICompatibleClient:
                 "X-Title": "ScAI - Single Cell Sequencing Analysis Driven by AI"
             }
         )
+
+        # Protocol adapters (lazily built). None until first use.
+        self._responses_adapter: Optional[_ResponsesAdapter] = None
+        self._anthropic_adapter: Optional[_AnthropicAdapter] = None
     
     def set_context(self, session_id: str, agent_name: str):
         """Set session and agent context for logging"""
@@ -919,7 +1533,171 @@ class OpenAICompatibleClient:
         )
         return completion_tokens, has_tool_calls
 
-    async def chat(
+    def _get_responses_adapter(self) -> "_ResponsesAdapter":
+        if self._responses_adapter is None:
+            self._responses_adapter = _ResponsesAdapter(self.client, agent_name=self.agent_name)
+        return self._responses_adapter
+
+    def _get_anthropic_adapter(self) -> "_AnthropicAdapter":
+        if self._anthropic_adapter is None:
+            self._anthropic_adapter = _AnthropicAdapter(
+                api_key=self.api_key, base_url=_anthropic_sdk_base_url(self.base_url),
+                http_client=self.http_client, agent_name=self.agent_name)
+        return self._anthropic_adapter
+
+    @staticmethod
+    def _adapter_temp_call_pair(
+        call_factory: Callable[[bool], Awaitable[Any]]
+    ) -> Tuple[Callable[[], Awaitable[Any]], Callable[[], Awaitable[Any]]]:
+        return (lambda: call_factory(False), lambda: call_factory(True))
+
+    async def _invoke_adapter(self, *, interaction_type, model, log_messages,
+                              make_coro, make_coro_no_temp,
+                              tools=None, tool_choice=None, temperature=None,
+                              max_tokens=None, request_timeout=None):
+        """Wrap an adapter call (Responses/Anthropic) with the same cross-cutting
+        machinery the inline chat path uses: LLM logging + retry_with_backoff
+        (via _call_with_temp_fallback, which also gives on_retry, temperature
+        fallback, and UpstreamExhaustedError on exhaustion).
+
+        make_coro / make_coro_no_temp are zero-arg callables returning fresh
+        coroutines (with / without temperature)."""
+        interaction = self.llm_logger.log_request(
+            session_id=self.session_id,
+            agent=self.agent_name,
+            model=model,
+            messages=log_messages,
+            interaction_type=interaction_type,
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            base_url=self.base_url,
+        )
+        start_time = time.time()
+        model_key = _extract_model_name(model)
+        retry_kwargs = self._build_retry_kwargs(model, request_timeout=request_timeout)
+        try:
+            result = await self._call_with_temp_fallback(
+                make_coro, make_coro_no_temp, model_key, retry_kwargs
+            )
+        except Exception as e:
+            self.llm_logger.log_response(
+                interaction=interaction, error=str(e),
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+            raise
+        tool_calls_log = None
+        tcs = getattr(result, "tool_calls", None)
+        if tcs:
+            tool_calls_log = [
+                {"id": tc.id, "name": tc.name, "arguments": tc.arguments,
+                 "parse_error": tc.parse_error}
+                for tc in tcs
+            ]
+        self.llm_logger.log_response(
+            interaction=interaction,
+            response_content=getattr(result, "content", None),
+            tool_calls=tool_calls_log,
+            usage=getattr(result, "usage", {}) or {},
+            duration_ms=(time.time() - start_time) * 1000,
+        )
+        return result
+
+    async def _dispatch_non_streaming(
+        self,
+        *,
+        model: str,
+        interaction_type: str,
+        log_messages: List[Dict[str, Any]],
+        make_anthropic_adapter_call: Optional[Callable[[Any, bool], Awaitable[Any]]],
+        make_responses_adapter_call: Callable[[Any, bool], Awaitable[Any]],
+        make_inline_call: Callable[[], Awaitable[Any]],
+        reactive_log_message: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Any = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        request_timeout: Optional[float] = None,
+    ):
+        def invoke(adapter, adapter_call):
+            make_coro, make_coro_no_temp = self._adapter_temp_call_pair(
+                lambda skip_temperature: adapter_call(adapter, skip_temperature)
+            )
+            return self._invoke_adapter(
+                interaction_type=interaction_type, model=model, log_messages=log_messages,
+                make_coro=make_coro, make_coro_no_temp=make_coro_no_temp,
+                tools=tools, tool_choice=tool_choice, temperature=temperature,
+                max_tokens=max_tokens, request_timeout=request_timeout)
+
+        protocol = _route_protocol(self.base_url, model)
+        if protocol == "anthropic":
+            if make_anthropic_adapter_call is None:
+                raise ValueError(f"{interaction_type} does not support anthropic protocol")
+            return await invoke(self._get_anthropic_adapter(), make_anthropic_adapter_call)
+        if protocol == "responses":
+            adapter = self._get_responses_adapter()
+            return await self._responses_or_fallback(
+                lambda: invoke(adapter, make_responses_adapter_call), make_inline_call, model)
+        try:
+            return await make_inline_call()
+        except BadRequestError as e:
+            if is_responses_only_model(e):
+                logger.warning(f"[{self.agent_name}] model {model} is responses-only; {reactive_log_message}")
+                _PROBE_CACHE[(self.base_url, model)] = "responses"
+                return await invoke(self._get_responses_adapter(), make_responses_adapter_call)
+            raise
+
+    def _responses_probe_decision(self, model: str) -> Optional[str]:
+        key = (self.base_url, model)
+        if self.base_url in _NO_RESPONSES_ENDPOINT or _PROBE_CACHE.get(key) == "chat":
+            return "chat"
+        if _PROBE_CACHE.get(key) == "responses":
+            return "responses"
+        return None
+
+    def _record_responses_probe_failure(self, model: str, error: Exception, stream: bool = False) -> Optional[str]:
+        key = (self.base_url, model)
+        stream_label = " stream" if stream else ""
+        if is_responses_endpoint_absent(error):
+            logger.warning(f"[{self.agent_name}] Responses{stream_label} endpoint absent at {self.base_url}; falling back to chat{stream_label}")
+            _NO_RESPONSES_ENDPOINT.add(self.base_url)
+            _PROBE_CACHE[key] = "chat"
+            return "chat"
+        if is_responses_chat_only_model(error):
+            logger.warning(f"[{self.agent_name}] model {model} is chat/completions-only on Responses; falling back to chat{stream_label}")
+            _PROBE_CACHE[key] = "chat"
+            return "chat"
+        return None
+
+    async def _responses_or_fallback(self, coro_factory, fallback_coro_factory, model):
+        """Run a Responses-adapter call; on endpoint-absent, cache + run the
+        existing chat/completions inline path instead. A per-(base_url, model)
+        lock ensures concurrent first calls probe only once; once decided,
+        _route_protocol short-circuits future calls via the cache."""
+        decision = self._responses_probe_decision(model)
+        if decision == "chat":
+            return await fallback_coro_factory()
+        if decision == "responses":
+            return await coro_factory()
+        key = (self.base_url, model)
+        lock = _PROBE_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            decision = self._responses_probe_decision(model)
+            if decision == "chat":
+                return await fallback_coro_factory()
+            if decision == "responses":
+                return await coro_factory()
+            try:
+                result = await coro_factory()
+            except Exception as e:
+                if self._record_responses_probe_failure(model, e) == "chat":
+                    return await fallback_coro_factory()
+                raise
+            _PROBE_CACHE[key] = "responses"
+            return result
+
+    async def _chat_inline(
         self,
         model: str,
         messages: List[Dict[str, Any]],
@@ -929,23 +1707,6 @@ class OpenAICompatibleClient:
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None
     ) -> LLMResponse:
-        """
-        Send chat request to OpenAI-compatible API with automatic retry on timeout
-
-        Args:
-            model: Model identifier (e.g., "google/gemini-2.5-pro-preview-05-06")
-            messages: List of messages
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
-            stream: Whether to stream response
-            timeout: Per-request timeout in seconds (overrides client default)
-
-        Returns:
-            LLMResponse object
-        """
-        # Enforce English output
-        messages = _inject_english_enforcement(messages)
-
         # Create log record
         interaction = self.llm_logger.log_request(
             session_id=self.session_id,
@@ -1008,8 +1769,55 @@ class OpenAICompatibleClient:
                 duration_ms=(time.time() - start_time) * 1000
             )
             raise
-    
-    async def chat_with_tools(
+
+    async def chat(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        stream: bool = False,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None
+    ) -> LLMResponse:
+        """
+        Send chat request to OpenAI-compatible API with automatic retry on timeout
+        and automatic protocol dispatch (chat / responses / anthropic).
+
+        Args:
+            model: Model identifier (e.g., "google/gemini-2.5-pro-preview-05-06")
+            messages: List of messages
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens to generate
+            stream: Unsupported; use chat_stream() for streaming responses
+            timeout: Per-request timeout in seconds (overrides client default)
+
+        Returns:
+            LLMResponse object
+        """
+        if stream:
+            raise ValueError("chat(stream=True) is not supported; use chat_stream() for streaming responses")
+
+        enforced = _inject_english_enforcement(messages)
+        return await self._dispatch_non_streaming(
+            model=model,
+            interaction_type="chat",
+            log_messages=enforced,
+            make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete(
+                model=model, messages=enforced, temperature=temperature,
+                max_tokens=max_tokens, timeout=timeout, skip_temperature=skip_temperature),
+            make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete(
+                model=model, messages=enforced, temperature=temperature,
+                max_tokens=max_tokens, timeout=timeout, skip_temperature=skip_temperature),
+            make_inline_call=lambda: self._chat_inline(
+                model, enforced, temperature, max_tokens, False, timeout, max_retries),
+            reactive_log_message="switching plain chat to Responses adapter",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_timeout=timeout,
+        )
+
+    async def _chat_with_tools_inline(
         self,
         model: str,
         messages: List[Dict[str, Any]],
@@ -1018,23 +1826,6 @@ class OpenAICompatibleClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None
     ) -> LLMToolResponse:
-        """
-        Send chat request with function/tool calling support and automatic retry on timeout
-        
-        Args:
-            model: Model identifier
-            messages: List of messages
-            tools: List of tool definitions in OpenAI format
-            tool_choice: "auto", "none", "required", or specific tool
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
-            
-        Returns:
-            LLMToolResponse with potential tool calls
-        """
-        # Enforce English output
-        messages = _inject_english_enforcement(messages)
-
         # Create log record
         interaction = self.llm_logger.log_request(
             session_id=self.session_id,
@@ -1079,8 +1870,6 @@ class OpenAICompatibleClient:
                     _make_request, _make_request_no_temp, model_key, retry_kwargs
                 )
             except BadRequestError as tc_err:
-                # Reactive fallback: the provider rejected our tool_choice on
-                # the wire. Cache and retry once with tool_choice="auto".
                 if (
                     is_tool_choice_error(tc_err)
                     and effective_tool_choice not in (None, "auto", "none")
@@ -1089,7 +1878,6 @@ class OpenAICompatibleClient:
                         f"[{self.agent_name}] tool_choice rejected by {model_key}, "
                         f"caching as unsupported and retrying with 'auto'"
                     )
-                    # P2-1: serialize add under the cache lock.
                     self._ensure_cache_locks()
                     async with self._toolchoice_cache_lock:
                         if model_key not in self._toolchoice_unsupported_models:
@@ -1104,12 +1892,10 @@ class OpenAICompatibleClient:
                 else:
                     raise
 
-            # Safely extract message from response
             message = None
             if response and response.choices and len(response.choices) > 0:
                 message = response.choices[0].message
 
-            # Parse tool calls if present
             tool_calls = []
             tool_calls_log = []
             if message and message.tool_calls:
@@ -1141,13 +1927,8 @@ class OpenAICompatibleClient:
                         "parse_error": parse_error,
                     })
 
-            # Extract content — handles reasoning models, list content, etc.
             content = self._extract_content_from_message(message, response) if message else None
 
-            # Preserve the full raw assistant message before recovery might modify it.
-            # Required for providers that attach extra fields to tool calls (Gemini
-            # thought_signature) and for thinking-mode providers that demand reasoning
-            # be echoed on tool-call turns (DeepSeek v4, MiMo, Anthropic/OpenRouter).
             raw_assistant_message = None
             if message:
                 try:
@@ -1155,10 +1936,6 @@ class OpenAICompatibleClient:
                 except Exception as e:
                     logger.debug(f"[{self.agent_name}] Failed to preserve raw assistant message: {e}")
 
-            # Fallback: some gateways (e.g. litellm proxying n1n.ai for Claude/Gemini)
-            # occasionally lose the structured tool_calls field and serialize the
-            # tool_use JSON into content. Recognize and recover it so the downstream
-            # agent loop does not mistake it for a plain-text response.
             if not tool_calls and content:
                 recovered = _recover_stringified_tool_call(content)
                 if recovered is not None:
@@ -1178,8 +1955,6 @@ class OpenAICompatibleClient:
                         "recovered": True,
                     })
                     content = None
-                    # Sync raw_assistant_message so downstream echoes (e.g. Gemini
-                    # thought_signature preservation) get consistent recovered data.
                     if raw_assistant_message is not None:
                         raw_assistant_message["content"] = None
                         raw_assistant_message["tool_calls"] = [{
@@ -1197,7 +1972,6 @@ class OpenAICompatibleClient:
                 raw_assistant_message=raw_assistant_message
             )
 
-            # Log response
             self.llm_logger.log_response(
                 interaction=interaction,
                 response_content=content,
@@ -1208,39 +1982,77 @@ class OpenAICompatibleClient:
 
             return result
 
-        except Exception as e:
-            logger.exception(f"[{self.agent_name}] Chat with tools error")
-
-            # Log error
+        except BadRequestError as e:
+            logger.warning(
+                f"[{self.agent_name}] Chat with tools BadRequestError"
+                f" (may be handled upstream): {e}"
+            )
             self.llm_logger.log_response(
                 interaction=interaction,
                 error=str(e),
                 duration_ms=(time.time() - start_time) * 1000
             )
             raise
-    
-    async def chat_stream(
+        except Exception as e:
+            logger.exception(f"[{self.agent_name}] Chat with tools error")
+            self.llm_logger.log_response(
+                interaction=interaction,
+                error=str(e),
+                duration_ms=(time.time() - start_time) * 1000
+            )
+            raise
+
+    async def chat_with_tools(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        tool_choice: Union[str, Dict[str, Any]] = "auto",
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None
+    ) -> LLMToolResponse:
+        """
+        Send chat request with function/tool calling support and automatic retry on timeout.
+        Auto-routes to Responses or Anthropic adapter when appropriate.
+
+        Args:
+            model: Model identifier
+            messages: List of messages
+            tools: List of tool definitions in OpenAI format
+            tool_choice: "auto", "none", "required", or specific tool
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens to generate
+
+        Returns:
+            LLMToolResponse with potential tool calls
+        """
+        enforced = _inject_english_enforcement(messages)
+        return await self._dispatch_non_streaming(
+            model=model,
+            interaction_type="chat_with_tools",
+            log_messages=enforced,
+            make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
+                model=model, messages=enforced, tools=tools, tool_choice=tool_choice,
+                temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
+            make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
+                model=model, messages=enforced, tools=tools, tool_choice=tool_choice,
+                temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
+            make_inline_call=lambda: self._chat_with_tools_inline(
+                model, enforced, tools, tool_choice, temperature, max_tokens),
+            reactive_log_message="switching to Responses adapter",
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    async def _chat_stream_inline(
         self,
         model: str,
         messages: List[Dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None
     ) -> AsyncGenerator[str, None]:
-        """
-        Stream chat response from OpenAI-compatible API.
-
-        Connection establishment is retried with backoff on transient errors.
-        Mid-stream failures propagate to the caller (partial content already yielded).
-
-        Yields:
-            Content chunks
-        """
-        logger.info(f"[{self.agent_name}] Starting stream request to {model}")
-
-        # Enforce English output
-        messages = _inject_english_enforcement(messages)
-
-        # Extract model name for cache key
         model_key = _extract_model_name(model)
 
         base_params = {"model": model, "messages": messages, "stream": True}
@@ -1248,9 +2060,8 @@ class OpenAICompatibleClient:
             base_params, model, temperature, max_tokens
         )
 
-        # Retry connection establishment (most common failure point)
         stream_retry_kwargs = self._build_retry_kwargs(model, request_timeout=120.0)
-        stream_retry_kwargs["max_retries"] = MAX_RETRIES  # stream needs explicit retries
+        stream_retry_kwargs["max_retries"] = MAX_RETRIES
 
         stream = await self._call_with_temp_fallback(
             _make_request, _make_request_no_temp, model_key, stream_retry_kwargs
@@ -1260,49 +2071,102 @@ class OpenAICompatibleClient:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
-    async def chat_with_vision(
+    async def _responses_or_fallback_stream(self, model, messages, temperature, max_tokens):
+        """Try Responses streaming; endpoint-absent (raised before first chunk)
+        -> cache + switch to inline chat stream. Per-(base_url, model) lock makes
+        concurrent first calls probe once."""
+        key = (self.base_url, model)
+        lock = _PROBE_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            if self._responses_probe_decision(model) == "chat":
+                async for ch in self._chat_stream_inline(model, messages, temperature, max_tokens):
+                    yield ch
+                return
+            adapter = self._get_responses_adapter()
+            gen = adapter.stream(model=model, messages=messages,
+                                 temperature=temperature, max_tokens=max_tokens)
+            try:
+                first = await gen.__anext__()
+            except StopAsyncIteration:
+                _PROBE_CACHE[key] = "responses"
+                return
+            except Exception as e:
+                if self._record_responses_probe_failure(model, e, stream=True) == "chat":
+                    async for ch in self._chat_stream_inline(model, messages, temperature, max_tokens):
+                        yield ch
+                    return
+                raise
+            _PROBE_CACHE[key] = "responses"
+            yield first
+        # Lock released here; remaining chunks are streamed without lock
+        async for ch in gen:
+            yield ch
+
+    async def chat_stream(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream chat response from OpenAI-compatible API with auto-routing
+        to Responses or Anthropic adapter when appropriate.
+
+        Connection establishment is retried with backoff on transient errors.
+        Mid-stream failures propagate to the caller (partial content already yielded).
+
+        Yields:
+            Content chunks
+        """
+        logger.info(f"[{self.agent_name}] Starting stream request to {model}")
+
+        enforced = _inject_english_enforcement(messages)
+        protocol = _route_protocol(self.base_url, model)
+        if protocol == "anthropic":
+            async for ch in self._get_anthropic_adapter().stream(
+                    model=model, messages=enforced, temperature=temperature, max_tokens=max_tokens):
+                yield ch
+            return
+        if protocol == "responses":
+            async for ch in self._responses_or_fallback_stream(model, enforced, temperature, max_tokens):
+                yield ch
+            return
+        try:
+            stream = self._chat_stream_inline(model, enforced, temperature, max_tokens)
+            first = await stream.__anext__()
+        except StopAsyncIteration:
+            return
+        except BadRequestError as e:
+            if is_responses_only_model(e):
+                logger.warning(f"[{self.agent_name}] model {model} is responses-only; "
+                               f"switching chat stream to Responses adapter")
+                _PROBE_CACHE[(self.base_url, model)] = "responses"
+                adapter = self._get_responses_adapter()
+                async for ch in adapter.stream(model=model, messages=enforced,
+                                               temperature=temperature, max_tokens=max_tokens):
+                    yield ch
+                return
+            raise
+        yield first
+        async for ch in stream:
+            yield ch
+
+    async def _chat_with_vision_inline(
         self,
         model: str,
         text_prompt: str,
-        images: List[str],  # Base64 encoded images
+        images: List[str],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         request_timeout: Optional[float] = None
     ) -> LLMResponse:
-        """
-        Send chat request with images to OpenAI-compatible API with automatic retry on timeout
-
-        Args:
-            model: Model identifier
-            text_prompt: Text prompt
-            images: List of base64 encoded images
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens
-
-        Returns:
-            LLMResponse object
-        """
-        # Build multimodal content (text first, then images — per OpenRouter recommendation)
-        content = []
-
-        # Add text prompt first
-        content.append({
-            "type": "text",
-            "text": text_prompt
-        })
-
-        for img_b64 in images:
-            mime_type = _detect_image_mime_type(img_b64)
-            content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{mime_type};base64,{img_b64}"
-                }
-            })
-
         messages = [
             {"role": "system", "content": ENGLISH_ENFORCEMENT},
-            {"role": "user", "content": content},
+            {"role": "user", "content": [{"type": "text", "text": text_prompt}] + [
+                {"type": "image_url", "image_url": {"url": f"data:{_detect_image_mime_type(img_b64)};base64,{img_b64}"}}
+                for img_b64 in images
+            ]},
         ]
 
         # Create log record (without the actual image data to save space)
@@ -1332,7 +2196,6 @@ class OpenAICompatibleClient:
                 _make_request, _make_request_no_temp, model_key, retry_kwargs
             )
 
-            # Extract content — uses shared helper for reasoning / multimodal formats
             content = ""
             if response and response.choices and len(response.choices) > 0:
                 message = response.choices[0].message
@@ -1347,7 +2210,6 @@ class OpenAICompatibleClient:
                 raw_response=response
             )
 
-            # Log response
             self.llm_logger.log_response(
                 interaction=interaction,
                 response_content=result.content,
@@ -1360,13 +2222,56 @@ class OpenAICompatibleClient:
         except Exception as e:
             logger.exception(f"[{self.agent_name}] Vision error")
 
-            # Log error
             self.llm_logger.log_response(
                 interaction=interaction,
                 error=str(e),
                 duration_ms=(time.time() - start_time) * 1000
             )
             raise
+
+    async def chat_with_vision(
+        self,
+        model: str,
+        text_prompt: str,
+        images: List[str],  # Base64 encoded images
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        request_timeout: Optional[float] = None
+    ) -> LLMResponse:
+        """
+        Send chat request with images to OpenAI-compatible API with automatic retry on timeout.
+        Auto-routes to Responses or Anthropic adapter when appropriate.
+
+        Args:
+            model: Model identifier
+            text_prompt: Text prompt
+            images: List of base64 encoded images
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens
+
+        Returns:
+            LLMResponse object
+        """
+        log_msgs = [{"role": "user", "content": f"[{len(images)} images] + {text_prompt[:500]}"}]
+        return await self._dispatch_non_streaming(
+            model=model,
+            interaction_type="vision",
+            log_messages=log_msgs,
+            make_anthropic_adapter_call=lambda adapter, skip_temperature: adapter.complete_vision(
+                model=model, text_prompt=text_prompt, images=images,
+                temperature=temperature, max_tokens=max_tokens,
+                timeout=request_timeout, skip_temperature=skip_temperature),
+            make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete_vision(
+                model=model, text_prompt=text_prompt, images=images,
+                temperature=temperature, max_tokens=max_tokens,
+                timeout=request_timeout, skip_temperature=skip_temperature),
+            make_inline_call=lambda: self._chat_with_vision_inline(
+                model, text_prompt, images, temperature, max_tokens, request_timeout),
+            reactive_log_message="switching vision request to Responses adapter",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_timeout=request_timeout,
+        )
 
 
 class GoogleDeepResearchClient:

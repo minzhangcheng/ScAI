@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.12 · **Last updated**: 2026-06-19
+**Version**: 0.28.1 · **Last updated**: 2026-06-20
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,21 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.27.x — (2026-06-17 → present)**
+**0.28.x — (2026-06-20 → present)**
+
+- `0.28.1` — Multi-protocol LLM client: OpenAI Responses API + Anthropic Messages API adapters, protocol auto-routing, deep-research structured citations (2026-06-20):
+  - **Protocol routing system**: `_route_protocol()` auto-selects between `chat` (OpenAI SDK `/chat/completions`), `responses` (OpenAI SDK `/responses`), and `anthropic` (Anthropic SDK `/v1/messages`) based on `base_url` and `model`. URL path suffix override (`/responses`, `/messages`, `/chat/completions`), no-`/v1` → Anthropic heuristic, deep-research model → responses, probe caching with per-(base_url, model) lock for concurrent first-call safety. Two-level cache: `_NO_RESPONSES_ENDPOINT` (base_url-level, no Responses endpoint at all) + `_PROBE_CACHE` (model-level protocol). Lazy adapter construction via `_get_responses_adapter()` / `_get_anthropic_adapter()`.
+  - **OpenAI Responses API adapter**: `ResponsesLLMAdapter` — implements `complete()`, `complete_with_tools()`, `complete_vision()`, `stream()` using the OpenAI SDK's `client.responses.*` interface. Translates messages via `_responses_messages_to_input()` (system → `instructions`, rest → `input[]`), tools via `_responses_translate_tools()` (flattened function format), tool_choice via `_responses_translate_tool_choice()`. Supports web search built-in tool. `_responses_or_fallback()` pattern catches endpoint-absent / chat-only-model errors and falls back to the inline chat path with automatic cache write.
+  - **Anthropic Messages API adapter**: `AnthropicLLMAdapter` — implements the same interface (`complete()`, `complete_with_tools()`, `complete_vision()`, `stream()`) using the `anthropic` SDK. Translates messages via `_anthropic_messages_translate()` (system split, tool_use/tool_result content blocks), tools via `_anthropic_translate_tools()` and `_anthropic_translate_tool_choice()`. Handles `thinking`/`redacted_thinking` content blocks for Claude extended thinking.
+  - **Deep-research structured citations**: `LiteratureAgent._select_references()` — prefers structured `response.citations` from the Responses API over regex extraction from text. Both `_extract_references_from_text()` and `_select_references()` made `@staticmethod`.
+  - **URL normalization**: `_openai_sdk_base_url()` / `_anthropic_sdk_base_url()` strip endpoint suffixes so SDK path append does not double-append. `_strip_path_suffix()` shared helper.
+  - **Model detection**: `_is_deep_research_model()` normalizes hyphens to match both `o3-deep-research` and `o4-deepresearch-mini`.
+  - **All three high-level methods** (`chat()`, `chat_with_tools()`, `chat_stream()`, `chat_with_vision()`) now auto-route through `_route_protocol()` with inline fallback: chat path first, `BadRequestError` with `is_responses_only_model()` → cache + retry via Responses adapter. `chat_with_tools()` extracted from monolithic method → `_chat_with_tools_inline()`; same for vision.
+  - **Dependency**: `anthropic>=0.40.0` added to `requirements.txt` (lazy-imported, only needed for Anthropic Messages API endpoints).
+  - **Follow-up fix**: `_AnthropicAdapter.complete_vision()` now passes `timeout` parameter through to `self.client.messages.create()` (was silently ignored). Test `test_anthropic_adapter_complete_vision_passes_timeout()` added.
+  - **7 new test files** (~1010 lines): `test_protocol_routing.py` (215 lines — routing priority, probe cache, concurrent lock, URL suffix override, URL normalization), `test_client_protocol_dispatch.py` (231 lines — chat/stream/vision/tools dispatch for all 3 protocols), `test_anthropic_adapter.py` (176 lines — Anthropic message translation, tool format, thinking blocks, timeout pass-through), `test_responses_adapter.py` (160 lines — Responses message/tool/stream translation), `test_protocol_crosscutting.py` (171 lines — english enforcement, rate-limit retry, error mapping across protocols), `test_protocol_url_normalize.py` (38 lines), `test_literature_citations.py` (19 lines — structured citation from response object).
+
+**0.27.x — (2026-06-17 → 2026-06-19)**
 
 - `0.27.12` — Report figure collection deep search (scai-data-5 regression fix), figure count audit logging, prompt figure steering (2026-06-19):
   - **`resolve_figure_in_workspace()` shared helper**: New function in `backend/utils/files.py` — searches for a figure by basename across the entire workspace tree (root → `figures/` → `rglob` deep search), with `seen_stems` dedup. Returns the first match deterministically, logs a warning on multiple matches.

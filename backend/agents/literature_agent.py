@@ -347,10 +347,20 @@ class LiteratureAgent(BaseAgent):
             f"{len(report_text)} chars"
         )
 
-        references = self._extract_references_from_text(report_text)
+        references = self._select_references(response, report_text)
         return await self._finalize_result(topic, report_text, references, state, 1)
 
-    def _extract_references_from_text(self, text: str) -> List[Dict[str, str]]:
+    @staticmethod
+    def _select_references(response, report_text: str):
+        """Prefer structured citations from the Responses API; fall back to
+        regex extraction over the report text."""
+        citations = getattr(response, "citations", None)
+        if citations:
+            return citations
+        return LiteratureAgent._extract_references_from_text(report_text)
+
+    @staticmethod
+    def _extract_references_from_text(text: str) -> List[Dict[str, str]]:
         """Extract references from deep research output text.
 
         Tries structured [N] Title... URL format first, falls back to plain URL extraction.
