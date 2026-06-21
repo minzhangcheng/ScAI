@@ -1,7 +1,8 @@
 import pytest
+import json
 from unittest.mock import AsyncMock, MagicMock
 import backend.utils.llm_client as llm_mod
-from backend.utils.llm_client import OpenAICompatibleClient, LLMResponse, LLMToolResponse, NotFoundError, BadRequestError
+from backend.utils.llm_client import OpenAICompatibleClient, LLMResponse, LLMToolResponse, NotFoundError, BadRequestError, InternalServerError, RateLimitError
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +57,301 @@ async def test_responses_endpoint_absent_falls_back_to_chat(monkeypatch):
     assert r.content == "CHAT"
     assert "https://x/v1" in llm_mod._NO_RESPONSES_ENDPOINT
     assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-4o")] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_responses_not_implemented_500_falls_back_to_chat_without_retry():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - {'error': {'message': 'not implemented (request id: x)', 'type': 'new_api_error', 'param': '', 'code': 'local:convert_request_failed'}}",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "not implemented (request id: x)", "code": "local:convert_request_failed"}},
+    ))
+    c._responses_adapter = fake
+
+    inline_resp = MagicMock()
+    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT", tool_calls=None))]
+    inline_resp.model = "gemini-3.1-pro-preview"
+    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                                  prompt_tokens_details=None)
+    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+
+    r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "CHAT"
+    fake.complete.assert_awaited_once()
+    c.client.chat.completions.create.assert_awaited_once()
+    llm_mod.asyncio.sleep.assert_not_awaited()
+    assert "https://api.n1n.ai/v1" in llm_mod._NO_RESPONSES_ENDPOINT
+    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_vision_responses_not_implemented_500_falls_back_to_chat():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete_vision = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - {'error': {'message': 'not implemented', 'code': 'local:convert_request_failed'}}",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "not implemented", "code": "local:convert_request_failed"}},
+    ))
+    c._responses_adapter = fake
+
+    inline_resp = MagicMock()
+    inline_resp.choices = [MagicMock(message=MagicMock(content="VISION_CHAT", tool_calls=None))]
+    inline_resp.model = "gemini-3.1-pro-preview"
+    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                                  prompt_tokens_details=None)
+    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+
+    r = await c.chat_with_vision(
+        model="gemini-3.1-pro-preview",
+        text_prompt="describe",
+        images=[],
+        temperature=0.5,
+        max_tokens=10,
+    )
+
+    assert r.content == "VISION_CHAT"
+    fake.complete_vision.assert_awaited_once()
+    c.client.chat.completions.create.assert_awaited_once()
+    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_tools_responses_not_implemented_500_falls_back_to_chat():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete_with_tools = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - {'error': {'message': 'not implemented', 'code': 'local:convert_request_failed'}}",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "not implemented", "code": "local:convert_request_failed"}},
+    ))
+    c._responses_adapter = fake
+
+    inline_resp = MagicMock()
+    inline_resp.choices = [MagicMock(message=MagicMock(content="TOOLS_CHAT", tool_calls=None))]
+    inline_resp.model = "gemini-3.1-pro-preview"
+    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                                  prompt_tokens_details=None)
+    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+
+    r = await c.chat_with_tools(
+        model="gemini-3.1-pro-preview",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "f"}}],
+    )
+
+    assert r.content == "TOOLS_CHAT"
+    fake.complete_with_tools.assert_awaited_once()
+    c.client.chat.completions.create.assert_awaited_once()
+    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_not_implemented_500_falls_back_to_chat():
+    c = _client("https://api.n1n.ai/v1")
+
+    async def _raise_at_first_chunk(**kwargs):
+        raise InternalServerError(
+            message="Error code: 500 - {'error': {'message': 'not implemented', 'code': 'local:convert_request_failed'}}",
+            response=MagicMock(status_code=500),
+            body={"error": {"message": "not implemented", "code": "local:convert_request_failed"}},
+        )
+        yield  # pragma: no cover
+
+    fake = MagicMock()
+    fake.stream = MagicMock(side_effect=lambda **kwargs: _raise_at_first_chunk(**kwargs))
+    c._responses_adapter = fake
+
+    class _Chunk:
+        def __init__(self, t): self.choices = [MagicMock(delta=MagicMock(content=t))]
+
+    async def _chat_stream(*a, **k):
+        for t in ["Hel", "lo"]:
+            yield _Chunk(t)
+
+    c.client.chat.completions.create = AsyncMock(side_effect=lambda **kw: _chat_stream())
+
+    chunks = []
+    async for ch in c.chat_stream(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}]):
+        chunks.append(ch)
+
+    assert "".join(chunks) == "Hello"
+    assert fake.stream.call_count == 1
+    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_protocol_probe_both_protocols_500_does_not_cache_protocol():
+    c = _client("https://x/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - upstream overloaded",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "upstream overloaded"}},
+    ))
+    c._responses_adapter = fake
+
+    with pytest.raises(llm_mod.UpstreamExhaustedError):
+        await c.chat(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
+
+    assert "https://x/v1" not in llm_mod._NO_RESPONSES_ENDPOINT
+    assert ("https://x/v1", "gpt-4o") not in llm_mod._PROBE_CACHE
+    assert fake.complete.await_count > 1
+
+
+@pytest.mark.asyncio
+async def test_responses_failure_then_chat_success_caches_chat_without_more_rounds():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - transient responses failure",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "transient responses failure"}},
+    ))
+    c._responses_adapter = fake
+
+    inline_resp = MagicMock()
+    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT_OK", tool_calls=None))]
+    inline_resp.model = "gemini-3.1-pro-preview"
+    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                                  prompt_tokens_details=None)
+    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+
+    r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "CHAT_OK"
+    fake.complete.assert_awaited_once()
+    c.client.chat.completions.create.assert_awaited_once()
+    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_protocol_probe_retries_responses_after_chat_failure():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=[
+        InternalServerError(
+            message="Error code: 500 - responses down once",
+            response=MagicMock(status_code=500),
+            body={"error": {"message": "responses down once"}},
+        ),
+        LLMResponse("RESPONSES_OK", "gemini-3.1-pro-preview", {}, None),
+    ])
+    c._responses_adapter = fake
+
+    c.client.chat.completions.create = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - chat down once",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "chat down once"}},
+    ))
+
+    r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "RESPONSES_OK"
+    assert fake.complete.await_count == 2
+    assert c.client.chat.completions.create.await_count == 1
+    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "responses"
+
+
+@pytest.mark.asyncio
+async def test_protocol_probe_fails_after_three_response_chat_rounds():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - responses unavailable",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "responses unavailable"}},
+    ))
+    c._responses_adapter = fake
+
+    c.client.chat.completions.create = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - chat unavailable",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "chat unavailable"}},
+    ))
+
+    with pytest.raises(llm_mod.UpstreamExhaustedError) as exc_info:
+        await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
+
+    assert "Protocol probe exhausted after 3 rounds" in str(exc_info.value)
+    assert fake.complete.await_count == 3
+    assert c.client.chat.completions.create.await_count == 3
+    assert ("https://api.n1n.ai/v1", "gemini-3.1-pro-preview") not in llm_mod._PROBE_CACHE
+
+
+@pytest.mark.asyncio
+async def test_protocol_probe_rate_limit_alternates_without_internal_sleep():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=RateLimitError(
+        message="rate limited on responses",
+        response=MagicMock(status_code=429),
+        body={"error": {"message": "rate limited on responses"}},
+    ))
+    c._responses_adapter = fake
+
+    inline_resp = MagicMock()
+    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT_AFTER_429", tool_calls=None))]
+    inline_resp.model = "gemini-3.1-pro-preview"
+    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                                  prompt_tokens_details=None)
+    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+
+    r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "CHAT_AFTER_429"
+    fake.complete.assert_awaited_once()
+    c.client.chat.completions.create.assert_awaited_once()
+    llm_mod.asyncio.sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_protocol_probe_json_error_alternates_without_internal_sleep():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=json.JSONDecodeError("bad json", "{", 0))
+    c._responses_adapter = fake
+
+    inline_resp = MagicMock()
+    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT_AFTER_JSON", tool_calls=None))]
+    inline_resp.model = "gemini-3.1-pro-preview"
+    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                                  prompt_tokens_details=None)
+    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+
+    r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "CHAT_AFTER_JSON"
+    fake.complete.assert_awaited_once()
+    c.client.chat.completions.create.assert_awaited_once()
+    llm_mod.asyncio.sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_protocol_probe_failure_clears_model_chat_cache_written_by_endpoint_absent():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=NotFoundError(
+        message="Cannot POST /v1/responses",
+        response=MagicMock(status_code=404),
+        body=None,
+    ))
+    c._responses_adapter = fake
+
+    c.client.chat.completions.create = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - chat unavailable",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "chat unavailable"}},
+    ))
+
+    with pytest.raises(llm_mod.UpstreamExhaustedError):
+        await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
+
+    assert "https://api.n1n.ai/v1" in llm_mod._NO_RESPONSES_ENDPOINT
+    assert ("https://api.n1n.ai/v1", "gemini-3.1-pro-preview") not in llm_mod._PROBE_CACHE
 
 
 @pytest.mark.asyncio

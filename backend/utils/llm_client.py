@@ -139,6 +139,7 @@ def _detect_image_mime_type(img_b64: str) -> str:
 MAX_RETRIES = 4
 MAX_RETRIES_UPSTREAM_5XX = 8  # Dedicated for flaky upstream (e.g., Cloudflare 524)
 RETRY_DELAY_BASE = 2.0  # Base delay in seconds, will be multiplied by attempt number
+PROTOCOL_PROBE_ROUNDS = 3  # Max alternating Responses/Chat probe rounds
 # Rate limit (429) uses fixed escalating delays to handle TPM limits
 RATE_LIMIT_DELAYS = [5, 10, 20, 40]  # seconds between retries
 # Note: Only retry transient errors. Non-transient errors like AuthenticationError,
@@ -623,6 +624,18 @@ def is_responses_endpoint_absent(error: Exception) -> bool:
     if isinstance(error, NotFoundError):
         return True
     s = str(error).lower()
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        if isinstance(err, dict):
+            s = " ".join([
+                s,
+                str(err.get("message", "")).lower(),
+                str(err.get("code", "")).lower(),
+                str(err.get("type", "")).lower(),
+            ])
+    if "not implemented" in s and ("responses" in s or "local:convert_request_failed" in s):
+        return True
     route_markers = (
         "cannot post",
         "unknown request url",
@@ -698,6 +711,7 @@ async def retry_with_backoff(
     llm_server: str = "",
     request_timeout: float = 300.0,
     on_retry: Optional[Callable[[int, int, float, str], Awaitable[None]]] = None,
+    non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
 ):
     """
     Execute an async function with exponential backoff retry on timeout/connection errors
@@ -738,6 +752,8 @@ async def retry_with_backoff(
         try:
             return await asyncio.wait_for(func(), timeout=request_timeout)
         except json.JSONDecodeError as e:
+            if non_retryable_predicate is not None and non_retryable_predicate(e):
+                raise
             # JSON errors get fewer retries — repeated bad JSON is likely persistent.
             # MAX_JSON_RETRIES is the retry budget; <= keeps the actual retry count
             # equal to MAX_JSON_RETRIES (total invocations == MAX_JSON_RETRIES + 1).
@@ -767,6 +783,8 @@ async def retry_with_backoff(
             )
             break
         except RateLimitError as e:
+            if non_retryable_predicate is not None and non_retryable_predicate(e):
+                raise
             last_exception = e
             if _is_hard_quota_error(e):
                 logger.error(
@@ -788,6 +806,8 @@ async def retry_with_backoff(
                 logger.error(f"[{agent_name}] Rate limit exceeded after {budget} retries")
                 break  # stop spinning; fall through to UpstreamExhaustedError
         except RETRYABLE_EXCEPTIONS as e:
+            if non_retryable_predicate is not None and non_retryable_predicate(e):
+                raise
             last_exception = e
             is_5xx = isinstance(e, InternalServerError)
             if is_5xx:
@@ -1554,7 +1574,8 @@ class OpenAICompatibleClient:
     async def _invoke_adapter(self, *, interaction_type, model, log_messages,
                               make_coro, make_coro_no_temp,
                               tools=None, tool_choice=None, temperature=None,
-                              max_tokens=None, request_timeout=None):
+                              max_tokens=None, request_timeout=None,
+                              non_retryable_predicate=None):
         """Wrap an adapter call (Responses/Anthropic) with the same cross-cutting
         machinery the inline chat path uses: LLM logging + retry_with_backoff
         (via _call_with_temp_fallback, which also gives on_retry, temperature
@@ -1577,6 +1598,8 @@ class OpenAICompatibleClient:
         start_time = time.time()
         model_key = _extract_model_name(model)
         retry_kwargs = self._build_retry_kwargs(model, request_timeout=request_timeout)
+        if non_retryable_predicate is not None:
+            retry_kwargs["non_retryable_predicate"] = non_retryable_predicate
         try:
             result = await self._call_with_temp_fallback(
                 make_coro, make_coro_no_temp, model_key, retry_kwargs
@@ -1619,8 +1642,9 @@ class OpenAICompatibleClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         request_timeout: Optional[float] = None,
+        make_probe_fallback_call: Optional[Callable[[], Awaitable[Any]]] = None,
     ):
-        def invoke(adapter, adapter_call):
+        def invoke(adapter, adapter_call, non_retryable_predicate=None):
             make_coro, make_coro_no_temp = self._adapter_temp_call_pair(
                 lambda skip_temperature: adapter_call(adapter, skip_temperature)
             )
@@ -1628,7 +1652,8 @@ class OpenAICompatibleClient:
                 interaction_type=interaction_type, model=model, log_messages=log_messages,
                 make_coro=make_coro, make_coro_no_temp=make_coro_no_temp,
                 tools=tools, tool_choice=tool_choice, temperature=temperature,
-                max_tokens=max_tokens, request_timeout=request_timeout)
+                max_tokens=max_tokens, request_timeout=request_timeout,
+                non_retryable_predicate=non_retryable_predicate)
 
         protocol = _route_protocol(self.base_url, model)
         if protocol == "anthropic":
@@ -1637,8 +1662,10 @@ class OpenAICompatibleClient:
             return await invoke(self._get_anthropic_adapter(), make_anthropic_adapter_call)
         if protocol == "responses":
             adapter = self._get_responses_adapter()
+            probe_fallback_call = make_probe_fallback_call or make_inline_call
             return await self._responses_or_fallback(
-                lambda: invoke(adapter, make_responses_adapter_call), make_inline_call, model)
+                lambda: invoke(adapter, make_responses_adapter_call, lambda _e: True),
+                probe_fallback_call, model)
         try:
             return await make_inline_call()
         except BadRequestError as e:
@@ -1671,10 +1698,9 @@ class OpenAICompatibleClient:
         return None
 
     async def _responses_or_fallback(self, coro_factory, fallback_coro_factory, model):
-        """Run a Responses-adapter call; on endpoint-absent, cache + run the
-        existing chat/completions inline path instead. A per-(base_url, model)
-        lock ensures concurrent first calls probe only once; once decided,
-        _route_protocol short-circuits future calls via the cache."""
+        """Run a Responses-adapter call, alternating Responses and chat up to
+        PROTOCOL_PROBE_ROUNDS while the protocol is unknown. Once either
+        protocol succeeds, cache that decision for future calls."""
         decision = self._responses_probe_decision(model)
         if decision == "chat":
             return await fallback_coro_factory()
@@ -1688,14 +1714,36 @@ class OpenAICompatibleClient:
                 return await fallback_coro_factory()
             if decision == "responses":
                 return await coro_factory()
-            try:
-                result = await coro_factory()
-            except Exception as e:
-                if self._record_responses_probe_failure(model, e) == "chat":
-                    return await fallback_coro_factory()
-                raise
-            _PROBE_CACHE[key] = "responses"
-            return result
+            last_responses_error: Optional[Exception] = None
+            last_chat_error: Optional[Exception] = None
+            for round_index in range(PROTOCOL_PROBE_ROUNDS):
+                try:
+                    result = await coro_factory()
+                    _PROBE_CACHE[key] = "responses"
+                    return result
+                except Exception as e:
+                    last_responses_error = e
+                    self._record_responses_probe_failure(model, e)
+                try:
+                    result = await fallback_coro_factory()
+                    _PROBE_CACHE[key] = "chat"
+                    return result
+                except Exception as e:
+                    last_chat_error = e
+                    logger.warning(
+                        f"[{self.agent_name}] Protocol probe round {round_index + 1}/{PROTOCOL_PROBE_ROUNDS} failed: "
+                        f"responses={type(last_responses_error).__name__ if last_responses_error else 'none'}; "
+                        f"chat={type(last_chat_error).__name__}: {str(last_chat_error)[:120]}"
+                    )
+            _PROBE_CACHE.pop(key, None)
+            raise UpstreamExhaustedError(
+                f"[{self.agent_name}] Protocol probe exhausted after {PROTOCOL_PROBE_ROUNDS} rounds. "
+                f"Last Responses error: {type(last_responses_error).__name__}: {last_responses_error}. "
+                f"Last Chat error: {type(last_chat_error).__name__}: {last_chat_error}",
+                agent_name=self.agent_name,
+                model=model,
+                llm_server=self.base_url,
+            ) from (last_chat_error or last_responses_error)
 
     async def _chat_inline(
         self,
@@ -1799,6 +1847,7 @@ class OpenAICompatibleClient:
             raise ValueError("chat(stream=True) is not supported; use chat_stream() for streaming responses")
 
         enforced = _inject_english_enforcement(messages)
+        probe_timeout = timeout or 300.0
         return await self._dispatch_non_streaming(
             model=model,
             interaction_type="chat",
@@ -1811,6 +1860,8 @@ class OpenAICompatibleClient:
                 max_tokens=max_tokens, timeout=timeout, skip_temperature=skip_temperature),
             make_inline_call=lambda: self._chat_inline(
                 model, enforced, temperature, max_tokens, False, timeout, max_retries),
+            make_probe_fallback_call=lambda: self._chat_inline(
+                model, enforced, temperature, max_tokens, False, probe_timeout, max_retries=0),
             reactive_log_message="switching plain chat to Responses adapter",
             temperature=temperature,
             max_tokens=max_tokens,
@@ -1824,7 +1875,8 @@ class OpenAICompatibleClient:
         tools: List[Dict[str, Any]],
         tool_choice: Union[str, Dict[str, Any]] = "auto",
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        max_retries: Optional[int] = None
     ) -> LLMToolResponse:
         # Create log record
         interaction = self.llm_logger.log_request(
@@ -1862,6 +1914,8 @@ class OpenAICompatibleClient:
             base_params, model, temperature, max_tokens
         )
         retry_kwargs = self._build_retry_kwargs(model)
+        if max_retries is not None:
+            retry_kwargs["max_retries"] = max_retries
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat_with_tools request to {model}")
@@ -2039,6 +2093,8 @@ class OpenAICompatibleClient:
                 temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
             make_inline_call=lambda: self._chat_with_tools_inline(
                 model, enforced, tools, tool_choice, temperature, max_tokens),
+            make_probe_fallback_call=lambda: self._chat_with_tools_inline(
+                model, enforced, tools, tool_choice, temperature, max_tokens, max_retries=0),
             reactive_log_message="switching to Responses adapter",
             tools=tools,
             tool_choice=tool_choice,
@@ -2159,7 +2215,8 @@ class OpenAICompatibleClient:
         images: List[str],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
-        request_timeout: Optional[float] = None
+        request_timeout: Optional[float] = None,
+        max_retries: Optional[int] = None
     ) -> LLMResponse:
         messages = [
             {"role": "system", "content": ENGLISH_ENFORCEMENT},
@@ -2188,7 +2245,7 @@ class OpenAICompatibleClient:
         _make_request, _make_request_no_temp = self._build_request_pair(
             base_params, model, temperature, max_tokens
         )
-        retry_kwargs = self._build_retry_kwargs(model, request_timeout=request_timeout)
+        retry_kwargs = self._build_retry_kwargs(model, request_timeout=request_timeout, max_retries_override=max_retries)
 
         try:
             logger.info(f"[{self.agent_name}] Sending vision request to {model} with {len(images)} images")
@@ -2253,6 +2310,7 @@ class OpenAICompatibleClient:
             LLMResponse object
         """
         log_msgs = [{"role": "user", "content": f"[{len(images)} images] + {text_prompt[:500]}"}]
+        probe_timeout = request_timeout or 300.0
         return await self._dispatch_non_streaming(
             model=model,
             interaction_type="vision",
@@ -2267,6 +2325,8 @@ class OpenAICompatibleClient:
                 timeout=request_timeout, skip_temperature=skip_temperature),
             make_inline_call=lambda: self._chat_with_vision_inline(
                 model, text_prompt, images, temperature, max_tokens, request_timeout),
+            make_probe_fallback_call=lambda: self._chat_with_vision_inline(
+                model, text_prompt, images, temperature, max_tokens, probe_timeout, max_retries=0),
             reactive_log_message="switching vision request to Responses adapter",
             temperature=temperature,
             max_tokens=max_tokens,

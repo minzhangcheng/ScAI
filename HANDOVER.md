@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.28.1 · **Last updated**: 2026-06-20
+**Version**: 0.28.1.1 · **Last updated**: 2026-06-20
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,14 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.28.x — (2026-06-20 → present)**
+
+- `0.28.1.1` — Protocol probe rewrite: alternating Responses/Chat with PROTOCOL_PROBE_ROUNDS, non-retryable predicate, Gemini/n1n.ai Responses 500 detection (2026-06-20):
+  - **Protocol probe rewrite**: `_responses_or_fallback()` now alternates between Responses and chat up to `PROTOCOL_PROBE_ROUNDS=3` before raising `UpstreamExhaustedError` with a detailed diagnostic. Previously tried Responses once and fell back to chat on any error — which masked transient flakiness on both sides. The probe loop tracks `last_responses_error` and `last_chat_error` and clears `_PROBE_CACHE` on exhaustion so a future call re-probes.
+  - **`is_responses_endpoint_absent()` enhancement**: Now inspects `error.body` dict for `"not implemented"` combined with `"responses"` or `"local:convert_request_failed"` — handles n1n.ai's Gemini Responses 500 error (returns `InternalServerError`, not `NotFoundError`). Previously this 500 was treated as a transient server error and retried (wasteful); now it's classified as endpoint-absent and triggers chat fallback.
+  - **`retry_with_backoff()` `non_retryable_predicate` parameter**: When set and returns True for an exception, the exception is re-raised immediately (no retry, no sleep). Used by the protocol probe to fail fast from the Responses adapter and alternate to chat instead of wasting retry attempts on a server that doesn't support Responses.
+  - **`_invoke_adapter()` and `_dispatch_non_streaming()`**: `non_retryable_predicate` threaded through; `make_probe_fallback_call` parameter added to `_dispatch_non_streaming()`. When the protocol is "responses", the initial adapter call passes `non_retryable_predicate=lambda _e: True` (fail fast) and `make_probe_fallback_call` uses zero-retry inline calls (`max_retries=0`), so the probe loop alternates quickly without internal retry/sleep delays.
+  - **All three dispatch methods updated**: `chat()`, `chat_with_tools()`, and `chat_with_vision()` now pass `make_probe_fallback_call` with `max_retries=0` and `probe_timeout` for the chat-side probe calls. `chat_with_tools()` and `chat_with_vision_inline()` accept `max_retries` parameter to support this.
+  - **11 new test cases** (~230 lines) in `test_client_protocol_dispatch.py`: Responses 500 fallback for chat/vision/tools/stream, both-protocols-500 no-cache, responses-failure-then-chat-success caches chat, probe retries responses after chat failure, probe exhausts after 3 alternating rounds, rate-limit and JSON-error alternate immediately, 404 endpoint-absent + chat-fail clears model cache.
 
 - `0.28.1` — Multi-protocol LLM client: OpenAI Responses API + Anthropic Messages API adapters, protocol auto-routing, deep-research structured citations (2026-06-20):
   - **Protocol routing system**: `_route_protocol()` auto-selects between `chat` (OpenAI SDK `/chat/completions`), `responses` (OpenAI SDK `/responses`), and `anthropic` (Anthropic SDK `/v1/messages`) based on `base_url` and `model`. URL path suffix override (`/responses`, `/messages`, `/chat/completions`), no-`/v1` → Anthropic heuristic, deep-research model → responses, probe caching with per-(base_url, model) lock for concurrent first-call safety. Two-level cache: `_NO_RESPONSES_ENDPOINT` (base_url-level, no Responses endpoint at all) + `_PROBE_CACHE` (model-level protocol). Lazy adapter construction via `_get_responses_adapter()` / `_get_anthropic_adapter()`.
