@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.27.11 · **Last updated**: 2026-06-19
+**Version**: 0.27.12 · **Last updated**: 2026-06-19
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,14 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.27.x — (2026-06-17 → present)**
+
+- `0.27.12` — Report figure collection deep search (scai-data-5 regression fix), figure count audit logging, prompt figure steering (2026-06-19):
+  - **`resolve_figure_in_workspace()` shared helper**: New function in `backend/utils/files.py` — searches for a figure by basename across the entire workspace tree (root → `figures/` → `rglob` deep search), with `seen_stems` dedup. Returns the first match deterministically, logs a warning on multiple matches.
+  - **Supervisor figure collection fix**: `_collect_figure_paths()` now uses `resolve_figure_in_workspace()` instead of checking only `workspace_path / fname` and `workspace_path / "figures" / fname`. Figures saved into `results/<dir>/figures/` subdirectories (via code that ignored the bare-filename guidance) are now found for supervisor review.
+  - **Report figure scanner `_scan_existing_figures()`**: New `analysis_log` parameter — iterates all `saved_figure_filenames` from analysis steps, resolves each via `resolve_figure_in_workspace()`, copies to the report figures directory. Caught the scai-data-5 case (34 figures generated, only 2 reached the report). Integrated into `DetailedReportGenerator._scan_existing_figures()` call site.
+  - **`count_saved_figures()` helper**: New function in `bioinformatics_agent.py` — counts actual disk-saved figures from `analysis_log.saved_figure_filenames`. Completion log lines in both `BioinformaticsAgent.run()` and `AgentNodesMixin._bioinformatics_analysis()` now report "X saved figures" alongside "Y inline figures", replacing the misleading `0 figures` inline-only count.
+  - **Bioinformatics prompt steering**: Prompt now recommends `generate_publication_figure` for report-quality figures and warns against saving into nested `results/<dir>/figures/` paths. Both `_static_system_prompt` and kernel-initialization prompt updated.
+  - **4 new test files** (215 total lines): `test_bioinformatics_figure_count_log.py`, `test_figure_prompt_guidance.py`, `test_scan_logged_figures.py` (regression: subdir figure found and copied), `test_supervisor_figure_collection.py` (regression: subdir figure + shared helper tests).
 
 - `0.27.11` — Gemini Deep Research poll transient-failure resilience (2026-06-19):
   - **`GoogleDeepResearchClient._poll_research()`**: Wraps the HTTP GET in `try/except` for `httpx.TransportError` and `httpx.TimeoutException`. On transient network errors (disconnects, timeouts, DNS failures) during polling, logs a warning and retries after `poll_interval` instead of crashing the entire deep research call. Sustained failures still raise `TimeoutError` via the existing `max_wait` deadline.

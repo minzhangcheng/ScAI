@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import quote as url_quote
 
 from ..utils.formatting import safe_parse_json, format_revision_history
+from ..utils.files import resolve_figure_in_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -1390,6 +1391,7 @@ Respond in JSON:
         session restore, where a fresh SupervisorAgent has empty supervision logs.
         """
         figure_map: Dict[str, Path] = {}
+        seen_stems: set = set()
         if not workspace_path:
             return figure_map
 
@@ -1397,14 +1399,10 @@ Respond in JSON:
             for fname in rec.get("saved_figure_filenames", []):
                 if fname in figure_map:
                     continue
-                # Search for the figure in workspace
-                for candidate in [
-                    workspace_path / fname,
-                    workspace_path / "figures" / fname,
-                ]:
-                    if candidate.exists():
-                        figure_map[fname] = candidate
-                        break
+                resolved = resolve_figure_in_workspace(fname, workspace_path, seen_stems)
+                if resolved is not None:
+                    seen_stems.add(resolved.stem)
+                    figure_map[fname] = resolved
 
         # Also include publication figures (PI-reviewed, may not be in supervision records)
         if state and state.publication_figures:

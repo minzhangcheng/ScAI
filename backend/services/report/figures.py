@@ -9,6 +9,8 @@ from typing import Dict, Any, List, Optional
 
 from PIL import Image
 
+from backend.utils.files import resolve_figure_in_workspace
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,6 +125,7 @@ class FiguresMixin:
     def _scan_existing_figures(
         self,
         publication_figures: Optional[List[Any]] = None,
+        analysis_log: Optional[List[Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Scan the WORKSPACE directory for existing images from analysis phase.
@@ -192,6 +195,51 @@ class FiguresMixin:
                     )
                 }
                 existing_figures.append(fig_info)
+
+        if analysis_log:
+            logged_basenames: List[str] = []
+            seen_logged: set = set()
+            for step in analysis_log:
+                if isinstance(step, dict):
+                    fnames = step.get("saved_figure_filenames") or []
+                else:
+                    fnames = getattr(step, "saved_figure_filenames", None) or []
+                for fname in fnames:
+                    base = os.path.basename(str(fname))
+                    if base and base not in seen_logged:
+                        seen_logged.add(base)
+                        logged_basenames.append(base)
+
+            for base in logged_basenames:
+                src = resolve_figure_in_workspace(base, self.workspace_dir, seen_filenames)
+                if src is None:
+                    continue
+                seen_filenames.add(src.stem)
+
+                dest_png = self.figures_dir / src.name
+                try:
+                    shutil.copy2(str(src), str(dest_png))
+                except Exception:
+                    continue
+
+                pdf_file = src.with_suffix(".pdf")
+                dest_pdf = self.figures_dir / pdf_file.name
+                if pdf_file.exists():
+                    try:
+                        shutil.copy2(str(pdf_file), str(dest_pdf))
+                    except Exception:
+                        pass
+
+                existing_figures.append({
+                    "filename": src.name,
+                    "name": src.stem.replace("_", " ").title(),
+                    "png_path": str(dest_png),
+                    "pdf_path": str(dest_pdf) if pdf_file.exists() else None,
+                    "inferred_type": self._infer_figure_type(
+                        src.stem,
+                        declared_type=declared_type_by_stem.get(src.stem),
+                    ),
+                })
 
         return existing_figures
 

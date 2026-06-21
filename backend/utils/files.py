@@ -1,10 +1,14 @@
 """File path safety utilities — no imports from backend.main."""
+import logging
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Dict, List, Optional, Set
 
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 
 def safe_filename(filename: str) -> str:
@@ -54,3 +58,40 @@ async def temp_file_on_error(tmp_path: str) -> AsyncIterator[None]:
     except Exception:
         Path(tmp_path).unlink(missing_ok=True)
         raise
+
+
+def resolve_figure_in_workspace(
+    basename: str,
+    workspace_dir: Path,
+    seen_stems: Optional[Set[str]] = None,
+) -> Optional[Path]:
+    """Locate a figure file by basename within the workspace directory tree.
+
+    Searches in priority order:
+    1. workspace_dir / basename  (root)
+    2. workspace_dir / "figures" / basename  (figures subdir)
+    3. workspace_dir.rglob(basename)  (deep search — catches results/<dir>/figures/)
+
+    Returns the first existing match, or None.  When multiple deep matches
+    exist, the sorted-first is chosen deterministically and a warning is logged.
+
+    If *seen_stems* is provided and the file's stem is already present, returns
+    None (caller already collected a figure with that stem).
+    """
+    stem = os.path.splitext(basename)[0]
+    if seen_stems is not None and stem in seen_stems:
+        return None
+
+    for candidate in [workspace_dir / basename, workspace_dir / "figures" / basename]:
+        if candidate.exists():
+            return candidate
+
+    matches = [
+        m for m in sorted(workspace_dir.rglob(basename))
+        if m.suffix.lower() in (".png", ".jpg", ".jpeg")
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        logger.warning("Multiple workspace files named %s; using %s", basename, matches[0])
+    return matches[0]

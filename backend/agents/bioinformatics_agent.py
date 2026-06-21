@@ -38,6 +38,27 @@ def build_gate_skip_note(gate_label: str) -> str:
             f"after repeated attempts and was released by the gate. Downstream "
             f"conclusions should not assume this validation was performed.")
 
+
+def count_saved_figures(analysis_log) -> int:
+    """Count figures actually written to disk during a run.
+
+    Each AnalysisStep records the filenames it saved in saved_figure_filenames.
+    Accepts AnalysisStep objects or plain dicts (node-retry serialization form).
+    Used for completion logging instead of the misleading inline-capture count.
+    """
+    if not analysis_log:
+        return 0
+    total = 0
+    for step in analysis_log:
+        if step is None:
+            continue
+        if isinstance(step, dict):
+            names = step.get("saved_figure_filenames") or []
+        else:
+            names = getattr(step, "saved_figure_filenames", None) or []
+        total += len(names)
+    return total
+
 from ..models.schemas import (
     AgentType, AnalysisPhase, AnalysisState, MessageRole, CodeExecution,
     PublicationFigure, FigureReviewStatus, AnalysisStep, PlanStage,
@@ -731,7 +752,7 @@ class BioinformaticsAgent(BaseAgent):
 
 You are conducting {modality} analysis. You have access to tools:
 1. execute_code - Run Python code (scanpy, anndata, numpy, pandas, matplotlib available)
-   For plotting code: use `plt.savefig('name.jpg')` (or `sc.pl.*(save='_name.jpg')`) to save figures — the system intercepts this and auto-generates a companion high-res PDF, so do NOT save a separate PDF yourself. Do NOT call plt.close() or plt.show() — the system handles figure cleanup automatically.
+   For plotting code: use `plt.savefig('name.jpg')` (or `sc.pl.*(save='_name.jpg')`) to save figures — the system intercepts this and auto-generates a companion high-res PDF, so do NOT save a separate PDF yourself. Do NOT call plt.close() or plt.show() — the system handles figure cleanup automatically. Prefer generate_publication_figure for figures intended for the final report (it adds PI review and correct figure typing); reserve execute_code savefig for quick exploratory plots. When you do use execute_code savefig, save with a bare filename — do NOT save figures into nested results/<dir>/figures/ paths.
 2. consult_pi - Ask PI for biological decisions (analysis direction, pathway selection, interpretation)
 3. search_literature - Search for marker genes, pathways, biological knowledge
 4. annotate_clusters - Annotate ALL cell clusters at once with literature evidence (use INSTEAD of per-cluster consult_pi)
@@ -919,7 +940,7 @@ CELL TYPE ANNOTATION WORKFLOW:
 Your Jupyter kernel is running in: {self.sandbox.working_dir}
 A variable `_WORKSPACE_DIR` (pathlib.Path) is pre-defined in the kernel and points to this directory.
 All output files MUST be saved using `_WORKSPACE_DIR` as the root. NEVER use relative paths like './' or '../'.
-- Figures: in execute_code, call `plt.savefig('name.jpg')` or `sc.pl.*(save='_name.jpg')` — files land under `_WORKSPACE_DIR` automatically and a companion PDF is generated. Do NOT manually save a separate PDF. (Inside generate_publication_figure's `code`, the tool wraps saving — see that tool's notes.)
+- Figures: in execute_code, call `plt.savefig('name.jpg')` or `sc.pl.*(save='_name.jpg')` with a bare filename — files land under `_WORKSPACE_DIR/figures` automatically and a companion PDF is generated. Do NOT manually save a separate PDF, and do NOT save figures into nested results/<dir>/figures/ paths. For report-quality figures, use generate_publication_figure instead. (Inside generate_publication_figure's `code`, the tool wraps saving — see that tool's notes.)
 - Tables/CSV results: save to `_WORKSPACE_DIR / 'tables'`
 - H5AD files: save to `_WORKSPACE_DIR`
 When writing files, ALWAYS use the `_WORKSPACE_DIR` variable for the path:
@@ -3559,7 +3580,8 @@ finally:
                 status = "completed_with_fallback"
                 logger.info("[Bioinformatics] Extracted findings from last text response (fallback)")
 
-        logger.info(f"[Bioinformatics] Analysis {status}: {step_count} steps executed, {len(all_findings)} findings, {len(all_figures)} figures")
+        _saved_fig_count = count_saved_figures(analysis_log)
+        logger.info(f"[Bioinformatics] Analysis {status}: {step_count} steps executed, {len(all_findings)} findings, {len(all_figures)} inline figures, {_saved_fig_count} saved figures")
 
         # Clear checkpoint only on explicit completion via report_findings
         # Preserve checkpoint for max_steps_reached and completed_with_fallback to allow resumption

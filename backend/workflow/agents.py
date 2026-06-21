@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
+from ..agents.bioinformatics_agent import count_saved_figures
 from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
 from .retry import with_retry
 
@@ -705,7 +706,8 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             "status": result.get("status", "completed")
         }
 
-        logger.info(f"[{self.session_id}] Bioinformatics analysis completed: {len(all_findings)} findings, {len(all_figures)} figures, {result.get('steps_executed', 0)} steps")
+        _saved_fig_count = count_saved_figures(result.get("analysis_log", []))
+        logger.info(f"[{self.session_id}] Bioinformatics analysis completed: {len(all_findings)} findings, {len(all_figures)} inline figures, {_saved_fig_count} saved figures, {result.get('steps_executed', 0)} steps")
 
         await self._send_message(
             "result",
