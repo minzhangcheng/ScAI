@@ -143,6 +143,9 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # Settings provider — set in initialize(), provides hot-reloadable settings
         self._settings_provider: Optional[AgentSettingsProvider] = None
 
+        # Technique agent (optional, created in initialize())
+        self.technique_agent: Optional[TechniqueAgent] = None
+
     async def _wait_for_llm_intervention(
         self,
         error: UpstreamExhaustedError,
@@ -391,6 +394,76 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             for t in AgentType
         }
 
+    def _create_optional_agent(self, agent_name: str):
+        """Factory — instantiate a new optional agent by name."""
+        if agent_name == "pathology":
+            agent = PathologyAgent(
+                settings_provider=self._settings_provider,
+                tile_size=self.config.image_tile_size,
+                max_tiles=50,
+            )
+            agent.set_session(self.session_id)
+            agent.llm_intervention_callback = self._pathology_llm_intervention_callback
+            return agent
+        if agent_name == "biochemistry":
+            agent = BiochemistryAgent(settings_provider=self._settings_provider)
+            agent.set_session(self.session_id)
+            return agent
+        if agent_name == "painter":
+            agent = PainterAgent(settings_provider=self._settings_provider)
+            agent.set_session(self.session_id)
+            return agent
+        if agent_name == "supervisor":
+            agent = SupervisorAgent(
+                settings_provider=self._settings_provider,
+                pi_callback=self._pi_callback,
+                message_callback=self._supervisor_message_callback,
+                session_id=self.session_id,
+                technique_agent=self.technique_agent,
+            )
+            agent.set_sandbox(self.sandbox)
+            return agent
+        if agent_name == "technique":
+            agent = TechniqueAgent(
+                settings_provider=self._settings_provider,
+                message_callback=self._technique_message_callback,
+            )
+            agent.set_session(self.session_id)
+            return agent
+        raise ValueError(f"Unknown optional agent: {agent_name}")
+
+    def ensure_agent_ready(self, agent_name: str) -> bool:
+        """Materialize or destroy an optional agent based on its current config.
+
+        Returns True if the agent is ready for use, False if it should be
+        skipped (model is empty).
+        """
+        def sync_technique_dependents():
+            if agent_name != "technique":
+                return
+            for dependent_name in ("bioinformatics_agent", "supervisor_agent"):
+                dependent = getattr(self, dependent_name, None)
+                if dependent is not None and hasattr(dependent, "technique_agent"):
+                    dependent.technique_agent = self.technique_agent
+
+        model = self._settings_provider.get_model(agent_name)
+        attr = f"{agent_name}_agent"
+        agent = getattr(self, attr, None)
+        if not model or not model.strip():
+            if agent is not None:
+                logger.info(f"[{self.session_id}] {agent_name} agent disabled by empty model")
+                setattr(self, attr, None)
+                sync_technique_dependents()
+            return False
+        if agent is None:
+            logger.info(f"[{self.session_id}] Creating {agent_name} agent after config enable")
+            agent = self._create_optional_agent(agent_name)
+            setattr(self, attr, agent)
+            sync_technique_dependents()
+        if hasattr(agent, "refresh_runtime_config_if_needed"):
+            agent.refresh_runtime_config_if_needed()
+        return True
+
     async def initialize(self):
         """Initialize all components"""
         logger.info(f"[{self.session_id}] Initializing workflow components")
@@ -441,16 +514,13 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             session_id=self.session_id,
         )
 
+        # Install retry callbacks before agents are created so eager external
+        # clients, such as Literature deep-research clients, inherit them.
+        self._install_retry_notifiers()
+
         # Technique Agent (lightweight doc lookup, used by Supervisor and Bioinformatics)
-        technique_model = self._settings_provider.get_model("technique")
-        if technique_model and technique_model.strip():
-            self.technique_agent = TechniqueAgent(
-                settings_provider=self._settings_provider,
-                message_callback=self._technique_message_callback,
-            )
-            self.technique_agent.set_session(self.session_id)
-        else:
-            self.technique_agent = None
+        self.technique_agent = None
+        self.ensure_agent_ready("technique")
 
         # Initialize required agents (PI and Bioinformatics — always active)
         self.pi_agent = PIAgent(
@@ -473,30 +543,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self.bioinformatics_agent._pause_event = self._pause_event
 
         # Initialize optional agents — disabled if model is empty
-        pathology_model = self._settings_provider.get_model("pathology")
-        if pathology_model and pathology_model.strip():
-            self.pathology_agent = PathologyAgent(
-                settings_provider=self._settings_provider,
-                tile_size=self.config.image_tile_size,
-                max_tiles=50,
-            )
-            self.pathology_agent.set_session(self.session_id)
-            self.pathology_agent.llm_intervention_callback = (
-                self._pathology_llm_intervention_callback
-            )
-        else:
-            self.pathology_agent = None
-            logger.info(f"[{self.session_id}] Pathology agent disabled (empty model)")
-
-        biochemistry_model = self._settings_provider.get_model("biochemistry")
-        if biochemistry_model and biochemistry_model.strip():
-            self.biochemistry_agent = BiochemistryAgent(
-                settings_provider=self._settings_provider,
-            )
-            self.biochemistry_agent.set_session(self.session_id)
-        else:
-            self.biochemistry_agent = None
-            logger.info(f"[{self.session_id}] Biochemistry agent disabled (empty model)")
+        self.pathology_agent = None
+        self.ensure_agent_ready("pathology")
+        self.biochemistry_agent = None
+        self.ensure_agent_ready("biochemistry")
 
         # Literature agent with mode-specific configuration
         literature_config = self._settings_provider.get_literature_config()
@@ -513,49 +563,23 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         )
         self.literature_agent.set_session(self.session_id)
 
-        # Register deep research LLM client for cleanup (if literature agent created one)
-        if hasattr(self.literature_agent, '_deep_research_llm_client') and self.literature_agent._deep_research_llm_client:
-            self._settings_provider.register_client(
-                ('deep_research', 'deep_research'),
-                self.literature_agent._deep_research_llm_client,
-            )
-
         # Initialize Painter Agent for graphic abstract generation (optional)
-        painter_model = self._settings_provider.get_model("painter")
-        if painter_model and painter_model.strip():
-            self.painter_agent = PainterAgent(
-                settings_provider=self._settings_provider,
-            )
-            self.painter_agent.set_session(self.session_id)
-        else:
-            self.painter_agent = None
-            logger.info(f"[{self.session_id}] Painter agent disabled (empty model)")
+        self.painter_agent = None
+        self.ensure_agent_ready("painter")
 
         # Initialize Supervisor Agent for real-time analysis monitoring (optional)
-        supervisor_model = self._settings_provider.get_model("supervisor")
-        if supervisor_model and supervisor_model.strip():
-            self.supervisor_agent = SupervisorAgent(
-                settings_provider=self._settings_provider,
-                pi_callback=self._pi_callback,
-                message_callback=self._supervisor_message_callback,
-                session_id=self.session_id,
-                technique_agent=self.technique_agent,
-            )
-            self.supervisor_agent.set_sandbox(self.sandbox)
-        else:
-            self.supervisor_agent = None
-            logger.info(f"[{self.session_id}] Supervisor agent disabled (empty model)")
+        self.supervisor_agent = None
+        self.ensure_agent_ready("supervisor")
 
         # Log which agents are active
         pi_model = self._settings_provider.get_model("pi")
         bioinformatics_model = self._settings_provider.get_model("bioinformatics")
         literature_model = self._settings_provider.get_model("literature")
-        logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={pathology_model or 'DISABLED'}, Bioinformatics={bioinformatics_model}, Biochemistry={biochemistry_model or 'DISABLED'}, Literature={literature_model}, Painter={painter_model or 'DISABLED'}, Supervisor={supervisor_model or 'DISABLED'}")
-
-        # Wire on_retry callback into every agent's LLM client so that
-        # WebSocket observers receive progress updates during retry waits
-        # instead of seeing dead silence.
-        self._install_retry_notifiers()
+        path_model = self._settings_provider.get_model("pathology")
+        biochem_model = self._settings_provider.get_model("biochemistry")
+        painter_model = self._settings_provider.get_model("painter")
+        sup_model = self._settings_provider.get_model("supervisor")
+        logger.info(f"[{self.session_id}] Agents initialized: PI={pi_model}, Pathology={path_model or 'DISABLED'}, Bioinformatics={bioinformatics_model}, Biochemistry={biochem_model or 'DISABLED'}, Literature={literature_model}, Painter={painter_model or 'DISABLED'}, Supervisor={sup_model or 'DISABLED'}")
 
         # Build workflow graph
         self._build_graph()
@@ -1048,6 +1072,15 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 logger.info(f"[{self.session_id}] LLM manager closed")
             except Exception as e:
                 logger.exception(f"[{self.session_id}] Error closing LLM manager")
+
+        # Close literature-owned runtime clients before provider cleanup
+        if hasattr(self, 'literature_agent') and self.literature_agent:
+            close_runtime_clients = getattr(self.literature_agent, "close_runtime_clients", None)
+            if close_runtime_clients:
+                try:
+                    await close_runtime_clients()
+                except Exception:
+                    logger.exception(f"[{self.session_id}] Error closing literature runtime clients")
 
         # Close per-agent LLM clients managed by the settings provider
         if hasattr(self, '_settings_provider') and self._settings_provider:

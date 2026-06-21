@@ -43,6 +43,15 @@ export interface SessionLoadResponse {
   species_resolved?: boolean
   species_genes_validated?: boolean
   species_input_info?: Record<string, unknown>
+  literature_config?: {
+    mode?: 'gemini_deep_research' | 'pubmed_llm' | 'deep_research' | 'disabled'
+    deep_research_model?: string
+    deep_research_llm_base_url?: string
+    deep_research_api_key?: string
+    google_api_key?: string
+    pubmed_email?: string
+    max_search_rounds?: number
+  }
 }
 
 export interface RawTreatmentGroup {

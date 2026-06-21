@@ -81,7 +81,7 @@ class MessagingMixin:
 
     async def _supervisor_callback(self, step: AnalysisStep, figures: Optional[List[str]] = None) -> SupervisorEvalResult:
         """Bridge bioinformatics agent's supervisor_callback to SupervisorAgent."""
-        if not self.supervisor_agent or not self._settings_provider.get_model("supervisor"):
+        if not self.ensure_agent_ready("supervisor"):
             return SupervisorEvalResult()
         try:
             return await self.supervisor_agent.evaluate_step(step, figures or [])

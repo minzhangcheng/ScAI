@@ -253,7 +253,7 @@ export interface ExplorationFailedInfo {
   message?: string
 }
 
-interface AppState {
+export interface AppState {
   // Language
   language: Language
   setLanguage: (lang: Language) => void

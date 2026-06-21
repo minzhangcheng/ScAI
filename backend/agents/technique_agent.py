@@ -75,6 +75,7 @@ class TechniqueAgent(BaseAgent):
         it uses lookup_docs() and lookup_from_error() directly.
         This stub satisfies the BaseAgent ABC contract.
         """
+        self.refresh_runtime_config_if_needed()
         return {
             "agent": self.agent_type.value,
             "status": "skipped",
@@ -228,6 +229,7 @@ except ImportError as e:
         if not result.success or not raw_doc.strip() or "Cannot import" in raw_doc:
             return f"Could not find documentation for `{function_path}`. Package may not be installed."
 
+        self.refresh_runtime_config_if_needed()
         # Step 2: Summarize with cheap LLM
         await self._notify("status", f"Summarizing documentation for `{function_path}`...")
         user_msg = f"Summarize this Python API documentation:\n\n{raw_doc[:4000]}"
@@ -265,6 +267,7 @@ except ImportError as e:
         Returns:
             Concise error explanation + correct API usage
         """
+        self.refresh_runtime_config_if_needed()
         parsed = self._parse_error_for_lookup(error_text)
         if not parsed:
             return ""

@@ -222,6 +222,7 @@ class SupervisorAgent:
         self.technique_agent = technique_agent
         self._sandbox = None
         self._vision_disabled_runtime: bool = False
+        self._last_config_revision: Optional[int] = None
 
         # Current round state
         self.supervision_log: List[SupervisorRecord] = []
@@ -262,6 +263,19 @@ class SupervisorAgent:
     def has_vision(self, value: bool):
         self._vision_disabled_runtime = not value
 
+    def refresh_runtime_config_if_needed(self) -> None:
+        """Reset cached supervisor client when effective config changed.
+
+        Mirror of BaseAgent.refresh_runtime_config_if_needed for the
+        SupervisorAgent which does not inherit BaseAgent.
+        """
+        current_revision = self._provider.get_config_revision("supervisor")
+        if current_revision == self._last_config_revision:
+            return
+
+        self._last_config_revision = current_revision
+        self._provider.clear_agent_client_cache("supervisor")
+
     def set_sandbox(self, sandbox):
         """Set the sandbox reference for Technique Agent doc lookups."""
         self._sandbox = sandbox
@@ -289,6 +303,7 @@ class SupervisorAgent:
         Returns:
             SupervisorEvalResult with feedback string and force_skip flag.
         """
+        self.refresh_runtime_config_if_needed()
         self._step_count += 1
         record = SupervisorRecord(
             step_number=step.step_number,
@@ -671,6 +686,7 @@ class SupervisorAgent:
         Returns:
             Report dict compatible with existing frontend expectations.
         """
+        self.refresh_runtime_config_if_needed()
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         workspace_path = Path(workspace_dir) if workspace_dir else None
@@ -1124,6 +1140,7 @@ Respond in JSON:
 }}
 ```
 """
+        self.refresh_runtime_config_if_needed()
         self._set_llm_context()
         response = await self.llm_client.chat(
             model=self.model,

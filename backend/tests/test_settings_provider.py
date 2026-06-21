@@ -231,7 +231,7 @@ class TestRegisterClient:
         provider.register_client(("deep_research", "deep_research"), mock_client)
         assert provider.get_llm_client("pi") is not mock_client
         # Registered client is in cache and will be cleaned up
-        assert ("deep_research", "deep_research") in provider._client_cache
+        assert ("registered", "deep_research", "deep_research") in provider._client_cache
 
     def test_cached_clients_returns_all(self, provider, state):
         state.agent_server_configs["pi"] = {

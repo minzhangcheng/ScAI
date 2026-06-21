@@ -596,6 +596,7 @@ class AnalysisState(BaseModel):
         "species_resolved": "species_resolved",
         "species_genes_validated": "species_genes_validated",
         "species_input_info": "species_input_info",
+        "literature_config": "literature_config",
     }
 
     # --- Data helper methods ---
@@ -795,6 +796,9 @@ class AnalysisState(BaseModel):
                 result[api_key] = self._serialize_graphic_abstract(val)
             elif field_name == "plan_dialogue_history":
                 result[api_key] = self._serialize_dialogue_history(self.plan_dialogue_history)
+            elif field_name == "literature_config":
+                from backend.utils.settings_provider import AgentSettingsProvider
+                result[api_key] = AgentSettingsProvider.mask_literature_config(val)
             elif field_name == "realtime_messages":
                 result[api_key] = self._serialize_messages(strip_message_base64)
             else:

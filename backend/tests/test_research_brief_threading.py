@@ -11,6 +11,9 @@ def _mock_provider():
     provider.get_llm_client.return_value = MagicMock()
     provider.get_temperature.return_value = 0.7
     provider.get_system_prompt.return_value = "test prompt"
+    provider.get_literature_config.return_value = {}
+    provider.get_config_revision.return_value = 0
+    provider.clear_agent_client_cache.return_value = None
     return provider
 
 

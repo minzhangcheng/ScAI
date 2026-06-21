@@ -1,8 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { useAppStore, Message, Session, AgentType, RoundResult } from '../stores/appStore'
+import { useAppStore, Message, Session, AgentType, RoundResult, type AppState } from '../stores/appStore'
 import { transformRawMessage, restoreAgentErrors } from '../utils/messageTransform'
-import { transformLoadResponse, transformRoundResults } from '../utils/transformLoadResponse'
+import { transformLoadResponse, transformRoundResults, type StoreUpdates } from '../utils/transformLoadResponse'
 import { devLog } from '../utils/logger'
+import { buildLiteratureConfigPayload, isMaskedSecret } from '../utils/literatureConfig'
 import { downloadBlob } from '../utils/download'
 
 const SNAPSHOT_CLEANUP_THRESHOLD = 20
@@ -19,6 +20,33 @@ import type {
 
 const API_BASE = '/api'
 export const WS_CONNECT_TIMEOUT_MS = 10_000
+
+export function applyStoreUpdates(updates: StoreUpdates): void {
+  const store = useAppStore.getState()
+  const setSecretFromLoad = (
+    current: string,
+    incoming: string,
+    setter: (value: string) => void,
+  ): void => {
+    if (!isMaskedSecret(incoming) || !current || isMaskedSecret(current)) {
+      setter(incoming)
+    }
+  }
+  if (updates.stateVersion != null) store.setStateVersion(updates.stateVersion)
+  if (updates.snapshotCount != null) store.setSnapshotCount(updates.snapshotCount)
+  if (updates.roundWaitSeconds != null) store.setRoundWaitSeconds(updates.roundWaitSeconds)
+  if (updates.literatureMode != null) store.setLiteratureMode(updates.literatureMode as AppState['literatureMode'])
+  if (updates.deepResearchModel != null) store.setDeepResearchModel(updates.deepResearchModel)
+  if (updates.deepResearchLlmBaseUrl != null) store.setDeepResearchLlmBaseUrl(updates.deepResearchLlmBaseUrl)
+  if (updates.deepResearchApiKey != null) {
+    setSecretFromLoad(store.deepResearchApiKey, updates.deepResearchApiKey, store.setDeepResearchApiKey)
+  }
+  if (updates.googleApiKey != null) {
+    setSecretFromLoad(store.googleApiKey, updates.googleApiKey, store.setGoogleApiKey)
+  }
+  if (updates.pubmedEmail != null) store.setPubmedEmail(updates.pubmedEmail)
+  if (updates.literatureMaxSearchRounds != null) store.setLiteratureMaxSearchRounds(updates.literatureMaxSearchRounds)
+}
 
 // Generate UUID using crypto API with fallback for non-HTTPS contexts
 export function generateId(): string {
@@ -238,15 +266,7 @@ export function useSession() {
 
       setCurrentSession(session)
 
-      if (storeUpdates.stateVersion != null) {
-        useAppStore.getState().setStateVersion(storeUpdates.stateVersion)
-      }
-      if (storeUpdates.snapshotCount != null) {
-        useAppStore.getState().setSnapshotCount(storeUpdates.snapshotCount)
-      }
-      if (storeUpdates.roundWaitSeconds != null) {
-        useAppStore.getState().setRoundWaitSeconds(storeUpdates.roundWaitSeconds)
-      }
+      applyStoreUpdates(storeUpdates)
 
       if (data.agent_errors && Array.isArray(data.agent_errors)) {
         restoreAgentErrors(data.agent_errors)
@@ -518,8 +538,9 @@ export function useSession() {
     ])
 
     // Sync remaining settings in parallel (max_rounds is now dynamically set by direction selection)
-    const roundWaitSeconds = useAppStore.getState().roundWaitSeconds
-    const { literatureMode, googleApiKey, pubmedEmail, literatureMaxSearchRounds, deepResearchModel, deepResearchLlmBaseUrl, deepResearchApiKey } = useAppStore.getState()
+    const appState = useAppStore.getState()
+    const { roundWaitSeconds } = appState
+    const literaturePayload = buildLiteratureConfigPayload(appState)
 
     await Promise.allSettled([
       apiFetch(`/session/${currentSession.id}/round-wait`, {
@@ -528,15 +549,7 @@ export function useSession() {
       }).catch(e => { syncFailures.push('round_wait'); throw e }),
       apiFetch(`/session/${currentSession.id}/literature-config`, {
         method: 'POST',
-        body: JSON.stringify({
-          mode: literatureMode,
-          deep_research_model: deepResearchModel,
-          deep_research_llm_base_url: deepResearchLlmBaseUrl,
-          deep_research_api_key: deepResearchApiKey,
-          google_api_key: googleApiKey,
-          pubmed_email: pubmedEmail,
-          max_search_rounds: literatureMaxSearchRounds,
-        }),
+        body: JSON.stringify(literaturePayload),
       }).catch(e => { syncFailures.push('literature_config'); throw e }),
     ])
 
@@ -769,15 +782,7 @@ export function useWebSocket() {
             const currentSess = useAppStore.getState().currentSession
             if (currentSess && currentSess.id === loadingSessionId) {
               useAppStore.getState().updateSession(sessionUpdates)
-              if (storeUpdates.stateVersion != null) {
-                useAppStore.getState().setStateVersion(storeUpdates.stateVersion)
-              }
-              if (storeUpdates.snapshotCount != null) {
-                useAppStore.getState().setSnapshotCount(storeUpdates.snapshotCount)
-              }
-              if (storeUpdates.roundWaitSeconds != null) {
-                useAppStore.getState().setRoundWaitSeconds(storeUpdates.roundWaitSeconds)
-              }
+              applyStoreUpdates(storeUpdates)
             }
           }
         } catch (e: any) {
@@ -836,15 +841,7 @@ export function useWebSocket() {
                   if (reloadData) {
                     const { sessionUpdates, storeUpdates } = transformLoadResponse(reloadData)
                     useAppStore.getState().updateSession(sessionUpdates)
-                    if (storeUpdates.stateVersion != null) {
-                      useAppStore.getState().setStateVersion(storeUpdates.stateVersion)
-                    }
-                    if (storeUpdates.snapshotCount != null) {
-                      useAppStore.getState().setSnapshotCount(storeUpdates.snapshotCount)
-                    }
-                    if (storeUpdates.roundWaitSeconds != null) {
-                      useAppStore.getState().setRoundWaitSeconds(storeUpdates.roundWaitSeconds)
-                    }
+                    applyStoreUpdates(storeUpdates)
                   }
                 })
                 .catch(reloadErr => console.error('WebSocket: Failed to reload session state:', reloadErr))

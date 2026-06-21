@@ -1762,6 +1762,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
         Returns:
             Dict with analysis results
         """
+        self.refresh_runtime_config_if_needed()
         # Use provided callback or fall back to instance callback
         review_callback = figure_review_callback or self.figure_review_callback
         _supervisor_callback = supervisor_callback or self.supervisor_callback
@@ -3607,6 +3608,7 @@ finally:
     
     async def process(self, state: AnalysisState, instruction: str, **kwargs) -> Dict[str, Any]:
         """Main entry point for workflow"""
+        self.refresh_runtime_config_if_needed()
         # Reset per-run state to avoid pollution from previous rounds
         self.code_history = []
         self.analysis_context = {}

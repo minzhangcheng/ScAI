@@ -40,6 +40,7 @@ class BaseAgent(ABC):
         self.message_history: List[Dict[str, Any]] = []
         self.session_id = session_id
         self._vision_disabled_runtime: bool = False
+        self._last_config_revision: Optional[int] = None
 
     @property
     def model(self) -> str:
@@ -96,6 +97,30 @@ class BaseAgent(ABC):
     def set_session(self, session_id: str):
         """Update session ID for logging"""
         self.session_id = session_id
+
+    def refresh_runtime_config_if_needed(self) -> None:
+        """Reset per-agent runtime state when effective config changed.
+
+        Most config is read dynamically through AgentSettingsProvider. This hook
+        handles cached runtime objects, such as LLM clients and agent-specific
+        clients, before the next agent use.
+        """
+        current_revision = self._provider.get_config_revision(self.agent_type.value)
+        if current_revision == self._last_config_revision:
+            return
+
+        previous_revision = self._last_config_revision
+        self._last_config_revision = current_revision
+        self._provider.clear_agent_client_cache(self.agent_type.value)
+        self.on_runtime_config_changed(previous_revision, current_revision)
+
+    def on_runtime_config_changed(
+        self,
+        previous_revision: Optional[int],
+        current_revision: int,
+    ) -> None:
+        """Subclass hook for runtime objects derived from config."""
+        return None
         
     def reset_history(self):
         """Reset message history"""
@@ -155,6 +180,7 @@ class BaseAgent(ABC):
             Assistant response
         """
         # Set context before each call (client is shared between agents)
+        self.refresh_runtime_config_if_needed()
         self._set_llm_context()
 
         messages = self.get_messages_for_llm(message)
@@ -193,6 +219,7 @@ class BaseAgent(ABC):
             timeout: Per-request timeout in seconds (uses client default if None)
             max_retries: Override retry count (uses client default if None)
         """
+        self.refresh_runtime_config_if_needed()
         self._set_llm_context()
 
         prompt = system_prompt or self.system_prompt
@@ -237,6 +264,7 @@ class BaseAgent(ABC):
             Response chunks
         """
         # Set context before each call (client is shared between agents)
+        self.refresh_runtime_config_if_needed()
         self._set_llm_context()
 
         messages = self.get_messages_for_llm(message)

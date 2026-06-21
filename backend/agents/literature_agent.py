@@ -86,29 +86,27 @@ class LiteratureAgent(BaseAgent):
         # Mode configuration
         self.literature_mode = literature_mode
         self.deep_research_model = deep_research_model
+        self.deep_research_llm_base_url = deep_research_llm_base_url
+        self.deep_research_api_key = deep_research_api_key
         self.pubmed_email = pubmed_email
         self.max_search_rounds = max(1, min(20, max_search_rounds))
         self.proxy_url = proxy_url
 
         # Separate LLM client for deep research mode (optional)
         self._deep_research_llm_client: Optional[OpenAICompatibleClient] = None
-        if deep_research_llm_base_url and deep_research_api_key:
-            self._deep_research_llm_client = OpenAICompatibleClient(
-                api_key=deep_research_api_key,
-                base_url=deep_research_llm_base_url,
-                proxy_url=proxy_url,
-            )
+        if self.deep_research_llm_base_url and self.deep_research_api_key:
+            self._deep_research_llm_client = self._make_deep_research_client()
 
         # Create GoogleDeepResearchClient only when needed (Gemini mode)
+        self._google_api_key = google_api_key
         self._deep_research: Optional[GoogleDeepResearchClient] = None
         if google_api_key:
-            self._deep_research = GoogleDeepResearchClient(
-                google_api_key, proxy_url=proxy_url
-            )
+            self._deep_research = self._make_google_client()
 
         # Cache for annotate_clusters results to avoid redundant Deep Research calls
         self._annotation_cache: Dict[str, Any] = {}
         self._ANNOTATION_CACHE_MAX = 100
+        self._client_close_tasks: Set[asyncio.Task] = set()
 
     @property
     def is_deep_research_available(self) -> bool:
@@ -116,6 +114,111 @@ class LiteratureAgent(BaseAgent):
         if self.literature_mode not in ("gemini_deep_research", "deep_research"):
             return False
         return self._deep_research is not None or bool(self.deep_research_model)
+
+    def _make_deep_research_client(self) -> OpenAICompatibleClient:
+        client = OpenAICompatibleClient(
+            api_key=self.deep_research_api_key,
+            base_url=self.deep_research_llm_base_url,
+            proxy_url=self.proxy_url,
+            session_id=self.session_id,
+            agent_name=self.agent_type.value,
+        )
+        apply_retry_callback = getattr(self._provider, "apply_retry_callback", None)
+        if apply_retry_callback:
+            apply_retry_callback(client)
+        return client
+
+    def _make_google_client(self) -> GoogleDeepResearchClient:
+        return GoogleDeepResearchClient(
+            self._google_api_key,
+            proxy_url=self.proxy_url,
+        )
+
+    def _deep_research_client_signature(self) -> Tuple[str, str]:
+        return (
+            self.deep_research_llm_base_url or "",
+            self.deep_research_api_key or "",
+        )
+
+    def _close_stale_client(self, client) -> None:
+        if client is None or not hasattr(client, "close"):
+            return
+
+        async def _close():
+            try:
+                await client.close()
+            except Exception as e:
+                logger.debug(f"[Literature] Failed to close stale runtime client: {e}")
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(_close())
+        else:
+            task = loop.create_task(_close())
+            self._client_close_tasks.add(task)
+            task.add_done_callback(self._client_close_tasks.discard)
+
+    async def close_runtime_clients(self) -> None:
+        """Close literature-owned clients that are not owned by AgentSettingsProvider."""
+        clients = [self._deep_research_llm_client, self._deep_research]
+        self._deep_research_llm_client = None
+        self._deep_research = None
+        if self._client_close_tasks:
+            pending_tasks = list(self._client_close_tasks)
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+            self._client_close_tasks.clear()
+        for client in clients:
+            if client is None or not hasattr(client, "close"):
+                continue
+            try:
+                await client.close()
+            except Exception as e:
+                logger.debug(f"[Literature] Failed to close runtime client: {e}")
+
+    def _sync_literature_config_from_provider(self) -> None:
+        lit_config = self._provider.get_literature_config() or {}
+
+        new_mode = lit_config.get("mode", self.literature_mode)
+        new_model = lit_config.get("deep_research_model", self.deep_research_model)
+        new_base_url = lit_config.get("deep_research_llm_base_url", self.deep_research_llm_base_url)
+        new_api_key = lit_config.get("deep_research_api_key", self.deep_research_api_key)
+        new_google_api_key = lit_config.get("google_api_key", self._google_api_key)
+        new_pubmed_email = lit_config.get("pubmed_email", self.pubmed_email)
+        new_max_rounds = lit_config.get("max_search_rounds", self.max_search_rounds)
+
+        old_client_signature = self._deep_research_client_signature()
+
+        self.literature_mode = new_mode
+        self.deep_research_model = new_model
+        self.deep_research_llm_base_url = new_base_url
+        self.deep_research_api_key = new_api_key
+        self.pubmed_email = new_pubmed_email
+        self.max_search_rounds = max(1, min(20, int(new_max_rounds or 5)))
+
+        new_client_signature = self._deep_research_client_signature()
+        if new_client_signature != old_client_signature:
+            old_client = self._deep_research_llm_client
+            self._deep_research_llm_client = None
+            self._close_stale_client(old_client)
+            if self.deep_research_llm_base_url and self.deep_research_api_key:
+                self._deep_research_llm_client = self._make_deep_research_client()
+
+        if new_google_api_key != self._google_api_key:
+            old_client = self._deep_research
+            self._deep_research = None
+            self._close_stale_client(old_client)
+            self._google_api_key = new_google_api_key
+            if new_google_api_key:
+                self._deep_research = self._make_google_client()
+
+    def on_runtime_config_changed(
+        self,
+        previous_revision: Optional[int],
+        current_revision: int,
+    ) -> None:
+        self._sync_literature_config_from_provider()
+        self._annotation_cache.clear()
 
     @property
     def fallback_model(self) -> str:
@@ -149,6 +252,7 @@ class LiteratureAgent(BaseAgent):
         **kwargs
     ) -> Dict[str, Any]:
         """Process literature research instruction"""
+        self.refresh_runtime_config_if_needed()
         effective_mode = mode_override if mode_override is not None else self.literature_mode
         if effective_mode == "disabled":
             logger.info("[Literature] Literature agent is disabled, skipping")
@@ -283,6 +387,7 @@ class LiteratureAgent(BaseAgent):
         Makes a single long-running chat call with high max_tokens and timeout.
         The deep research model handles web search and synthesis internally.
         """
+        self.refresh_runtime_config_if_needed()
         if not self.deep_research_model:
             raise ValueError("deep_research_model not configured for deep_research mode")
 
@@ -1120,6 +1225,7 @@ Please list 3-5 most important findings, one per line.
         state: Optional[AnalysisState] = None
     ) -> Dict[str, Any]:
         """Get marker genes for a specific cell type via literature search."""
+        self.refresh_runtime_config_if_needed()
         tissue_context = f" {tissue}" if tissue else ""
         topic = f"{cell_type} marker genes {organism}{tissue_context} single cell RNA sequencing"
 
@@ -1192,6 +1298,7 @@ Please return in JSON format:
         Returns:
             Dict with annotations per cluster, literature_report, references, status
         """
+        self.refresh_runtime_config_if_needed()
         if self.literature_mode == "disabled":
             logger.info("[Literature] Literature agent is disabled, skipping annotate_clusters")
             return {"annotations": {}, "literature_report": "", "references": [], "status": "disabled"}
@@ -1365,6 +1472,7 @@ Return a JSON object with this EXACT structure:
         state: Optional[AnalysisState] = None
     ) -> Dict[str, Any]:
         """Validate pathway enrichment with literature evidence."""
+        self.refresh_runtime_config_if_needed()
         topic = f"{pathway_name} pathway {' '.join(genes[:10])} disease mechanism"
 
         result = await self._do_research(topic, state)
@@ -1418,6 +1526,7 @@ Reply in JSON format:
         state: Optional[AnalysisState] = None
     ) -> Dict[str, Any]:
         """Search for molecular mechanisms underlying a phenotype."""
+        self.refresh_runtime_config_if_needed()
         query_parts = [phenotype, "molecular mechanism"]
         if genes:
             query_parts.extend(genes[:5])

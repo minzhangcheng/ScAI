@@ -7,6 +7,8 @@ freshness even after LangGraph checkpoint-deserialization replaces the
 object. Changes made via session_config API routes are immediately
 visible on the next get_* call.
 """
+import hashlib
+import json
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -16,6 +18,9 @@ from backend.utils.llm_client import OpenAICompatibleClient
 from backend.state import sessions
 
 logger = logging.getLogger(__name__)
+
+MASKED_SECRET_VALUE = "********"
+_SECRET_FIELD_NAMES = {"api_key", "deep_research_api_key", "google_api_key"}
 
 
 class AgentSettingsProvider:
@@ -41,11 +46,18 @@ class AgentSettingsProvider:
         self._config = config
         self._global_client = global_client
         self._retry_callback = retry_callback
-        self._client_cache: Dict[Tuple[str, str], OpenAICompatibleClient] = {}
+        self._client_cache: Dict[Tuple[str, str, str], OpenAICompatibleClient] = {}
 
     def set_retry_callback(self, callback: Optional[Callable]) -> None:
         """Set or update the retry callback for newly created LLM clients."""
         self._retry_callback = callback
+        for client in self._client_cache.values():
+            client.on_retry = callback
+
+    def apply_retry_callback(self, client: Optional[OpenAICompatibleClient]) -> None:
+        """Apply the current retry callback to an externally-created client."""
+        if client is not None and self._retry_callback:
+            client.on_retry = self._retry_callback
 
     def _get_state(self) -> AnalysisState:
         """Return the freshest available AnalysisState.
@@ -91,12 +103,15 @@ class AgentSettingsProvider:
            (not agent_key or agent_key == self._config.api.api_key):
             return self._global_client
 
-        cache_key = (agent_url or self._config.api.llm_base_url,
-                     agent_key or self._config.api.api_key)
+        cache_key = (
+            agent_name,
+            agent_url or self._config.api.llm_base_url,
+            agent_key or self._config.api.api_key,
+        )
         if cache_key not in self._client_cache:
             client = OpenAICompatibleClient(
-                api_key=cache_key[1],
-                base_url=cache_key[0],
+                api_key=cache_key[2],
+                base_url=cache_key[1],
                 proxy_url=self._config.api.proxy_url,
                 session_id=self._session_id,
                 agent_name=agent_name,
@@ -111,12 +126,28 @@ class AgentSettingsProvider:
     # ------------------------------------------------------------------
 
     def register_client(self, key: Tuple[str, str], client: OpenAICompatibleClient) -> None:
-        """Register an externally-created client (e.g. deep research) for cleanup."""
-        self._client_cache[key] = client
+        """Register an externally-created client (e.g. deep research) for cleanup.
+
+        Legacy callers pass a two-part key. Store it under a namespaced key so it
+        cannot collide with normal per-agent server clients.
+        """
+        cache_key = ("registered", key[0], key[1])
+        self._client_cache[cache_key] = client
 
     def cached_clients(self):
         """Iterate over all cached LLM clients (for retry-callback wiring)."""
         return self._client_cache.values()
+
+    def clear_agent_client_cache(self, agent_name: str) -> None:
+        """Drop cached OpenAI-compatible clients for one agent.
+
+        The clients are not awaited/closed here because route handlers are
+        synchronous with respect to the provider and stale clients are harmless
+        once removed from the cache. Workflow cleanup still closes cached clients.
+        """
+        for key in list(self._client_cache):
+            if key[0] == agent_name:
+                self._client_cache.pop(key, None)
 
     # ------------------------------------------------------------------
     # Literature config
@@ -125,6 +156,58 @@ class AgentSettingsProvider:
     def get_literature_config(self) -> Dict[str, Any]:
         return self._get_state().literature_config or {}
 
+    @staticmethod
+    def mask_literature_config(config: Dict[str, Any]) -> Dict[str, Any]:
+        masked = dict(config or {})
+        for key in _SECRET_FIELD_NAMES:
+            if masked.get(key):
+                masked[key] = MASKED_SECRET_VALUE
+        return masked
+
+    @staticmethod
+    def resolve_literature_config_update(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+        existing = existing or {}
+        incoming = incoming or {}
+        resolved = dict(incoming)
+        for key in _SECRET_FIELD_NAMES:
+            if resolved.get(key) == MASKED_SECRET_VALUE:
+                resolved[key] = existing.get(key, "")
+        return resolved
+
+    # ------------------------------------------------------------------
+    # Config revision tracking
+    # ------------------------------------------------------------------
+
+    def _agent_extra_signature(self, agent_name: str, state: AnalysisState) -> Dict[str, Any]:
+        """Return agent-specific config values that affect runtime behavior."""
+        if agent_name == "literature":
+            return {"literature_config": state.literature_config or {}}
+        return {}
+
+    def get_config_signature(self, agent_name: str) -> tuple:
+        """Return all config values that affect an agent's next behavior."""
+        state = self._get_state()
+        signature = {
+            "model": self.get_model(agent_name),
+            "temperature": self.get_temperature(agent_name),
+            "system_prompt": self.get_system_prompt(agent_name),
+            "vision_enabled": self.get_vision_setting(agent_name),
+            "server": (state.agent_server_configs or {}).get(agent_name, {}),
+        }
+        signature.update(self._agent_extra_signature(agent_name, state))
+        return tuple(sorted(_secret_safe_signature(signature).items()))
+
+    def get_config_revision(self, agent_name: str) -> int:
+        """Stable integer revision for an agent's effective runtime config."""
+        raw = json.dumps(
+            self.get_config_signature(agent_name),
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        return int(digest, 16)
+
     async def cleanup(self):
         for client in self._client_cache.values():
             try:
@@ -132,3 +215,14 @@ class AgentSettingsProvider:
             except Exception as e:
                 logger.debug(f"Failed to close cached LLM client: {e}")
         self._client_cache.clear()
+
+
+def _secret_safe_signature(value: Any, key_name: str = "") -> Any:
+    if isinstance(value, dict):
+        return {str(k): _secret_safe_signature(v, str(k)) for k, v in sorted(value.items())}
+    if isinstance(value, list):
+        return [_secret_safe_signature(v, key_name) for v in value]
+    if key_name in _SECRET_FIELD_NAMES and value:
+        digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+        return {"sha256": digest}
+    return value

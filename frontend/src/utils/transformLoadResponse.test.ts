@@ -172,6 +172,65 @@ describe('transformLoadResponse', () => {
     expect(result.sessionUpdates.name).toBeUndefined()
   })
 
+  it('extracts literature_config into storeUpdates when present', () => {
+    const data: SessionLoadResponse = {
+      ...MINIMAL_RESPONSE,
+      literature_config: {
+        mode: 'deep_research',
+        deep_research_model: 'openai/o4-mini-deep-research',
+        deep_research_llm_base_url: 'https://custom.llm/api/v1',
+        deep_research_api_key: 'dr-key-123',
+        google_api_key: 'google-key-456',
+        pubmed_email: 'user@example.com',
+        max_search_rounds: 8,
+      },
+    }
+    const result = transformLoadResponse(data)
+    expect(result.storeUpdates.literatureMode).toBe('deep_research')
+    expect(result.storeUpdates.deepResearchModel).toBe('openai/o4-mini-deep-research')
+    expect(result.storeUpdates.deepResearchLlmBaseUrl).toBe('https://custom.llm/api/v1')
+    expect(result.storeUpdates.deepResearchApiKey).toBe('dr-key-123')
+    expect(result.storeUpdates.googleApiKey).toBe('google-key-456')
+    expect(result.storeUpdates.pubmedEmail).toBe('user@example.com')
+    expect(result.storeUpdates.literatureMaxSearchRounds).toBe(8)
+  })
+
+  it('hydrates masked literature config into store updates', () => {
+    const data: SessionLoadResponse = {
+      ...MINIMAL_RESPONSE,
+      literature_config: {
+        mode: 'deep_research',
+        deep_research_model: 'o4-mini-deep-research',
+        deep_research_llm_base_url: 'https://sg.uiuiapi.com/v1',
+        deep_research_api_key: '********',
+        google_api_key: '',
+        pubmed_email: 'user@example.com',
+        max_search_rounds: 8,
+      },
+    }
+    const result = transformLoadResponse(data)
+    expect(result.storeUpdates).toMatchObject({
+      literatureMode: 'deep_research',
+      deepResearchModel: 'o4-mini-deep-research',
+      deepResearchLlmBaseUrl: 'https://sg.uiuiapi.com/v1',
+      deepResearchApiKey: '********',
+      pubmedEmail: 'user@example.com',
+      literatureMaxSearchRounds: 8,
+    })
+  })
+
+  it('omits literature_config fields when not provided', () => {
+    const { literature_config: _lc, ...rest } = MINIMAL_RESPONSE
+    const result = transformLoadResponse(rest)
+    expect(result.storeUpdates.literatureMode).toBeUndefined()
+    expect(result.storeUpdates.deepResearchModel).toBeUndefined()
+    expect(result.storeUpdates.deepResearchLlmBaseUrl).toBeUndefined()
+    expect(result.storeUpdates.deepResearchApiKey).toBeUndefined()
+    expect(result.storeUpdates.googleApiKey).toBeUndefined()
+    expect(result.storeUpdates.pubmedEmail).toBeUndefined()
+    expect(result.storeUpdates.literatureMaxSearchRounds).toBeUndefined()
+  })
+
   it('maps species fields and accepts waiting_species_input status', () => {
     const data: any = {
       session_id: 's1',

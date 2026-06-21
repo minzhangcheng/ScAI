@@ -26,6 +26,7 @@ class CallbacksMixin:
                 "this fallback was previously a silent ValidationError because user_id is required."
             )
         state = self._current_analysis_state
+        self.literature_agent.refresh_runtime_config_if_needed()
         result = await self.literature_agent.process(
             state,
             topic,
@@ -157,6 +158,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
         """
         pi_vision = self._vision_settings.get('pi', True)
         bio_vision = self._vision_settings.get('bioinformatics', True)
+        self.ensure_agent_ready("supervisor")
         sup_vision = (
             self._vision_settings.get('supervisor', True)
             if self.supervisor_agent else False

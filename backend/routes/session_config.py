@@ -8,12 +8,34 @@ from backend.models.api_requests import (
     VisionSettingUpdateRequest, LiteratureConfigRequest, AgentServerConfigRequest,
 )
 from backend.models.schemas import APIResponse, DEFAULT_ROUND_WAIT_SECONDS
-from backend.services.session_store import async_save_session, ensure_session_loaded
+from backend.services.session_store import async_save_session, ensure_session_loaded, update_session_cache
+from backend.state import get_session_lock, workflows
 from backend.utils.auth import require_session_ownership
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import validate_session_id
+from backend.utils.settings_provider import AgentSettingsProvider
 
 router = APIRouter(prefix="/api", tags=["session-config"])
+
+
+def _invalidate_active_agent_config(session_id: str, agent_name: str) -> None:
+    """Notify the active workflow (if any) that an agent's config changed.
+
+    Clears the provider's per-agent client cache and triggers the agent's
+    runtime refresh hook so the next use picks up the new configuration.
+    """
+    workflow = workflows.get(session_id)
+    if workflow is None:
+        return
+
+    provider = getattr(workflow, "_settings_provider", None)
+    if provider is not None and hasattr(provider, "clear_agent_client_cache"):
+        provider.clear_agent_client_cache(agent_name)
+
+    agent_attr = f"{agent_name}_agent"
+    agent = getattr(workflow, agent_attr, None)
+    if agent is not None and hasattr(agent, "refresh_runtime_config_if_needed"):
+        agent.refresh_runtime_config_if_needed()
 
 
 class MaxRoundsRequest(BaseModel):
@@ -27,11 +49,14 @@ class RoundWaitRequest(BaseModel):
 @router.post("/session/{session_id}/prompts")
 async def update_prompts(session_id: str, request: Request, body: PromptUpdateRequest):
     """Update agent prompts"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    state.custom_prompts[body.agent] = body.prompt
-    await async_save_session(session_id, state)
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        state.custom_prompts[body.agent] = body.prompt
+        await update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+    _invalidate_active_agent_config(session_id, body.agent)
 
     return APIResponse(success=True, message=f"Prompt updated for {body.agent}")
 
@@ -59,11 +84,14 @@ async def get_prompts(session_id: str, request: Request):
 @router.post("/session/{session_id}/models")
 async def update_models(session_id: str, request: Request, body: ModelUpdateRequest):
     """Update agent models"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    state.custom_models[body.agent] = body.model
-    await async_save_session(session_id, state)
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        state.custom_models[body.agent] = body.model
+        await update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+    _invalidate_active_agent_config(session_id, body.agent)
 
     return APIResponse(success=True, message=f"Model updated for {body.agent}")
 
@@ -91,11 +119,14 @@ async def get_models(session_id: str, request: Request):
 @router.post("/session/{session_id}/temperatures")
 async def update_temperatures(session_id: str, request: Request, body: TemperatureUpdateRequest):
     """Update agent temperature"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    state.custom_temperatures[body.agent] = body.temperature
-    await async_save_session(session_id, state)
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        state.custom_temperatures[body.agent] = body.temperature
+        await update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+    _invalidate_active_agent_config(session_id, body.agent)
 
     return APIResponse(success=True, message=f"Temperature updated for {body.agent}: {body.temperature}")
 
@@ -115,11 +146,14 @@ async def get_temperatures(session_id: str, request: Request):
 @router.post("/session/{session_id}/vision-settings")
 async def update_vision_settings(session_id: str, request: Request, body: VisionSettingUpdateRequest):
     """Update agent vision capability setting"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    state.agent_vision_settings[body.agent] = body.vision_enabled
-    await async_save_session(session_id, state)
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        state.agent_vision_settings[body.agent] = body.vision_enabled
+        await update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+    _invalidate_active_agent_config(session_id, body.agent)
 
     return APIResponse(success=True, message=f"Vision setting updated for {body.agent}: {body.vision_enabled}")
 
@@ -136,10 +170,13 @@ async def get_vision_settings(session_id: str, request: Request):
 @router.post("/session/{session_id}/max-rounds")
 async def update_max_rounds(session_id: str, request: Request, body: MaxRoundsRequest):
     """Update maximum analysis rounds"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-    state.max_rounds = body.max_rounds
-    await async_save_session(session_id, state)
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        state.max_rounds = body.max_rounds
+        await update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
 
     return APIResponse(success=True, message=f"Max rounds updated to {body.max_rounds}")
 
@@ -155,10 +192,13 @@ async def get_max_rounds(session_id: str, request: Request):
 @router.post("/session/{session_id}/round-wait")
 async def update_round_wait(session_id: str, request: Request, body: RoundWaitRequest):
     """Update round wait countdown seconds (-1=manual, 0=no wait, positive=countdown)"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-    state.round_wait_seconds = body.round_wait_seconds
-    await async_save_session(session_id, state)
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        state.round_wait_seconds = body.round_wait_seconds
+        await update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
 
     return APIResponse(success=True, message=f"Round wait updated to {body.round_wait_seconds}s")
 
@@ -166,19 +206,26 @@ async def update_round_wait(session_id: str, request: Request, body: RoundWaitRe
 @router.post("/session/{session_id}/literature-config")
 async def update_literature_config(session_id: str, request: Request, body: LiteratureConfigRequest):
     """Update literature agent configuration"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    state.literature_config = {
-        "mode": body.mode,
-        "deep_research_model": body.deep_research_model,
-        "deep_research_llm_base_url": body.deep_research_llm_base_url,
-        "deep_research_api_key": body.deep_research_api_key,
-        "google_api_key": body.google_api_key,
-        "pubmed_email": body.pubmed_email,
-        "max_search_rounds": body.max_search_rounds,
-    }
-    await async_save_session(session_id, state)
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        incoming = {
+            "mode": body.mode,
+            "deep_research_model": body.deep_research_model,
+            "deep_research_llm_base_url": body.deep_research_llm_base_url,
+            "deep_research_api_key": body.deep_research_api_key,
+            "google_api_key": body.google_api_key,
+            "pubmed_email": body.pubmed_email,
+            "max_search_rounds": body.max_search_rounds,
+        }
+        state.literature_config = AgentSettingsProvider.resolve_literature_config_update(
+            state.literature_config or {},
+            incoming,
+        )
+        await update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+    _invalidate_active_agent_config(session_id, "literature")
 
     return APIResponse(success=True, message=f"Literature config updated: mode={body.mode}")
 
@@ -196,13 +243,15 @@ async def update_agent_server_config(session_id: str, request: Request, body: Ag
     """Update per-agent LLM server configuration"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    state.agent_server_configs[body.agent] = {
-        "llm_base_url": body.llm_base_url,
-        "api_key": body.api_key,
-    }
-    await async_save_session(session_id, state)
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        state.agent_server_configs[body.agent] = {
+            "llm_base_url": body.llm_base_url,
+            "api_key": body.api_key,
+        }
+        await update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+    _invalidate_active_agent_config(session_id, body.agent)
 
     return APIResponse(success=True, message=f"Server config for {body.agent} updated")
 

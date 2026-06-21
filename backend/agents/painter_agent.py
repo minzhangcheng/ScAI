@@ -134,6 +134,7 @@ class PainterAgent(BaseAgent):
         Returns:
             GraphicAbstract with generated image
         """
+        self.refresh_runtime_config_if_needed()
         logger.info(f"[{self.session_id}][Painter] Generating graphic abstract")
 
         # Build comprehensive prompt for image generation
@@ -181,6 +182,7 @@ class PainterAgent(BaseAgent):
         Raises:
             ValueError: If revision fails
         """
+        self.refresh_runtime_config_if_needed()
         self._set_llm_context()
         logger.info(f"[{self.session_id}][Painter] Revising graphic abstract (revision {len(revision_history)})")
 
@@ -611,6 +613,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
         Raises:
             ValueError: If image generation fails
         """
+        self.refresh_runtime_config_if_needed()
         self._set_llm_context()
 
         # Validate input token count before calling API

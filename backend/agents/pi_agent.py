@@ -99,6 +99,7 @@ class PIAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Process instruction and coordinate analysis"""
         
+        self.refresh_runtime_config_if_needed()
         # Get context from state
         context = self._build_context(state)
         
@@ -422,6 +423,7 @@ Return JSON: {{"action": "change_species"|"keep"|"custom", "new_species": "scien
 
         Returns dict mapping cluster_id to adjusted annotation fields.
         """
+        self.refresh_runtime_config_if_needed()
         logger.info(f"[PI] Reviewing cluster annotations for {organism} {tissue}")
 
         # Build compact annotation summary for PI review
@@ -1076,6 +1078,7 @@ IMPORTANT:
         Uses PI's strong model for the critical cluster→cell_type matching step,
         instead of delegating to Literature Agent's weak model.
         """
+        self.refresh_runtime_config_if_needed()
         logger.info(f"[PI] Annotating {len(cluster_markers)} clusters from literature for {organism} {tissue}")
 
         tissue_part = f" {tissue}" if tissue else ""
@@ -1735,6 +1738,7 @@ Keep tasks actionable and specific. Do NOT remove core tasks unless truly unnece
         behavior). Falls back to ``{"decompose": False, "tasks": topics}`` on any
         parse/LLM error.
         """
+        self.refresh_runtime_config_if_needed()
         MAX_DR_TASKS = 5
 
         results_summary = self._format_completed_results(completed_results) or "None yet."
@@ -2136,6 +2140,7 @@ Note: Extract biochemistry values from user message if they mention specific num
         Returns:
             RoundResult with synthesis
         """
+        self.refresh_runtime_config_if_needed()
         logger.info(f"[PI] Synthesizing round {state.current_round} results")
 
         # Reset message history — the prompt below embeds full state context,

@@ -3,6 +3,7 @@ import { usePrompts } from '../hooks/useApi'
 import { useAppStore, AgentType, DEFAULT_MODELS, DEFAULT_TEMPERATURES, DEFAULT_VISION_SETTINGS } from '../stores/appStore'
 import { useTranslation, getDefaultPrompts } from '../i18n/translations'
 import { apiFetch } from '../hooks/useApi'
+import { buildLiteratureConfigPayload, resolveDeepResearchServerConfig } from '../utils/literatureConfig'
 import {
   Users,
   Microscope,
@@ -113,9 +114,13 @@ export function PromptsPanel() {
     deepResearchLlmBaseUrl, setDeepResearchLlmBaseUrl,
     deepResearchApiKey, setDeepResearchApiKey,
     googleApiKey, setGoogleApiKey,
-    pubmedEmail,
     literatureMaxSearchRounds, setLiteratureMaxSearchRounds,
   } = useAppStore()
+  const resolvedDeepResearch = resolveDeepResearchServerConfig({
+    deepResearchLlmBaseUrl,
+    deepResearchApiKey,
+    apiConfig,
+  })
   const llmModifyPending = useAppStore(s => s.llmModifyPending)
   const llmFailureInfo = useAppStore(s => s.llmFailureInfo)
   const { savePrompt, saveModel, saveTemperature } = usePrompts()
@@ -298,17 +303,10 @@ export function PromptsPanel() {
         // Also save literature config if on literature agent
         if (selectedAgent === 'literature') {
           try {
+            const literaturePayload = buildLiteratureConfigPayload(useAppStore.getState())
             await apiFetch(`/session/${currentSession.id}/literature-config`, {
               method: 'POST',
-              body: JSON.stringify({
-                mode: literatureMode,
-                deep_research_model: deepResearchModel,
-                deep_research_llm_base_url: deepResearchLlmBaseUrl,
-                deep_research_api_key: deepResearchApiKey,
-                google_api_key: googleApiKey,
-                pubmed_email: pubmedEmail,
-                max_search_rounds: literatureMaxSearchRounds,
-              }),
+              body: JSON.stringify(literaturePayload),
             })
           } catch (e) {
             console.error('Failed to save literature config:', e)
@@ -603,7 +601,7 @@ export function PromptsPanel() {
                               </span>
                               {!serverExpanded && (
                                 <span className="text-xs text-slate-500 ml-auto truncate max-w-[200px]">
-                                  {deepResearchLlmBaseUrl || editedLlmBaseUrl || apiConfig.llmBaseUrl || 'https://openrouter.ai/api/v1'}
+                                  {resolvedDeepResearch.deepResearchLlmBaseUrl}
                                 </span>
                               )}
                             </button>
@@ -611,14 +609,14 @@ export function PromptsPanel() {
                               <div className="px-2 pb-2 space-y-1.5">
                                 <input
                                   type="text"
-                                  value={deepResearchLlmBaseUrl || editedLlmBaseUrl || apiConfig.llmBaseUrl || 'https://openrouter.ai/api/v1'}
+                                  value={resolvedDeepResearch.deepResearchLlmBaseUrl}
                                   onChange={(e) => { setDeepResearchLlmBaseUrl(e.target.value); setSaved(false) }}
                                   className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                 />
                                 <div className="relative">
                                   <input
                                     type={showDeepResearchApiKey ? 'text' : 'password'}
-                                    value={deepResearchApiKey || editedApiKey || apiConfig.apiKey || ''}
+                                    value={resolvedDeepResearch.deepResearchApiKey}
                                     onChange={(e) => { setDeepResearchApiKey(e.target.value); setSaved(false) }}
                                     className="w-full px-3 py-1.5 pr-10 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                   />

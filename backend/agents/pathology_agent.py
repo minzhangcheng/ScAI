@@ -87,6 +87,7 @@ class PathologyAgent(BaseAgent):
         **kwargs
     ) -> Dict[str, Any]:
         """Process pathology analysis instruction"""
+        self.refresh_runtime_config_if_needed()
         # Check if there are images to analyze
         images_to_analyze = kwargs.get("images", state.get_files_by_section("pathology"))
         
@@ -184,6 +185,7 @@ class PathologyAgent(BaseAgent):
         When no intervention callback is wired, the error propagates unchanged so
         the per-image handler in process() skips the image (legacy behaviour).
         """
+        self.refresh_runtime_config_if_needed()
         while True:
             try:
                 return await call_factory()
@@ -231,6 +233,7 @@ class PathologyAgent(BaseAgent):
         Returns:
             Analysis results
         """
+        self.refresh_runtime_config_if_needed()
         # Set LLM context before vision calls (client is shared between agents)
         self._set_llm_context()
         
@@ -515,6 +518,7 @@ Please provide comprehensive analysis and reply in JSON format:
         Used when PI requests specific pathology verification
         """
         try:
+            self.refresh_runtime_config_if_needed()
             # Set LLM context before vision calls (client is shared between agents)
             self._set_llm_context()
 

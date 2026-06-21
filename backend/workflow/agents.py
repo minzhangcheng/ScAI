@@ -282,7 +282,7 @@ class AgentNodesMixin:
                 "failed_node": None,
             }
 
-        if not self.pathology_agent or not self._settings_provider.get_model("pathology"):
+        if not self.ensure_agent_ready("pathology"):
             logger.info(f"[{self.session_id}] Pathology agent disabled, skipping")
             skipped_result = {"findings": [], "status": "skipped"}
             cache_store(analysis_state, AgentType.PATHOLOGY, skipped_result)
@@ -617,6 +617,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         await self._send_message("status", "Bioinformatics agent is running autonomous analysis...", AgentType.BIOINFORMATICS)
 
         # Reset supervisor state for this round
+        self.ensure_agent_ready("supervisor")
         if self.supervisor_agent:
             self.supervisor_agent.reset_for_round(planning_stage=planning_stage)
 
@@ -795,7 +796,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 "failed_node": None,
             }
 
-        if not self.biochemistry_agent or not self._settings_provider.get_model("biochemistry"):
+        if not self.ensure_agent_ready("biochemistry"):
             logger.info(f"[{self.session_id}] Biochemistry agent disabled, skipping")
             skipped_result = {"findings": [], "status": "skipped"}
             cache_store(analysis_state, AgentType.BIOCHEMISTRY, skipped_result)

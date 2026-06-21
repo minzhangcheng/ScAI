@@ -269,7 +269,7 @@ class ReportingMixin:
             logger.info(f"[{self.session_id}] No analysis work recorded, skipping graphic abstract")
             return {**state, "analysis_state": analysis_state}
 
-        if self.painter_agent and self._settings_provider.get_model("painter"):
+        if self.ensure_agent_ready("painter"):
             try:
                 return await self._generate_image_graphic_abstract(state)
             except Exception as e:
@@ -749,6 +749,7 @@ class ReportingMixin:
         # === LLM call with retry + user intervention ===
         while True:
             try:
+                self.ensure_agent_ready("supervisor")
                 if self.supervisor_agent:
                     report = await self.supervisor_agent.generate_detailed_report(
                         analysis_state=analysis_state,

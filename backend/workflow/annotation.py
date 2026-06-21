@@ -162,6 +162,9 @@ class AnnotationMixin:
                 "already_confirmed": True,
             }
 
+        # Refresh literature config before annotation use
+        self.literature_agent.refresh_runtime_config_if_needed()
+
         # --- PI-guided annotation ---
         lit_mode = getattr(self.literature_agent, 'literature_mode', 'pubmed_llm')
         pi_search_guided = False

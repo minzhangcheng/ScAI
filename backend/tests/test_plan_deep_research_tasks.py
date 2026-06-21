@@ -2,11 +2,17 @@
 import pytest
 
 from backend.agents.pi_agent import PIAgent
+from backend.config._config import SystemConfig
+from backend.models.schemas import AnalysisState
+from backend.utils.settings_provider import AgentSettingsProvider
 
 
 class _FakePI(PIAgent):
     """Bypass PIAgent.__init__; stub the LLM round-trip."""
     def __init__(self, response: str):
+        state = AnalysisState(id="test", name="Test", user_id="u", initial_instruction="x")
+        super().__init__(settings_provider=AgentSettingsProvider(
+            state=state, config=SystemConfig(), global_client=None))
         self._response = response
 
     async def chat(self, prompt, temperature=0.3):

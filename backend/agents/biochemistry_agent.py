@@ -60,6 +60,7 @@ class BiochemistryAgent(BaseAgent):
         Step 3: Summarize results, provide conclusions and experiment suggestions
         """
 
+        self.refresh_runtime_config_if_needed()
         bio_files = state.get_files_by_section("biochemistry")
 
         # Separate image files from data files

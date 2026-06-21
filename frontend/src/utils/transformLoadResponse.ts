@@ -100,13 +100,25 @@ function transformGraphicAbstract(raw: SessionLoadResponse['graphic_abstract']) 
   }
 }
 
+export interface LiteratureConfigStoreUpdates {
+  literatureMode?: string
+  deepResearchModel?: string
+  deepResearchLlmBaseUrl?: string
+  deepResearchApiKey?: string
+  googleApiKey?: string
+  pubmedEmail?: string
+  literatureMaxSearchRounds?: number
+}
+
+export type StoreUpdates = {
+  stateVersion?: number
+  snapshotCount?: number
+  roundWaitSeconds?: number
+} & LiteratureConfigStoreUpdates
+
 export interface TransformedLoadResponse {
   sessionUpdates: Partial<Session>
-  storeUpdates: {
-    stateVersion?: number
-    snapshotCount?: number
-    roundWaitSeconds?: number
-  }
+  storeUpdates: StoreUpdates
 }
 
 export function transformLoadResponse(data: SessionLoadResponse): TransformedLoadResponse {
@@ -139,6 +151,19 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
     ...opt('stateVersion', data.state_version),
     ...opt('snapshotCount', data.snapshot_count),
     ...opt('roundWaitSeconds', typeof data.round_wait_seconds === 'number' ? data.round_wait_seconds : undefined),
+  }
+
+  if (data.literature_config && typeof data.literature_config === 'object') {
+    const lc = data.literature_config as Record<string, unknown>
+    Object.assign(storeUpdates, {
+      ...opt('literatureMode', typeof lc.mode === 'string' ? lc.mode : undefined),
+      ...opt('deepResearchModel', typeof lc.deep_research_model === 'string' ? lc.deep_research_model : undefined),
+      ...opt('deepResearchLlmBaseUrl', typeof lc.deep_research_llm_base_url === 'string' ? lc.deep_research_llm_base_url : undefined),
+      ...opt('deepResearchApiKey', typeof lc.deep_research_api_key === 'string' ? lc.deep_research_api_key : undefined),
+      ...opt('googleApiKey', typeof lc.google_api_key === 'string' ? lc.google_api_key : undefined),
+      ...opt('pubmedEmail', typeof lc.pubmed_email === 'string' ? lc.pubmed_email : undefined),
+      ...opt('literatureMaxSearchRounds', typeof lc.max_search_rounds === 'number' ? lc.max_search_rounds : undefined),
+    })
   }
 
   return { sessionUpdates, storeUpdates }
