@@ -184,26 +184,31 @@ async def test_stream_responses_not_implemented_500_falls_back_to_chat():
 
 
 @pytest.mark.asyncio
-async def test_protocol_probe_both_protocols_500_does_not_cache_protocol():
+async def test_protocol_probe_persistent_500_does_not_cache_protocol():
     c = _client("https://x/v1")
-    fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=InternalServerError(
+    boom = InternalServerError(
         message="Error code: 500 - upstream overloaded",
         response=MagicMock(status_code=500),
         body={"error": {"message": "upstream overloaded"}},
-    ))
+    )
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=boom)
     c._responses_adapter = fake
+    c.client.chat.completions.create = AsyncMock(side_effect=boom)
+    anth = MagicMock()
+    anth.complete = AsyncMock(side_effect=boom)
+    c._anthropic_adapter = anth
 
     with pytest.raises(llm_mod.UpstreamExhaustedError):
         await c.chat(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
 
     assert "https://x/v1" not in llm_mod._NO_RESPONSES_ENDPOINT
     assert ("https://x/v1", "gpt-4o") not in llm_mod._PROBE_CACHE
-    assert fake.complete.await_count > 1
+    assert fake.complete.await_count == 3
 
 
 @pytest.mark.asyncio
-async def test_responses_failure_then_chat_success_caches_chat_without_more_rounds():
+async def test_responses_transient_then_chat_success_retries_then_caches_chat():
     c = _client("https://api.n1n.ai/v1")
     fake = MagicMock()
     fake.complete = AsyncMock(side_effect=InternalServerError(
@@ -223,13 +228,13 @@ async def test_responses_failure_then_chat_success_caches_chat_without_more_roun
     r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
 
     assert r.content == "CHAT_OK"
-    fake.complete.assert_awaited_once()
+    assert fake.complete.await_count == 3
     c.client.chat.completions.create.assert_awaited_once()
     assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "chat"
 
 
 @pytest.mark.asyncio
-async def test_protocol_probe_retries_responses_after_chat_failure():
+async def test_protocol_probe_responses_recovers_before_touching_chat():
     c = _client("https://api.n1n.ai/v1")
     fake = MagicMock()
     fake.complete = AsyncMock(side_effect=[
@@ -241,49 +246,44 @@ async def test_protocol_probe_retries_responses_after_chat_failure():
         LLMResponse("RESPONSES_OK", "gemini-3.1-pro-preview", {}, None),
     ])
     c._responses_adapter = fake
-
-    c.client.chat.completions.create = AsyncMock(side_effect=InternalServerError(
-        message="Error code: 500 - chat down once",
-        response=MagicMock(status_code=500),
-        body={"error": {"message": "chat down once"}},
-    ))
+    c.client.chat.completions.create = AsyncMock()
 
     r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
 
     assert r.content == "RESPONSES_OK"
     assert fake.complete.await_count == 2
-    assert c.client.chat.completions.create.await_count == 1
+    c.client.chat.completions.create.assert_not_awaited()
     assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "gemini-3.1-pro-preview")] == "responses"
 
 
 @pytest.mark.asyncio
-async def test_protocol_probe_fails_after_three_response_chat_rounds():
+async def test_protocol_probe_exhausts_all_protocols_on_persistent_transient():
     c = _client("https://api.n1n.ai/v1")
+    boom = InternalServerError(
+        message="Error code: 500 - unavailable",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "unavailable"}},
+    )
     fake = MagicMock()
-    fake.complete = AsyncMock(side_effect=InternalServerError(
-        message="Error code: 500 - responses unavailable",
-        response=MagicMock(status_code=500),
-        body={"error": {"message": "responses unavailable"}},
-    ))
+    fake.complete = AsyncMock(side_effect=boom)
     c._responses_adapter = fake
-
-    c.client.chat.completions.create = AsyncMock(side_effect=InternalServerError(
-        message="Error code: 500 - chat unavailable",
-        response=MagicMock(status_code=500),
-        body={"error": {"message": "chat unavailable"}},
-    ))
+    c.client.chat.completions.create = AsyncMock(side_effect=boom)
+    anth = MagicMock()
+    anth.complete = AsyncMock(side_effect=boom)
+    c._anthropic_adapter = anth
 
     with pytest.raises(llm_mod.UpstreamExhaustedError) as exc_info:
         await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
 
-    assert "Protocol probe exhausted after 3 rounds" in str(exc_info.value)
+    assert "Protocol probe exhausted" in str(exc_info.value)
     assert fake.complete.await_count == 3
-    assert c.client.chat.completions.create.await_count == 3
+    assert c.client.chat.completions.create.await_count == 1
+    assert anth.complete.await_count == 3
     assert ("https://api.n1n.ai/v1", "gemini-3.1-pro-preview") not in llm_mod._PROBE_CACHE
 
 
 @pytest.mark.asyncio
-async def test_protocol_probe_rate_limit_alternates_without_internal_sleep():
+async def test_protocol_probe_rate_limit_retries_then_switches_to_chat():
     c = _client("https://api.n1n.ai/v1")
     fake = MagicMock()
     fake.complete = AsyncMock(side_effect=RateLimitError(
@@ -303,9 +303,8 @@ async def test_protocol_probe_rate_limit_alternates_without_internal_sleep():
     r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
 
     assert r.content == "CHAT_AFTER_429"
-    fake.complete.assert_awaited_once()
+    assert fake.complete.await_count == 3
     c.client.chat.completions.create.assert_awaited_once()
-    llm_mod.asyncio.sleep.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -331,7 +330,7 @@ async def test_protocol_probe_json_error_alternates_without_internal_sleep():
 
 
 @pytest.mark.asyncio
-async def test_protocol_probe_failure_clears_model_chat_cache_written_by_endpoint_absent():
+async def test_endpoint_absent_records_no_responses_but_no_protocol_cache_on_exhaustion():
     c = _client("https://api.n1n.ai/v1")
     fake = MagicMock()
     fake.complete = AsyncMock(side_effect=NotFoundError(
@@ -340,12 +339,15 @@ async def test_protocol_probe_failure_clears_model_chat_cache_written_by_endpoin
         body=None,
     ))
     c._responses_adapter = fake
-
-    c.client.chat.completions.create = AsyncMock(side_effect=InternalServerError(
+    boom = InternalServerError(
         message="Error code: 500 - chat unavailable",
         response=MagicMock(status_code=500),
         body={"error": {"message": "chat unavailable"}},
-    ))
+    )
+    c.client.chat.completions.create = AsyncMock(side_effect=boom)
+    anth = MagicMock()
+    anth.complete = AsyncMock(side_effect=boom)
+    c._anthropic_adapter = anth
 
     with pytest.raises(llm_mod.UpstreamExhaustedError):
         await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
@@ -543,3 +545,119 @@ async def test_stream_responses_chat_only_does_not_mark_base_url_no_responses():
     assert "".join(chunks) == "Hello"
     assert "https://x/v1" not in llm_mod._NO_RESPONSES_ENDPOINT
     assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-chat-only")] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_probe_responses_transient_retries_3x_then_switches_to_chat():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=InternalServerError(
+        message="Error code: 500 - transient blip",
+        response=MagicMock(status_code=500),
+        body={"error": {"message": "transient blip"}},
+    ))
+    c._responses_adapter = fake
+    inline_resp = MagicMock()
+    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT_OK", tool_calls=None))]
+    inline_resp.model = "m"
+    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                                  prompt_tokens_details=None)
+    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+
+    r = await c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "CHAT_OK"
+    assert fake.complete.await_count == 3
+    sleeps = [call.args[0] for call in llm_mod.asyncio.sleep.await_args_list]
+    assert sleeps == [2.0, 15.0, 10.0]
+    c.client.chat.completions.create.assert_awaited_once()
+    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "m")] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_probe_responses_recovers_on_second_attempt_stays_responses():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=[
+        InternalServerError(message="Error code: 500 - blip",
+                            response=MagicMock(status_code=500),
+                            body={"error": {"message": "blip"}}),
+        LLMResponse("RESP_OK", "m", {}, None),
+    ])
+    c._responses_adapter = fake
+    c.client.chat.completions.create = AsyncMock()
+
+    r = await c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "RESP_OK"
+    assert fake.complete.await_count == 2
+    c.client.chat.completions.create.assert_not_awaited()
+    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "m")] == "responses"
+
+
+@pytest.mark.asyncio
+async def test_probe_endpoint_absent_switches_immediately_no_retry():
+    c = _client("https://api.n1n.ai/v1")
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=NotFoundError(
+        message="Cannot POST /v1/responses",
+        response=MagicMock(status_code=404), body=None))
+    c._responses_adapter = fake
+    inline_resp = MagicMock()
+    inline_resp.choices = [MagicMock(message=MagicMock(content="CHAT", tool_calls=None))]
+    inline_resp.model = "m"
+    inline_resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1, total_tokens=2,
+                                  prompt_tokens_details=None)
+    c.client.chat.completions.create = AsyncMock(return_value=inline_resp)
+
+    r = await c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "CHAT"
+    fake.complete.assert_awaited_once()
+    llm_mod.asyncio.sleep.assert_not_awaited()
+    assert "https://api.n1n.ai/v1" in llm_mod._NO_RESPONSES_ENDPOINT
+    assert llm_mod._PROBE_CACHE[("https://api.n1n.ai/v1", "m")] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_probe_anthropic_third_in_order_succeeds_caches_anthropic():
+    c = _client("https://gateway.example.com/v1")
+    resp_fake = MagicMock()
+    resp_fake.complete = AsyncMock(side_effect=NotFoundError(
+        message="Cannot POST /v1/responses",
+        response=MagicMock(status_code=404), body=None))
+    c._responses_adapter = resp_fake
+    c.client.chat.completions.create = AsyncMock(side_effect=NotFoundError(
+        message="Cannot POST /v1/chat/completions",
+        response=MagicMock(status_code=404), body=None))
+    anth_fake = MagicMock()
+    anth_fake.complete = AsyncMock(return_value=LLMResponse("ANTH", "claude", {}, None))
+    c._anthropic_adapter = anth_fake
+
+    r = await c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "ANTH"
+    assert llm_mod._PROBE_CACHE[("https://gateway.example.com/v1", "m")] == "anthropic"
+
+
+@pytest.mark.asyncio
+async def test_cached_responses_uses_full_retry_on_transient():
+    c = _client("https://x/v1")
+    llm_mod._PROBE_CACHE[("https://x/v1", "m")] = "responses"
+    fake = MagicMock()
+    fake.complete = AsyncMock(side_effect=[
+        InternalServerError(message="Error code: 500 - blip1",
+                            response=MagicMock(status_code=500),
+                            body={"error": {"message": "blip1"}}),
+        InternalServerError(message="Error code: 500 - blip2",
+                            response=MagicMock(status_code=500),
+                            body={"error": {"message": "blip2"}}),
+        LLMResponse("RESP_OK", "m", {}, None),
+    ])
+    c._responses_adapter = fake
+
+    r = await c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "RESP_OK"
+    assert fake.complete.await_count == 3
+    assert llm_mod._PROBE_CACHE[("https://x/v1", "m")] == "responses"

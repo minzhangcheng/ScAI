@@ -117,7 +117,7 @@ def _make_fake_response(content: str, tool_calls=None):
 def test_chat_with_tools_recovers_stringified_call(monkeypatch):
     """When upstream returns no tool_calls but content is a stringified tool call,
     chat_with_tools must synthesize a ToolCall and clear content."""
-    client = OpenAICompatibleClient(api_key="k", base_url="http://x", agent_name="t")
+    client = OpenAICompatibleClient(api_key="k", base_url="http://x/v1/chat/completions", agent_name="t")
 
     stringified = '{"tool":"report_findings","parameters":{"summary":"done"}}'
     fake_response = _make_fake_response(stringified, tool_calls=None)
@@ -145,7 +145,7 @@ def test_chat_with_tools_recovers_stringified_call(monkeypatch):
 
 def test_chat_with_tools_keeps_plain_text_when_not_a_tool_call(monkeypatch):
     """Genuine plain-text replies must not be misinterpreted as tool calls."""
-    client = OpenAICompatibleClient(api_key="k", base_url="http://x", agent_name="t")
+    client = OpenAICompatibleClient(api_key="k", base_url="http://x/v1/chat/completions", agent_name="t")
 
     plain = "I will now proceed with the analysis."
     fake_response = _make_fake_response(plain, tool_calls=None)
@@ -167,7 +167,7 @@ def test_chat_with_tools_keeps_plain_text_when_not_a_tool_call(monkeypatch):
 
 def test_chat_with_tools_native_tool_calls_unaffected(monkeypatch):
     """When upstream returns proper tool_calls, recovery path must not run."""
-    client = OpenAICompatibleClient(api_key="k", base_url="http://x", agent_name="t")
+    client = OpenAICompatibleClient(api_key="k", base_url="http://x/v1/chat/completions", agent_name="t")
 
     native_tc = MagicMock()
     native_tc.id = "call_native_1"

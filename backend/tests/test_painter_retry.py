@@ -35,7 +35,11 @@ def _make_painter(base_url: str = f"https://{_GOOGLE_AI_STUDIO_BASE_URL}/v1beta"
     provider.get_system_prompt.return_value = "draw"
     provider.get_temperature.return_value = 0.7
     provider.get_llm_client.return_value = llm_client
+    # Match the cached revision so refresh_runtime_config_if_needed early-returns
+    # (the fixture bypasses BaseAgent.__init__, which normally sets this).
+    provider.get_config_revision.return_value = 1
     painter._provider = provider
+    painter._last_config_revision = 1
     return painter
 
 

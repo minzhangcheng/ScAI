@@ -1,6 +1,6 @@
 # ScAI 使用手册
 
-**版本**：0.28.2.1 · **最后更新**：2026-06-20
+**版本**：0.28.3 · **最后更新**：2026-06-21
 
 ScAI（Single-Cell Sequencing Analysis Driven by AI）是一个多 Agent AI 驱动的多组学生物医学研究系统。它将单细胞测序（scRNA-seq / snRNA-seq）、bulk RNA-seq、病理图像（H&E / IHC）和生化指标整合到统一的迭代分析工作流中，由八个专业 AI Agent 协作完成分析，并通过**人在回路（Human-in-the-Loop）**设计让研究人员在关键节点参与决策。
 

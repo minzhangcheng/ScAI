@@ -213,3 +213,55 @@ async def test_chat_only_model_fallback_does_not_mark_base_url_no_responses():
     assert r.content == "CHAT"
     assert "https://x/v1" not in llm_mod._NO_RESPONSES_ENDPOINT
     assert llm_mod._PROBE_CACHE[("https://x/v1", "gpt-chat-only")] == "chat"
+
+
+from backend.utils.llm_client import _route_protocol_order
+
+
+def test_order_default_v1():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    assert _route_protocol_order("https://x/v1", "gpt-4o") == ["responses", "chat", "anthropic"]
+
+
+def test_order_no_v1_anthropic_first():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    assert _route_protocol_order("https://api.anthropic.com", "claude-3") == [
+        "anthropic", "responses", "chat"]
+
+
+def test_order_anthropic_keyword_with_v1():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    # /v1 present but 'anthropic' keyword floats anthropic to the front
+    assert _route_protocol_order("https://api.anthropic.com/v1", "claude-3")[0] == "anthropic"
+
+
+def test_route_anthropic_v1_resolves_anthropic():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    assert _route_protocol("https://api.anthropic.com/v1", "claude-3") == "anthropic"
+
+
+def test_order_messages_suffix_is_hard_pin():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    assert _route_protocol_order("https://gw/v1/messages", "m") == ["anthropic"]
+
+
+def test_order_explicit_responses_suffix_single():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    assert _route_protocol_order("https://x/v1/responses", "m") == ["responses"]
+
+
+def test_order_cached_decision_single():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    llm_mod._PROBE_CACHE[("https://x/v1", "m")] = "chat"
+    assert _route_protocol_order("https://x/v1", "m") == ["chat"]
+
+
+def test_order_dr_model_responses_then_chat():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    assert _route_protocol_order("https://x/v1", "o3-deep-research") == ["responses", "chat"]
+
+
+def test_order_no_responses_endpoint_drops_responses():
+    llm_mod._NO_RESPONSES_ENDPOINT.clear(); llm_mod._PROBE_CACHE.clear()
+    llm_mod._NO_RESPONSES_ENDPOINT.add("https://x/v1")
+    assert _route_protocol_order("https://x/v1", "m") == ["chat", "anthropic"]

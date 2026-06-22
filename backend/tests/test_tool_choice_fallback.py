@@ -66,7 +66,7 @@ class TestChatWithToolsFallback:
 
         client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
         client.agent_name = "test"
-        client.base_url = "https://fake.example.com/v1"
+        client.base_url = "https://fake.example.com/v1/chat/completions"
         client.session_id = "test-session"
         client.on_retry = None
         client._temp_unsupported_models = set()
@@ -119,7 +119,7 @@ class TestChatWithToolsFallback:
 
         client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
         client.agent_name = "test"
-        client.base_url = "https://fake.example.com/v1"
+        client.base_url = "https://fake.example.com/v1/chat/completions"
         client.session_id = "test-session"
         client.on_retry = None
         client._temp_unsupported_models = set()
@@ -161,7 +161,7 @@ class TestChatWithToolsFallback:
 
         client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
         client.agent_name = "test"
-        client.base_url = "https://fake.example.com/v1"
+        client.base_url = "https://fake.example.com/v1/chat/completions"
         client.session_id = "test-session"
         client.on_retry = None
         client._temp_unsupported_models = set()

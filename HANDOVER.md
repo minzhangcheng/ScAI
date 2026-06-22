@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.28.2.1 · **Last updated**: 2026-06-20
+**Version**: 0.28.3 · **Last updated**: 2026-06-21
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,18 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.28.x — (2026-06-20 → present)**
+
+- `0.28.3` — Protocol probe rewrite: multi-protocol ordered probing via `_route_protocol_order`, per-protocol transient retry with PROBE_RETRY_DELAYS, `is_transient_probe_error` classifier, fixed confirmed-responses no-retry bug, keyword-based probe order hints, anthropic third-in-order support (2026-06-21):
+  - **`_route_protocol_order()` replaces single-protocol routing**: Returns an ordered list of protocols to probe (`["responses", "chat", "anthropic"]` by default) instead of a single decided protocol. `_route_protocol()` retained as head-of-list wrapper. Probe order built from: (0) explicit URL path suffix → single hard-pinned, (1) cached probe decision → single decided, (2) deep-research model → `["responses", "chat"]`, (3) base order reordered by keyword hints (`anthropic`/`responses`/`chat` substrings in base_url) + `/v1`-absent floats anthropic front + known no-responses sites drop `responses`.
+  - **`_keyword_protocol_hints()`**: Soft substring-match hints from base_url that reorder the probe sequence without hard-pinning. Covers `api.anthropic.com` URLs missed by the no-`/v1` heuristic.
+  - **`PROBE_RETRY_DELAYS`** `(2.0, 15.0, 10.0)`: Per-protocol transient-retry waits in seconds before switching to the next protocol in the probe order. Each protocol gets 3 single-shot attempts with these delays on transient errors (429, timeout, 5xx), then the probe moves on.
+  - **`is_transient_probe_error()` classifier**: Distinguishes transient upstream blips (retry same protocol) from deterministic "wrong protocol / endpoint" signals (switch immediately). Deterministic: endpoint-absent, chat-only-model, responses-only-model. Transient: APITimeoutError, APIConnectionError, InternalServerError, RateLimitError, httpx connect/read timeout, asyncio.TimeoutError. Deterministic errors take precedence.
+  - **`_probe_in_order()`**: New probe loop — tries protocols from the order list, for each protocol does up to 3 transient-retry attempts with PROBE_RETRY_DELAYS sleep, then switches. On deterministic wrong-protocol error, switches immediately (may inject redirect protocol at front). Only a SUCCESS writes `_PROBE_CACHE`. Per-(base_url, model) lock ensures concurrent first-call probes once. Exhaustion raises `UpstreamExhaustedError` with all tried protocols.
+  - **`_call_decided_protocol()`**: For cached/decided protocols — full retry/backoff on transient errors (old behavior). On deterministic wrong-protocol error (cache wrong), redirects once to the correct protocol with full retry. Fixes the confirmed-responses no-retry bug where a cached `"responses"` decision would not retry transient 5xx before the old `_responses_or_fallback`.
+  - **`_dispatch_non_streaming()` rewritten**: Uses `call_for()` closure that generates protocol-specific factories. In probe mode: `max_retries=0` + `non_retryable_predicate=lambda e: True` (fail fast, probe loop owns retry). In decided mode: full retry + `non_retryable_predicate` excludes transient errors (so retry_with_backoff works normally). Removed `reactive_log_message` parameter (defunct).
+  - **Deleted**: `_responses_or_fallback()`, `_responses_probe_decision()`, `_record_responses_probe_failure()`, `PROTOCOL_PROBE_ROUNDS` — all replaced by the new probe infrastructure.
+  - **Bug fix in `_build_retry_kwargs()`**: `max_retries_override` was only applied inside the `if request_timeout is not None` block — extracted to unconditional check. Adapter `_get_responses_adapter()` / `_get_anthropic_adapter()` changed from `is None` to `getattr(self, ...) is None` for property-init safety.
+  - **Test updates**: Existing probe tests updated for new behavior — `test_protocol_probe_persistent_500_does_not_cache_protocol` now includes anthropic mock and 3 calls per protocol. New tests: `test_probe_responses_transient_retries_3x_then_switches_to_chat` (verifies PROBE_RETRY_DELAYS sleep sequence), `test_probe_responses_recovers_on_second_attempt_stays_responses`, `test_probe_endpoint_absent_switches_immediately_no_retry`, `test_probe_anthropic_third_in_order_succeeds_caches_anthropic`, `test_cached_responses_uses_full_retry_on_transient`. Routing tests: 9 new `_route_protocol_order` tests covering order defaults, anthropic keyword, /v1 absence, `/messages` suffix hard-pin, cached decision, DR model, no-responses endpoint drop. New `test_transient_probe_classifier.py` (61 lines) with 10 test cases.
 
 - `0.28.2.1` — Deep Research web_search tool injection, Responses adapter tools passthrough, tool name fallback retry (2026-06-20):
   - **Web search tool injection**: `LiteratureAgent._deep_research_via_chat()` now passes `tools=[{"type": "web_search_preview"}]` to the DR-LLM chat call — enables OpenAI Responses API's built-in web search capability for deep-research models (o4-mini-deep-research, o3-deep-research, etc). The model retrieves live web content during generation instead of relying solely on training data.

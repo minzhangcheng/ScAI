@@ -229,7 +229,6 @@ async def test_dispatch_non_streaming_uses_responses_then_caches():
             model="gpt-4o", messages=[{"role": "user", "content": "hi"}],
             temperature=0.7, max_tokens=None, timeout=None, skip_temperature=skip_temperature),
         make_inline_call=lambda: c._chat_inline("gpt-4o", [{"role": "user", "content": "hi"}]),
-        reactive_log_message="switching plain chat to Responses adapter",
         temperature=0.7,
     )
 
@@ -257,7 +256,6 @@ async def test_dispatch_non_streaming_reactive_responses_only_fallback():
             model="responses-only", messages=[{"role": "user", "content": "hi"}],
             temperature=0.7, max_tokens=None, timeout=None, skip_temperature=skip_temperature),
         make_inline_call=inline,
-        reactive_log_message="switching plain chat to Responses adapter",
         temperature=0.7,
     )
 

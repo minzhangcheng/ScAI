@@ -139,7 +139,6 @@ def _detect_image_mime_type(img_b64: str) -> str:
 MAX_RETRIES = 4
 MAX_RETRIES_UPSTREAM_5XX = 8  # Dedicated for flaky upstream (e.g., Cloudflare 524)
 RETRY_DELAY_BASE = 2.0  # Base delay in seconds, will be multiplied by attempt number
-PROTOCOL_PROBE_ROUNDS = 3  # Max alternating Responses/Chat probe rounds
 # Rate limit (429) uses fixed escalating delays to handle TPM limits
 RATE_LIMIT_DELAYS = [5, 10, 20, 40]  # seconds between retries
 # Note: Only retry transient errors. Non-transient errors like AuthenticationError,
@@ -240,30 +239,71 @@ def _url_path_suffix_protocol(base_url: str):
     return None
 
 
-def _route_protocol(base_url: str, model: str) -> str:
-    """Decide which protocol to use for (base_url, model).
+# Canonical probe order when nothing else disambiguates. responses first
+# (richer: citations + built-in web_search), then chat, then anthropic.
+_DEFAULT_PROTOCOL_ORDER = ("responses", "chat", "anthropic")
+
+# Per-protocol transient-retry waits (seconds) BEFORE switching to the next
+# protocol in a probe. len() == attempts per protocol on transient errors
+# (429/timeout/5xx). Deterministic "wrong protocol" errors skip these.
+PROBE_RETRY_DELAYS = (2.0, 15.0, 10.0)
+
+
+def _keyword_protocol_hints(base_url: str) -> List[str]:
+    """Soft protocol hints from substring keywords in base_url, highest priority
+    first. These only REORDER the probe sequence (never hard-pin a protocol —
+    that is the job of an exact path suffix, see _url_path_suffix_protocol).
+    Matching is loose on purpose: a wrong hint costs at most one failed probe
+    attempt before moving on."""
+    low = base_url.lower()
+    hints: List[str] = []
+    # anthropic is wire-incompatible with the OpenAI family, so its markers are
+    # the strongest hint (covers api.anthropic.com/v1, missed by '/v1 absent').
+    if "anthropic" in low or "/messages" in low:
+        hints.append("anthropic")
+    if "responses" in low:
+        hints.append("responses")
+    if "chat" in low or "completion" in low:
+        hints.append("chat")
+    return hints
+
+
+def _route_protocol_order(base_url: str, model: str) -> List[str]:
+    """Ordered list of protocols to try for (base_url, model).
 
     Priority:
-      0. explicit endpoint URL suffix
-      1. base_url without '/v1'  -> anthropic
-      2. deep-research model     -> responses
-      3. base_url has no responses endpoint (cached) -> chat
-      4. probe cache hit
-      5. default 'responses' (caller will probe + fall back on endpoint-absent)
+      0. explicit endpoint URL suffix  -> single hard-pinned protocol
+      1. cached probe decision         -> single decided protocol
+      2. deep-research model           -> ['responses', 'chat']
+      3. base order, reordered by keyword hints; '/v1' absence floats anthropic
+         to the front (legacy heuristic); a site known to lack /responses drops
+         'responses' from the order.
     """
     explicit = _url_path_suffix_protocol(base_url)
     if explicit is not None:
-        return explicit
-    if "/v1" not in base_url:
-        return "anthropic"
-    if _is_deep_research_model(model):
-        return "responses"
-    if base_url in _NO_RESPONSES_ENDPOINT:
-        return "chat"
+        return [explicit]
     cached = _PROBE_CACHE.get((base_url, model))
     if cached is not None:
-        return cached
-    return "responses"
+        return [cached]
+    if _is_deep_research_model(model):
+        return ["responses", "chat"]
+
+    order = list(_DEFAULT_PROTOCOL_ORDER)
+    if "/v1" not in base_url:
+        order = ["anthropic", "responses", "chat"]
+    for proto in reversed(_keyword_protocol_hints(base_url)):
+        if proto in order:
+            order.remove(proto)
+            order.insert(0, proto)
+    if base_url in _NO_RESPONSES_ENDPOINT and "responses" in order:
+        order.remove("responses")
+    return order
+
+
+def _route_protocol(base_url: str, model: str) -> str:
+    """Primary protocol for (base_url, model) — head of the probe order. Retained
+    for streaming dispatch and callers/tests that need a single value."""
+    return _route_protocol_order(base_url, model)[0]
 
 
 def _strip_path_suffix(base_url: str, suffixes: tuple) -> str:
@@ -690,6 +730,30 @@ def is_responses_only_model(error: Exception) -> bool:
     """True when a chat/completions error indicates the model is only served
     via the Responses API (reactive chat -> responses fallback)."""
     return "only supported in v1/responses" in str(error).lower()
+
+
+def is_transient_probe_error(error: Exception) -> bool:
+    """True when an error is a transient upstream blip (retry the SAME protocol),
+    as opposed to a deterministic 'wrong protocol / endpoint' signal (switch
+    protocol immediately).
+
+    Deterministic protocol signals (endpoint-absent, chat-only, responses-only)
+    take precedence and return False even though some arrive as 5xx — those mean
+    the protocol is wrong, not that the server hiccuped.
+    """
+    if (is_responses_endpoint_absent(error)
+            or is_responses_chat_only_model(error)
+            or is_responses_only_model(error)):
+        return False
+    return isinstance(error, (
+        APITimeoutError,
+        APIConnectionError,
+        InternalServerError,
+        RateLimitError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        asyncio.TimeoutError,
+    ))
 
 
 # Hard-quota markers: a 429 carrying any of these never recovers by waiting
@@ -1424,10 +1488,10 @@ class OpenAICompatibleClient:
         }
         if request_timeout is not None:
             kwargs["request_timeout"] = request_timeout
-            if max_retries_override is not None:
-                kwargs["max_retries"] = max_retries_override
-            elif request_timeout > 300:
-                kwargs["max_retries"] = 0  # Don't retry expensive long-running requests
+        if max_retries_override is not None:
+            kwargs["max_retries"] = max_retries_override
+        elif request_timeout is not None and request_timeout > 300:
+            kwargs["max_retries"] = 0  # Don't retry expensive long-running requests
         if self.on_retry is not None:
             kwargs["on_retry"] = self.on_retry
         return kwargs
@@ -1589,12 +1653,12 @@ class OpenAICompatibleClient:
         return completion_tokens, has_tool_calls
 
     def _get_responses_adapter(self) -> "_ResponsesAdapter":
-        if self._responses_adapter is None:
+        if getattr(self, "_responses_adapter", None) is None:
             self._responses_adapter = _ResponsesAdapter(self.client, agent_name=self.agent_name)
         return self._responses_adapter
 
     def _get_anthropic_adapter(self) -> "_AnthropicAdapter":
-        if self._anthropic_adapter is None:
+        if getattr(self, "_anthropic_adapter", None) is None:
             self._anthropic_adapter = _AnthropicAdapter(
                 api_key=self.api_key, base_url=_anthropic_sdk_base_url(self.base_url),
                 http_client=self.http_client, agent_name=self.agent_name)
@@ -1610,7 +1674,7 @@ class OpenAICompatibleClient:
                               make_coro, make_coro_no_temp,
                               tools=None, tool_choice=None, temperature=None,
                               max_tokens=None, request_timeout=None,
-                              non_retryable_predicate=None):
+                              non_retryable_predicate=None, max_retries_override=None):
         """Wrap an adapter call (Responses/Anthropic) with the same cross-cutting
         machinery the inline chat path uses: LLM logging + retry_with_backoff
         (via _call_with_temp_fallback, which also gives on_retry, temperature
@@ -1632,7 +1696,8 @@ class OpenAICompatibleClient:
         )
         start_time = time.time()
         model_key = _extract_model_name(model)
-        retry_kwargs = self._build_retry_kwargs(model, request_timeout=request_timeout)
+        retry_kwargs = self._build_retry_kwargs(
+            model, request_timeout=request_timeout, max_retries_override=max_retries_override)
         if non_retryable_predicate is not None:
             retry_kwargs["non_retryable_predicate"] = non_retryable_predicate
         try:
@@ -1662,6 +1727,100 @@ class OpenAICompatibleClient:
         )
         return result
 
+    def _cache_protocol_decision(self, model: str, protocol: str) -> None:
+        _PROBE_CACHE[(self.base_url, model)] = protocol
+
+    def _note_probe_protocol_failure(self, model: str, protocol: str,
+                                     error: Exception) -> Optional[str]:
+        """Record side effects for a DETERMINISTIC failure of `protocol` and
+        return the protocol to redirect to next, or None. Never writes a success
+        cache (only success writes _PROBE_CACHE); only records the site-level
+        _NO_RESPONSES_ENDPOINT fact for a truly absent responses endpoint."""
+        if protocol == "responses":
+            if is_responses_endpoint_absent(error):
+                logger.warning(f"[{self.agent_name}] Responses endpoint absent at "
+                               f"{self.base_url}; switching to chat")
+                _NO_RESPONSES_ENDPOINT.add(self.base_url)
+                return "chat"
+            if is_responses_chat_only_model(error):
+                logger.warning(f"[{self.agent_name}] model {model} chat-only on Responses; "
+                               f"switching to chat")
+                return "chat"
+        if protocol == "chat":
+            if is_responses_only_model(error):
+                logger.warning(f"[{self.agent_name}] model {model} is responses-only; "
+                               f"switching to responses")
+                return "responses"
+        return None
+
+    async def _call_decided_protocol(self, protocol: str, call_for, model: str):
+        """Call a single, already-decided protocol with FULL retry/backoff. On a
+        deterministic 'wrong protocol' error, redirect once to the indicated
+        protocol (also full-retry). Fixes the confirmed-responses no-retry bug."""
+        factory = call_for(protocol, probe=False)
+        if factory is None:
+            raise ValueError(f"protocol {protocol} unsupported for this interaction")
+        try:
+            result = await factory()
+        except Exception as e:
+            redirect = self._note_probe_protocol_failure(model, protocol, e)
+            if redirect is None:
+                raise
+            if _PROBE_CACHE.get((self.base_url, model)) == protocol:
+                _PROBE_CACHE.pop((self.base_url, model), None)
+            rfactory = call_for(redirect, probe=False)
+            if rfactory is None:
+                raise
+            result = await rfactory()
+            self._cache_protocol_decision(model, redirect)
+            return result
+        self._cache_protocol_decision(model, protocol)
+        return result
+
+    async def _probe_in_order(self, order: List[str], call_for, model: str):
+        """Try protocols in `order`. Per protocol: up to len(PROBE_RETRY_DELAYS)
+        single-shot attempts on TRANSIENT errors (sleeping PROBE_RETRY_DELAYS
+        between/after each), then move on. A DETERMINISTIC 'wrong protocol' error
+        switches immediately (and may inject a redirect protocol at the front).
+        Only a SUCCESS writes the protocol cache."""
+        key = (self.base_url, model)
+        lock = _PROBE_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            recheck = _route_protocol_order(self.base_url, model)
+            if len(recheck) == 1:
+                return await self._call_decided_protocol(recheck[0], call_for, model)
+
+            pending = list(order)
+            tried: set = set()
+            last_error: Optional[Exception] = None
+            while pending:
+                protocol = pending.pop(0)
+                if protocol in tried:
+                    continue
+                tried.add(protocol)
+                factory = call_for(protocol, probe=True)
+                if factory is None:
+                    continue
+                for attempt in range(len(PROBE_RETRY_DELAYS)):
+                    try:
+                        result = await factory()
+                        self._cache_protocol_decision(model, protocol)
+                        return result
+                    except Exception as e:
+                        last_error = e
+                        if is_transient_probe_error(e):
+                            await asyncio.sleep(PROBE_RETRY_DELAYS[attempt])
+                            continue
+                        redirect = self._note_probe_protocol_failure(model, protocol, e)
+                        if redirect and redirect not in tried and redirect not in pending:
+                            pending.insert(0, redirect)
+                        break
+            raise UpstreamExhaustedError(
+                f"[{self.agent_name}] Protocol probe exhausted across {sorted(tried)} "
+                f"for {model}. Last error: {type(last_error).__name__}: {last_error}",
+                agent_name=self.agent_name, model=model, llm_server=self.base_url,
+            ) from last_error
+
     async def _dispatch_non_streaming(
         self,
         *,
@@ -1671,7 +1830,6 @@ class OpenAICompatibleClient:
         make_anthropic_adapter_call: Optional[Callable[[Any, bool], Awaitable[Any]]],
         make_responses_adapter_call: Callable[[Any, bool], Awaitable[Any]],
         make_inline_call: Callable[[], Awaitable[Any]],
-        reactive_log_message: str,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Any = None,
         temperature: Optional[float] = None,
@@ -1679,7 +1837,10 @@ class OpenAICompatibleClient:
         request_timeout: Optional[float] = None,
         make_probe_fallback_call: Optional[Callable[[], Awaitable[Any]]] = None,
     ):
-        def invoke(adapter, adapter_call, non_retryable_predicate=None):
+        def invoke(adapter, adapter_call, max_retries_override=None,
+                   non_retryable_predicate=None):
+            if non_retryable_predicate is None:
+                non_retryable_predicate = lambda e: not is_transient_probe_error(e)
             make_coro, make_coro_no_temp = self._adapter_temp_call_pair(
                 lambda skip_temperature: adapter_call(adapter, skip_temperature)
             )
@@ -1688,27 +1849,35 @@ class OpenAICompatibleClient:
                 make_coro=make_coro, make_coro_no_temp=make_coro_no_temp,
                 tools=tools, tool_choice=tool_choice, temperature=temperature,
                 max_tokens=max_tokens, request_timeout=request_timeout,
-                non_retryable_predicate=non_retryable_predicate)
+                non_retryable_predicate=non_retryable_predicate,
+                max_retries_override=max_retries_override)
 
-        protocol = _route_protocol(self.base_url, model)
-        if protocol == "anthropic":
-            if make_anthropic_adapter_call is None:
-                raise ValueError(f"{interaction_type} does not support anthropic protocol")
-            return await invoke(self._get_anthropic_adapter(), make_anthropic_adapter_call)
-        if protocol == "responses":
-            adapter = self._get_responses_adapter()
-            probe_fallback_call = make_probe_fallback_call or make_inline_call
-            return await self._responses_or_fallback(
-                lambda: invoke(adapter, make_responses_adapter_call, lambda _e: True),
-                probe_fallback_call, model)
-        try:
-            return await make_inline_call()
-        except BadRequestError as e:
-            if is_responses_only_model(e):
-                logger.warning(f"[{self.agent_name}] model {model} is responses-only; {reactive_log_message}")
-                _PROBE_CACHE[(self.base_url, model)] = "responses"
-                return await invoke(self._get_responses_adapter(), make_responses_adapter_call)
-            raise
+        def call_for(protocol, *, probe):
+            mr = 0 if probe else None
+            # In probe mode, the probe loop owns ALL retry logic; the backoff
+            # layer must not intervene.  In decided mode, only deterministic
+            # wrong-protocol errors are non-retryable (they trigger redirect).
+            np = (lambda e: True) if probe else (lambda e: not is_transient_probe_error(e))
+            if protocol == "responses":
+                return lambda: invoke(self._get_responses_adapter(),
+                                      make_responses_adapter_call, max_retries_override=mr,
+                                      non_retryable_predicate=np)
+            if protocol == "anthropic":
+                if make_anthropic_adapter_call is None:
+                    return None
+                return lambda: invoke(self._get_anthropic_adapter(),
+                                      make_anthropic_adapter_call, max_retries_override=mr,
+                                      non_retryable_predicate=np)
+            if protocol == "chat":
+                if probe:
+                    return make_probe_fallback_call or make_inline_call
+                return make_inline_call
+            return None
+
+        order = _route_protocol_order(self.base_url, model)
+        if len(order) == 1:
+            return await self._call_decided_protocol(order[0], call_for, model)
+        return await self._probe_in_order(order, call_for, model)
 
     def _responses_probe_decision(self, model: str) -> Optional[str]:
         key = (self.base_url, model)
@@ -1731,54 +1900,6 @@ class OpenAICompatibleClient:
             _PROBE_CACHE[key] = "chat"
             return "chat"
         return None
-
-    async def _responses_or_fallback(self, coro_factory, fallback_coro_factory, model):
-        """Run a Responses-adapter call, alternating Responses and chat up to
-        PROTOCOL_PROBE_ROUNDS while the protocol is unknown. Once either
-        protocol succeeds, cache that decision for future calls."""
-        decision = self._responses_probe_decision(model)
-        if decision == "chat":
-            return await fallback_coro_factory()
-        if decision == "responses":
-            return await coro_factory()
-        key = (self.base_url, model)
-        lock = _PROBE_LOCKS.setdefault(key, asyncio.Lock())
-        async with lock:
-            decision = self._responses_probe_decision(model)
-            if decision == "chat":
-                return await fallback_coro_factory()
-            if decision == "responses":
-                return await coro_factory()
-            last_responses_error: Optional[Exception] = None
-            last_chat_error: Optional[Exception] = None
-            for round_index in range(PROTOCOL_PROBE_ROUNDS):
-                try:
-                    result = await coro_factory()
-                    _PROBE_CACHE[key] = "responses"
-                    return result
-                except Exception as e:
-                    last_responses_error = e
-                    self._record_responses_probe_failure(model, e)
-                try:
-                    result = await fallback_coro_factory()
-                    _PROBE_CACHE[key] = "chat"
-                    return result
-                except Exception as e:
-                    last_chat_error = e
-                    logger.warning(
-                        f"[{self.agent_name}] Protocol probe round {round_index + 1}/{PROTOCOL_PROBE_ROUNDS} failed: "
-                        f"responses={type(last_responses_error).__name__ if last_responses_error else 'none'}; "
-                        f"chat={type(last_chat_error).__name__}: {str(last_chat_error)[:120]}"
-                    )
-            _PROBE_CACHE.pop(key, None)
-            raise UpstreamExhaustedError(
-                f"[{self.agent_name}] Protocol probe exhausted after {PROTOCOL_PROBE_ROUNDS} rounds. "
-                f"Last Responses error: {type(last_responses_error).__name__}: {last_responses_error}. "
-                f"Last Chat error: {type(last_chat_error).__name__}: {last_chat_error}",
-                agent_name=self.agent_name,
-                model=model,
-                llm_server=self.base_url,
-            ) from (last_chat_error or last_responses_error)
 
     async def _chat_inline(
         self,
@@ -1900,7 +2021,6 @@ class OpenAICompatibleClient:
                 model, enforced, temperature, max_tokens, False, timeout, max_retries),
             make_probe_fallback_call=lambda: self._chat_inline(
                 model, enforced, temperature, max_tokens, False, probe_timeout, max_retries=0),
-            reactive_log_message="switching plain chat to Responses adapter",
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=timeout,
@@ -2133,7 +2253,6 @@ class OpenAICompatibleClient:
                 model, enforced, tools, tool_choice, temperature, max_tokens),
             make_probe_fallback_call=lambda: self._chat_with_tools_inline(
                 model, enforced, tools, tool_choice, temperature, max_tokens, max_retries=0),
-            reactive_log_message="switching to Responses adapter",
             tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,
@@ -2365,7 +2484,6 @@ class OpenAICompatibleClient:
                 model, text_prompt, images, temperature, max_tokens, request_timeout),
             make_probe_fallback_call=lambda: self._chat_with_vision_inline(
                 model, text_prompt, images, temperature, max_tokens, probe_timeout, max_retries=0),
-            reactive_log_message="switching vision request to Responses adapter",
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=request_timeout,
