@@ -295,14 +295,41 @@ def _anthropic_sdk_base_url(base_url: str) -> str:
 
 def _responses_messages_to_input(messages: List[Dict[str, Any]]):
     """Translate OpenAI chat messages to Responses (instructions, input[]).
-    The first system message becomes top-level `instructions`; all other
-    messages pass through as input items."""
+
+    The first system message becomes top-level `instructions`. Chat-completions
+    tool history is converted to Responses input item types because Responses
+    rejects raw assistant.tool_calls and role=tool messages in input[].
+    """
     instructions = None
     items: List[Dict[str, Any]] = []
     for msg in messages:
-        if msg.get("role") == "system" and instructions is None:
+        role = msg.get("role")
+        if role == "system" and instructions is None:
             instructions = msg.get("content")
             continue
+
+        if role == "assistant" and msg.get("tool_calls"):
+            content = msg.get("content")
+            if content:
+                items.append({"role": "assistant", "content": content})
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                items.append({
+                    "type": "function_call",
+                    "call_id": tc.get("id"),
+                    "name": fn.get("name"),
+                    "arguments": fn.get("arguments") or "{}",
+                })
+            continue
+
+        if role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": msg.get("tool_call_id"),
+                "output": msg.get("content") or "",
+            })
+            continue
+
         items.append(msg)
     return instructions, items
 
@@ -1136,8 +1163,16 @@ class _ResponsesAdapter:
                     return await self.client.responses.create(**params)
             raise
 
-    async def complete(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False) -> LLMResponse:
-        params = self._build_params(model, messages, temperature, max_tokens, timeout=timeout, skip_temperature=skip_temperature)
+    async def complete(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False, tools=None) -> LLMResponse:
+        params = self._build_params(
+            model,
+            messages,
+            temperature,
+            max_tokens,
+            tools=tools,
+            timeout=timeout,
+            skip_temperature=skip_temperature,
+        )
         resp = await self._create_responses_with_fallback(params)
         dump = resp.model_dump()
         text, _tools, citations, usage = _parse_responses_dump(dump)
@@ -1826,7 +1861,8 @@ class OpenAICompatibleClient:
         max_tokens: Optional[int] = None,
         stream: bool = False,
         timeout: Optional[float] = None,
-        max_retries: Optional[int] = None
+        max_retries: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> LLMResponse:
         """
         Send chat request to OpenAI-compatible API with automatic retry on timeout
@@ -1839,6 +1875,7 @@ class OpenAICompatibleClient:
             max_tokens: Maximum tokens to generate
             stream: Unsupported; use chat_stream() for streaming responses
             timeout: Per-request timeout in seconds (overrides client default)
+            tools: Optional Responses API tools for non-streaming Responses calls
 
         Returns:
             LLMResponse object
@@ -1857,7 +1894,8 @@ class OpenAICompatibleClient:
                 max_tokens=max_tokens, timeout=timeout, skip_temperature=skip_temperature),
             make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete(
                 model=model, messages=enforced, temperature=temperature,
-                max_tokens=max_tokens, timeout=timeout, skip_temperature=skip_temperature),
+                max_tokens=max_tokens, timeout=timeout, skip_temperature=skip_temperature,
+                tools=tools),
             make_inline_call=lambda: self._chat_inline(
                 model, enforced, temperature, max_tokens, False, timeout, max_retries),
             make_probe_fallback_call=lambda: self._chat_inline(

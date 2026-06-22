@@ -426,6 +426,7 @@ class LiteratureAgent(BaseAgent):
                     temperature=0.3,
                     max_tokens=None,
                     timeout=1800.0,
+                    tools=[{"type": "web_search_preview"}],
                 )
                 break
             except (OpenAIConnectionError, httpx.ConnectError, httpx.ConnectTimeout, OSError) as e:

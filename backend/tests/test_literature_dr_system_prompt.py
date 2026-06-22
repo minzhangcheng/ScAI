@@ -13,6 +13,9 @@ def _make_agent():
     provider.get_model.return_value = "test-model"
     provider.get_temperature.return_value = 0.3
     provider.get_system_prompt.return_value = "ROLE-SYSTEM-PROMPT"
+    provider.get_literature_config.return_value = {}
+    provider.get_config_revision.return_value = 0
+    provider.clear_agent_client_cache = MagicMock()
     client = MagicMock()
     client.set_context = MagicMock()
     resp = MagicMock()
@@ -35,6 +38,15 @@ def test_dr_chat_includes_system_message():
     assert messages[0]["role"] == "system"
     assert messages[0]["content"] == "ROLE-SYSTEM-PROMPT"
     assert messages[-1]["role"] == "user"
+
+
+def test_deep_research_via_chat_requests_web_search_tool():
+    agent, client = _make_agent()
+    asyncio.run(agent._deep_research_via_chat("hepatic copper uptake", state=None))
+    dr_call = client.chat.call_args_list[0]
+    assert dr_call.kwargs["model"] == "dr-model"
+    assert dr_call.kwargs["timeout"] == 1800.0
+    assert dr_call.kwargs["tools"] == [{"type": "web_search_preview"}]
 
 
 def test_findings_extract_max_chars_is_100k():

@@ -35,6 +35,102 @@ def test_messages_to_input_no_system():
     assert items == [{"role": "user", "content": "hi"}]
 
 
+def test_messages_to_input_converts_assistant_tool_calls_to_responses_function_calls():
+    msgs = [
+        {"role": "system", "content": "be precise"},
+        {"role": "user", "content": "run code"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "execute_code",
+                        "arguments": '{"code": "print(1)"}',
+                    },
+                }
+            ],
+        },
+    ]
+    instructions, items = _responses_messages_to_input(msgs)
+    assert instructions == "be precise"
+    assert items == [
+        {"role": "user", "content": "run code"},
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "execute_code",
+            "arguments": '{"code": "print(1)"}',
+        },
+    ]
+    assert all("tool_calls" not in item for item in items)
+
+
+def test_messages_to_input_converts_tool_result_to_responses_function_call_output():
+    msgs = [
+        {"role": "user", "content": "continue"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "stdout: 1"},
+    ]
+    instructions, items = _responses_messages_to_input(msgs)
+    assert instructions is None
+    assert items == [
+        {"role": "user", "content": "continue"},
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "stdout: 1",
+        },
+    ]
+
+
+def test_messages_to_input_converts_bioinformatics_tool_history_without_raw_chat_tool_fields():
+    msgs = [
+        {"role": "system", "content": "You are a bioinformatics analyst."},
+        {"role": "user", "content": "Analyze the dataset."},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_QhuLHeAd3okoIPcQrr5fflbj",
+                    "type": "function",
+                    "function": {
+                        "name": "execute_code",
+                        "arguments": '{"code": "print(\'inventory\')", "description": "Inventory inputs"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_QhuLHeAd3okoIPcQrr5fflbj",
+            "content": "Allowed count-like inputs:\\nfiltered_feature_bc_matrix.h5",
+        },
+        {"role": "user", "content": "Continue with QC."},
+    ]
+    instructions, items = _responses_messages_to_input(msgs)
+    assert instructions == "You are a bioinformatics analyst."
+    assert items == [
+        {"role": "user", "content": "Analyze the dataset."},
+        {
+            "type": "function_call",
+            "call_id": "call_QhuLHeAd3okoIPcQrr5fflbj",
+            "name": "execute_code",
+            "arguments": '{"code": "print(\'inventory\')", "description": "Inventory inputs"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_QhuLHeAd3okoIPcQrr5fflbj",
+            "output": "Allowed count-like inputs:\\nfiltered_feature_bc_matrix.h5",
+        },
+        {"role": "user", "content": "Continue with QC."},
+    ]
+    assert all("tool_calls" not in item for item in items)
+    assert all("tool_call_id" not in item for item in items)
+
+
 def test_translate_tools_to_flat():
     tools = [{"type": "function", "function": {"name": "f", "description": "d", "parameters": {"type": "object"}}}]
     out = _responses_translate_tools(tools)
@@ -128,6 +224,72 @@ async def test_responses_adapter_complete():
 
 
 @pytest.mark.asyncio
+async def test_responses_adapter_complete_sends_explicit_web_search_tool():
+    dump = {
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "researched"}],
+            }
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+    }
+    client = _fake_openai_with_response(dump)
+    adapter = _ResponsesAdapter(client, agent_name="literature")
+
+    result = await adapter.complete(
+        model="o4-mini-deep-research",
+        messages=[{"role": "user", "content": "research copper transport"}],
+        temperature=0.3,
+        max_tokens=None,
+        timeout=1800.0,
+        tools=[{"type": "web_search_preview"}],
+    )
+
+    assert result.content == "researched"
+    kwargs = client.responses.create.call_args.kwargs
+    assert kwargs["tools"] == [{"type": "web_search_preview"}]
+    assert kwargs["timeout"] == 1800.0
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_complete_retries_explicit_web_search_tool_name():
+    success_resp = MagicMock()
+    success_resp.model_dump.return_value = {
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "researched"}],
+            }
+        ],
+        "usage": {},
+    }
+    success_resp.model = "gpt-x"
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.create = AsyncMock(
+        side_effect=[Exception("Unknown tool type: web_search_preview"), success_resp]
+    )
+    adapter = _ResponsesAdapter(client, agent_name="literature")
+
+    result = await adapter.complete(
+        model="o4-mini-deep-research",
+        messages=[{"role": "user", "content": "research copper transport"}],
+        temperature=0.3,
+        max_tokens=None,
+        tools=[{"type": "web_search_preview"}],
+    )
+
+    assert result.content == "researched"
+    first_call = client.responses.create.call_args_list[0].kwargs
+    second_call = client.responses.create.call_args_list[1].kwargs
+    assert first_call["tools"] == [{"type": "web_search_preview"}]
+    assert second_call["tools"] == [{"type": "web_search"}]
+
+
+@pytest.mark.asyncio
 async def test_responses_adapter_with_tools_injects_web_search_for_dr():
     dump = {"output": [{"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"}],
             "usage": {}}
@@ -140,6 +302,79 @@ async def test_responses_adapter_with_tools_injects_web_search_for_dr():
     assert r.has_tool_calls
     sent_tools = client.responses.create.call_args.kwargs["tools"]
     assert {"type": "web_search_preview"} in sent_tools
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_complete_with_tools_sends_converted_tool_history():
+    dump = {
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "done"}],
+            }
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+    }
+    client = _fake_openai_with_response(dump)
+    adapter = _ResponsesAdapter(client, agent_name="bioinformatics")
+    messages = [
+        {"role": "system", "content": "You are a bioinformatics analyst."},
+        {"role": "user", "content": "Analyze the dataset."},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "execute_code",
+                        "arguments": '{"code": "print(1)"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "1"},
+        {"role": "user", "content": "Continue."},
+    ]
+    result = await adapter.complete_with_tools(
+        model="gpt-5.5",
+        messages=messages,
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "execute_code",
+                    "description": "Execute Python code",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        tool_choice="auto",
+        temperature=0.2,
+        max_tokens=4096,
+    )
+    assert result.content == "done"
+    kwargs = client.responses.create.call_args.kwargs
+    assert kwargs["instructions"] == "You are a bioinformatics analyst."
+    assert kwargs["input"] == [
+        {"role": "user", "content": "Analyze the dataset."},
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "execute_code",
+            "arguments": '{"code": "print(1)"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "1",
+        },
+        {"role": "user", "content": "Continue."},
+    ]
+    assert all("tool_calls" not in item for item in kwargs["input"])
+    assert all("tool_call_id" not in item for item in kwargs["input"])
 
 
 @pytest.mark.asyncio
@@ -158,3 +393,49 @@ async def test_responses_adapter_stream_yields_text_deltas():
                                   temperature=0.5, max_tokens=None):
         chunks.append(c)
     assert "".join(chunks) == "Hello"
+
+
+def test_messages_to_input_prevents_unknown_parameter_input_tool_calls_regression():
+    messages = [
+        {"role": "system", "content": "You are a professional bioinformatics analyst."},
+        {"role": "user", "content": "Project context"},
+        {"role": "user", "content": "Plan context"},
+        {"role": "user", "content": "Execute stage 1"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_QhuLHeAd3okoIPcQrr5fflbj",
+                    "type": "function",
+                    "function": {
+                        "name": "execute_code",
+                        "arguments": '{"code": "import pathlib\\nprint(\'Allowed count-like inputs:\')", "description": "Inventory count-matrix inputs"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_QhuLHeAd3okoIPcQrr5fflbj",
+            "content": "Allowed count-like inputs:\\nfiltered_feature_bc_matrix.h5\\nExcluded loom inputs:\\nCon.loom",
+        },
+        {"role": "user", "content": "Continue analysis."},
+    ]
+
+    instructions, input_items = _responses_messages_to_input(messages)
+
+    assert instructions == "You are a professional bioinformatics analyst."
+    assert input_items[3] == {
+        "type": "function_call",
+        "call_id": "call_QhuLHeAd3okoIPcQrr5fflbj",
+        "name": "execute_code",
+        "arguments": '{"code": "import pathlib\\nprint(\'Allowed count-like inputs:\')", "description": "Inventory count-matrix inputs"}',
+    }
+    assert "tool_calls" not in input_items[3]
+    assert input_items[4] == {
+        "type": "function_call_output",
+        "call_id": "call_QhuLHeAd3okoIPcQrr5fflbj",
+        "output": "Allowed count-like inputs:\\nfiltered_feature_bc_matrix.h5\\nExcluded loom inputs:\\nCon.loom",
+    }
+    assert all(item.get("role") != "tool" for item in input_items)

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.28.2 · **Last updated**: 2026-06-20
+**Version**: 0.28.2.1 · **Last updated**: 2026-06-20
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.28.x — (2026-06-20 → present)**
+
+- `0.28.2.1` — Deep Research web_search tool injection, Responses adapter tools passthrough, tool name fallback retry (2026-06-20):
+  - **Web search tool injection**: `LiteratureAgent._deep_research_via_chat()` now passes `tools=[{"type": "web_search_preview"}]` to the DR-LLM chat call — enables OpenAI Responses API's built-in web search capability for deep-research models (o4-mini-deep-research, o3-deep-research, etc). The model retrieves live web content during generation instead of relying solely on training data.
+  - **Responses adapter tools passthrough**: `_ResponsesAdapter.complete()` now accepts a `tools` parameter and forwards it through `_build_params()` to `client.responses.create()`. `OpenAICompatibleClient.chat()` also now accepts `tools` and passes them to the Responses adapter call, so plain-text chat requests can request web search via the Responses protocol.
+  - **Tool name fallback retry**: `_ResponsesAdapter._create_responses_with_fallback()` already had retry logic for the built-in `web_search` tool when `web_search_preview` was unknown. New test `test_responses_adapter_complete_retries_explicit_web_search_tool_name()` confirms the fallback chain works when explicit tools are passed outside the auto-injection path.
+  - **3 test additions** (~50 lines): `test_literature_dr_system_prompt.py` + `test_deep_research_via_chat_requests_web_search_tool()`, `test_protocol_crosscutting.py` + `test_chat_responses_path_passes_explicit_tools_to_adapter()`, `test_responses_adapter.py` + 2 tests (tool forwarding + fallback retry).
 
 - `0.28.2` — Hot-reloadable agent config: runtime config revision tracking, base agent refresh hook, literature agent live reconfiguration, workflow ensure_agent_ready, session-config route invalidation, frontend literature config sync, secret masking (2026-06-20):
   - **Settings provider config revision**: `AgentSettingsProvider.get_config_signature()` / `get_config_revision()` produce a deterministic tuple and SHA-256-based integer revision for each agent's effective config (model, temperature, system_prompt, vision, server, literature_config). Secrets are hashed in signatures via `_secret_safe_signature()`. `clear_agent_client_cache(agent_name)` drops per-agent OpenAI clients. `mask_literature_config()` / `resolve_literature_config_update()` handle the `"********"` masked-secret pattern for round-trip safe API responses.

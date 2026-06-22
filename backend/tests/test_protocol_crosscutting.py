@@ -139,6 +139,29 @@ async def test_chat_responses_path_retries_and_logs():
 
 
 @pytest.mark.asyncio
+async def test_chat_responses_path_passes_explicit_tools_to_adapter():
+    c = _client()
+    c.llm_logger = MagicMock()
+    fake = MagicMock()
+    fake.complete = AsyncMock(return_value=LLMResponse("R", "gpt", {"total_tokens": 1}, None))
+    c._responses_adapter = fake
+
+    result = await c.chat(
+        model="o4-mini-deep-research",
+        messages=[{"role": "user", "content": "research copper transport"}],
+        temperature=0.3,
+        timeout=1800.0,
+        tools=[{"type": "web_search_preview"}],
+    )
+
+    assert result.content == "R"
+    fake.complete.assert_awaited_once()
+    kwargs = fake.complete.call_args.kwargs
+    assert kwargs["tools"] == [{"type": "web_search_preview"}]
+    assert kwargs["timeout"] == 1800.0
+
+
+@pytest.mark.asyncio
 async def test_chat_responses_endpoint_absent_still_falls_back():
     c = _client()
     c.llm_logger = MagicMock()
