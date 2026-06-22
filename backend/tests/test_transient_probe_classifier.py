@@ -53,9 +53,26 @@ def test_chat_only_model_is_not_transient():
     assert is_transient_probe_error(e) is False
 
 
-def test_json_decode_error_is_not_transient():
-    assert is_transient_probe_error(json.JSONDecodeError("bad", "{", 0)) is False
+def test_json_decode_error_is_transient():
+    # JSONDecodeError is transient under the blacklist model (it gets retried
+    # with a separate budget in retry_with_backoff, but is_transient_probe_error
+    # only gates probe-loop/decided-protocol retries).
+    assert is_transient_probe_error(json.JSONDecodeError("bad", "{", 0)) is True
 
 
-def test_plain_bad_request_is_not_transient():
-    assert is_transient_probe_error(_err(BadRequestError, "invalid param foo", 400)) is False
+def test_plain_bad_request_is_transient():
+    # Plain 400 (non-adaptation) is transient under the blacklist model.
+    # This is the key behavioral change: unknown/unexpected errors are retried.
+    assert is_transient_probe_error(_err(BadRequestError, "invalid param foo", 400)) is True
+
+
+def test_temperature_error_is_not_transient():
+    # Temperature-related BadRequestError must propagate to _call_with_temp_fallback
+    e = _err(BadRequestError, "Temperature parameter is not supported", 400)
+    assert is_transient_probe_error(e) is False
+
+
+def test_tool_choice_error_is_not_transient():
+    # Tool-choice-related BadRequestError must propagate to tool_choice fallback
+    e = _err(BadRequestError, "tool_choice parameter is not supported", 400)
+    assert is_transient_probe_error(e) is False

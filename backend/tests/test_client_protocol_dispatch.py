@@ -324,9 +324,9 @@ async def test_protocol_probe_json_error_alternates_without_internal_sleep():
     r = await c.chat(model="gemini-3.1-pro-preview", messages=[{"role": "user", "content": "hi"}])
 
     assert r.content == "CHAT_AFTER_JSON"
-    fake.complete.assert_awaited_once()
+    assert fake.complete.await_count == 3  # 3 probe retries (JSONDecodeError is now transient)
     c.client.chat.completions.create.assert_awaited_once()
-    llm_mod.asyncio.sleep.assert_not_awaited()
+    assert llm_mod.asyncio.sleep.await_count == 3  # 3 probe retries, each sleeps before retrying
 
 
 @pytest.mark.asyncio

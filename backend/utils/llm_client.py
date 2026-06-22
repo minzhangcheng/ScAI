@@ -141,8 +141,10 @@ MAX_RETRIES_UPSTREAM_5XX = 8  # Dedicated for flaky upstream (e.g., Cloudflare 5
 RETRY_DELAY_BASE = 2.0  # Base delay in seconds, will be multiplied by attempt number
 # Rate limit (429) uses fixed escalating delays to handle TPM limits
 RATE_LIMIT_DELAYS = [5, 10, 20, 40]  # seconds between retries
-# Note: Only retry transient errors. Non-transient errors like AuthenticationError,
-# BadRequestError, NotFoundError etc. should NOT be retried.
+# Note: retry_with_backoff now uses a broad except Exception with protocol/parameter
+# adaptation signal gating, so RETRYABLE_EXCEPTIONS is mainly used as a fallback set
+# for log labeling. Non-adaptation errors of ALL types are retried, with exhaustion
+# producing UpstreamExhaustedError → user-facing HITL gate.
 RETRYABLE_EXCEPTIONS = (
     APITimeoutError,
     APIConnectionError,
@@ -732,28 +734,35 @@ def is_responses_only_model(error: Exception) -> bool:
     return "only supported in v1/responses" in str(error).lower()
 
 
+def _is_protocol_adaptation_signal(error: Exception) -> bool:
+    """Errors that the protocol dispatcher adapts to (switch protocol / drop a
+    parameter) rather than retrying — they must always propagate to their
+    dedicated handlers and never be caught by generic retry logic."""
+    return (is_responses_endpoint_absent(error)
+            or is_responses_chat_only_model(error)
+            or is_responses_only_model(error)
+            or is_temperature_error(error)
+            or is_tool_choice_error(error))
+
+
 def is_transient_probe_error(error: Exception) -> bool:
     """True when an error is a transient upstream blip (retry the SAME protocol),
-    as opposed to a deterministic 'wrong protocol / endpoint' signal (switch
-    protocol immediately).
+    as opposed to a deterministic protocol/parameter adaptation signal (switch
+    protocol immediately or fall back to a different parameter set).
 
-    Deterministic protocol signals (endpoint-absent, chat-only, responses-only)
-    take precedence and return False even though some arrive as 5xx — those mean
-    the protocol is wrong, not that the server hiccuped.
+    Uses a blacklist model: only protocol/parameter adaptation signals return
+    False (non-retryable). EVERYTHING else — including unknown/unexpected error
+    types and error codes — is treated as potentially transient and retried.
+    This is a deliberate design choice: upstream LLM providers return error codes
+    inconsistently, so we cannot maintain a reliable whitelist. Retry exhaustion
+    always produces UpstreamExhaustedError, which the workflow layer turns into
+    a user-facing HITL gate (retry/skip/stop).
     """
-    if (is_responses_endpoint_absent(error)
-            or is_responses_chat_only_model(error)
-            or is_responses_only_model(error)):
+    if isinstance(error, UpstreamExhaustedError):
         return False
-    return isinstance(error, (
-        APITimeoutError,
-        APIConnectionError,
-        InternalServerError,
-        RateLimitError,
-        httpx.ConnectTimeout,
-        httpx.ReadTimeout,
-        asyncio.TimeoutError,
-    ))
+    if _is_protocol_adaptation_signal(error):
+        return False
+    return True
 
 
 # Hard-quota markers: a 429 carrying any of these never recovers by waiting
@@ -896,7 +905,17 @@ async def retry_with_backoff(
                 budget = min(max_retries, len(RATE_LIMIT_DELAYS))
                 logger.error(f"[{agent_name}] Rate limit exceeded after {budget} retries")
                 break  # stop spinning; fall through to UpstreamExhaustedError
-        except RETRYABLE_EXCEPTIONS as e:
+        except Exception as e:
+            # An already-exhausted upstream error (e.g. raised by a nested
+            # retry_with_backoff / probe loop) must not be retried or re-wrapped;
+            # propagate it as-is so the workflow's HITL gate sees it.
+            if isinstance(e, UpstreamExhaustedError):
+                raise
+            # Protocol/parameter adaptation signals have dedicated upstream
+            # handlers (protocol redirect, temperature fallback, tool_choice
+            # fallback). They must NEVER be retried here.
+            if _is_protocol_adaptation_signal(e):
+                raise
             if non_retryable_predicate is not None and non_retryable_predicate(e):
                 raise
             last_exception = e

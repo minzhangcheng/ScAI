@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.28.3 · **Last updated**: 2026-06-21
+**Version**: 0.28.4 · **Last updated**: 2026-06-22
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,15 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.28.x — (2026-06-20 → present)**
+
+- `0.28.4` — `is_transient_probe_error` / `retry_with_backoff` blacklist retry model: unknown/unexpected errors retried instead of immediately propagated, protocol/parameter adaptation signals bypass retry, hang-safety fix in LLM failure test helper (2026-06-22):
+  - **`is_transient_probe_error()` rewritten from whitelist to blacklist model**: Previously only specific exception types (APITimeoutError, APIConnectionError, InternalServerError, RateLimitError, httpx timeouts, asyncio.TimeoutError) were transient; everything else was non-transient. Now only `UpstreamExhaustedError` and `_is_protocol_adaptation_signal()` return `False` (non-retryable). Everything else — including unknown/unexpected error types and error codes — is treated as potentially transient and retried. Upstream LLM providers return error codes inconsistently, so a whitelist is unreliable; retry exhaustion always produces `UpstreamExhaustedError` → workflow HITL gate.
+  - **`_is_protocol_adaptation_signal()` added**: Groups all protocol/parameter adaptation signals that must bypass generic retry: `is_responses_endpoint_absent`, `is_responses_chat_only_model`, `is_responses_only_model`, `is_temperature_error`, `is_tool_choice_error`. These have dedicated upstream handlers (protocol redirect, temperature fallback, tool_choice fallback) and must never be caught by `retry_with_backoff`.
+  - **`retry_with_backoff()` changed from `except RETRYABLE_EXCEPTIONS` to `except Exception`**: Broad catch with explicit filters. `UpstreamExhaustedError` (nested exhaustion) propagates as-is. `_is_protocol_adaptation_signal()` propagates to dedicated handlers. All other errors are retried; on exhaustion they surface as `UpstreamExhaustedError` → user-facing HITL gate. Comment updated to reflect the "broad except with adaptation signal gating" model.
+  - **Test rewrites**: `test_retry_classification.py` completely rewritten — removed `_is_hard_quota_error` / auth/hard-quota tests, replaced with `test_service_unavailable_400_is_retried` (generic 400 retried 3×), `test_temperature_400_not_retried_propagates` (temperature signal propagates immediately), `test_tool_choice_400_not_retried_propagates` (tool_choice signal propagates immediately).
+  - **Test classification changes**: `test_transient_probe_classifier.py` — `test_json_decode_error_is_not_transient` → `test_json_decode_error_is_transient`, `test_plain_bad_request_is_not_transient` → `test_plain_bad_request_is_transient`. Added `test_temperature_error_is_not_transient` and `test_tool_choice_error_is_not_transient`.
+  - **Test divergence fixed**: `test_tool_choice_fallback.py` — non-tool-choice BadRequestError now surfaces as `UpstreamExhaustedError` (retried then exhausted) instead of raw `BadRequestError`. `test_client_protocol_dispatch.py` — JSONDecodeError now counts as 3 probe retries with sleep.
+  - **Hang-safety fix in `test_llm_failure_workflow.py`**: `_signal_action_once` helper now has bounded `timeout=5.0` parameter (was: infinite polling). Prevents suite-wide hang when the code under test diverts before creating the LLM-failure Event. Added `has_resumable_checkpoint = AsyncMock(return_value=False)` mock to `test_bioinformatics_node_raises_upstream_exhausted` to prevent flow diversion before `UpstreamExhaustedError` path.
 
 - `0.28.3` — Protocol probe rewrite: multi-protocol ordered probing via `_route_protocol_order`, per-protocol transient retry with PROBE_RETRY_DELAYS, `is_transient_probe_error` classifier, fixed confirmed-responses no-retry bug, keyword-based probe order hints, anthropic third-in-order support (2026-06-21):
   - **`_route_protocol_order()` replaces single-protocol routing**: Returns an ordered list of protocols to probe (`["responses", "chat", "anthropic"]` by default) instead of a single decided protocol. `_route_protocol()` retained as head-of-list wrapper. Probe order built from: (0) explicit URL path suffix → single hard-pinned, (1) cached probe decision → single decided, (2) deep-research model → `["responses", "chat"]`, (3) base order reordered by keyword hints (`anthropic`/`responses`/`chat` substrings in base_url) + `/v1`-absent floats anthropic front + known no-responses sites drop `responses`.

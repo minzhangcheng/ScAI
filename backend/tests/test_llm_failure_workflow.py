@@ -10,14 +10,27 @@ from backend.constants import LlmFailureAction, StateSyncChangeType
 from backend.models.schemas import AnalysisState
 
 
-async def _signal_action_once(mock_self, node_name, action):
+async def _signal_action_once(mock_self, node_name, action, timeout=5.0):
     """Helper: poll for the per-node Event to appear, then signal once.
 
     Uses polling instead of a fixed sleep so the signal is delivered
     as soon as the decorator creates the Event and calls event.wait().
+
+    Bounded by ``timeout``: if the Event never appears (e.g. the code under
+    test diverts away from the LLM-failure gate before creating it), this
+    raises instead of polling forever — turning a silent suite-wide hang
+    into a fast, localized failure.
     """
+    waited = 0.0
     while node_name not in mock_self._llm_failure_events:
+        if waited >= timeout:
+            raise AssertionError(
+                f"LLM-failure Event for node '{node_name}' never appeared within "
+                f"{timeout}s — the code under test did not reach the intervention "
+                f"gate (it likely raised earlier or returned before getting there)."
+            )
         await asyncio.sleep(0.01)
+        waited += 0.01
     # Give the decorator a moment to enter event.wait() after releasing the lock
     await asyncio.sleep(0.02)
     mock_self._llm_failure_actions[node_name] = action
@@ -341,6 +354,12 @@ class TestBioinformaticsNodeUpstreamPropagation:
 
         # Mock the bioinformatics agent so run_autonomous_analysis raises UpstreamExhaustedError
         mock.bioinformatics_agent = MagicMock()
+        # has_resumable_checkpoint is awaited in _bioinformatics_analysis BEFORE
+        # run_autonomous_analysis. A plain MagicMock attribute returns a
+        # non-awaitable MagicMock, which raises TypeError and diverts the flow
+        # away from the UpstreamExhaustedError path the test exercises. Mock it
+        # as an async no-checkpoint so the run reaches run_autonomous_analysis.
+        mock.bioinformatics_agent.has_resumable_checkpoint = AsyncMock(return_value=False)
         mock.bioinformatics_agent.run_autonomous_analysis = AsyncMock(
             side_effect=UpstreamExhaustedError(
                 "No available channel for model claude-sonnet-4.6",

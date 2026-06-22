@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 from openai import BadRequestError
 
-from backend.utils.llm_client import is_tool_choice_error
+from backend.utils.llm_client import is_tool_choice_error, UpstreamExhaustedError
 
 
 def _make_bad_request(message: str) -> BadRequestError:
@@ -172,7 +172,10 @@ class TestChatWithToolsFallback:
             def log_response(self, **kw): return None
         client.llm_logger = _NullLogger()
 
-        # BadRequest that is NOT tool_choice — must propagate, not retry.
+        # BadRequest that is NOT tool_choice and NOT an adaptation signal: under
+        # the blacklist retry model it is treated as transient, retried, and on
+        # exhaustion surfaces as UpstreamExhaustedError (→ workflow HITL gate)
+        # rather than the raw BadRequestError.
         other_err = _make_bad_request("Unknown error from upstream")
         create_mock = AsyncMock(side_effect=other_err)
         client.client = MagicMock()
@@ -180,7 +183,7 @@ class TestChatWithToolsFallback:
         client.client.chat.completions = MagicMock()
         client.client.chat.completions.create = create_mock
 
-        with pytest.raises(BadRequestError):
+        with pytest.raises(UpstreamExhaustedError):
             await client.chat_with_tools(
                 model="provider/some-model",
                 messages=[{"role": "user", "content": "hi"}],
