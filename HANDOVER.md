@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.28.7 · **Last updated**: 2026-06-23
+**Version**: 0.28.8 · **Last updated**: 2026-06-23
 
 ## 1. Runtime Architecture
 
@@ -196,6 +196,24 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.28.x — (2026-06-20 → present)**
 
+- `0.28.8` — Snapshot parent-chain fix: forward (non-restore) auto-snapshots now chain instead of all becoming isolated roots (2026-06-23):
+  - **Problem**: On a normal forward run with no manual restores, every auto-snapshot got `parent_id=None` / `branch_label="main"`, producing a flat list of isolated roots (observed: 26 snapshots, zero parent links). Root cause: `compute_snapshot_context()` sourced `parent_id` only from `state.last_restored_snapshot_id`, which is set only immediately after a restore (`snapshots.py`) and cleared after a single snapshot (`create_and_register_snapshot`). Outside a restore it is always `None`, so forward snapshots never linked. This was the over-correction of the P2-4 fix (which correctly removed the `snapshots[-1]` time-based fallback but removed forward chaining with it).
+  - **New lineage head pointer `AnalysisState.last_snapshot_id`**: Advances to the new snapshot id on every create, and is set to the restore target on restore. `compute_snapshot_context()` now sets `parent_id = last_restored_snapshot_id or last_snapshot_id` — a fresh restore still takes precedence (anchors the new diverging branch on the restored node), but normal forward runs chain onto the head. Does **not** reintroduce `snapshots[-1]`, so the P2-4 regression test still passes.
+  - **`branch_label` continuation**: Forward snapshots now inherit the parent snapshot's `branch_label` instead of reverting to `"main"`, so a branch keeps its label as it extends (only a fresh restore allocates a new `branch-X`).
+  - **Head updates**: `create_and_register_snapshot` sets `state.last_snapshot_id = snapshot.id` after append; snapshot restore route (`snapshots.py`) sets `restored_state.last_snapshot_id = snapshot.id`. Both production creation sites (`workflow/core.py`, `routes/chat.py`) go through `create_and_register_snapshot`, so head advancement is centralized.
+  - **API exclusion**: `last_snapshot_id` is internal lineage state (like `last_restored_snapshot_id`) — added to `_EXCLUDED_FIELDS` in `test_to_api_dict_coverage.py`.
+  - **New tests** (`test_snapshot_forward_chain.py`): first forward snapshot is a root; second chains to first; a long forward run forms a single linear chain with exactly one root; restore-then-forward chains onto the restore point and stays on the diverging branch.
+  - **Note**: Pre-existing flat snapshots cannot be auto-relinked (they lack ordering parent info); the fix only applies to snapshots created after the upgrade.
+
+- `0.28.7` — Species HITL WebSocket reconnect fix, test stub hardening across 5 test files (2026-06-23):
+  - **Species HITL resend on WebSocket reconnect**: `_resend_wait_input_state_sync` extended to cover `species_input` and `gene_species_mismatch` reasons (previously only `llm_failure`/`agent_disabled`); `species_input_info` now included in the state-sync payload so the species dialog reopens after reconnect.
+  - **Test stub hardening**: Added `_provider`/`_last_config_revision`/`agent_type` stubs to `PathologyAgent._bare_agent` and `BioinformaticsAgent` test shell in `test_bioinfo_text_only_exit.py`. Bound real `ensure_agent_ready` in hot-reload test stand-in. Added `ensure_agent_ready` mock to `test_snapshot_rollback_idempotency.py`. Resolved file paths relative to test file in `test_tpl_noop_install.py`.
+
+- `0.28.6` — Literature search tuning: PubMed max rounds 20→50 (default 5→10), Deep Research LLM default 1 call (max 5→2) with prompt inversion (2026-06-23):
+  - **PubMed max_search_rounds upper bound 20→50, default 5→10**: All backend layers updated — Pydantic validators in `config_schema.py` (export/import) and `api_requests.py` (runtime API), `LiteratureAgent` constructor/clamp/hot-reload, `AnalysisState` default dict, `workflow/core.py` instantiation, `config_io.py` export/import fallbacks, `chat.py` delegation. Frontend store default and `PromptsPanel` input synced (clamp `20→50`, default `10`). Upper-bound guard test added (50 passes, 51 rejects). Default-alignment tests updated in `test_config_schema.py`, `test_config_io.py`, `test_settings_provider.py`.
+  - **Deep Research LLM decomposition capped at 2 tasks (was 5), prompt inverted to favor single merged query**: `MAX_DR_TASKS` in `PiAgent.plan_deep_research_tasks()` reduced from 5 to 2. Prompt rewritten to default to single merged query (`decompose=false`); split only when genuinely necessary, producing exactly 2 tasks. Docstring updated. Tests aligned in `test_plan_deep_research_tasks.py` and `test_literature_dr_decompose.py`.
+  - **New doc files**: Implementation plan `docs/superpowers/plans/2026-06-23-literature-search-tuning.md` and design spec `docs/superpowers/specs/2026-06-23-literature-search-tuning-design.md`.
+
 - `0.28.5` — Full cluster marker pass-through in PI agent, inline markdown link extraction in literature citations, citation footer made format-agnostic (2026-06-23):
   - **`_summarize_cluster_markers()` changed from 3-tuple to 2-tuple**: Removed `gene_sample` (sampled `[:10]` genes per cluster capped at 20 total). The `gene_sample` line was too sparse to be useful and consumed context. Callers now receive only `(n_clusters, markers_summary)`.
   - **Removed `[:15]` cluster truncation in PI prompts**: `generate_annotation_research_brief()`, `evaluate_annotation_search_results()`, and `build_search_direction_brief()` now pass ALL clusters instead of capping at 15. Each cluster still limited to 8 genes per line. This ensures the LLM sees the full cluster landscape for annotation and direction decisions.
@@ -206,15 +224,6 @@ Detailed release notes for every version are available through `git log` and rel
   - **`analysis_state_api_dict` test**: Added `"literature_config"` to expected API dict fields.
   - **Route snapshot updated**: Added `/api/admin/users/{uid}/role` PATCH and `/api/session/{session_id}/species-input` POST.
   - **New tests**: `test_evaluate_annotation_search.py` — evaluator sees all 22 clusters; `test_summarize_cluster_markers.py` — 2-tuple return, all clusters beyond 15 included, genes capped at 8 per cluster. `test_pi_research_briefs.py` — annotation brief includes all clusters, no `gene_sample` line. `test_literature_citations.py` — inline markdown link extraction, image markdown exclusion, PMC fragment stripping, mixed numbered+inline.
-
-- `0.28.6` — Literature search tuning: PubMed max rounds 20→50 (default 5→10), Deep Research LLM default 1 call (max 5→2) with prompt inversion (2026-06-23):
-  - **PubMed max_search_rounds upper bound 20→50, default 5→10**: All backend layers updated — Pydantic validators in `config_schema.py` (export/import) and `api_requests.py` (runtime API), `LiteratureAgent` constructor/clamp/hot-reload, `AnalysisState` default dict, `workflow/core.py` instantiation, `config_io.py` export/import fallbacks, `chat.py` delegation. Frontend store default and `PromptsPanel` input synced (clamp `20→50`, default `10`). Upper-bound guard test added (50 passes, 51 rejects). Default-alignment tests updated in `test_config_schema.py`, `test_config_io.py`, `test_settings_provider.py`.
-  - **Deep Research LLM decomposition capped at 2 tasks (was 5), prompt inverted to favor single merged query**: `MAX_DR_TASKS` in `PiAgent.plan_deep_research_tasks()` reduced from 5 to 2. Prompt rewritten to default to single merged query (`decompose=false`); split only when genuinely necessary, producing exactly 2 tasks. Docstring updated. Tests aligned in `test_plan_deep_research_tasks.py` and `test_literature_dr_decompose.py`.
-  - **New doc files**: Implementation plan `docs/superpowers/plans/2026-06-23-literature-search-tuning.md` and design spec `docs/superpowers/specs/2026-06-23-literature-search-tuning-design.md`.
-
-- `0.28.7` — Species HITL WebSocket reconnect fix, test stub hardening across 5 test files (2026-06-23):
-  - **Species HITL resend on WebSocket reconnect**: `_resend_wait_input_state_sync` extended to cover `species_input` and `gene_species_mismatch` reasons (previously only `llm_failure`/`agent_disabled`); `species_input_info` now included in the state-sync payload so the species dialog reopens after reconnect.
-  - **Test stub hardening**: Added `_provider`/`_last_config_revision`/`agent_type` stubs to `PathologyAgent._bare_agent` and `BioinformaticsAgent` test shell in `test_bioinfo_text_only_exit.py`. Bound real `ensure_agent_ready` in hot-reload test stand-in. Added `ensure_agent_ready` mock to `test_snapshot_rollback_idempotency.py`. Resolved file paths relative to test file in `test_tpl_noop_install.py`.
 
 - `0.28.4.1` — Deep Research background polling: Responses `background=True` submission + retrieve polling to avoid gateway idle timeouts, `_NO_BACKGROUND_ENDPOINT` per-endpoint cache for `background`-rejecting providers (2026-06-22):
   - **Problem**: Deep research models run for several minutes. A blocking `responses.create()` keeps the connection idle long enough for upstream gateways (e.g. Cloudflare in front of `api.n1n.ai`) to sever it with HTTP 524 while the job keeps running server-side. Submitting with `background=True` returns immediately, then we poll `responses.retrieve()` with short requests that never trip the gateway's idle timeout.

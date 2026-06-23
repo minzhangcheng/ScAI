@@ -440,6 +440,7 @@ class AnalysisState(BaseModel):
     # Snapshots for debugging rollback
     snapshots: List[Snapshot] = Field(default_factory=list)
     last_restored_snapshot_id: Optional[str] = None  # Tracks which snapshot was last restored (for parent chain)
+    last_snapshot_id: Optional[str] = None  # Lineage head: id of the most recently created/restored snapshot, used as the forward parent
 
     # Collaborative analysis planning
     current_plan: Optional[AnalysisPlan] = None

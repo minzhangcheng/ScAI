@@ -34,12 +34,16 @@ class SnapshotManager:
             "pre_major_revision"   - Before major plan revision dialogue
             "post_report"          - After final report
         """
-        # P2-4: do NOT use snapshots[-1] as fallback — it picks by time, not by branch.
-        # When there's no explicit restore anchor, leave parent_id as None (a new root)
-        # to avoid corrupting the parent chain in multi-branch restore scenarios.
-        parent_id = state.last_restored_snapshot_id
+        # P2-4: do NOT use snapshots[-1] as fallback — it picks by time, not by
+        # branch, which mis-parents across branches. Instead chain onto the lineage
+        # head (last_snapshot_id), which advances on every create and points at the
+        # restore target after a restore. A fresh restore (last_restored_snapshot_id)
+        # takes precedence so the new snapshot anchors on the restored node and forms
+        # a diverging branch.
+        parent_id = state.last_restored_snapshot_id or state.last_snapshot_id
 
         if state.last_restored_snapshot_id:
+            # Diverging off a restore point: allocate a new branch label.
             existing_branches = sum(
                 1 for s in state.snapshots
                 if s.parent_id == state.last_restored_snapshot_id
@@ -47,6 +51,10 @@ class SnapshotManager:
             )
             branch_letter = chr(ord('A') + existing_branches) if existing_branches < 26 else str(existing_branches)
             branch_label = f"branch-{branch_letter}"
+        elif parent_id:
+            # Forward continuation: stay on the parent's branch.
+            parent = next((s for s in state.snapshots if s.id == parent_id), None)
+            branch_label = parent.branch_label if parent and parent.branch_label else "main"
         else:
             branch_label = "main"
 
@@ -77,6 +85,8 @@ class SnapshotManager:
             branch_label=ctx["branch_label"],
         )
         state.snapshots.append(snapshot)
+        # Advance the lineage head so the next forward snapshot chains onto this one.
+        state.last_snapshot_id = snapshot.id
         if state.last_restored_snapshot_id:
             state.last_restored_snapshot_id = None
         await notify_fn(session_id, "snapshot_count", {"count": len(state.snapshots)})

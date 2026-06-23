@@ -25,6 +25,7 @@ _EXCLUDED_FIELDS = {
     "annotation_report_html_path",
     "snapshots",
     "last_restored_snapshot_id",
+    "last_snapshot_id",
     "code_history",
     "analysis_log",
     "literature_reports",

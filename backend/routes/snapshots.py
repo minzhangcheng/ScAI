@@ -83,6 +83,9 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
 
     restored_state.snapshots = state.snapshots
     restored_state.last_restored_snapshot_id = snapshot.id
+    # Move the lineage head to the restore target so forward snapshots after the
+    # branch's first one keep chaining onto the restored point.
+    restored_state.last_snapshot_id = snapshot.id
 
     # Phase-aware status setting
     phase = snapshot.phase
