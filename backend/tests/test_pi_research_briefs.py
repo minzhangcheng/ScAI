@@ -79,3 +79,14 @@ async def test_round_brief_strips_whitespace():
     pi = _FakePI(response="  round brief  ")
     out = await pi.generate_round_research_brief("topic", None, state=None)
     assert out == "round brief"
+
+
+@pytest.mark.asyncio
+async def test_annotation_brief_includes_all_clusters_no_gene_sample_line():
+    pi = _FakePI()
+    markers = {str(i): [f"G{i}a", f"G{i}b"] for i in range(22)}
+    await pi.generate_annotation_research_brief(markers, "mouse", "liver", state=None)
+    p = pi.captured["prompt"]
+    for i in range(22):
+        assert f"Cluster {i}:" in p
+    assert "Key marker genes across clusters" not in p

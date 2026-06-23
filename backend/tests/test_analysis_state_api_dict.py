@@ -68,6 +68,7 @@ class TestAnalysisStateApiDictRoundTrip:
             "exploration_report_url", "annotation_report_url", "detailed_report_url",
             "analysis_phase", "messages", "custom_prompts",
             "custom_models", "custom_temperatures", "deg_thresholds",
+            "literature_config",
             "state_version",
             "last_sync_timestamp", "snapshot_count", "current_plan",
             "plan_dialogue_history", "agent_errors",

@@ -26,6 +26,8 @@ def _mk_supervisor(recent_errors=None):
     sup._step_count = 0
     sup._pi_question_hashes = set()
     sup.session_id = "test-session"
+    sup._provider = MagicMock()
+    sup._last_config_revision = sup._provider.get_config_revision.return_value
     sup.supervision_log = []
     sup.pi_callback = AsyncMock(return_value="Try a different gene list.")
     sup.technique_agent = None

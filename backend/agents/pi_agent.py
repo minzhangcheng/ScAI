@@ -844,18 +844,14 @@ Respond in JSON:
     @staticmethod
     def _summarize_cluster_markers(
         cluster_markers: Dict[str, List[str]]
-    ) -> Tuple[str, int, str]:
-        """Sample marker genes across clusters → (gene_sample, n_clusters, markers_summary)."""
-        all_genes: set = set()
-        for genes in cluster_markers.values():
-            all_genes.update(genes[:10])
-        gene_sample = ", ".join(list(all_genes)[:20])
+    ) -> Tuple[int, str]:
+        """Summarize markers across ALL clusters → (n_clusters, markers_summary)."""
         n_clusters = len(cluster_markers)
         markers_summary = "\n".join(
             f"  Cluster {cid}: {', '.join(genes[:8])}"
-            for cid, genes in list(cluster_markers.items())[:15]
+            for cid, genes in cluster_markers.items()
         )
-        return gene_sample, n_clusters, markers_summary
+        return n_clusters, markers_summary
 
     @staticmethod
     def _brief_background_block(state: Optional[AnalysisState]) -> str:
@@ -881,7 +877,7 @@ Respond in JSON:
         """
         logger.info(f"[PI] Generating annotation search query for {organism} {tissue}")
 
-        gene_sample, n_clusters, markers_summary = self._summarize_cluster_markers(cluster_markers)
+        n_clusters, markers_summary = self._summarize_cluster_markers(cluster_markers)
 
         # Experimental background from state
         background = ""
@@ -894,7 +890,6 @@ in a single-cell RNA sequencing dataset.
 Organism: {organism}
 Tissue: {tissue}
 Number of clusters: {n_clusters}
-Key marker genes across clusters: {gene_sample}
 {background}
 
 Cluster marker genes (top genes per cluster):
@@ -937,7 +932,7 @@ Return ONLY the PubMed query string, nothing else."""
         experimental background as reference only (no injection). Returns the
         stripped brief; an empty string signals the caller to fall back.
         """
-        gene_sample, n_clusters, markers_summary = self._summarize_cluster_markers(cluster_markers)
+        n_clusters, markers_summary = self._summarize_cluster_markers(cluster_markers)
         background = self._brief_background_block(state)
 
         prompt = f"""You are a principal investigator writing a Deep Research brief to identify cell types
@@ -946,7 +941,6 @@ in a single-cell RNA sequencing dataset.
 Organism: {organism}
 Tissue: {tissue}
 Number of clusters: {n_clusters}
-Key marker genes across clusters: {gene_sample}
 
 Cluster marker genes (top genes per cluster):
 {markers_summary}{background}
@@ -1015,7 +1009,7 @@ Return ONLY the research brief text."""
         # Build cluster markers summary so PI can judge coverage per cluster
         markers_summary = "\n".join(
             f"  Cluster {cid}: {', '.join(genes[:8])}"
-            for cid, genes in list(cluster_markers.items())[:15]
+            for cid, genes in cluster_markers.items()
         )
 
         articles_summary = "\n".join(

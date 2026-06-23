@@ -51,15 +51,15 @@ class LiteratureAgent(BaseAgent):
     - Gemini Deep Research → PubMed + LLM → quick_search (LLM knowledge only)
     """
 
-    # Citation-format footer for the deep_research-LLM prompt. This text is a
-    # load-bearing contract with _extract_references_from_text's regex — keep it
-    # verbatim. PI-authored briefs never include citation-format directives.
+    # Citation guidance for the deep_research-LLM prompt. Deliberately format-agnostic:
+    # _extract_references_from_text accepts BOTH end-of-text "[N] Title URL" lists and
+    # inline "[text](URL)" markdown links, so the footer no longer mandates one rigid
+    # format. PI-authored briefs never include citation-format directives.
     _DEEP_RESEARCH_CITATION_FOOTER = (
-        "IMPORTANT - Citation format:\n"
-        "For each cited paper, provide a reference list at the end in this exact format:\n"
-        "[N] Author et al. (Year). Title. Journal. URL_or_DOI\n"
-        "Example: [1] Smith et al. (2023). Role of TGF-beta in liver fibrosis. "
-        "Nature. https://doi.org/10.1038/xxx"
+        "IMPORTANT - Citations:\n"
+        "Support each key claim with a clickable source. Cite either inline as a markdown "
+        "link [text](URL), or as a numbered reference list at the end in the form "
+        "[N] Title. URL_or_DOI (or use both). Always include a title and a DOI/URL where available."
     )
 
     _FINDINGS_EXTRACT_MAX_CHARS = 100000
@@ -469,28 +469,37 @@ class LiteratureAgent(BaseAgent):
     def _extract_references_from_text(text: str) -> List[Dict[str, str]]:
         """Extract references from deep research output text.
 
-        Tries structured [N] Title... URL format first, falls back to plain URL extraction.
+        Collects two structured forms — end-of-text "[N] Title URL" entries and
+        inline markdown "[text](URL)" links — then falls back to bare URLs only when
+        the structured forms yield fewer than 3 references. pmc text-fragment suffixes
+        ("#:~:text=...") are stripped before dedup.
         """
         refs: List[Dict[str, str]] = []
         seen: set = set()
 
-        # Try structured format: [N] Title... URL
-        for m in re.finditer(
-            r'\[(\d+)\]\s*(.{5,300}?)\s*(https?://[^\s\)\]]+)', text
-        ):
-            url = m.group(3).rstrip('.,;')
-            if url not in seen:
-                seen.add(url)
-                title = m.group(2).strip(' .-,')
-                refs.append({"title": title, "url": url})
+        def _norm(url: str) -> str:
+            url = url.rstrip('.,;')
+            return url.split('#:~:text=', 1)[0]
 
-        # Fallback to plain URL extraction if structured refs are insufficient
+        def _add(title: str, url: str) -> None:
+            url = _norm(url)
+            if url and url not in seen:
+                seen.add(url)
+                refs.append({"title": title.strip(' .-,'), "url": url})
+
+        # 1. End-of-text numbered list: [N] Title... URL
+        for m in re.finditer(r'\[(\d+)\]\s*(.{5,300}?)\s*(https?://[^\s\)\]]+)', text):
+            _add(m.group(2), m.group(3))
+
+        # 2. Inline markdown links: [text](URL)
+        #    (?<!!) excludes image markdown ![alt](url) — image URLs aren't references
+        for m in re.finditer(r'(?<!!)\[([^\]]{1,200}?)\]\((https?://[^\s\)]+)\)', text):
+            _add(m.group(1), m.group(2))
+
+        # 3. Bare URL fallback — only when structured extraction is insufficient
         if len(refs) < 3:
             for m in re.finditer(r'https?://[^\s\)\]]+', text):
-                url = m.group(0).rstrip('.,;')
-                if url not in seen:
-                    seen.add(url)
-                    refs.append({"title": "", "url": url})
+                _add("", m.group(0))
 
         return refs
 
@@ -1335,7 +1344,7 @@ Please return in JSON format:
         all_genes: set = set()
         for genes in cluster_markers.values():
             all_genes.update(genes[:10])  # Top 10 per cluster
-        gene_sample = ", ".join(list(all_genes)[:20])  # Cap at 20 genes
+        gene_sample = ", ".join(list(all_genes)[:40])  # Cap at 40 genes (fallback topic only)
 
         tissue_part = f" {tissue}" if tissue else ""
         topic = (

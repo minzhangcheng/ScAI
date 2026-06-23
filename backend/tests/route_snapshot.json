@@ -36,6 +36,12 @@
     ]
   ],
   [
+    "/api/admin/users/{uid}/role",
+    [
+      "PATCH"
+    ]
+  ],
+  [
     "/api/admin/users/{uid}/status",
     [
       "PATCH"
@@ -604,6 +610,12 @@
     "/api/session/{session_id}/snapshots/{snapshot_id}/rollback-preview",
     [
       "GET"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/species-input",
+    [
+      "POST"
     ]
   ],
   [

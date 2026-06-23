@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.28.4.1 · **Last updated**: 2026-06-22
+**Version**: 0.28.5 · **Last updated**: 2026-06-23
 
 ## 1. Runtime Architecture
 
@@ -196,6 +196,17 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.28.x — (2026-06-20 → present)**
 
+- `0.28.5` — Full cluster marker pass-through in PI agent, inline markdown link extraction in literature citations, citation footer made format-agnostic (2026-06-23):
+  - **`_summarize_cluster_markers()` changed from 3-tuple to 2-tuple**: Removed `gene_sample` (sampled `[:10]` genes per cluster capped at 20 total). The `gene_sample` line was too sparse to be useful and consumed context. Callers now receive only `(n_clusters, markers_summary)`.
+  - **Removed `[:15]` cluster truncation in PI prompts**: `generate_annotation_research_brief()`, `evaluate_annotation_search_results()`, and `build_search_direction_brief()` now pass ALL clusters instead of capping at 15. Each cluster still limited to 8 genes per line. This ensures the LLM sees the full cluster landscape for annotation and direction decisions.
+  - **`_DEEP_RESEARCH_CITATION_FOOTER` made format-agnostic**: Changed from rigid `"[N] Author et al. (Year). Title. Journal. URL_or_DOI"` mandate to guidance supporting both inline markdown links `[text](URL)` and numbered reference lists. The parser already accepts both formats.
+  - **`_extract_references_from_text()` now extracts inline markdown links**: Added a second regex for `[text](URL)` patterns (with `(?<!!)` lookbehind to exclude image markdown `![alt](url)`). Structured extraction order: (1) end-of-text numbered list `[N] Title... URL`, (2) inline markdown links, (3) bare URL fallback (only when structured < 3 refs). Added `_norm()` to strip `#:~:text=...` PMC text-fragment suffixes before dedup.
+  - **Gene sample cap raised in LiteratureAgent**: `get_exploration_findings()` gene_sample cap bumped from 20 to 40 (fallback topic only).
+  - **Supervisor test fix**: `_mk_supervisor` in `test_supervisor_stuck_escalation.py` now mocks `_provider` and `_last_config_revision` to prevent TypeError.
+  - **`analysis_state_api_dict` test**: Added `"literature_config"` to expected API dict fields.
+  - **Route snapshot updated**: Added `/api/admin/users/{uid}/role` PATCH and `/api/session/{session_id}/species-input` POST.
+  - **New tests**: `test_evaluate_annotation_search.py` — evaluator sees all 22 clusters; `test_summarize_cluster_markers.py` — 2-tuple return, all clusters beyond 15 included, genes capped at 8 per cluster. `test_pi_research_briefs.py` — annotation brief includes all clusters, no `gene_sample` line. `test_literature_citations.py` — inline markdown link extraction, image markdown exclusion, PMC fragment stripping, mixed numbered+inline.
+
 - `0.28.4.1` — Deep Research background polling: Responses `background=True` submission + retrieve polling to avoid gateway idle timeouts, `_NO_BACKGROUND_ENDPOINT` per-endpoint cache for `background`-rejecting providers (2026-06-22):
   - **Problem**: Deep research models run for several minutes. A blocking `responses.create()` keeps the connection idle long enough for upstream gateways (e.g. Cloudflare in front of `api.n1n.ai`) to sever it with HTTP 524 while the job keeps running server-side. Submitting with `background=True` returns immediately, then we poll `responses.retrieve()` with short requests that never trip the gateway's idle timeout.
   - **`_ResponsesAdapter.__init__`**: Now accepts `base_url` parameter, passed by `OpenAICompatibleClient._get_responses_adapter()`, to enable per-endpoint background support caching.
@@ -378,6 +389,11 @@ Detailed release notes for every version are available through `git log` and rel
   - **Bioinfo agent integration**: `_detect_and_lookup_swallowed_error()` method consults the Technique Agent (`lookup_from_error`) for API documentation when a swallowed error is detected. `_build_swallowed_error_feedback()` generates steering messages that guide the agent to fix and retry instead of skipping.
   - **Execution loop injection**: Swallowed-error detection runs unconditionally after every code execution step. When detected, the feedback is appended to the tool result before it's sent back to the LLM, guiding the agent toward the correct API call.
   - **Test**: `test_error_parsing.py` — 5 tests covering scvelo case, str-form error, no-skip-keyword (returns None), data-driven skip (returns None), empty/None output.
+
+- `0.26.7` — painter retry extraction, _images_api_attempt method, shared _retry_with_backoff (2026-06-16):
+  - **Shared `_retry_with_backoff()` helper**: Extracted the 3× inline exponential-backoff retry loops (Revision, Chat generation, Images API) into a single reusable `_retry_with_backoff()` function. Client errors (4xx) break out immediately without retrying; transient errors use `2^attempt` delay. All call sites unified under the same retry logic.
+  - **`_images_api_attempt()` method**: Extracted the single-attempt Images API call (`/v1/images/generations`) with `b64_json`→URL response-format fallback, standard/non-standard response extraction, and `content_filter`/error-field diagnostics into a dedicated method. Images API strategy now wrapped in `_retry_with_backoff()` instead of inline retry.
+  - **Test**: `test_painter_retry.py` — 4 tests covering transient→success retry, 4xx client-error skip, exhaustion after 3 failures, and b64_json→no-format fallback preservation.
 
 - `0.26.7` — painter retry extraction, _images_api_attempt method, shared _retry_with_backoff (2026-06-16):
   - **Shared `_retry_with_backoff()` helper**: Extracted the 3× inline exponential-backoff retry loops (Revision, Chat generation, Images API) into a single reusable `_retry_with_backoff()` function. Client errors (4xx) break out immediately without retrying; transient errors use `2^attempt` delay. All call sites unified under the same retry logic.
