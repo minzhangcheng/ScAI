@@ -439,3 +439,241 @@ def test_messages_to_input_prevents_unknown_parameter_input_tool_calls_regressio
         "output": "Allowed count-like inputs:\\nfiltered_feature_bc_matrix.h5\\nExcluded loom inputs:\\nCon.loom",
     }
     assert all(item.get("role") != "tool" for item in input_items)
+
+
+def test_build_params_adds_background_for_deep_research():
+    adapter = _ResponsesAdapter(MagicMock(), agent_name="t")
+    params = adapter._build_params(
+        "o4-mini-deep-research", [{"role": "user", "content": "x"}], 0.3, None,
+        background_ok=True)
+    assert params.get("background") is True
+
+
+def test_build_params_no_background_for_normal_model():
+    adapter = _ResponsesAdapter(MagicMock(), agent_name="t")
+    params = adapter._build_params(
+        "gpt-5.5", [{"role": "user", "content": "x"}], 0.3, None)
+    assert "background" not in params
+
+
+def test_build_params_no_background_when_streaming_deep_research():
+    adapter = _ResponsesAdapter(MagicMock(), agent_name="t")
+    params = adapter._build_params(
+        "o4-mini-deep-research", [{"role": "user", "content": "x"}], 0.3, None,
+        stream=True)
+    assert "background" not in params
+
+
+def test_build_params_no_background_without_background_ok():
+    adapter = _ResponsesAdapter(MagicMock(), agent_name="t")
+    params = adapter._build_params(
+        "o4-mini-deep-research", [{"role": "user", "content": "x"}], 0.3, None)
+    assert "background" not in params
+
+
+def test_build_params_skips_background_when_endpoint_cached(monkeypatch):
+    monkeypatch.setattr(
+        "backend.utils.llm_client._NO_BACKGROUND_ENDPOINT", {"https://api.x/v1"})
+    adapter = _ResponsesAdapter(MagicMock(), agent_name="t", base_url="https://api.x/v1")
+    params = adapter._build_params(
+        "o4-mini-deep-research", [{"role": "user", "content": "x"}], 0.3, None,
+        background_ok=True)
+    assert "background" not in params
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_deep_research_no_background():
+    dump = {"output": [{"type": "function_call", "call_id": "c1", "name": "f",
+            "arguments": "{}"}], "usage": {}}
+    client = _fake_openai_with_response(dump)
+    adapter = _ResponsesAdapter(client, agent_name="t", base_url="https://api.x/v1")
+    await adapter.complete_with_tools(
+        model="o3-deep-research", messages=[{"role": "user", "content": "x"}],
+        tools=[], tool_choice="auto", temperature=0.5, max_tokens=None)
+    assert "background" not in client.responses.create.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_complete_vision_deep_research_no_background():
+    dump = {"output": [{"type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "hi"}]}], "usage": {}}
+    client = _fake_openai_with_response(dump)
+    adapter = _ResponsesAdapter(client, agent_name="t", base_url="https://api.x/v1")
+    await adapter.complete_vision(
+        model="o4-mini-deep-research", text_prompt="x", images=[],
+        temperature=0.5, max_tokens=None)
+    assert "background" not in client.responses.create.call_args.kwargs
+
+
+def _mk_resp(status, resp_id="resp_1", dump=None, error=None):
+    r = MagicMock()
+    r.status = status
+    r.id = resp_id
+    if dump is not None:
+        r.model_dump.return_value = dump
+    if error is not None:
+        r.error = error
+    return r
+
+
+@pytest.mark.asyncio
+async def test_await_completion_returns_immediately_when_completed():
+    done = _mk_resp("completed")
+    adapter = _ResponsesAdapter(MagicMock(), agent_name="t")
+    result = await adapter._await_completion(done)
+    assert result is done
+
+
+@pytest.mark.asyncio
+async def test_await_completion_polls_until_completed(monkeypatch):
+    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
+    in_progress = _mk_resp("in_progress")
+    done = _mk_resp("completed")
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.retrieve = AsyncMock(side_effect=[in_progress, done])
+    adapter = _ResponsesAdapter(client, agent_name="t")
+    start = _mk_resp("in_progress")
+    result = await adapter._await_completion(start)
+    assert result is done
+    assert client.responses.retrieve.await_count == 2
+    client.responses.retrieve.assert_awaited_with("resp_1")
+
+
+@pytest.mark.asyncio
+async def test_await_completion_raises_on_failed(monkeypatch):
+    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
+    failed = _mk_resp("failed", error="boom")
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.retrieve = AsyncMock(return_value=failed)
+    adapter = _ResponsesAdapter(client, agent_name="t")
+    start = _mk_resp("in_progress")
+    with pytest.raises(RuntimeError):
+        await adapter._await_completion(start)
+
+
+@pytest.mark.asyncio
+async def test_await_completion_tolerates_transient_poll_errors(monkeypatch):
+    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
+    done = _mk_resp("completed")
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.retrieve = AsyncMock(
+        side_effect=[Exception("temporary network blip"), done])
+    adapter = _ResponsesAdapter(client, agent_name="t")
+    start = _mk_resp("in_progress")
+    result = await adapter._await_completion(start)
+    assert result is done
+    assert client.responses.retrieve.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_await_completion_raises_after_repeated_poll_errors(monkeypatch):
+    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
+    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_MAX_POLL_ERRORS", 3)
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.retrieve = AsyncMock(side_effect=Exception("down"))
+    adapter = _ResponsesAdapter(client, agent_name="t")
+    start = _mk_resp("in_progress")
+    with pytest.raises(Exception):
+        await adapter._await_completion(start)
+    assert client.responses.retrieve.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_complete_deep_research_uses_background_polling(monkeypatch):
+    monkeypatch.setattr("backend.utils.llm_client._DR_BACKGROUND_POLL_INTERVAL", 0)
+    dump = {
+        "output": [
+            {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text", "text": "report"}]}
+        ],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    }
+    submitted = _mk_resp("in_progress")
+    submitted.model = "o4-mini-deep-research"
+    completed = _mk_resp("completed", dump=dump)
+    completed.model = "o4-mini-deep-research"
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.create = AsyncMock(return_value=submitted)
+    client.responses.retrieve = AsyncMock(return_value=completed)
+    adapter = _ResponsesAdapter(client, agent_name="literature")
+
+    r = await adapter.complete(
+        model="o4-mini-deep-research",
+        messages=[{"role": "user", "content": "x"}],
+        temperature=0.3,
+        max_tokens=None,
+        timeout=1800.0,
+        tools=[{"type": "web_search_preview"}],
+    )
+
+    assert r.content == "report"
+    assert client.responses.create.call_args.kwargs.get("background") is True
+    client.responses.retrieve.assert_awaited_with("resp_1")
+
+
+def test_background_polling_constants_exist():
+    from backend.utils import llm_client as lc
+    assert lc._DR_BACKGROUND_POLL_INTERVAL > 0
+    assert lc._DR_BACKGROUND_MAX_WAIT >= 600
+    assert lc._DR_BACKGROUND_MAX_POLL_ERRORS >= 1
+    assert "failed" in lc._DR_BACKGROUND_TERMINAL_FAILED
+
+
+def test_is_unsupported_background_error_detects():
+    from backend.utils.llm_client import _is_unsupported_background_error
+    assert _is_unsupported_background_error(Exception("Unknown parameter: 'background'")) is True
+    assert _is_unsupported_background_error(Exception("background mode is not supported")) is True
+    assert _is_unsupported_background_error(Exception("'background' is not allowed")) is True
+
+
+def test_is_unsupported_background_error_ignores_unrelated():
+    from backend.utils.llm_client import _is_unsupported_background_error
+    assert _is_unsupported_background_error(Exception("rate limit exceeded")) is False
+    # mentions background but is not a rejection of the parameter
+    assert _is_unsupported_background_error(Exception("the background of the histology image")) is False
+
+
+def test_no_background_endpoint_cache_exists():
+    from backend.utils import llm_client as lc
+    assert isinstance(lc._NO_BACKGROUND_ENDPOINT, set)
+
+
+@pytest.mark.asyncio
+async def test_create_fallback_strips_background_and_retries(monkeypatch):
+    monkeypatch.setattr("backend.utils.llm_client._NO_BACKGROUND_ENDPOINT", set())
+    import backend.utils.llm_client as lc
+    success = MagicMock()
+    success.model_dump.return_value = {"output": [], "usage": {}}
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.create = AsyncMock(
+        side_effect=[Exception("Unknown parameter: 'background'"), success])
+    adapter = _ResponsesAdapter(client, agent_name="t", base_url="https://api.x/v1")
+
+    result = await adapter._create_responses_with_fallback(
+        {"model": "o4-mini-deep-research", "input": [], "background": True})
+
+    assert result is success
+    assert client.responses.create.await_count == 2
+    second_kwargs = client.responses.create.call_args_list[1].kwargs
+    assert "background" not in second_kwargs
+    assert "https://api.x/v1" in lc._NO_BACKGROUND_ENDPOINT
+
+
+@pytest.mark.asyncio
+async def test_create_fallback_does_not_strip_on_unrelated_error(monkeypatch):
+    monkeypatch.setattr("backend.utils.llm_client._NO_BACKGROUND_ENDPOINT", set())
+    client = MagicMock()
+    client.responses = MagicMock()
+    client.responses.create = AsyncMock(side_effect=RuntimeError("upstream 500"))
+    adapter = _ResponsesAdapter(client, agent_name="t", base_url="https://api.x/v1")
+
+    with pytest.raises(RuntimeError):
+        await adapter._create_responses_with_fallback(
+            {"model": "o4-mini-deep-research", "input": [], "background": True})
+    assert client.responses.create.await_count == 1

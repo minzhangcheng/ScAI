@@ -219,6 +219,24 @@ def _is_deep_research_model(model: str) -> bool:
     return "deepresearch" in model_name
 
 
+# Background-mode polling for deep-research Responses calls. These models run for
+# several minutes; a blocking responses.create() keeps the connection idle long
+# enough for an upstream gateway (e.g. Cloudflare in front of api.n1n.ai) to sever
+# it with HTTP 524 while the job keeps running server-side. Submitting with
+# background=True returns immediately, then we poll responses.retrieve() with short
+# requests that never trip the gateway's idle timeout.
+_DR_BACKGROUND_POLL_INTERVAL = 5.0     # seconds between retrieve() polls
+_DR_BACKGROUND_MAX_WAIT = 1800.0       # 30 min ceiling for a single DR task
+_DR_BACKGROUND_MAX_POLL_ERRORS = 5     # consecutive transient poll failures before giving up
+_DR_BACKGROUND_TERMINAL_FAILED = ("failed", "cancelled", "canceled", "incomplete", "expired")
+
+
+# Per-endpoint cache (base_url) of Responses endpoints that rejected the
+# `background` parameter. Once seen, _build_params skips background for that
+# endpoint so we don't pay a failed round-trip on every deep-research call.
+_NO_BACKGROUND_ENDPOINT: set = set()
+
+
 # 两级协议探测缓存（模块级，跨 client 实例 / 跨 agent 共享，因协议只由 base_url+model 决定）。
 # 第一级：整站无 Responses 端点（base_url 级，与 model 无关）。
 _NO_RESPONSES_ENDPOINT: set = set()
@@ -623,6 +641,21 @@ def _swap_web_search_tool_name(tools: list, from_name: str, to_name: str) -> lis
         {**t, "type": to_name} if isinstance(t, dict) and t.get("type") == from_name else t
         for t in tools
     ]
+
+
+def _is_unsupported_background_error(error: Exception) -> bool:
+    """True when a provider rejects the Responses `background` parameter
+    (a gateway that doesn't implement background mode). String-based (like
+    _is_unknown_web_search_tool_error) to stay testable without constructing
+    SDK error objects: requires the word 'background' AND a rejection keyword,
+    so prose that merely mentions a background does not match."""
+    s = str(error).lower()
+    if "background" not in s:
+        return False
+    return any(kw in s for kw in (
+        "unknown parameter", "unsupported parameter", "unsupported",
+        "not supported", "unexpected", "not allowed", "invalid parameter",
+    ))
 
 
 def _is_o_series(model_name: str) -> bool:
@@ -1191,12 +1224,15 @@ class _ResponsesAdapter:
     client and translates the canonical OpenAI-chat request shape to/from
     Responses. Parsing operates on model_dump() dicts (see _parse_responses_dump)."""
 
-    def __init__(self, client: "AsyncOpenAI", agent_name: str = "unknown"):
+    def __init__(self, client: "AsyncOpenAI", agent_name: str = "unknown",
+                 base_url: str = ""):
         self.client = client
         self.agent_name = agent_name
+        self.base_url = base_url
 
     def _build_params(self, model, messages, temperature, max_tokens, tools=None,
-                      tool_choice=None, stream=False, timeout=None, skip_temperature=False) -> Dict[str, Any]:
+                      tool_choice=None, stream=False, timeout=None, skip_temperature=False,
+                      background_ok=False) -> Dict[str, Any]:
         instructions, input_items = _responses_messages_to_input(messages)
         params: Dict[str, Any] = {"model": model, "input": input_items}
         if instructions is not None:
@@ -1213,6 +1249,16 @@ class _ResponsesAdapter:
             params["tools"] = _responses_translate_tools(_inject_web_search_if_needed(model, []))
         if tool_choice is not None:
             params["tool_choice"] = _responses_translate_tool_choice(tool_choice)
+        # Deep-research models run for minutes: submit as a background task so
+        # create() returns immediately and we poll retrieve() (see
+        # _ResponsesAdapter._await_completion). Only the caller that runs under a
+        # long outer timeout opts in (background_ok); streaming keeps its own
+        # long-lived connection so it never needs background; and an endpoint
+        # known to reject `background` is skipped so we don't pay a failed
+        # round-trip every call.
+        if (background_ok and not stream and _is_deep_research_model(model)
+                and self.base_url not in _NO_BACKGROUND_ENDPOINT):
+            params["background"] = True
         if stream:
             params["stream"] = True
         if timeout is not None:
@@ -1226,6 +1272,17 @@ class _ResponsesAdapter:
         try:
             return await self.client.responses.create(**params)
         except Exception as e:
+            # Provider rejected background mode: cache the endpoint, drop the
+            # flag, and retry synchronously (best we can do without background).
+            if _is_unsupported_background_error(e) and params.get("background"):
+                logger.warning(
+                    f"[{self.agent_name}] Responses background mode rejected at "
+                    f"{self.base_url}; retrying synchronously: {str(e)[:120]}"
+                )
+                if self.base_url:
+                    _NO_BACKGROUND_ENDPOINT.add(self.base_url)
+                params.pop("background", None)
+                return await self.client.responses.create(**params)
             if not _is_unknown_web_search_tool_error(e):
                 raise
             tools = params.get("tools")
@@ -1246,6 +1303,62 @@ class _ResponsesAdapter:
                     return await self.client.responses.create(**params)
             raise
 
+    async def _await_completion(self, resp):
+        """Poll a background Responses task to completion.
+
+        Deep-research models are submitted with background=True so the initial
+        create() returns immediately with status queued/in_progress instead of
+        holding the connection open for minutes (which trips an upstream gateway's
+        idle timeout -> HTTP 524 while the task keeps running server-side). We then
+        poll responses.retrieve() with short requests until a terminal status.
+
+        Non-background responses (status completed/None, or anything not in the
+        queued/in_progress set) are returned as-is, so this is a no-op for
+        ordinary calls.
+        """
+        status = getattr(resp, "status", None)
+        if status not in ("queued", "in_progress"):
+            return resp
+        resp_id = getattr(resp, "id", None)
+        if not resp_id:
+            return resp
+        logger.info(
+            f"[{self.agent_name}] Deep research submitted (background), "
+            f"polling {resp_id}"
+        )
+        deadline = time.monotonic() + _DR_BACKGROUND_MAX_WAIT
+        consecutive_errors = 0
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_DR_BACKGROUND_POLL_INTERVAL)
+            try:
+                resp = await self.client.responses.retrieve(resp_id)
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                logger.warning(
+                    f"[{self.agent_name}] Background poll transient error "
+                    f"({consecutive_errors}/{_DR_BACKGROUND_MAX_POLL_ERRORS}): "
+                    f"{type(e).__name__}: {str(e)[:120]}"
+                )
+                if consecutive_errors >= _DR_BACKGROUND_MAX_POLL_ERRORS:
+                    raise
+                continue
+            status = getattr(resp, "status", None)
+            if status == "completed":
+                logger.info(
+                    f"[{self.agent_name}] Deep research {resp_id} completed"
+                )
+                return resp
+            if status in _DR_BACKGROUND_TERMINAL_FAILED:
+                err = getattr(resp, "error", None)
+                raise RuntimeError(
+                    f"Deep research task {resp_id} {status}: {err}"
+                )
+        raise TimeoutError(
+            f"Deep research task {resp_id} did not complete within "
+            f"{_DR_BACKGROUND_MAX_WAIT}s"
+        )
+
     async def complete(self, model, messages, temperature, max_tokens, timeout=None, skip_temperature=False, tools=None) -> LLMResponse:
         params = self._build_params(
             model,
@@ -1255,8 +1368,10 @@ class _ResponsesAdapter:
             tools=tools,
             timeout=timeout,
             skip_temperature=skip_temperature,
+            background_ok=True,
         )
         resp = await self._create_responses_with_fallback(params)
+        resp = await self._await_completion(resp)
         dump = resp.model_dump()
         text, _tools, citations, usage = _parse_responses_dump(dump)
         return LLMResponse(content=text, model=getattr(resp, "model", model),
@@ -1267,6 +1382,7 @@ class _ResponsesAdapter:
         params = self._build_params(model, messages, temperature, max_tokens,
                                     tools=tools, tool_choice=tool_choice, skip_temperature=skip_temperature)
         resp = await self._create_responses_with_fallback(params)
+        resp = await self._await_completion(resp)
         dump = resp.model_dump()
         text, tool_calls, _citations, usage = _parse_responses_dump(dump)
         raw_assistant = _tool_calls_to_raw_assistant(text, tool_calls)
@@ -1286,6 +1402,7 @@ class _ResponsesAdapter:
         ]
         params = self._build_params(model, messages, temperature, max_tokens, timeout=timeout, skip_temperature=skip_temperature)
         resp = await self._create_responses_with_fallback(params)
+        resp = await self._await_completion(resp)
         dump = resp.model_dump()
         text, _tools, citations, usage = _parse_responses_dump(dump)
         return LLMResponse(content=text, model=getattr(resp, "model", model),
@@ -1673,7 +1790,8 @@ class OpenAICompatibleClient:
 
     def _get_responses_adapter(self) -> "_ResponsesAdapter":
         if getattr(self, "_responses_adapter", None) is None:
-            self._responses_adapter = _ResponsesAdapter(self.client, agent_name=self.agent_name)
+            self._responses_adapter = _ResponsesAdapter(
+                self.client, agent_name=self.agent_name, base_url=self.base_url)
         return self._responses_adapter
 
     def _get_anthropic_adapter(self) -> "_AnthropicAdapter":
