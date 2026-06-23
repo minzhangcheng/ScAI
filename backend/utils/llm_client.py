@@ -348,9 +348,9 @@ def _openai_sdk_base_url(base_url: str) -> str:
 
 
 def _anthropic_sdk_base_url(base_url: str) -> str:
-    """Normalize a base_url for AsyncAnthropic: strip a trailing /v1/messages or
-    /messages so the SDK's own /v1/messages append is not doubled."""
-    return _strip_path_suffix(base_url, ("/v1/messages", "/messages"))
+    """Normalize a base_url for AsyncAnthropic: strip a trailing /v1/messages,
+    /messages, or /v1 so the SDK's own /v1/messages append is not doubled."""
+    return _strip_path_suffix(base_url, ("/v1/messages", "/messages", "/v1"))
 
 
 def _responses_messages_to_input(messages: List[Dict[str, Any]]):
@@ -1931,6 +1931,7 @@ class OpenAICompatibleClient:
             tried: set = set()
             last_error: Optional[Exception] = None
             while pending:
+                await asyncio.sleep(1.0)
                 protocol = pending.pop(0)
                 if protocol in tried:
                     continue

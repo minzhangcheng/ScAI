@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.28.8 · **Last updated**: 2026-06-23
+**Version**: 0.28.8.1 · **Last updated**: 2026-06-24
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.28.x — (2026-06-20 → present)**
+
+- `0.28.8.1` — Anthropic `/v1` bare suffix handling, protocol probe startup delay (2026-06-24):
+  - **`_anthropic_sdk_base_url` now strips bare `/v1`**: Added `"/v1"` to the suffix-strip tuple so base URLs like `https://api.anthropic.com/v1` (without `/messages`) are normalized correctly — the SDK's own `/v1/messages` append is no longer doubled.
+  - **Protocol probe startup delay**: Added `await asyncio.sleep(1.0)` before the protocol probe loop in `_dispatch_non_streaming()` to prevent race conditions when concurrent requests trigger simultaneous probes with the same `(base_url, model)` lock key.
 
 - `0.28.8` — Snapshot parent-chain fix: forward (non-restore) auto-snapshots now chain instead of all becoming isolated roots (2026-06-23):
   - **Problem**: On a normal forward run with no manual restores, every auto-snapshot got `parent_id=None` / `branch_label="main"`, producing a flat list of isolated roots (observed: 26 snapshots, zero parent links). Root cause: `compute_snapshot_context()` sourced `parent_id` only from `state.last_restored_snapshot_id`, which is set only immediately after a restore (`snapshots.py`) and cleared after a single snapshot (`create_and_register_snapshot`). Outside a restore it is always `None`, so forward snapshots never linked. This was the over-correction of the P2-4 fix (which correctly removed the `snapshots[-1]` time-based fallback but removed forward chaining with it).
