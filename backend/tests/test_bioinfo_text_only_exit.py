@@ -10,6 +10,7 @@ Covers two helpers added to BioinformaticsAgent:
 import pytest
 
 from backend.agents.bioinformatics_agent import BioinformaticsAgent
+from backend.models.schemas import AgentType
 from backend.utils.llm_client import UpstreamExhaustedError
 
 
@@ -106,6 +107,10 @@ class TestAutonomousLoopTextOnlyEscalation:
         agent.figure_review_callback = None
         agent.supervisor_callback = None
         agent.technique_agent = None
+        agent._provider = MagicMock()
+        agent._provider.get_config_revision = MagicMock(return_value=0)
+        agent._last_config_revision = 0
+        agent.agent_type = AgentType.BIOINFORMATICS
 
         # --- Stub read-only properties from BaseAgent ---
         monkeypatch.setattr(

@@ -1,4 +1,7 @@
 """Tests for _TPL_NOOP_INSTALL template constant in sandbox.py."""
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestTplNoopInstall:
@@ -44,18 +47,12 @@ class TestBioinformaticsAgentConsumesTplNoopInstall:
     """bioinformatics_agent.py must import and use _TPL_NOOP_INSTALL."""
 
     def test_bioinformatics_agent_imports_tpl(self):
-        from pathlib import Path
-        src = Path("backend/agents/bioinformatics_agent.py").read_text()
+        src = (_REPO_ROOT / "backend" / "agents" / "bioinformatics_agent.py").read_text()
         assert "_TPL_NOOP_INSTALL" in src, "bioinformatics_agent.py must import _TPL_NOOP_INSTALL"
 
     def test_bioinformatics_agent_no_inline_unwind(self):
         """The inline unwind+install boilerplate should be gone."""
-        from pathlib import Path
-        src = Path("backend/agents/bioinformatics_agent.py").read_text()
-        # After refactor, the raw inline unwind code is gone;
-        # only the {_TPL_NOOP_INSTALL} reference remains (inside f-strings).
-        # The string literal "_unwrap_close_guard = 0" should NOT appear
-        # as raw code in this file (it's in the template constant in sandbox.py).
+        src = (_REPO_ROOT / "backend" / "agents" / "bioinformatics_agent.py").read_text()
         count = src.count("_unwrap_close_guard = 0")
         assert count == 0, f"Expected 0 inline unwind in bioinformatics_agent.py, got {count}"
 
@@ -64,13 +61,11 @@ class TestChatConsumesTplNoopInstall:
     """chat.py must import and use _TPL_NOOP_INSTALL."""
 
     def test_chat_imports_tpl(self):
-        from pathlib import Path
-        src = Path("backend/routes/chat.py").read_text()
+        src = (_REPO_ROOT / "backend" / "routes" / "chat.py").read_text()
         assert "_TPL_NOOP_INSTALL" in src, "chat.py must import _TPL_NOOP_INSTALL"
 
     def test_chat_no_inline_unwind(self):
-        from pathlib import Path
-        src = Path("backend/routes/chat.py").read_text()
+        src = (_REPO_ROOT / "backend" / "routes" / "chat.py").read_text()
         count = src.count("_unwrap_close_guard = 0")
         assert count == 0, f"Expected 0 inline unwind in chat.py, got {count}"
 
@@ -80,7 +75,6 @@ class TestBioinfoAgentNoForwardRef:
     asyncio is already imported at module level."""
 
     def test_no_forward_ref_on_pause_event(self):
-        from pathlib import Path
-        src = Path("backend/agents/bioinformatics_agent.py").read_text()
+        src = (_REPO_ROOT / "backend" / "agents" / "bioinformatics_agent.py").read_text()
         assert "Optional['asyncio.Event']" not in src, \
             "Unnecessary forward ref: asyncio is imported at module top"

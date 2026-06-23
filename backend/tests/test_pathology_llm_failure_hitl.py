@@ -6,10 +6,12 @@ its upstream retries, the agent must surface an LLM-failure intervention
 dropping the image.
 """
 import pytest
+from unittest.mock import MagicMock
 
 import backend.agents.pathology_agent as mod
 from backend.agents.pathology_agent import PathologyAgent, _ImageSkipRequested
 from backend.constants import LlmFailureAction
+from backend.models.schemas import AgentType
 from backend.utils.llm_client import UpstreamExhaustedError
 from backend.workflow.helpers import WorkflowTerminatedError
 
@@ -19,6 +21,10 @@ def _bare_agent() -> PathologyAgent:
     settings_provider); only the attributes used by the code under test are set."""
     agent = object.__new__(PathologyAgent)
     agent.llm_intervention_callback = None
+    agent.agent_type = AgentType.PATHOLOGY
+    agent._provider = MagicMock()
+    agent._provider.get_config_revision = MagicMock(return_value=0)
+    agent._last_config_revision = 0
     return agent
 
 

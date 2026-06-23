@@ -83,6 +83,7 @@ async def test_biochem_disabled_agent_also_caches(analysis_state):
     wf.session_id = "test"
     wf.biochemistry_agent = None
     wf._send_message = AsyncMock()
+    wf.ensure_agent_ready = MagicMock(return_value=False)
     wf._biochemistry_analysis = AgentNodesMixin._biochemistry_analysis.__get__(wf)
 
     state = {"analysis_state": analysis_state, "pi_instructions": {}}
@@ -153,6 +154,7 @@ async def test_pathology_disabled_path_caches_skipped(analysis_state):
     wf.session_id = "test"
     wf.pathology_agent = None
     wf._send_message = AsyncMock()
+    wf.ensure_agent_ready = MagicMock(return_value=False)
     wf._pathology_analysis = AgentNodesMixin._pathology_analysis.__get__(wf)
 
     state = {"analysis_state": analysis_state, "pi_instructions": {}}

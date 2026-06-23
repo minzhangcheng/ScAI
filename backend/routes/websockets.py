@@ -37,7 +37,13 @@ async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> No
     state_sync handler. Without this resend the dialog never reopens.
     """
     reason = getattr(state, "wait_input_reason", None)
-    if reason not in ("llm_failure", "agent_disabled"):
+    _HITL_RESEND_REASONS = (
+        "llm_failure",
+        "agent_disabled",
+        "species_input",
+        "gene_species_mismatch",
+    )
+    if reason not in _HITL_RESEND_REASONS:
         return
     payload = {
         "change_type": reason,
@@ -50,6 +56,7 @@ async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> No
         "wait_input_reason": reason,
         "llm_failure_info": getattr(state, "llm_failure_info", None),
         "agent_disabled_info": getattr(state, "agent_disabled_info", None),
+        "species_input_info": getattr(state, "species_input_info", None),
     }
     try:
         await websocket.send_json({
