@@ -166,13 +166,13 @@ class TestConfigRoundtrip:
             assert df.filename != ""
 
     def test_max_search_rounds_default_aligned(self):
-        """Import fallback should be 5 (matching schema default)."""
+        """Import fallback should be 10 (matching schema default)."""
         d = _config_dict()
         d["api_config"]["literature"] = {"mode": "disabled"}
         config = ConfigV1.model_validate(d)
         state = apply_config_to_session(config, user_id="u1")
-        # Fallback when max_search_rounds not set: should be 5
-        assert state.literature_config["max_search_rounds"] == 5
+        # Fallback when max_search_rounds not set: should be 10
+        assert state.literature_config["max_search_rounds"] == 10
 
 
 def test_bioinfo_max_steps_default():

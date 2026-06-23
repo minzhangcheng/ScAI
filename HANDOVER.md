@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.28.5 · **Last updated**: 2026-06-23
+**Version**: 0.28.6 · **Last updated**: 2026-06-23
 
 ## 1. Runtime Architecture
 
@@ -206,6 +206,11 @@ Detailed release notes for every version are available through `git log` and rel
   - **`analysis_state_api_dict` test**: Added `"literature_config"` to expected API dict fields.
   - **Route snapshot updated**: Added `/api/admin/users/{uid}/role` PATCH and `/api/session/{session_id}/species-input` POST.
   - **New tests**: `test_evaluate_annotation_search.py` — evaluator sees all 22 clusters; `test_summarize_cluster_markers.py` — 2-tuple return, all clusters beyond 15 included, genes capped at 8 per cluster. `test_pi_research_briefs.py` — annotation brief includes all clusters, no `gene_sample` line. `test_literature_citations.py` — inline markdown link extraction, image markdown exclusion, PMC fragment stripping, mixed numbered+inline.
+
+- `0.28.6` — Literature search tuning: PubMed max rounds 20→50 (default 5→10), Deep Research LLM default 1 call (max 5→2) with prompt inversion (2026-06-23):
+  - **PubMed max_search_rounds upper bound 20→50, default 5→10**: All backend layers updated — Pydantic validators in `config_schema.py` (export/import) and `api_requests.py` (runtime API), `LiteratureAgent` constructor/clamp/hot-reload, `AnalysisState` default dict, `workflow/core.py` instantiation, `config_io.py` export/import fallbacks, `chat.py` delegation. Frontend store default and `PromptsPanel` input synced (clamp `20→50`, default `10`). Upper-bound guard test added (50 passes, 51 rejects). Default-alignment tests updated in `test_config_schema.py`, `test_config_io.py`, `test_settings_provider.py`.
+  - **Deep Research LLM decomposition capped at 2 tasks (was 5), prompt inverted to favor single merged query**: `MAX_DR_TASKS` in `PiAgent.plan_deep_research_tasks()` reduced from 5 to 2. Prompt rewritten to default to single merged query (`decompose=false`); split only when genuinely necessary, producing exactly 2 tasks. Docstring updated. Tests aligned in `test_plan_deep_research_tasks.py` and `test_literature_dr_decompose.py`.
+  - **New doc files**: Implementation plan `docs/superpowers/plans/2026-06-23-literature-search-tuning.md` and design spec `docs/superpowers/specs/2026-06-23-literature-search-tuning-design.md`.
 
 - `0.28.4.1` — Deep Research background polling: Responses `background=True` submission + retrieve polling to avoid gateway idle timeouts, `_NO_BACKGROUND_ENDPOINT` per-endpoint cache for `background`-rejecting providers (2026-06-22):
   - **Problem**: Deep research models run for several minutes. A blocking `responses.create()` keeps the connection idle long enough for upstream gateways (e.g. Cloudflare in front of `api.n1n.ai`) to sever it with HTTP 524 while the job keeps running server-side. Submitting with `background=True` returns immediately, then we poll `responses.retrieve()` with short requests that never trip the gateway's idle timeout.

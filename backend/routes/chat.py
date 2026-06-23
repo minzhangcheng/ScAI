@@ -440,7 +440,7 @@ async def _execute_chat_agent(
             deep_research_api_key=lit_config.get("deep_research_api_key", ""),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
-            max_search_rounds=lit_config.get("max_search_rounds", 5),
+            max_search_rounds=lit_config.get("max_search_rounds", 10),
             proxy_url=config.api.proxy_url if config.api else None,
         )
 
@@ -536,7 +536,7 @@ async def _execute_chat_agent(
             deep_research_api_key=lit_config.get("deep_research_api_key", ""),
             google_api_key=lit_config.get("google_api_key", ""),
             pubmed_email=lit_config.get("pubmed_email", ""),
-            max_search_rounds=lit_config.get("max_search_rounds", 5),
+            max_search_rounds=lit_config.get("max_search_rounds", 10),
             proxy_url=config.api.proxy_url if config.api else None,
         )
         result = await lit_agent.process(state, instruction)

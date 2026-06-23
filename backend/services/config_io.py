@@ -71,7 +71,7 @@ def apply_config_to_session(config: ConfigV1, user_id: str = "") -> AnalysisStat
         "deep_research_api_key": lit.deep_research_api_key or "",
         "google_api_key": lit.google_api_key or "",
         "pubmed_email": lit.pubmed_email or "",
-        "max_search_rounds": lit.max_search_rounds or 5,
+        "max_search_rounds": lit.max_search_rounds or 10,
     }
 
     # Apply fallback server_config for ALL agents
@@ -236,7 +236,7 @@ def export_session_to_config(state: AnalysisState) -> Dict[str, Any]:
         "deep_research_api_key": lit.get("deep_research_api_key") or None,
         "google_api_key": lit.get("google_api_key") or None,
         "pubmed_email": lit.get("pubmed_email") or None,
-        "max_search_rounds": lit.get("max_search_rounds", 5),
+        "max_search_rounds": lit.get("max_search_rounds", 10),
     }
 
     # Build output

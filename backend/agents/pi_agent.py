@@ -1727,13 +1727,13 @@ Keep tasks actionable and specific. Do NOT remove core tasks unless truly unnece
         multiple independent Deep Research (DR) sub-tasks.
 
         Returns ``{"decompose": bool, "tasks": [str, ...]}``. When ``decompose``
-        is True the caller issues one DR call per task (serial, capped at 5).
+        is True the caller issues one DR call per task (serial, capped at 2).
         When False the caller merges all topics into a single DR call (legacy
         behavior). Falls back to ``{"decompose": False, "tasks": topics}`` on any
         parse/LLM error.
         """
         self.refresh_runtime_config_if_needed()
-        MAX_DR_TASKS = 5
+        MAX_DR_TASKS = 2
 
         results_summary = self._format_completed_results(completed_results) or "None yet."
 
@@ -1753,13 +1753,17 @@ web/literature search and synthesis).
 ## Candidate Literature Topics
 {chr(10).join(f"- {t}" for t in topics)}
 
-Decide whether this literature work is COMPLEX enough to warrant splitting into \
-SEVERAL independent Deep Research tasks, each investigated separately and deeply, \
-versus merging everything into ONE comprehensive Deep Research query.
+        Decide whether this literature work truly REQUIRES splitting into TWO independent \
+Deep Research tasks, or whether ONE comprehensive Deep Research query is sufficient.
 
-Split (decompose=true) ONLY when the topics span genuinely distinct questions that \
-each deserve their own focused deep investigation. For closely related or simple \
-topics, prefer a single merged query (decompose=false).
+DEFAULT to a single merged query (decompose=false). A single Deep Research call \
+already runs multi-round web/literature search and synthesis internally, so it \
+covers the vast majority of cases.
+
+Set decompose=true ONLY when it is GENUINELY NECESSARY — i.e. the topics span TWO \
+clearly distinct questions that each demand their own separate, deep investigation \
+and cannot be adequately covered together. The bar for splitting is HIGH; when in \
+doubt, prefer a single merged query.
 
 Return a JSON object:
 {{
@@ -1767,9 +1771,9 @@ Return a JSON object:
     "tasks": ["focused task 1", "focused task 2", ...]
 }}
 
-If decompose is true, provide between 2 and {MAX_DR_TASKS} self-contained tasks \
-(each a complete standalone research brief). If decompose is false, "tasks" may \
-echo the candidate topics."""
+If decompose is true, provide EXACTLY 2 self-contained tasks (each a complete \
+standalone research brief). If decompose is false, "tasks" may echo the candidate \
+topics."""
 
         try:
             response = await self.chat(prompt, temperature=0.3)

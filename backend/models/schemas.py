@@ -522,7 +522,7 @@ class AnalysisState(BaseModel):
         "deep_research_api_key": "",         # Separate API key for deep research (optional)
         "google_api_key": "",                # For Gemini Deep Research mode
         "pubmed_email": "",                  # For PubMed mode (NCBI requirement)
-        "max_search_rounds": 5,              # Max iterative search rounds
+        "max_search_rounds": 10,             # Max iterative search rounds
     })
     
     # Chat messages (PI Agent free-form chat, separate from workflow)

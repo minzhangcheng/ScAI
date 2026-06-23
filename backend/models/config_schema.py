@@ -32,7 +32,7 @@ class LiteratureConfig(BaseModel):
     deep_research_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
     pubmed_email: Optional[str] = None
-    max_search_rounds: int = Field(ge=1, le=20, default=5)
+    max_search_rounds: int = Field(ge=1, le=50, default=10)
 
 
 class ApiConfigSection(BaseModel):

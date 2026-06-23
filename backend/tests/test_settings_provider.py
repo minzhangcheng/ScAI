@@ -165,7 +165,7 @@ class TestGetLiteratureConfig:
     def test_returns_default_config(self, provider):
         config = provider.get_literature_config()
         assert config["mode"] == "deep_research"
-        assert config["max_search_rounds"] == 5
+        assert config["max_search_rounds"] == 10
 
     def test_returns_custom_config(self, provider, state):
         state.literature_config["mode"] = "pubmed_llm"

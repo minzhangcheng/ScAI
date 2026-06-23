@@ -77,7 +77,7 @@ def _state():
 @pytest.mark.asyncio
 async def test_decompose_runs_one_call_per_task():
     lit = _LitAgent()
-    pi = _PIAgent({"decompose": True, "tasks": ["TA", "TB", "TC"]})
+    pi = _PIAgent({"decompose": True, "tasks": ["TA", "TB"]})
     host = _Host(lit, pi)
     state = {
         "analysis_state": _state(),
@@ -85,14 +85,13 @@ async def test_decompose_runs_one_call_per_task():
         "pi_instructions": {"literature_topics": ["x"], "overview": ""},
     }
     out = await host._literature_research(state)
-    # one DR call per decomposed task (3 tasks → 3 calls)
-    assert len(lit.calls) == 3
+    # one DR call per decomposed task (2 tasks → 2 calls)
+    assert len(lit.calls) == 2
     # Each call should contain the task text (prefixed by species)
     assert "TA" in lit.calls[0]["topic"]
     assert "TB" in lit.calls[1]["topic"]
-    assert "TC" in lit.calls[2]["topic"]
-    # Combined findings should contain all 3
-    assert len(out["literature_result"]["findings"]) == 3
+    # Combined findings should contain all 2
+    assert len(out["literature_result"]["findings"]) == 2
 
 
 @pytest.mark.asyncio

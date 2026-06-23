@@ -558,7 +558,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             deep_research_api_key=literature_config.get('deep_research_api_key', ''),
             google_api_key=literature_config.get('google_api_key', ''),
             pubmed_email=literature_config.get('pubmed_email', ''),
-            max_search_rounds=literature_config.get('max_search_rounds', 5),
+            max_search_rounds=literature_config.get('max_search_rounds', 10),
             proxy_url=self.config.api.proxy_url,
         )
         self.literature_agent.set_session(self.session_id)

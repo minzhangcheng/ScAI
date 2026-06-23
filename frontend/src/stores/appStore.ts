@@ -557,8 +557,8 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       setGoogleApiKey: (key) => set({ googleApiKey: key }),
       pubmedEmail: '',
       setPubmedEmail: (email) => set({ pubmedEmail: email }),
-      literatureMaxSearchRounds: 5,
-      setLiteratureMaxSearchRounds: (rounds) => set({ literatureMaxSearchRounds: Math.max(1, Math.min(20, rounds)) }),
+      literatureMaxSearchRounds: 10,
+      setLiteratureMaxSearchRounds: (rounds) => set({ literatureMaxSearchRounds: Math.max(1, Math.min(50, rounds)) }),
 
       // Chat messages
       chatMessages: [],

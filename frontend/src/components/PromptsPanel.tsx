@@ -360,7 +360,7 @@ export function PromptsPanel() {
     if (selectedAgent === 'literature') {
       setLiteratureMode(googleApiKey ? 'gemini_deep_research' : 'pubmed_llm')
       setDeepResearchModel('')
-      setLiteratureMaxSearchRounds(5)
+      setLiteratureMaxSearchRounds(10)
     }
 
     setSaved(false)
@@ -681,11 +681,11 @@ export function PromptsPanel() {
                   <input
                     type="number"
                     min="1"
-                    max="20"
+                    max="50"
                     value={literatureMaxSearchRounds}
                     disabled={literatureMode === 'disabled'}
                     onChange={(e) => {
-                      setLiteratureMaxSearchRounds(parseInt(e.target.value) || 5)
+                      setLiteratureMaxSearchRounds(parseInt(e.target.value) || 10)
                       setSaved(false)
                     }}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-400"

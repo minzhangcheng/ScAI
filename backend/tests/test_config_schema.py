@@ -104,13 +104,21 @@ class TestConfigV1Validation:
     def test_literature_max_search_rounds_default(self):
         cfg = _valid_config()
         c = ConfigV1.model_validate(cfg)
-        assert c.api_config.literature.max_search_rounds == 5
+        assert c.api_config.literature.max_search_rounds == 10
 
     def test_literature_max_search_rounds_bounds(self):
         cfg = _valid_config()
         cfg["api_config"]["literature"]["max_search_rounds"] = 0
         with pytest.raises(ValidationError):
             ConfigV1.model_validate(cfg)
+
+        cfg["api_config"]["literature"]["max_search_rounds"] = 51
+        with pytest.raises(ValidationError):
+            ConfigV1.model_validate(cfg)
+
+        cfg["api_config"]["literature"]["max_search_rounds"] = 50
+        c = ConfigV1.model_validate(cfg)
+        assert c.api_config.literature.max_search_rounds == 50
 
     def test_agent_override_fields(self):
         """Verify field names: custom_prompt (not prompt), vision (not vision_enabled)."""

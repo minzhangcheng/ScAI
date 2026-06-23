@@ -21,10 +21,10 @@ class _FakePI(PIAgent):
 
 @pytest.mark.asyncio
 async def test_decompose_true_returns_clamped_tasks():
-    # 6 tasks returned, must clamp to 5
+    # 3 tasks returned, must clamp to 2
     resp = (
         '{"decompose": true, "tasks": '
-        '["t1","t2","t3","t4","t5","t6"]}'
+        '["t1","t2","t3"]}'
     )
     pi = _FakePI(resp)
     out = await pi.plan_deep_research_tasks(
@@ -32,7 +32,7 @@ async def test_decompose_true_returns_clamped_tasks():
         research_objective="obj", state=None,
     )
     assert out["decompose"] is True
-    assert out["tasks"] == ["t1", "t2", "t3", "t4", "t5"]
+    assert out["tasks"] == ["t1", "t2"]
 
 
 @pytest.mark.asyncio

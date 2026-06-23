@@ -59,7 +59,7 @@ class LiteratureConfigRequest(BaseModel):
     deep_research_api_key: str = ""
     google_api_key: str = ""
     pubmed_email: str = ""
-    max_search_rounds: int = Field(default=5, ge=1, le=20)
+    max_search_rounds: int = Field(default=10, ge=1, le=50)
 
 
 class AgentServerConfigRequest(BaseModel):

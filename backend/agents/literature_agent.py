@@ -74,7 +74,7 @@ class LiteratureAgent(BaseAgent):
         deep_research_api_key: str = "",
         google_api_key: str = "",
         pubmed_email: str = "",
-        max_search_rounds: int = 5,
+        max_search_rounds: int = 10,
         proxy_url: Optional[str] = None,
     ):
         super().__init__(
@@ -89,7 +89,7 @@ class LiteratureAgent(BaseAgent):
         self.deep_research_llm_base_url = deep_research_llm_base_url
         self.deep_research_api_key = deep_research_api_key
         self.pubmed_email = pubmed_email
-        self.max_search_rounds = max(1, min(20, max_search_rounds))
+        self.max_search_rounds = max(1, min(50, max_search_rounds))
         self.proxy_url = proxy_url
 
         # Separate LLM client for deep research mode (optional)
@@ -194,7 +194,7 @@ class LiteratureAgent(BaseAgent):
         self.deep_research_llm_base_url = new_base_url
         self.deep_research_api_key = new_api_key
         self.pubmed_email = new_pubmed_email
-        self.max_search_rounds = max(1, min(20, int(new_max_rounds or 5)))
+        self.max_search_rounds = max(1, min(50, int(new_max_rounds or 10)))
 
         new_client_signature = self._deep_research_client_signature()
         if new_client_signature != old_client_signature:
