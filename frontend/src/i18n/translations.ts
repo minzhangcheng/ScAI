@@ -496,6 +496,11 @@ Please provide a detailed literature review report with specific citation inform
     explorationFailedGoToData: '前往数据面板',
     explorationFailedContinue: '继续（重试 Stage 1）',
     explorationFailedStop: '停止分析',
+
+    // Marker DB missing dialog
+    markerDbMissingTitle: '需要 Marker 数据库',
+    markerDbMissingDesc: 'Marker 数据库 TSV 缺失。可联网补齐以启用数据库先验，或跳过（仅用文献注释），或终止分析。',
+    markerDbFetch: '联网补齐',
   },
 
   en: {
@@ -991,6 +996,11 @@ Please provide a detailed literature review report with specific citations.`,
     explorationFailedGoToData: 'Go to Data Panel',
     explorationFailedContinue: 'Continue (retry Stage 1)',
     explorationFailedStop: 'Stop Analysis',
+
+    // Marker DB missing dialog
+    markerDbMissingTitle: 'Marker database needed',
+    markerDbMissingDesc: 'Marker database TSV missing. Fetch to enable DB priors, skip (literature-only annotation), or terminate analysis.',
+    markerDbFetch: 'Fetch',
   }
 } as const
 

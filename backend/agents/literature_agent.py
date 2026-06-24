@@ -37,6 +37,123 @@ _FALLBACK_EXCEPTIONS = RETRYABLE_EXCEPTIONS + (RateLimitError,)
 _MAX_MAIN_RETRIES = 2
 _RETRY_DELAY_BASE = 2.0  # 秒，与 llm_client 保持一致
 
+# ===================================================================
+# Focused query pure function helpers (Batch 1)
+# ===================================================================
+
+# 污染 plausibility 检索的保守组织结构/非实质成分术语(通用,适用于所有组织)。
+# 未在此处列出的组织特定词(如肝 portal tract)由 plausibility_terms_for_tissue() 按 tissue 补充。
+_GENERIC_CONTAMINATION_PLAUSIBILITY_TERMS: list = [
+    '"nerve fiber"[tiab]',
+    'innervation[tiab]',
+    '"peripheral nerve"[tiab]',
+    'Schwann[tiab]',
+    'perivascular[tiab]',
+]
+
+# 组织特定的 plausibility terms,仅当 tissue 名称含对应 key 时加入。
+_TISSUE_CONTAMINATION_PLAUSIBILITY_TERMS: Dict[str, list] = {
+    "liver": ['"portal tract"[tiab]', '"portal triad"[tiab]', '"Glisson capsule"[tiab]'],
+    "hepatic": ['"portal tract"[tiab]', '"portal triad"[tiab]', '"Glisson capsule"[tiab]'],
+}
+
+# 旧常量名保留为别名,避免直接从该文件 import 它的外部代码报错。
+_DEFAULT_CONTAMINATION_PLAUSIBILITY_TERMS: list = _GENERIC_CONTAMINATION_PLAUSIBILITY_TERMS
+
+
+def plausibility_terms_for_tissue(tissue: str) -> list:
+    """Return generic + tissue-specific terms for suspected-contamination plausibility queries.
+
+    Liver-specific anatomy terms (portal tract, portal triad, Glisson capsule) only appear
+    when the tissue string contains "liver" or "hepatic". Unknown/default tissues receive
+    only generic nerve/perivascular terms.
+    """
+    normalized = (tissue or "").strip().lower()
+    terms = list(_GENERIC_CONTAMINATION_PLAUSIBILITY_TERMS)
+    for key, extra_terms in _TISSUE_CONTAMINATION_PLAUSIBILITY_TERMS.items():
+        if key in normalized:
+            terms.extend(extra_terms)
+            break
+    return terms
+
+
+def _gene_case_variants(gene: str) -> list:
+    """跨物种 ortholog 符号双拼: 小鼠式(Pkhd1) + 人类式(PKHD1)。已全大写则只返回一个。"""
+    gene = (gene or "").strip()
+    if not gene:
+        return []
+    upper = gene.upper()
+    return [gene] if gene == upper else [gene, upper]
+
+
+def _sanitize_synonyms(synonyms) -> list:
+    """去重、去空、长度<=60、移除破坏 PubMed query 的危险字符。"""
+    seen, out = set(), []
+    for s in synonyms or []:
+        s = re.sub(r'["\[\]()]', "", str(s)).strip()
+        if not s or len(s) > 60 or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def status_from_judge(judge: dict) -> str:
+    """judge 计数 → 四态。优先 contradictory,其次 strong/limited/exhausted。"""
+    strong = int(judge.get("strong", 0))
+    moderate = int(judge.get("moderate", 0))
+    if judge.get("contradictory"):
+        return "contradictory"
+    if strong >= 2:
+        return "strong"
+    if strong >= 1 and moderate >= 1:
+        return "limited"
+    return "exhausted"
+
+
+def build_focused_query(item: dict, organism: str, tissue: str, tier: int, bucket: str,
+                        plausibility_terms: list = None) -> str:
+    """构造 focused PubMed query;无可用检索词时返回空串(调用方应跳过)。
+
+    rare_unresolved: 候选名+synonyms+markers 双拼;tier1 加 tissue,tier2 去 tissue。
+    suspected_contamination: 仅 markers 双拼(不用可疑候选名);tier1=discovery(无 tissue),
+                             tier2=plausibility(加 tissue + 可选 plausibility_terms)。
+    """
+    species = (organism or "").strip()
+    or_terms = []
+    for m in item.get("top_markers", [])[:3]:
+        for v in _gene_case_variants(m):
+            or_terms.append(f'"{v}"[tiab]')
+
+    if bucket == "rare_unresolved":
+        cand = item.get("candidate_celltype")
+        if cand:
+            or_terms.insert(0, f'"{cand}"[tiab]')
+        for syn in _sanitize_synonyms(item.get("synonyms")):
+            or_terms.append(f'"{syn}"[tiab]')
+
+    if bucket == "suspected_contamination" and not or_terms:
+        return ""
+
+    if bucket == "suspected_contamination" and tier == 2:
+        terms = plausibility_terms if plausibility_terms is not None else plausibility_terms_for_tissue(tissue)
+        for t in terms:
+            or_terms.append(t)
+
+    if not or_terms:
+        return ""
+
+    parts = []
+    if species:
+        parts.append(species)
+    parts.append("(" + " OR ".join(or_terms) + ")")
+
+    add_tissue = (bucket == "rare_unresolved" and tier == 1) or \
+                 (bucket == "suspected_contamination" and tier == 2)
+    if add_tissue and tissue:
+        parts.append(tissue)
+    return " AND ".join(parts)
+
 
 class LiteratureAgent(BaseAgent):
     """
@@ -574,6 +691,8 @@ class LiteratureAgent(BaseAgent):
         current_round_findings: Optional[List[str]] = None,
         initial_query: Optional[str] = None,
         evaluate_fn: Optional[Callable] = None,
+        organism: str = "",
+        tissue: str = "",
     ) -> Dict[str, Any]:
         """Multi-round PubMed search with LLM-guided query refinement.
 
@@ -587,6 +706,8 @@ class LiteratureAgent(BaseAgent):
         all_articles: List[Dict[str, str]] = []
         seen_pmids: Set[str] = set()
         search_history: List[Dict[str, Any]] = []
+        latest_triage: Dict[str, Any] = {}
+        zero_streak = 0
 
         # Generate initial PubMed query from the topic (or use provided one)
         if pi_guided:
@@ -623,6 +744,8 @@ class LiteratureAgent(BaseAgent):
                     seen_pmids.add(a["pmid"])
             all_articles.extend(new_articles)
 
+            zero_streak = zero_streak + 1 if not new_articles else 0
+
             search_history.append({
                 "round": round_num,
                 "query": query,
@@ -636,17 +759,27 @@ class LiteratureAgent(BaseAgent):
             )
 
             # Evaluate if more searching needed
+            if zero_streak >= 3:
+                logger.info(f"[Literature] {label} stop: 3 consecutive zero-new rounds")
+                break
+
             if round_num < self.max_search_rounds and all_articles:
                 if pi_guided:
                     try:
                         evaluation = await evaluate_fn(all_articles, search_history)
                     except Exception as e:
-                        logger.warning(f"[Literature] PI evaluation failed in round {round_num}: {e}, stopping search")
+                        logger.warning(f"[Literature] PI evaluation failed in round {round_num}: {e}, stopping")
                         evaluation = {"sufficient": True}
+                    latest_triage = evaluation
+                    # 确定性语义终止: 全部簇已归桶 且 triage 非低置信
+                    if evaluation.get("triage_complete") and not evaluation.get("triage_low_confidence"):
+                        logger.info(f"[Literature] {label} semantic termination: all clusters triaged")
+                        break
                 else:
                     evaluation = await self._evaluate_pubmed_results(
                         topic, all_articles, search_history
                     )
+
                 if evaluation.get("sufficient", True):
                     logger.info(f"[Literature] {label} sufficient after {round_num} rounds")
                     break
@@ -659,15 +792,49 @@ class LiteratureAgent(BaseAgent):
             logger.warning(f"[Literature] No PubMed articles found ({label}), falling back to quick search")
             return await self._quick_search(topic, state)
 
-        # Synthesize all collected articles
-        report_text = await self._synthesize_pubmed_results(topic, all_articles)
+        # --- Focused search: run after main loop, before synthesis ---
+        focused_evidence: Dict[str, Any] = {}
+        focused_articles_for_synthesis: List[Dict[str, Any]] = []
+        if pi_guided and latest_triage:
+            for bucket in ("rare_unresolved", "suspected_contamination"):
+                items = latest_triage.get(bucket, [])
+                if not items:
+                    continue
+                fe = await self._focused_rare_search(items, organism, tissue, bucket=bucket)
+                focused_evidence.update(fe)
+                for cid, data in fe.items():
+                    if data.get("status") in ("strong", "limited"):
+                        for article in data.get("articles", []):
+                            pmid = article.get("pmid")
+                            if not pmid:
+                                continue
+                            if pmid not in seen_pmids:
+                                all_articles.append(article)
+                                seen_pmids.add(pmid)
+                            focused_articles_for_synthesis.append(article)
+
+        # Prioritize focused evidence for synthesis because _synthesize_pubmed_results
+        # intentionally truncates to the first 20 articles.
+        synthesis_seen_pmids = set()
+        synthesis_articles: List[Dict[str, Any]] = []
+        for article in focused_articles_for_synthesis + all_articles:
+            pmid = article.get("pmid")
+            if not pmid or pmid in synthesis_seen_pmids:
+                continue
+            synthesis_seen_pmids.add(pmid)
+            synthesis_articles.append(article)
+
+        report_text = await self._synthesize_pubmed_results(topic, synthesis_articles)
 
         references = [
             {"title": a["title"], "url": f"https://pubmed.ncbi.nlm.nih.gov/{a['pmid']}/"}
             for a in all_articles
         ]
 
-        return await self._finalize_result(topic, report_text, references, state, len(search_history))
+        final = await self._finalize_result(topic, report_text, references, state, len(search_history))
+        final["focused_evidence"] = focused_evidence
+        final["triage"] = latest_triage
+        return final
 
     # ===================================================================
     # PubMed E-utilities integration
@@ -1364,6 +1531,7 @@ Please return in JSON format:
             research_result = await self._multi_round_pubmed(
                 topic, state, pubmed_max_results=50,
                 initial_query=pi_initial_query, evaluate_fn=pi_evaluate_fn,
+                organism=organism, tissue=tissue,
             )
         else:
             # Default: Literature Agent handles everything (original behavior)
@@ -1387,7 +1555,9 @@ Please return in JSON format:
                 "references": references,
                 "n_clusters": n_clusters,
                 "organism": organism,
-                "tissue": tissue
+                "tissue": tissue,
+                "focused_evidence": research_result.get("focused_evidence", {}),
+                "triage": research_result.get("triage", {}),
             }
             # Do NOT cache partial results — cache will be populated after PI matching
             return result
@@ -1473,6 +1643,146 @@ Return a JSON object with this EXACT structure:
             del self._annotation_cache[oldest_key]
         self._annotation_cache[cache_key] = result
         return result
+
+    _STATUS_RANK = {"strong": 3, "limited": 2, "contradictory": 1, "exhausted": 0}
+    _EXHAUSTION_REASON_RANK = {
+        "search_failed": 3,
+        "judge_failed": 3,
+        "no_relevant_evidence": 2,
+        "no_pubmed_results": 1,
+        "empty_query": 0,
+        None: 0,
+    }
+
+    def _focused_result_score(self, result: Dict[str, Any]) -> tuple:
+        """Rank focused-search outcomes; on exhausted ties, surface runtime failures."""
+        status = result.get("status", "exhausted")
+        return (
+            self._STATUS_RANK.get(status, 0),
+            self._EXHAUSTION_REASON_RANK.get(result.get("exhaustion_reason"), 0),
+        )
+
+    async def _judge_focused_relevance(self, item, tissue, articles, bucket) -> dict:
+        """轻量 LLM 裁决,沿 identity/marker/tissue/method 维度评相关性。
+
+        携带 candidate + markers + bucket 语境: 对 suspected_contamination,candidate 可能为 None,
+        由 markers 指向判定 contradictory(marker 主要指向其它系统/细胞类型)。
+        """
+        candidate = item.get("candidate_celltype") or "the marker-defined population"
+        markers = ", ".join(item.get("top_markers", [])[:3])
+        purpose = ("verify rare cell identity" if bucket == "rare_unresolved"
+                   else "test whether these markers plausibly arise in this tissue or indicate contamination")
+        listing = "\n".join(
+            f"- {a.get('title','')}: {a.get('abstract','')[:200]}" for a in articles[:10]
+        ) or "(no articles)"
+        prompt = f"""Judge how many PubMed articles support identifying "{candidate}" (markers: {markers})
+in {tissue} tissue. Purpose: {purpose}. Score along cell-type identity, marker support, tissue
+relevance, method relevance.
+
+Articles:
+{listing}
+
+Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderately relevant>,
+"contradictory": <true if markers mainly point to a DIFFERENT system/celltype than the candidate/tissue>}}"""
+        resp = await self.chat_without_history(prompt, temperature=0.1)
+        judge = self._safe_parse_json(resp, default={}) or {}
+        for k in ("strong", "moderate"):
+            judge.setdefault(k, 0)
+        judge.setdefault("contradictory", False)
+        return {"status": status_from_judge(judge), "judge": judge}
+
+    async def _focused_rare_search(self, items, organism: str, tissue: str,
+                                   bucket: str = "rare_unresolved") -> dict:
+        """两级 focused 检索,按簇返回 {articles,status,tier}。
+
+        rare_unresolved: tier1(加 tissue) → 仅当 exhausted/contradictory 时升级 tier2(去 tissue)。
+        suspected_contamination: 并行跑 tier1=discovery(无 tissue) + tier2=plausibility(加 tissue),
+                                 取相关性 rank 更高者(spec §5.2: 两条都查)。
+        空 query 直接记为 exhausted,不发请求。
+        """
+        import asyncio
+        results: dict = {}
+
+        async def _run(item, tier):
+            q = build_focused_query(item, organism, tissue, tier=tier, bucket=bucket)
+            if not q:
+                return {
+                    "articles": [],
+                    "status": "exhausted",
+                    "tier": tier,
+                    "exhaustion_reason": "empty_query",
+                    "error": None,
+                }
+            try:
+                arts = await self._pubmed_search(q, max_results=10)
+            except Exception as e:
+                logger.warning(
+                    "[Literature] Focused PubMed search failed for cluster %s tier %s: %s",
+                    item.get("cluster_id"),
+                    tier,
+                    e,
+                )
+                return {
+                    "articles": [],
+                    "status": "exhausted",
+                    "tier": tier,
+                    "exhaustion_reason": "search_failed",
+                    "error": str(e),
+                }
+
+            if not arts:
+                return {
+                    "articles": [],
+                    "status": "exhausted",
+                    "tier": tier,
+                    "exhaustion_reason": "no_pubmed_results",
+                    "error": None,
+                }
+
+            await asyncio.sleep(0.4)
+
+            try:
+                judged = await self._judge_focused_relevance(item, tissue, arts, bucket)
+            except Exception as e:
+                logger.warning(
+                    "[Literature] Focused relevance judge failed for cluster %s tier %s: %s",
+                    item.get("cluster_id"),
+                    tier,
+                    e,
+                )
+                return {
+                    "articles": [],
+                    "status": "exhausted",
+                    "tier": tier,
+                    "exhaustion_reason": "judge_failed",
+                    "error": str(e),
+                }
+
+            status = judged.get("status", "exhausted") if isinstance(judged, dict) else "exhausted"
+            return {
+                "articles": arts,
+                "status": status,
+                "tier": tier,
+                "exhaustion_reason": "no_relevant_evidence" if status == "exhausted" else None,
+                "error": None,
+            }
+
+        for item in items or []:
+            cid = item.get("cluster_id")
+            if cid is None:
+                continue
+            if bucket == "suspected_contamination":
+                r1 = await _run(item, 1)   # discovery
+                r2 = await _run(item, 2)   # plausibility
+                best = r2 if self._focused_result_score(r2) > self._focused_result_score(r1) else r1
+            else:
+                best = await _run(item, 1)
+                if best["status"] in ("exhausted", "contradictory"):
+                    alt = await _run(item, 2)
+                    if self._focused_result_score(alt) > self._focused_result_score(best):
+                        best = alt
+            results[cid] = best
+        return results
 
     async def validate_pathway(
         self,

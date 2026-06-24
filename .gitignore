@@ -25,3 +25,8 @@ Thumbs.db
 .idea/
 *.swp
 *~
+
+# Marker database TSVs (fetched by scripts/fetch_markers.py)
+backend/data/markers/*.tsv
+!backend/data/markers/README.md
+!backend/data/markers/LICENSE

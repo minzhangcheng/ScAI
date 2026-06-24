@@ -40,13 +40,14 @@ async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> No
     _HITL_RESEND_REASONS = (
         "llm_failure",
         "agent_disabled",
+        "marker_db_missing",
         "species_input",
         "gene_species_mismatch",
     )
     if reason not in _HITL_RESEND_REASONS:
         return
     payload = {
-        "change_type": reason,
+        "change_type": "llm_failure" if reason == "marker_db_missing" else reason,
         "version": getattr(state, "state_version", 0),
         "status": state.status.value if hasattr(state.status, "value") else state.status,
         "current_round": getattr(state, "current_round", 0),

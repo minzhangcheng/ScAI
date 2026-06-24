@@ -466,7 +466,8 @@ async def _execute_chat_agent(
             await _send_agent_msg("pi_response", answer, AgentType.PI)
             return answer
 
-        async def annotate_callback(cluster_markers, tissue, organism):
+        async def annotate_callback(cluster_markers, tissue, organism,
+                                    analysis_log=None, database_priors=None):
             if not cluster_markers:
                 return {
                     "status": "error",

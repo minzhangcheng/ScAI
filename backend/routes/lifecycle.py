@@ -64,6 +64,9 @@ def resolve_hitl_skip_target(state):
     if reason == WaitInputReason.AGENT_DISABLED.value:
         info = state.agent_disabled_info or {}
         return info.get("node_name", ""), info.get("generation", 0)
+    if reason == WaitInputReason.MARKER_DB_MISSING.value:
+        info = getattr(state, "llm_failure_info", None) or {}
+        return info.get("node_name"), info.get("generation")
     if reason in (WaitInputReason.SPECIES_INPUT.value, WaitInputReason.GENE_SPECIES_MISMATCH.value):
         return "species_input", 0  # sentinel: lifecycle will call signal_species_input("")
     # Unknown or None reason — round-completion gate uses signal_continue.
@@ -456,10 +459,11 @@ async def _llm_failure_action_locked(session_id: str, user_id: str, req: LlmFail
     if state.wait_input_reason not in (
         WaitInputReason.LLM_FAILURE.value,
         WaitInputReason.AGENT_DISABLED.value,
+        WaitInputReason.MARKER_DB_MISSING.value,
     ):
         raise HTTPException(
             status_code=409,
-            detail=f"Session wait_input_reason is {state.wait_input_reason}, expected llm_failure or agent_disabled"
+            detail=f"Session wait_input_reason is {state.wait_input_reason}, expected llm_failure, agent_disabled, or marker_db_missing"
         )
 
     workflow = workflows.get(session_id)

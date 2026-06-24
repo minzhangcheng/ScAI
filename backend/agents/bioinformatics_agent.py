@@ -25,6 +25,10 @@ from ..utils.sandbox import (
     LocalJupyterSandbox, CodeExecutionResult, _TPL_NOOP_INSTALL,
 )
 from ..utils.checkpoint import CheckpointManager
+import inspect
+import json as _json
+from backend.services import ora_kernel
+from backend.services.marker_priors import MarkerDB, summarize_database_priors
 from ..utils.formatting import format_revision_history, truncate_for_llm
 
 # Configure logger
@@ -395,6 +399,14 @@ def _build_swallowed_error_feedback(error_type: str, doc_hint: str) -> str:
     return msg
 
 
+_MARKER_DB = MarkerDB()
+
+
+def marker_priors_write(organism: str, workspace_dir):
+    """模块级间接层，便于测试 monkeypatch。"""
+    return _MARKER_DB.write_workspace_input(organism, workspace_dir)
+
+
 class BioinformaticsAgent(BaseAgent):
     """
     Bioinformatics Agent with Autonomous Mode
@@ -424,12 +436,13 @@ class BioinformaticsAgent(BaseAgent):
         sandbox: LocalJupyterSandbox,
         literature_callback: Optional[Callable[[str], Awaitable[str]]] = None,
         pi_callback: Optional[Callable[[str, str], Awaitable[str]]] = None,
-        annotate_clusters_callback: Optional[Callable[[Dict, str, str], Awaitable[Dict[str, Any]]]] = None,
+        annotate_clusters_callback: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None,
         message_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
         figure_review_callback: Optional[Callable[[PublicationFigure], Awaitable[Dict[str, Any]]]] = None,
         supervisor_callback: Optional[Callable[['AnalysisStep', List[str]], Awaitable[SupervisorEvalResult]]] = None,
         technique_agent=None,
         species_validation_callback: Optional[Callable[[List[str], str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
+        marker_db_intervention_callback: Optional[Callable[[], Awaitable["LlmFailureAction"]]] = None,
     ):
         super().__init__(
             agent_type=AgentType.BIOINFORMATICS,
@@ -444,6 +457,7 @@ class BioinformaticsAgent(BaseAgent):
         self.supervisor_callback = supervisor_callback
         self.technique_agent = technique_agent
         self.species_validation_callback = species_validation_callback
+        self.marker_db_intervention_callback = marker_db_intervention_callback
 
         # Track execution history
         self.code_history: List[CodeExecution] = []
@@ -1385,6 +1399,28 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             await self._notify("warning",
                 f"Gene names may not match {state.species}: {assessment.get('reasoning', '')}")
             return False
+
+    async def _compute_database_priors(self, adata_var, cluster_key, rank_key,
+                                       organism, workspace_dir) -> dict:
+        """sandbox 内算 ORA 先验。任何失败返回 {}（绝不抛、绝不阻断注释）。"""
+        try:
+            if not marker_priors_write(organism, workspace_dir):
+                return {}
+            src = inspect.getsource(ora_kernel)
+            call = (
+                f"\n_priors = compute_ora_priors({adata_var}, "
+                f"'tables/marker_priors_input.tsv', {cluster_key!r}, {rank_key!r})\n"
+                f"import json as __j; print(__j.dumps(_priors))\n"
+            )
+            result = await self.sandbox.execute(src + call, save_to_history=False,
+                                                skip_safety_check=True)
+            out = getattr(result, "output", "") or ""
+            line = next((ln for ln in out.strip().splitlines()[::-1]
+                         if ln.strip().startswith("{")), None)
+            return _json.loads(line) if line else {}
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] DB priors computation skipped: {e}")
+            return {}
 
     async def _detect_and_lookup_swallowed_error(self, result, code: str):
         """Detect a technical error the agent caught in-code (try/except) and then
@@ -2890,11 +2926,27 @@ finally:
 
                     await self._notify("status", f"Annotating {n_clusters} clusters using literature evidence ({organism} {tissue})...")
 
+                    # 缺文件 HITL 门控（必须在算 priors 之前）
+                    if not _MARKER_DB.present() and self.marker_db_intervention_callback:
+                        from backend.constants import LlmFailureAction as _LFA
+                        from backend.workflow.helpers import WorkflowTerminatedError
+                        action = await self.marker_db_intervention_callback()
+                        if action == _LFA.TERMINATE:
+                            raise WorkflowTerminatedError("Analysis terminated by user at marker DB gate")
+                        if action == _LFA.RETRY:
+                            _MARKER_DB.reload()  # clear stale empty cache after fetch
+                    workspace_dir = getattr(self.sandbox, "working_dir", None)
+                    database_priors = {}
+                    if workspace_dir is not None:
+                        database_priors = await self._compute_database_priors(
+                            adata_var, cluster_key, rank_key_hint, organism, workspace_dir)
+
                     annotation_result: Dict[str, Any] = {}
                     if self.annotate_clusters_callback:
                         annotation_result = await self.annotate_clusters_callback(
                             cluster_markers, tissue, organism,
                             analysis_log=analysis_log,
+                            database_priors=database_priors,
                         )
                     else:
                         annotation_result = {
@@ -3023,6 +3075,8 @@ finally:
                         agent_reasoning=agent_reasoning,
                         cluster_markers_summary=markers_summary, annotation_tissue=tissue,
                         annotation_organism=organism, annotation_result_summary=(tool_result or ""),
+                        annotation_database_priors_summary=summarize_database_priors(
+                            database_priors, len(cluster_markers)),
                     ))
                     annotation_completed = True
                     annotation_retry_required = False

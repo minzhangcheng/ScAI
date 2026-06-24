@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.28.8.1"
+VERSION = "0.29.1"
 
 
 # ── Node → Agent mapping ───────────────────────────────────────────
@@ -64,6 +64,7 @@ class LlmFailureAction(str, Enum):
 class WaitInputReason(str, Enum):
     LLM_FAILURE = "llm_failure"
     AGENT_DISABLED = "agent_disabled"
+    MARKER_DB_MISSING = "marker_db_missing"
     SPECIES_INPUT = "species_input"
     GENE_SPECIES_MISMATCH = "gene_species_mismatch"
 

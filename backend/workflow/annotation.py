@@ -119,6 +119,7 @@ class AnnotationMixin:
         tissue: str,
         organism: str,
         analysis_log: Optional[List] = None,
+        database_priors: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """Callback for bioinformatics agent to annotate all clusters via literature.
 
@@ -189,6 +190,7 @@ class AnnotationMixin:
                         tissue=tissue,
                         articles=articles,
                         search_history=search_history,
+                        state=state,
                     )
 
                 pi_search_guided = True
@@ -268,6 +270,9 @@ class AnnotationMixin:
                     organism=organism,
                     tissue=tissue,
                     literature_report=literature_report,
+                    triage=result.get("triage", {}),
+                    focused_evidence=result.get("focused_evidence", {}),
+                    database_priors=database_priors or {},
                 )
                 result["status"] = "completed"
                 result["annotations"] = matching_result.get("annotations", {})
@@ -322,7 +327,7 @@ class AnnotationMixin:
             )
             try:
                 pi_review = await self.pi_agent.review_cluster_annotations(
-                    state, annotations, tissue, organism
+                    state, annotations, tissue, organism, triage=result.get("triage", {})
                 )
                 for cid, review in pi_review.items():
                     if cid in annotations and isinstance(review, dict):
@@ -431,7 +436,7 @@ class AnnotationMixin:
 
                     try:
                         pi_review = await self.pi_agent.review_cluster_annotations(
-                            state, annotations, tissue, organism
+                            state, annotations, tissue, organism, triage=result.get("triage", {})
                         )
                         for cid, review in pi_review.items():
                             if cid in annotations and isinstance(review, dict):

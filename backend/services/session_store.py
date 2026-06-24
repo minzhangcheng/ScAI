@@ -140,7 +140,10 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
         state = await asyncio.to_thread(load_session_from_disk, session_id)
         if state:
             # Clean up stale LLM failure state from a previous process
-            if state.wait_input_reason == WaitInputReason.LLM_FAILURE.value:
+            if state.wait_input_reason in (
+                WaitInputReason.LLM_FAILURE.value,
+                WaitInputReason.MARKER_DB_MISSING.value,
+            ):
                 logger.warning(
                     f"Session {session_id}: clearing stale LLM failure state from previous process"
                 )

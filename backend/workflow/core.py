@@ -313,6 +313,63 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             return LlmFailureAction.TERMINATE
         return LlmFailureAction.SKIP
 
+    async def _wait_for_marker_db_intervention(
+        self, node_name: str, analysis_state: AnalysisState,
+    ) -> LlmFailureAction:
+        """缺 marker TSV 时复用 LlmTimeoutDialog 通道。retry 不清 LLM cache。"""
+        async with self._llm_failure_lock:
+            self._llm_failure_generation += 1
+            gen = self._llm_failure_generation
+            if node_name not in self._llm_failure_events:
+                self._llm_failure_events[node_name] = asyncio.Event()
+            event = self._llm_failure_events[node_name]
+            event.clear()
+            analysis_state.wait_input_reason = WaitInputReason.MARKER_DB_MISSING.value
+            analysis_state.llm_failure_info = {
+                "agent": "bioinformatics", "model": "", "llm_server": "",
+                "error": ("Marker database TSV not found at backend/data/markers/. "
+                          "Click 'Fetch' to download or 'Skip'."),
+                "node_name": node_name, "generation": gen, "reason": "marker_db_missing",
+            }
+            self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+            await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_FAILURE.value)
+
+        try:
+            await event.wait()
+            action = self._llm_failure_actions.pop(node_name, None)
+            analysis_state.wait_input_reason = None
+            analysis_state.llm_failure_info = None
+            self._set_status(analysis_state, TaskStatus.RUNNING)
+            await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_RETRY.value)
+        except asyncio.CancelledError:
+            analysis_state.wait_input_reason = None
+            analysis_state.llm_failure_info = None
+            raise
+        finally:
+            self._llm_failure_events.pop(node_name, None)
+
+        if action == LlmFailureAction.RETRY.value:
+            return LlmFailureAction.RETRY
+        if action == LlmFailureAction.TERMINATE.value:
+            return LlmFailureAction.TERMINATE
+        return LlmFailureAction.SKIP
+
+    async def _marker_db_intervention_callback(self) -> LlmFailureAction:
+        """传给 bio agent 的回调：缺 marker DB 时弹 HITL；retry 即时联网补齐。"""
+        import asyncio as _aio
+        from backend.services import marker_priors
+        action = await self._wait_for_marker_db_intervention(
+            "bioinformatics_analysis", self._current_analysis_state)
+        if action == LlmFailureAction.RETRY:
+            ok = await _aio.to_thread(marker_priors.trigger_fetch)
+            await self._send_message(
+                "status",
+                "Marker DB fetched, computing priors" if ok else "Marker DB fetch failed; skipping DB priors",
+                AgentType.BIOINFORMATICS)
+        elif action == LlmFailureAction.SKIP:
+            await self._send_message("status", "Skipped DB priors", AgentType.BIOINFORMATICS)
+        return action
+
     def signal_continue(self):
         """Signal the workflow to continue from wait_for_user_input"""
         self._continue_event.set()
@@ -538,6 +595,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             supervisor_callback=self._supervisor_callback,
             technique_agent=self.technique_agent,
             species_validation_callback=self._species_validation_callback,
+            marker_db_intervention_callback=self._marker_db_intervention_callback,
         )
         self.bioinformatics_agent.set_session(self.session_id)
         self.bioinformatics_agent._pause_event = self._pause_event

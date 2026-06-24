@@ -861,6 +861,7 @@ export function useWebSocket() {
                 error: info.error,
                 nodeName: info.node_name,
                 generation: info.generation,
+                reason: info.reason,
               })
               store.setShowLlmTimeoutDialog(true)
             } else if (

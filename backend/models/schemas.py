@@ -134,6 +134,7 @@ class AnalysisStep(BaseModel):
     annotation_tissue: Optional[str] = None
     annotation_organism: Optional[str] = None
     annotation_result_summary: Optional[str] = None
+    annotation_database_priors_summary: Optional[str] = None
 
     # report_findings fields
     findings: List[str] = Field(default_factory=list)
@@ -542,7 +543,7 @@ class AnalysisState(BaseModel):
     human_messages: List[Dict[str, Any]] = Field(default_factory=list)  # History of human interventions
 
     # LLM failure user intervention
-    wait_input_reason: Optional[str] = None    # None | "llm_failure" | "agent_disabled"
+    wait_input_reason: Optional[str] = None    # None | "llm_failure" | "agent_disabled" | "marker_db_missing" | "species_input" | "gene_species_mismatch"
     llm_failure_info: Optional[Dict[str, Any]] = None
     # llm_failure_info keys when set:
     #   "agent": str       — agent name (e.g. "pathology")

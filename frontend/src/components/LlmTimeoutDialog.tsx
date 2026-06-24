@@ -80,6 +80,77 @@ export default function LlmTimeoutDialog({
   if (!open) return null
 
   const agentLabelKey = AGENT_LABEL_KEYS[llmFailureInfo.agent] || 'piAgent'
+  const isMarkerDb = llmFailureInfo.reason === 'marker_db_missing'
+
+  if (isMarkerDb) {
+    return (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+        onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+        onKeyDown={handleKeyDown}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('markerDbMissingTitle')}
+      >
+        <div
+          ref={dialogRef}
+          tabIndex={-1}
+          className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 outline-none"
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5 text-red-600" aria-hidden="true" />
+              </div>
+              <h2 className="text-lg font-semibold text-gray-900">
+                {t('markerDbMissingTitle')}
+              </h2>
+            </div>
+            <button
+              onClick={onClose}
+              className="p-1 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+              aria-label={t('llmClose')}
+            >
+              <X className="w-5 h-5" aria-hidden="true" />
+            </button>
+          </div>
+
+          {/* Description */}
+          <div className="px-6 py-4">
+            <p className="text-sm text-gray-600">{t('markerDbMissingDesc')}</p>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="px-6 pb-4 space-y-2">
+            <button
+              onClick={onRetry}
+              data-autofocus
+              className="w-full flex items-center justify-between px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors"
+            >
+              <span>{t('markerDbFetch')}</span>
+            </button>
+            <button
+              onClick={onSkip}
+              className="w-full px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-medium transition-colors"
+            >
+              {t('llmSkip')}
+            </button>
+            <button
+              onClick={onTerminate}
+              className="w-full px-4 py-3 bg-red-50 hover:bg-red-100 text-red-700 rounded-xl font-medium transition-colors border border-red-200 text-left"
+            >
+              {t('llmTerminate')}
+            </button>
+          </div>
+
+          <div className="px-6 pb-4 text-center text-xs text-gray-400">
+            {t('llmReopenHint')}
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
