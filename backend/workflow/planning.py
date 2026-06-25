@@ -42,6 +42,13 @@ def resolve_round_phase(current_round: int, current_phase: str,
     return "innovation" if has_exploration_report else "exploration"
 
 
+def _selected_directions_from_decision(selection_decision):
+    if isinstance(selection_decision, dict):
+        selected = selection_decision.get("selected_directions", [])
+        return selected if isinstance(selected, list) else []
+    return selection_decision if isinstance(selection_decision, list) else []
+
+
 class PlanningMixin:
     """Mixin providing planning-dialogue methods. Composed into SingleCellAnalysisWorkflow."""
     @with_retry("pi_planning")
@@ -267,7 +274,10 @@ class PlanningMixin:
                 elif user_direction == PI_DECIDE_SIGNAL or (not user_direction and analysis_state.current_round == 2):
                     # PI autonomously selects 2 best directions
                     logger.info(f"[{self.session_id}] Innovation phase: PI selecting best directions")
-                    selected_dirs = await self.pi_agent.select_best_directions(analysis_state)
+                    selection_decision = await self.pi_agent.select_best_directions(analysis_state)
+                    selected_dirs = _selected_directions_from_decision(selection_decision)
+                    if analysis_state.exploration_report and isinstance(selection_decision, dict):
+                        analysis_state.exploration_report.direction_selection_summary = selection_decision
                     # Set up multi-direction queue
                     analysis_state.user_chosen_directions = selected_dirs
                     # Pop first direction, rest goes to queue

@@ -1318,26 +1318,53 @@ Return a JSON object with this EXACT structure:
     ) -> ExplorationReport:
         """
         Generate structured exploration report (Report A) after Phase 1.
-
-        Summarizes all findings into a structured format for PI decision-making
-        in the Innovation phase and for user review.
+        Delegates to generate_raw_direction_candidates and score_directions_with_evidence.
         """
         logger.info(f"[PI] Generating exploration report")
+        raw_candidates = await self.generate_raw_direction_candidates(state, round_result)
+        fallback_evidence = [
+            {
+                "direction_id": c.get("direction_id", f"dir_{i+1:03d}"),
+                "direction": c.get("direction", ""),
+                "status": "skipped",
+                "search_tier": "failed",
+                "literature_novelty": "unknown",
+                "confidence": "failed",
+                "summary": "Literature evidence was not provided to direct generate_exploration_report call.",
+            }
+            for i, c in enumerate(raw_candidates)
+        ]
+        return await self.score_directions_with_evidence(state, round_result, raw_candidates, fallback_evidence)
+
+    async def generate_raw_direction_candidates(
+        self,
+        state: AnalysisState,
+        round_result: RoundResult,
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate raw research direction candidates without final scoring.
+        Called by generate_exploration_report as a separate substep.
+        """
+        logger.info(f"[PI] Generating raw direction candidates")
         self.reset_history()
 
-        # Build annotation context
         ann_summary = "No annotation data"
         if state.annotation_state and state.annotation_state.cluster_annotations:
             ann_lines = []
             for ca in state.annotation_state.cluster_annotations:
-                override_note = f" (user override: {ca.user_override})" if ca.user_override else ""
                 ann_lines.append(
-                    f"- Cluster {ca.cluster_id}: {ca.cell_type}{override_note} "
+                    f"- Cluster {ca.cluster_id}: {ca.cell_type} "
                     f"[confidence: {ca.confidence}] markers: {', '.join(ca.key_markers[:10])}"
                 )
             ann_summary = "\n".join(ann_lines)
 
-        prompt = f"""Based on the Round 1 exploration results, generate a structured exploration report.
+        prompt = f"""Based on the Round 1 exploration results, propose 3-5 raw research direction candidates.
+
+## Project Context
+- Name: {state.name}
+- Research Objective: {state.initial_instruction}
+- Species: {state.species or "Not specified"}
+{state.build_experimental_design_summary()}
 
 ## Round 1 Results
 **Bioinformatics findings**: {json.dumps(round_result.bioinformatics_findings[:15], ensure_ascii=False)}
@@ -1349,35 +1376,183 @@ Return a JSON object with this EXACT structure:
 ## Cell Annotations
 {ann_summary}
 
-Generate a comprehensive structured report in JSON:
+For each candidate, provide ALL of the following fields:
+- direction_id: Unique identifier like "dir_001"
+- direction: A specific, actionable research question
+- hypothesis: Brief hypothesis for this direction
+- rationale: Why this direction is interesting based on the data
+- supporting_data: What specific data supports this direction
+- key_genes: List of relevant genes
+- key_cell_types: List of relevant cell types
+- key_pathways: List of relevant pathways
+- key_uncertainties: What remains uncertain or needs validation
+- suggested_literature_topics: Natural-language topics for literature search
+- suggested_methods: Specific methods to investigate this direction
+- biology_expectedness: one of "expected", "partially_expected", "unexpected", "unknown"
+- functional_impact_hypothesis: Brief hypothesis about functional/clinical impact
+- prerequisite_dependencies: List of direction_ids that should be investigated first (empty list if none)
+- organism: {state.species or "Not specified"}
+- tissue: Tissue context from the experiment
+- experimental_context: The experimental design context
+
+IMPORTANT: Do NOT assign final innovation, literature novelty, data reliability, or priority scores. Those will be evaluated in a separate step with literature evidence.
+
+Return a JSON object with a single key "candidates" containing the list of candidate objects:
 {{
-    "cluster_overview": "Summary of all clusters: count, major cell type categories, proportions, condition distribution",
-    "data_quality_warnings": ["Warning about clusters with very few cells (<50)", "Warning about poor QC metrics", ...],
-    "strongest_heterogeneity": ["Which clusters/cell types show the strongest changes between conditions", ...],
-    "key_pathway_changes": ["Significant pathway enrichment results across clusters", ...],
-    "abnormal_markers": ["Clusters with unexpected marker expression patterns", ...],
-    "low_confidence_annotations": ["Clusters with uncertain cell type identity", ...],
-    "pi_direction_assessment": "Your overall assessment of the most promising research directions based on ALL the data",
-    "research_direction_candidates": [
+    "candidates": [
         {{
-            "direction": "A specific research question, e.g., 'Subtype-specific state shift of <cell type> between conditions, driven by <candidate pathway>'",
-            "rationale": "Why this is interesting based on the data (cite specific findings)",
-            "expected_innovation": "High/Medium/Low — Is this a well-studied area (Low) or an emerging/under-explored area (High)? Provide brief evidence.",
-            "expected_novelty": "High/Medium/Low — Is this finding expected (Low) or surprising/counter-intuitive (High)? Explain WHY.",
-            "data_reliability": "High/Medium/Low — Based on sample sizes, statistical significance, and effect sizes, how reliable is the supporting evidence? Cite specific data."
-        }},
-        ...
+            "direction_id": "dir_001",
+            "direction": "...",
+            "hypothesis": "...",
+            ...
+        }}
     ]
 }}
-
-IMPORTANT:
-- Include 3-5 research direction candidates
-- Each candidate should be a specific, actionable research question (not vague)
-- Base all assessments on actual data findings, not assumptions
-- For EACH candidate, you MUST provide all 5 fields: direction, rationale, expected_innovation, expected_novelty, data_reliability
-- Each evaluation field should start with the score (High/Medium/Low) followed by a brief explanation
 """
+        response = await self.chat(prompt, temperature=0.3)
+        data = self._safe_parse_json(response, default={})
+        candidates = data.get("candidates", [])
+        if not candidates:
+            logger.warning("[PI] Raw direction candidates empty, using fallback")
+            candidates = [{
+                "direction_id": "dir_001",
+                "direction": "Continue analysis based on Round 1 findings",
+                "hypothesis": "Further exploration needed",
+                "rationale": "No specific candidates generated",
+                "supporting_data": "",
+                "key_genes": [],
+                "key_cell_types": [],
+                "key_pathways": [],
+                "key_uncertainties": [],
+                "suggested_literature_topics": [],
+                "suggested_methods": [],
+                "biology_expectedness": "unknown",
+                "functional_impact_hypothesis": "",
+                "prerequisite_dependencies": [],
+                "organism": state.species or "Not specified",
+                "tissue": "",
+                "experimental_context": "",
+            }]
+        return candidates
 
+    async def score_directions_with_evidence(
+        self,
+        state: AnalysisState,
+        round_result: RoundResult,
+        raw_candidates: List[Dict[str, Any]],
+        literature_evidence: List[Dict[str, Any]],
+    ) -> ExplorationReport:
+        """
+        Score raw direction candidates with literature evidence to produce a complete ExplorationReport.
+        """
+        logger.info(f"[PI] Scoring {len(raw_candidates)} direction candidates with evidence")
+        self.reset_history()
+
+        ann_summary = "No annotation data"
+        if state.annotation_state and state.annotation_state.cluster_annotations:
+            ann_lines = []
+            for ca in state.annotation_state.cluster_annotations:
+                ann_lines.append(
+                    f"- Cluster {ca.cluster_id}: {ca.cell_type} "
+                    f"[confidence: {ca.confidence}] markers: {', '.join(ca.key_markers[:10])}"
+                )
+            ann_summary = "\n".join(ann_lines)
+
+        prompt = f"""You are the PI scoring research direction candidates with literature evidence.
+
+## Project Context
+- Name: {state.name}
+- Research Objective: {state.initial_instruction}
+
+## Round 1 Results
+**Bioinformatics findings**: {json.dumps(round_result.bioinformatics_findings[:15], ensure_ascii=False)}
+**Pathology findings**: {json.dumps(round_result.pathology_findings[:5], ensure_ascii=False)}
+**Biochemistry findings**: {json.dumps(round_result.biochemistry_findings[:5], ensure_ascii=False)}
+**Literature findings**: {json.dumps(round_result.literature_findings[:5], ensure_ascii=False)}
+**PI Summary**: {round_result.pi_summary[:1000]}
+
+## Cell Annotations
+{ann_summary}
+
+## Raw Direction Candidates
+{json.dumps(raw_candidates, ensure_ascii=False, indent=2)}
+
+## Literature Evidence
+{json.dumps(literature_evidence, ensure_ascii=False, indent=2) if literature_evidence else "No literature evidence provided."}
+
+### PI SCORING RULES
+
+Apply ALL of the following scoring rules:
+
+1. **Data reliability is the baseline**: If data_reliability=low, this direction cannot be a top recommendation unless the user explicitly chooses it.
+2. **Failed literature confidence forces unknown novelty**: If literature_confidence=failed, literature_novelty must be "unknown".
+3. **Speculative combinations**: High literature_novelty with low data_reliability is speculative and must not be the default recommendation; add a risk flag.
+4. **Strong combination dominates**: high data reliability + high data novelty + high mechanistic importance should dominate overall_priority.
+5. **Complementarity**: when recommending multiple directions, they must be complementary (e.g., one describes network architecture, one tests causal origin), not redundant.
+6. **Independence**: functional_impact must be assessed separately from mechanistic_importance.
+7. **Independence**: biology_expectedness must be assessed separately from literature_novelty and data_novelty.
+8. **Prerequisites**: if a direction has prerequisites, its prerequisite direction must also be selected or explicitly noted as already satisfied by prior results.
+9. **Composite priority**: overall_priority derives from the interaction of data_reliability, data_novelty, and functional_impact; when dimensions conflict, give explicit reasoning.
+10. **Conflict reconciliation**: when literature_novelty and biology_expectedness conflict, reconcile the discrepancy explicitly in literature_support_summary, data_support_summary, or risk_flags.
+11. **Negative-validation caveat**: when an evidence record has negative_validation_confidence=medium, any literature_novelty=high must be explicitly justified in literature_support_summary because at least one evidence axis is incomplete.
+
+### SCORING DIMENSIONS
+
+For each candidate, score ALL of these dimensions:
+
+1. **data_reliability**: "high" / "medium" / "low" — Based on sample sizes, effect sizes, statistical significance, and data quality.
+2. **literature_novelty**: "high" / "medium" / "low" / "unknown" — How well-studied is this area? "unknown" only when literature evidence failed.
+3. **biology_expectedness**: "expected" / "partially_expected" / "unexpected" / "unknown" — Given known pathways/mechanisms, is the finding expected, partly expected, or unexpected? This is PI reasoning, not PubMed coverage.
+4. **data_novelty**: "high" / "medium" / "low" — How unexpected or surprising is this finding in the data?
+5. **mechanistic_importance**: "high" / "medium" / "low" — How central is the proposed mechanism to the phenotype/disease?
+6. **functional_impact**: "high" / "medium" / "low" — What is the likely functional or clinical impact?
+7. **data_sufficiency**: "sufficient" / "partial" / "insufficient" — Is there enough data to support this direction?
+8. **methodological_gap**: "none" / "minor" / "major" — What methodological gaps exist?
+
+Also derive:
+- **overall_priority**: "high" / "medium" / "low" — Composite priority based on ALL dimensions.
+- **risk_flags**: List of specific risk flags (e.g., "cross_species_extrapolation", "low_statistical_power").
+- **prerequisite_dependencies**: Which other direction_ids must be completed first.
+- **evidence_ref**: Must match the direction_id from literature evidence.
+
+Finally, produce the **direction_dependency_graph** — a mapping from each direction_id to a list of direction_ids it depends on (from prerequisite_dependencies).
+
+Return a complete structured report JSON:
+{{
+    "cluster_overview": "...",
+    "data_quality_warnings": [...],
+    "strongest_heterogeneity": [...],
+    "key_pathway_changes": [...],
+    "abnormal_markers": [...],
+    "low_confidence_annotations": [...],
+    "pi_direction_assessment": "...",
+    "research_direction_candidates": [
+        {{
+            "direction_id": "dir_001",
+            "direction": "...",
+            "rationale": "...",
+            "data_support_summary": "...",
+            "literature_support_summary": "...",
+            "data_reliability": "high|medium|low",
+            "literature_novelty": "high|medium|low|unknown",
+            "biology_expectedness": "expected|partially_expected|unexpected|unknown",
+            "data_novelty": "high|medium|low",
+            "mechanistic_importance": "high|medium|low",
+            "functional_impact": "high|medium|low",
+            "data_sufficiency": "sufficient|partial|insufficient",
+            "methodological_gap": "none|minor|major",
+            "overall_priority": "high|medium|low",
+            "risk_flags": ["..."],
+            "prerequisite_dependencies": ["dir_id", "..."],
+            "evidence_ref": "dir_001"
+        }}
+    ],
+    "raw_direction_candidates": <echo the raw candidates exactly as provided above>,
+    "direction_literature_evidence": <echo the evidence matrix exactly as provided above>,
+    "direction_dependency_graph": {{"dir_001": ["dir_002"], ...}},
+    "direction_selection_summary": {{}}
+}}
+"""
         response = await self.chat(prompt, temperature=0.3)
         data = self._safe_parse_json(response, default={})
 
@@ -1385,7 +1560,55 @@ IMPORTANT:
         valid_fields = {k: v for k, v in data.items() if k in ExplorationReport.model_fields}
         report = ExplorationReport(**valid_fields)
 
+        # Normalize: research_direction_candidates must hold the FINAL scored candidates.
+        scored = data.get("research_direction_candidates") or []
+        # Recover if the LLM placed scored candidates under raw_direction_candidates by mistake.
+        if not any(isinstance(c, dict) and c.get("overall_priority") for c in scored):
+            recovered = [c for c in (data.get("raw_direction_candidates") or [])
+                         if isinstance(c, dict) and c.get("overall_priority")]
+            if recovered:
+                scored = recovered
+        # Guarantee direction_id + evidence_ref on every scored candidate.
+        raw_by_index = {i: rc for i, rc in enumerate(raw_candidates)}
+        for i, c in enumerate(scored):
+            if not isinstance(c, dict):
+                continue
+            if not c.get("direction_id"):
+                c["direction_id"] = (raw_by_index.get(i, {}) or {}).get("direction_id", f"dir_{i+1:03d}")
+            if not c.get("evidence_ref"):
+                c["evidence_ref"] = c["direction_id"]
+        report.research_direction_candidates = scored
+
+        # raw_direction_candidates always holds the ORIGINAL raw input.
+        report.raw_direction_candidates = raw_candidates
+        # Evidence matrix always preserved.
+        if not report.direction_literature_evidence:
+            report.direction_literature_evidence = literature_evidence
+
+        # Dependency-cycle validation MUST propagate — a cyclic graph must not be exposed.
+        if report.direction_dependency_graph:
+            self._validate_direction_dependency_graph(report.direction_dependency_graph)
+
         return report
+
+    def _validate_direction_dependency_graph(self, graph: Dict[str, List[str]]) -> None:
+        """Validate direction dependency graph for cycles using DFS."""
+        visiting = set()
+        visited = set()
+
+        def visit(node: str) -> None:
+            if node in visiting:
+                raise ValueError(f"Cycle detected in direction dependency graph at {node}")
+            if node in visited:
+                return
+            visiting.add(node)
+            for dep in graph.get(node, []) or []:
+                visit(dep)
+            visiting.remove(node)
+            visited.add(node)
+
+        for node in graph:
+            visit(node)
 
     async def innovation_instruction(
         self,
@@ -1610,24 +1833,30 @@ Return JSON:
     async def select_best_directions(
         self,
         state: AnalysisState
-    ) -> List[Dict[str, str]]:
+    ) -> Dict[str, Any]:
         """
-        PI autonomously selects 2 best research directions from exploration report candidates.
+        PI autonomously selects the best research directions from exploration report candidates.
         Used when user clicks 'Let PI Decide' or countdown expires.
 
         Returns:
-            List of dicts, each with 'direction' and 'notes' keys.
+            DirectionSelectionDecision-shaped dict with selected_directions, rejected_directions, selection_rationale.
         """
-        logger.info(f"[PI] Selecting 2 best research directions")
+        logger.info(f"[PI] Selecting best research directions")
+        self.reset_history()
 
         candidates = []
         if state.exploration_report and state.exploration_report.research_direction_candidates:
             candidates = state.exploration_report.research_direction_candidates
 
         if not candidates:
-            return [{"direction": "Continue analysis based on Round 1 findings", "notes": ""}]
+            return {
+                "selected_directions": [{"direction": "Continue analysis based on Round 1 findings", "notes": ""}],
+                "rejected_directions": [],
+                "selection_rationale": "No candidates available; using default direction.",
+            }
 
         exploration_context = ""
+        dependency_graph_section = ""
         if state.exploration_report:
             exploration_context = f"""
 Cluster Overview: {state.exploration_report.cluster_overview[:500]}
@@ -1636,21 +1865,30 @@ Strongest Heterogeneity: {json.dumps(state.exploration_report.strongest_heteroge
 Data Quality Warnings: {json.dumps(state.exploration_report.data_quality_warnings[:3], ensure_ascii=False)}
 PI Direction Assessment: {state.exploration_report.pi_direction_assessment[:500]}
 """
+            if state.exploration_report.direction_dependency_graph:
+                dependency_graph_section = f"""
+## Direction Dependency Graph
+{json.dumps(state.exploration_report.direction_dependency_graph, ensure_ascii=False, indent=2)}
 
-        prompt = f"""You are the PI selecting the 2 BEST research directions for the innovation phase.
+Select directions that respect dependency ordering: dependent directions should only be selected if their prerequisites are also selected.
+"""
+
+        prompt = f"""You are the PI selecting the best research direction(s) for the innovation phase.
 
 ## Exploration Report
 {exploration_context}
-
+{dependency_graph_section}
 ## Candidates
 {json.dumps(candidates, ensure_ascii=False, indent=2)}
 
-Select exactly 2 directions that together will provide the most comprehensive and impactful research outcomes.
+Select the best direction(s) — usually 1 to 2 — that together provide the most comprehensive and impactful outcomes while respecting prerequisite dependencies.
 
 SELECTION CRITERIA:
 1. **Reliability** is the baseline: low-reliability directions should be avoided
 2. **Innovation + Novelty** together determine priority
-3. The 2 selected directions should ideally be complementary (not redundant)
+3. Selected directions should ideally be complementary (not redundant)
+4. Consider the dependency graph: if a direction has prerequisites, ensure its prerequisites are also selected or the direction is independently viable
+5. For each rejected direction, provide an explanation
 
 Return JSON:
 {{
@@ -1664,7 +1902,15 @@ Return JSON:
             "notes": "Brief PI notes on why this was selected and what to focus on"
         }}
     ],
-    "rationale": "Why these 2 directions were chosen over others"
+    "rejected_directions": [
+        {{
+            "direction": "The exact direction text from rejected candidates",
+            "reason_not_selected": "Why this direction was not selected",
+            "follow_up_value": "high|medium|low",
+            "dependency_note": "Whether it has unmet prerequisites or is suitable as follow-up"
+        }}
+    ],
+    "selection_rationale": "Why these directions were chosen over others"
 }}
 """
 
@@ -1672,19 +1918,66 @@ Return JSON:
         data = self._safe_parse_json(response, default={})
 
         selected = data.get("selected_directions", [])
+        rejected = data.get("rejected_directions", [])
+        rationale = data.get("selection_rationale", "")
+
         if not selected or len(selected) < 1:
             # Fallback: pick first 2 candidates
             selected = [
                 {"direction": c.get("direction", ""), "notes": ""}
                 for c in candidates[:2]
             ]
+            # Build rejected list from remaining candidates
+            selected_dirs_set = {d["direction"] for d in selected}
+            rejected = [
+                {"direction": c.get("direction", ""), "reason_not_selected": "Not selected in fallback",
+                 "follow_up_value": "low", "dependency_note": ""}
+                for c in candidates
+                if c.get("direction", "") not in selected_dirs_set
+            ]
+            if not rationale:
+                rationale = "Fallback: selected first available candidates."
 
         # Ensure at least 1 direction
         if not selected:
             selected = [{"direction": "Continue analysis based on Round 1 findings", "notes": ""}]
 
+        # Validate dependency graph if present
+        dep_graph = state.exploration_report.direction_dependency_graph if state.exploration_report else {}
+        if dep_graph:
+            # A cyclic graph must not be used to present direction options (spec §377).
+            self._validate_direction_dependency_graph(dep_graph)
+
+        # Prerequisite closure (multi-hop): keep adding prerequisites until none are missing.
+        text_by_id = {c.get("direction_id"): c.get("direction", "") for c in candidates if isinstance(c, dict)}
+        id_by_text = {c.get("direction", ""): c.get("direction_id") for c in candidates if isinstance(c, dict)}
+        selected_texts = {d.get("direction", "") for d in selected}
+        changed = True
+        while changed:
+            changed = False
+            for d in list(selected):
+                dir_id = id_by_text.get(d.get("direction", ""))
+                cand = next((c for c in candidates if isinstance(c, dict) and c.get("direction_id") == dir_id), None)
+                if not cand:
+                    continue
+                for prereq_id in cand.get("prerequisite_dependencies", []) or []:
+                    prereq_text = text_by_id.get(prereq_id)
+                    if prereq_text and prereq_text not in selected_texts:
+                        selected.append({"direction": prereq_text,
+                                         "notes": f"Added to satisfy prerequisite of '{d.get('direction', '')}'."})
+                        selected_texts.add(prereq_text)
+                        changed = True
+
+        # A direction promoted into selected (e.g. as a prerequisite) must not also appear as rejected.
+        rejected = [r for r in rejected
+                    if isinstance(r, dict) and r.get("direction", "") not in selected_texts]
+
         logger.info(f"[PI] Selected {len(selected)} directions: {[d['direction'][:50] for d in selected]}")
-        return selected
+        return {
+            "selected_directions": selected,
+            "rejected_directions": rejected,
+            "selection_rationale": rationale,
+        }
 
     async def plan_supplementary_analysis(
         self, state: AnalysisState, user_request: str, context: str

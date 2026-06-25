@@ -26,8 +26,10 @@ from ..utils.settings_provider import AgentSettingsProvider
 
 logger = logging.getLogger(__name__)
 from ..models.schemas import (
-    AgentType, AnalysisState, MessageRole, LiteratureReport
+    AgentType, AnalysisState, MessageRole, LiteratureReport,
+    DirectionSearchQuery, PubMedEvidenceItem, DirectionLiteratureEvidence,
 )
+SpeciesTissueQualification = str
 from ..utils.llm_client import OpenAICompatibleClient, GoogleDeepResearchClient, RETRYABLE_EXCEPTIONS
 from openai import RateLimitError
 
@@ -1860,3 +1862,705 @@ Reply in JSON format:
             "references": result.get("references", []),
             "findings": result.get("findings", [])
         }
+
+    # ===================================================================
+    # Direction novelty literature triage (Task 2)
+    # ===================================================================
+
+    def _candidate_terms(self, candidate: Dict[str, Any]) -> Dict[str, List[str]]:
+        return {
+            "genes": [str(x).strip() for x in candidate.get("key_genes", []) if str(x).strip()],
+            "cells": [str(x).strip() for x in candidate.get("key_cell_types", []) if str(x).strip()],
+            "pathways": [str(x).strip() for x in candidate.get("key_pathways", []) if str(x).strip()],
+            "methods": [str(x).strip() for x in candidate.get("suggested_methods", []) if str(x).strip()],
+            "organism": [str(candidate.get("organism") or "").strip()],
+            "tissue": [str(candidate.get("tissue") or "").strip()],
+            "context": [str(candidate.get("experimental_context") or "").strip()],
+        }
+
+    def _format_term_list(self, terms: List[str], field: str = "tiab") -> str:
+        quoted = [f'"{t}"[{field}]' for t in terms if t]
+        if not quoted:
+            return ""
+        if len(quoted) == 1:
+            return quoted[0]
+        return "(" + " OR ".join(quoted) + ")"
+
+    def _build_direct_prior_work(self, terms: Dict[str, List[str]], deep: bool) -> Optional[str]:
+        parts = []
+        gene_part = self._format_term_list(terms["genes"])
+        if gene_part:
+            parts.append(gene_part)
+        # Fall back to cells or pathways if no genes
+        if not gene_part:
+            cell_part = self._format_term_list(terms["cells"])
+            if cell_part:
+                parts.append(cell_part)
+        if not gene_part and not parts:
+            pathway_part = self._format_term_list(terms["pathways"])
+            if pathway_part:
+                parts.append(pathway_part)
+
+        if not parts:
+            return None
+
+        org = terms["organism"][0] if terms["organism"][0] else ""
+        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        if org:
+            parts.append(f'"{org}"[all]')
+        if tis and not deep:
+            parts.append(f'"{tis}"[tiab]')
+
+        return " AND ".join(parts)
+
+    def _build_analogous_mechanism(self, terms: Dict[str, List[str]]) -> Optional[str]:
+        parts = []
+        pathway_part = self._format_term_list(terms["pathways"])
+        if pathway_part:
+            parts.append(pathway_part)
+        if not pathway_part:
+            gene_part = self._format_term_list(terms["genes"])
+            if gene_part:
+                parts.append(gene_part)
+        if not parts:
+            return None
+
+        org = terms["organism"][0] if terms["organism"][0] else ""
+        if org:
+            parts.append(f'"{org}"[all]')
+        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        if tis:
+            parts.append(f'"{tis}"[tiab]')
+
+        return " AND ".join(parts)
+
+    def _build_contradictory_expectedness(self, terms: Dict[str, List[str]]) -> Optional[str]:
+        gene_part = self._format_term_list(terms["genes"])
+        if not gene_part:
+            pathway_part = self._format_term_list(terms["pathways"])
+            if pathway_part:
+                gene_part = pathway_part
+        if not gene_part:
+            return None
+
+        return f"({gene_part}) AND (adverse[tiab] OR negative[tiab] OR inhibition[tiab] OR antagonist[tiab] OR detrimental[tiab])"
+
+    def _build_methodological_precedent(self, terms: Dict[str, List[str]]) -> Optional[str]:
+        method_part = self._format_term_list(terms["methods"])
+        if not method_part:
+            return None
+
+        parts = [method_part]
+        org = terms["organism"][0] if terms["organism"][0] else ""
+        if org:
+            parts.append(f'"{org}"[all]')
+        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        if tis:
+            parts.append(f'"{tis}"[tiab]')
+
+        return " AND ".join(parts)
+
+    def _build_gene_model_relaxed(self, terms: Dict[str, List[str]]) -> Optional[str]:
+        gene_part = self._format_term_list(terms["genes"])
+        if not gene_part:
+            return None
+        return gene_part
+
+    def _build_cell_type_focused(self, terms: Dict[str, List[str]]) -> Optional[str]:
+        cell_part = self._format_term_list(terms["cells"])
+        if not cell_part:
+            gene_part = self._format_term_list(terms["genes"])
+            if not gene_part:
+                return None
+            cell_part = gene_part
+        parts = [cell_part]
+        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        if tis:
+            parts.append(f'"{tis}"[tiab]')
+        return " AND ".join(parts)
+
+    def _build_pathway_focused(self, terms: Dict[str, List[str]]) -> Optional[str]:
+        pathway_part = self._format_term_list(terms["pathways"])
+        gene_part = self._format_term_list(terms["genes"])
+        if not pathway_part and not gene_part:
+            return None
+        parts = []
+        if pathway_part:
+            parts.append(pathway_part)
+        if gene_part:
+            parts.append(gene_part)
+        return " AND ".join(parts) if len(parts) > 1 else parts[0]
+
+    def _build_cross_species_or_tissue(self, terms: Dict[str, List[str]]) -> Optional[str]:
+        # Core mechanism term: prefer genes, then pathways, then cell types.
+        core = (self._format_term_list(terms["genes"])
+                or self._format_term_list(terms["pathways"])
+                or self._format_term_list(terms["cells"]))
+        if not core:
+            return None
+        parts = [core]
+        org = terms["organism"][0] if terms["organism"][0] else ""
+        if org:
+            # Cross-species: same mechanism studied in other organisms.
+            # Target tissue is intentionally omitted so cross-tissue evidence is not excluded.
+            parts.append(f'NOT "{org}"[all]')
+        return " AND ".join(parts) if len(parts) > 1 else parts[0]
+
+    def _build_degraded_fallback(self, terms: Dict[str, List[str]]) -> str:
+        parts = []
+        org = terms["organism"][0] if terms["organism"][0] else ""
+        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        if org:
+            parts.append(f'"{org}"[all]')
+        if tis:
+            parts.append(f'"{tis}"[tiab]')
+        combined = []
+        for key in ("pathways", "cells", "methods", "genes"):
+            for t in terms.get(key, []):
+                if t:
+                    combined.append(f'"{t}"[tiab]')
+        if combined:
+            parts.append("(" + " OR ".join(combined) + ")")
+        if not parts:
+            return ""
+        return " AND ".join(parts)
+
+    def _meaningful_term_count(self, terms: Dict[str, List[str]]) -> int:
+        count = 0
+        for key in ("genes", "cells", "pathways", "methods"):
+            if any(t for t in terms.get(key, []) if t):
+                count += 1
+        return count
+
+    def _direction_queries(self, candidate: Dict[str, Any], deep: bool = False) -> List[DirectionSearchQuery]:
+        terms = self._candidate_terms(candidate)
+        queries: List[DirectionSearchQuery] = []
+        meaningful = self._meaningful_term_count(terms)
+
+        standard_builders = [
+            ("direct_prior_work", lambda t: self._build_direct_prior_work(t, deep=False)),
+            ("analogous_mechanism", self._build_analogous_mechanism),
+            ("contradictory_expectedness", self._build_contradictory_expectedness),
+            ("methodological_precedent", self._build_methodological_precedent),
+        ]
+        deep_builders = [
+            ("gene_model_relaxed", self._build_gene_model_relaxed),
+            ("cell_type_focused", self._build_cell_type_focused),
+            ("pathway_focused", self._build_pathway_focused),
+            ("cross_species_or_tissue", self._build_cross_species_or_tissue),
+        ]
+
+        builders = deep_builders if deep else standard_builders
+        for category, builder in builders:
+            query_str = builder(terms)
+            if not query_str:
+                continue
+            if meaningful < 2:
+                fallback = self._build_degraded_fallback(terms)
+                if fallback:
+                    queries.append(DirectionSearchQuery(
+                        category=category,
+                        query=fallback,
+                        degraded=True,
+                        notes=f"Degraded: fewer than 2 meaningful axes (had {meaningful})"
+                    ))
+                    continue
+            queries.append(DirectionSearchQuery(category=category, query=query_str))
+
+        return queries
+
+    def _dedup_evidence(self, items: List["PubMedEvidenceItem"]) -> List["PubMedEvidenceItem"]:
+        seen: set = set()
+        out: List["PubMedEvidenceItem"] = []
+        for e in items:
+            key = str(getattr(e, "pmid", "") or "")
+            if key and key in seen:
+                continue
+            seen.add(key)
+            out.append(e)
+        return out
+
+    def _article_matches_candidate(self, article: Dict[str, Any], candidate: Dict[str, Any]) -> bool:
+        genes = [str(g).lower() for g in candidate.get("key_genes", []) if str(g).strip()]
+        pathways = [str(p).lower() for p in candidate.get("key_pathways", []) if str(p).strip()]
+        cells = [str(c).lower() for c in candidate.get("key_cell_types", []) if str(c).strip()]
+        title = (article.get("title") or "").lower()
+        abstract = (article.get("abstract") or "").lower()
+        text = f"{title} {abstract}"
+        for g in genes:
+            if g in text:
+                return True
+        for p in pathways:
+            if p in text:
+                return True
+        for c in cells:
+            if c in text:
+                return True
+        return False
+
+    def _extract_session_cached_pubmed_articles(self, state: Optional[AnalysisState]) -> List[Dict[str, Any]]:
+        if not state:
+            return []
+        articles: List[Dict[str, Any]] = []
+        seen_pmids: set = set()
+        for report in state.literature_reports:
+            for ref in report.references:
+                url = ref.get("url", "")
+                if "pubmed" not in url.lower():
+                    continue
+                pmid = ""
+                for part in url.rstrip("/").split("/"):
+                    if part.isdigit():
+                        pmid = part
+                        break
+                if not pmid or pmid in seen_pmids:
+                    continue
+                seen_pmids.add(pmid)
+                articles.append({
+                    "pmid": pmid,
+                    "title": ref.get("title", ""),
+                    "abstract": "",
+                    "year": "",
+                    "authors": "",
+                    "journal": "",
+                    "source": "session_cache",
+                })
+        return articles
+
+    async def _triage_articles_with_llm(
+        self,
+        articles: List[Dict[str, Any]],
+        candidate: Dict[str, Any],
+        query: DirectionSearchQuery,
+    ) -> Tuple[List[PubMedEvidenceItem], Dict[str, Any]]:
+        if not articles:
+            return [], {"off_topic": False, "contradictory_ambiguous": False,
+                         "species_tissue_qualification": "", "summary": "No articles to triage."}
+
+        terms = self._candidate_terms(candidate)
+        articles_text = "\n".join(
+            f"[PMID: {a.get('pmid', '?')}] {a.get('title', '')} - {a.get('abstract', '')[:400]}"
+            for a in articles[:30]
+        )
+
+        prompt = f"""You are a biomedical literature triage system. Assign each article to the most appropriate bucket.
+
+Research direction: {candidate.get('direction', '')}
+Key genes: {', '.join(terms['genes'])}
+Key cell types: {', '.join(terms['cells'])}
+Key pathways: {', '.join(terms['pathways'])}
+Organism: {', '.join(terms['organism'])}
+Tissue: {', '.join(terms['tissue'])}
+Query category: {query.category}
+
+Buckets:
+- direct: Directly studies the same gene(s), cell type(s), pathway(s), and experimental context
+- analogous: Studies a related but distinct mechanism, cell type, or context that could inform this direction
+- contradictory: Presents evidence that contradicts or challenges the proposed biology
+- methodological: Describes a method or technique relevant to the proposed approach
+- irrelevant: Not relevant to this research direction
+
+Articles:
+{articles_text}
+
+Respond ONLY with valid JSON (no markdown, no code fences):
+{{
+  "items": [
+    {{"pmid": "...", "bucket": "direct|analogous|contradictory|methodological|irrelevant", "relevance": "high|medium|low", "why_it_matters": "brief explanation"}}
+  ],
+  "off_topic": true or false,
+  "contradictory_ambiguous": true or false,
+  "species_tissue_qualification": "matched_species_tissue_available" | "no_matched_species_tissue_evidence" | "cross_tissue_only" | "cross_species_only" | "",
+  "summary": "One-sentence summary of this batch's evidence."
+}}"""
+
+        response, _ = await self._chat_with_fallback(prompt, temperature=0.1)
+        parsed = self._safe_parse_json(response, default={})
+        items_raw = parsed.get("items", [])
+        if not isinstance(items_raw, list):
+            items_raw = []
+
+        evidence_items: List[PubMedEvidenceItem] = []
+        bucket_map = {"direct": "direct", "analogous": "analogous",
+                       "contradictory": "contradictory", "methodological": "methodological",
+                       "irrelevant": "irrelevant"}
+        for it in items_raw:
+            pmid = str(it.get("pmid", ""))
+            bucket = str(it.get("bucket", "irrelevant"))
+            # Only keep non-irrelevant items
+            if bucket == "irrelevant":
+                continue
+            supports = bucket_map.get(bucket, "analogous")
+            relevance = str(it.get("relevance", "low"))
+            if relevance not in ("high", "medium", "low"):
+                relevance = "low"
+            article = next((a for a in articles if str(a.get("pmid", "")) == pmid), None)
+            evidence_items.append(PubMedEvidenceItem(
+                pmid=pmid,
+                title=article.get("title", "") if article else "",
+                year=article.get("year", "") if article else None,
+                url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else None,
+                relevance=relevance,
+                supports=supports,
+                source="session_cache" if any(a.get("source") == "session_cache" for a in articles if str(a.get("pmid", "")) == pmid) else "new_search",
+                species_context=", ".join(terms["organism"]),
+                tissue_context=", ".join(terms["tissue"]),
+                why_it_matters=str(it.get("why_it_matters", "")),
+            ))
+
+        metadata = {
+            "off_topic": bool(parsed.get("off_topic", False)),
+            "contradictory_ambiguous": bool(parsed.get("contradictory_ambiguous", False)),
+            "species_tissue_qualification": str(parsed.get("species_tissue_qualification", "")),
+            "summary": str(parsed.get("summary", "")),
+        }
+        return evidence_items, metadata
+
+    async def evaluate_direction_novelty_candidates(
+        self,
+        candidates: List[Dict[str, Any]],
+        state: Optional[AnalysisState] = None,
+        query_timeout_seconds: float = 30.0,
+        direction_timeout_seconds: float = 180.0,
+    ) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        cached_articles = self._extract_session_cached_pubmed_articles(state)
+
+        for candidate in candidates:
+            direction_id = candidate.get("direction_id", "")
+            direction_name = candidate.get("direction", "")
+            dir_result = self._build_empty_direction_result(direction_id, direction_name)
+
+            try:
+                dir_result = await asyncio.wait_for(
+                    self._evaluate_single_candidate(
+                        candidate, cached_articles, query_timeout_seconds
+                    ),
+                    timeout=direction_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                dir_result["status"] = "partial"
+                dir_result["timed_out"] = True
+                dir_result["timeout_seconds"] = direction_timeout_seconds
+                dir_result["limitations"].append("Direction-level timeout exceeded")
+            except Exception as exc:
+                logger.warning(f"[Literature] Direction evaluation failed for {direction_id}: {exc}")
+                dir_result["status"] = "failed"
+                dir_result["limitations"].append(str(exc)[:200])
+
+            results.append(dir_result)
+
+        return results
+
+    def _build_empty_direction_result(self, direction_id: str, direction_name: str) -> Dict[str, Any]:
+        return {
+            "direction_id": direction_id,
+            "direction": direction_name,
+            "status": "partial",
+            "search_tier": "standard",
+            "literature_novelty": "unknown",
+            "confidence": "low",
+            "negative_validation_confidence": "none",
+            "negative_validation_axes": {},
+            "direct_evidence_count": 0,
+            "analogous_evidence_count": 0,
+            "contradictory_evidence_count": 0,
+            "methodological_precedent_count": 0,
+            "direct_evidence": [],
+            "analogous_evidence": [],
+            "contradictory_evidence": [],
+            "methodological_precedent": [],
+            "queries": [],
+            "species_tissue_qualification": "",
+            "gap_assessment": "",
+            "summary": "",
+            "limitations": [],
+            "timeout_seconds": None,
+            "timed_out": False,
+        }
+
+    async def _evaluate_single_candidate(
+        self,
+        candidate: Dict[str, Any],
+        cached_articles: List[Dict[str, Any]],
+        query_timeout_seconds: float,
+    ) -> Dict[str, Any]:
+        direction_id = candidate.get("direction_id", "")
+        direction_name = candidate.get("direction", "")
+        result = self._build_empty_direction_result(direction_id, direction_name)
+        all_evidence: List[PubMedEvidenceItem] = []
+        executed_categories: set = set()
+        best_qualification: str = ""
+        all_limitations: List[str] = []
+        timed_out_flag = False
+        triage_metadata_list: List[Dict[str, Any]] = []
+        queries: List[DirectionSearchQuery] = []
+
+        # Phase 1: Standard queries
+        standard_queries = self._direction_queries(candidate, deep=False)
+        queries.extend(standard_queries)
+
+        for q in standard_queries:
+            evidence, meta, q_timedout, limitations = await self._execute_query_batch(
+                q, candidate, cached_articles, query_timeout_seconds
+            )
+            all_evidence.extend(evidence)
+            if not q.degraded:
+                executed_categories.add(q.category)
+            if meta:
+                triage_metadata_list.append(meta)
+            if q_timedout:
+                timed_out_flag = True
+            all_limitations.extend(limitations)
+
+        # Check escalation conditions
+        direct_ev = [e for e in all_evidence if e.supports == "direct"]
+        analogous_ev = [e for e in all_evidence if e.supports == "analogous"]
+        contradictory_ev = [e for e in all_evidence if e.supports == "contradictory"]
+        methodological_ev = [e for e in all_evidence if e.supports == "methodological"]
+
+        has_methods = bool(self._candidate_terms(candidate)["methods"])
+        needs_deep = (
+            len(direct_ev) < 2
+            or (len(analogous_ev) < 1 and len(direct_ev) < 1)
+            or any(m.get("contradictory_ambiguous", False) for m in triage_metadata_list)
+            or any(m.get("off_topic", False) for m in triage_metadata_list)
+            or any(q.degraded for q in standard_queries)
+            or (has_methods and len(methodological_ev) == 0)
+        )
+
+        search_tier = "standard"
+        if needs_deep:
+            deep_queries = self._direction_queries(candidate, deep=True)
+            queries.extend(deep_queries)
+            search_tier = "deep"
+            for q in deep_queries:
+                evidence, meta, q_timedout, limitations = await self._execute_query_batch(
+                    q, candidate, cached_articles, query_timeout_seconds
+                )
+                all_evidence.extend(evidence)
+                if not q.degraded:
+                    executed_categories.add(q.category)
+                if meta:
+                    triage_metadata_list.append(meta)
+                if q_timedout:
+                    timed_out_flag = True
+                all_limitations.extend(limitations)
+
+        # Deduplicate by PMID so the same article is not counted across multiple query categories.
+        all_evidence = self._dedup_evidence(all_evidence)
+
+        # Re-count after deep search
+        direct_ev = [e for e in all_evidence if e.supports == "direct"]
+        analogous_ev = [e for e in all_evidence if e.supports == "analogous"]
+        contradictory_ev = [e for e in all_evidence if e.supports == "contradictory"]
+        methodological_ev = [e for e in all_evidence if e.supports == "methodological"]
+
+        # Compute axes — an axis counts as covered only when the candidate actually
+        # had the relevant terms AND a non-degraded query for that axis executed.
+        axis_terms = self._candidate_terms(candidate)
+        has_gene = bool(axis_terms["genes"])
+        has_cell = bool(axis_terms["cells"])
+        has_tissue = bool(axis_terms["tissue"][0])
+        has_pathway = bool(axis_terms["pathways"])
+        axes = {
+            "gene_or_model": has_gene and (
+                "direct_prior_work" in executed_categories or "gene_model_relaxed" in executed_categories),
+            "tissue_or_cell_type": (has_cell or has_tissue) and (
+                "direct_prior_work" in executed_categories or "cell_type_focused" in executed_categories),
+            "pathway_or_mechanism": has_pathway and (
+                "analogous_mechanism" in executed_categories or "pathway_focused" in executed_categories),
+            "analogous_mechanism": (has_pathway or has_gene) and (
+                "analogous_mechanism" in executed_categories or "cross_species_or_tissue" in executed_categories),
+        }
+
+        all_axes_covered = all(axes.values())
+        no_surviving_evidence = len(direct_ev) == 0 and len(analogous_ev) == 0
+        neg_conf: str = "none"
+        if all_axes_covered and no_surviving_evidence:
+            neg_conf = "high"
+        elif all_axes_covered:
+            neg_conf = "medium"
+        elif any(axes.values()):
+            neg_conf = "low"
+
+        # Aggregate species_tissue_qualification
+        best_qualification = self._aggregate_qualification(triage_metadata_list)
+
+        # Novelty assessment (spec §231: absence-based high novelty requires strong negative validation).
+        novelty = "unknown"
+        if len(direct_ev) >= 2:
+            novelty = "low"
+        elif len(direct_ev) >= 1:
+            novelty = "medium"
+        elif len(analogous_ev) >= 1:
+            # Related prior work exists -> moderate novelty, never "high".
+            novelty = "medium"
+        elif len(direct_ev) == 0 and len(analogous_ev) == 0:
+            # No direct/analogous evidence: only claim high novelty when the negative
+            # search was strong enough to mean "genuinely unstudied".
+            novelty = "high" if neg_conf in {"high", "medium"} else "unknown"
+
+        confidence = "high"
+        if not all_evidence:
+            confidence = "low" if not timed_out_flag else "failed"
+        elif len(direct_ev) < 2:
+            confidence = "medium"
+
+        # Failed/timed-out searches cannot assert novelty (spec error-handling rule 3).
+        if timed_out_flag or confidence == "failed":
+            novelty = "unknown"
+
+        gap = self._build_gap_assessment(direct_ev, analogous_ev, contradictory_ev, axes, all_limitations)
+        summary = self._build_triage_summary(triage_metadata_list, direct_ev, analogous_ev, contradictory_ev)
+
+        result.update({
+            "status": "completed" if not timed_out_flag else "partial",
+            "search_tier": search_tier,
+            "literature_novelty": novelty,
+            "confidence": confidence,
+            "negative_validation_confidence": neg_conf,
+            "negative_validation_axes": axes,
+            "direct_evidence_count": len(direct_ev),
+            "analogous_evidence_count": len(analogous_ev),
+            "contradictory_evidence_count": len(contradictory_ev),
+            "methodological_precedent_count": len(methodological_ev),
+            "direct_evidence": [e.model_dump() for e in direct_ev],
+            "analogous_evidence": [e.model_dump() for e in analogous_ev],
+            "contradictory_evidence": [e.model_dump() for e in contradictory_ev],
+            "methodological_precedent": [e.model_dump() for e in methodological_ev],
+            "queries": [q.model_dump() for q in queries],
+            "species_tissue_qualification": best_qualification,
+            "gap_assessment": gap,
+            "summary": summary,
+            "limitations": all_limitations,
+            "timeout_seconds": query_timeout_seconds if timed_out_flag else None,
+            "timed_out": timed_out_flag,
+        })
+
+        return result
+
+    async def _execute_query_batch(
+        self,
+        query: DirectionSearchQuery,
+        candidate: Dict[str, Any],
+        cached_articles: List[Dict[str, Any]],
+        query_timeout_seconds: float,
+    ) -> Tuple[List[PubMedEvidenceItem], Dict[str, Any], bool, List[str]]:
+        evidence: List[PubMedEvidenceItem] = []
+        limitations: List[str] = []
+        timed_out = False
+        meta: Dict[str, Any] = {}
+
+        # Check cached articles first
+        matching_cache = [a for a in cached_articles if self._article_matches_candidate(a, candidate)]
+        if matching_cache:
+            try:
+                cache_ev, cache_meta = await asyncio.wait_for(
+                    self._triage_articles_with_llm(matching_cache, candidate, query),
+                    timeout=query_timeout_seconds,
+                )
+                evidence.extend(cache_ev)
+                meta = cache_meta
+            except asyncio.TimeoutError:
+                limitations.append(f"Cache triage timeout for query: {query.category}")
+                timed_out = True
+
+        # PubMed search
+        try:
+            articles = await asyncio.wait_for(
+                self._pubmed_search(query.query, max_results=20),
+                timeout=query_timeout_seconds,
+            )
+            query.result_count = len(articles)
+        except asyncio.TimeoutError:
+            limitations.append(f"PubMed search timeout for query: {query.category}")
+            timed_out = True
+            return evidence, meta, timed_out, limitations
+        except Exception as exc:
+            limitations.append(f"PubMed search failed for {query.category}: {str(exc)[:100]}")
+            return evidence, meta, timed_out, limitations
+
+        if not articles:
+            return evidence, meta, timed_out, limitations
+
+        # LLM triage
+        try:
+            llm_ev, llm_meta = await asyncio.wait_for(
+                self._triage_articles_with_llm(articles, candidate, query),
+                timeout=query_timeout_seconds,
+            )
+            evidence.extend(llm_ev)
+            meta = llm_meta
+            query.relevant_count = len(llm_ev)
+        except asyncio.TimeoutError:
+            limitations.append(f"LLM triage timeout for query: {query.category}")
+            timed_out = True
+
+        return evidence, meta, timed_out, limitations
+
+    def _aggregate_qualification(self, triage_metadata_list: List[Dict[str, Any]]) -> str:
+        priority = {
+            "matched_species_tissue_available": 5,
+            "no_matched_species_tissue_evidence": 4,
+            "cross_tissue_only": 3,
+            "cross_species_only": 2,
+            "mouse_liver_available": 1,
+            "no_mouse_liver_evidence": 0,
+            "": -1,
+        }
+        best = ""
+        best_prio = -1
+        for m in triage_metadata_list:
+            q = str(m.get("species_tissue_qualification", ""))
+            prio = priority.get(q, -1)
+            if prio > best_prio:
+                best_prio = prio
+                best = q
+        return best
+
+    def _build_gap_assessment(
+        self,
+        direct: List[PubMedEvidenceItem],
+        analogous: List[PubMedEvidenceItem],
+        contradictory: List[PubMedEvidenceItem],
+        axes: Dict[str, bool],
+        limitations: List[str],
+    ) -> str:
+        parts = []
+        if not direct:
+            parts.append("No direct prior evidence.")
+        else:
+            parts.append(f"Direct evidence: {len(direct)} articles.")
+        if not analogous:
+            parts.append("No analogous mechanism evidence.")
+        else:
+            parts.append(f"Analogous evidence: {len(analogous)} articles.")
+        if contradictory:
+            parts.append(f"Contradictory evidence found: {len(contradictory)} articles.")
+        covered = [k for k, v in axes.items() if v]
+        if covered:
+            parts.append(f"Validation axes covered: {', '.join(covered)}.")
+        if limitations:
+            parts.append(f"Limitations: {'; '.join(limitations[:3])}.")
+        return " ".join(parts) if parts else "No gap assessment available."
+
+    def _build_triage_summary(
+        self,
+        triage_metadata_list: List[Dict[str, Any]],
+        direct: List[PubMedEvidenceItem],
+        analogous: List[PubMedEvidenceItem],
+        contradictory: List[PubMedEvidenceItem],
+    ) -> str:
+        parts = []
+        if direct:
+            parts.append(f"Found {len(direct)} direct evidence articles.")
+        if analogous:
+            parts.append(f"Found {len(analogous)} analogous evidence articles.")
+        if contradictory:
+            parts.append(f"Found {len(contradictory)} contradictory evidence articles.")
+        for m in triage_metadata_list:
+            s = m.get("summary", "")
+            if s:
+                parts.append(s)
+        return " ".join(parts) if parts else "No literature evidence found for this direction."

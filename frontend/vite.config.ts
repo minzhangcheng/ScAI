@@ -24,6 +24,11 @@ function disableRequestTimeout(): Plugin {
 
 export default defineConfig({
   plugins: [react(), disableRequestTimeout()],
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test-setup.ts'],
+  },
   server: {
     port: 3000,
     allowedHosts: true,

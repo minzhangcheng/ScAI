@@ -121,6 +121,52 @@ class SynthesisMixin:
         bio = state.get("bioinformatics_result") or {}
         return bio.get("status") == "completed"
 
+    def _skipped_direction_evidence(self, raw_candidates, reason):
+        return [
+            {
+                "direction_id": c.get("direction_id", f"dir_{idx + 1:03d}"),
+                "direction": c.get("direction", ""),
+                "status": "skipped",
+                "search_tier": "failed",
+                "literature_novelty": "unknown",
+                "confidence": "failed",
+                "summary": reason,
+                "limitations": [reason],
+            }
+            for idx, c in enumerate(raw_candidates)
+        ]
+
+    async def _generate_evidence_gated_exploration_report(self, graph_state, analysis_state, round_result):
+        raw_candidates = await self.pi_agent.generate_raw_direction_candidates(analysis_state, round_result)
+        literature_result = (graph_state or {}).get("literature_result") or {}
+        if literature_result.get("status") in {"skipped", "disabled"}:
+            reason = "Direction-level literature verification was skipped because the Literature Agent was skipped or disabled earlier in the workflow."
+            direction_evidence = self._skipped_direction_evidence(raw_candidates, reason)
+            report = await self.pi_agent.score_directions_with_evidence(analysis_state, round_result, raw_candidates, direction_evidence)
+            self.pi_agent._validate_direction_dependency_graph(getattr(report, "direction_dependency_graph", {}) or {})
+            return report
+
+        try:
+            direction_evidence = await self.literature_agent.evaluate_direction_novelty_candidates(raw_candidates, state=analysis_state)
+        except Exception as lit_err:
+            logger.exception(f"[{self.session_id}] Direction literature evidence gate failed")
+            direction_evidence = [
+                {
+                    "direction_id": c.get("direction_id", f"dir_{idx + 1:03d}"),
+                    "direction": c.get("direction", ""),
+                    "status": "failed",
+                    "search_tier": "failed",
+                    "literature_novelty": "unknown",
+                    "confidence": "failed",
+                    "summary": f"Direction-level literature verification failed: {lit_err}",
+                    "limitations": ["Literature verification failed; PI scoring must be conservative."],
+                }
+                for idx, c in enumerate(raw_candidates)
+            ]
+        report = await self.pi_agent.score_directions_with_evidence(analysis_state, round_result, raw_candidates, direction_evidence)
+        self.pi_agent._validate_direction_dependency_graph(getattr(report, "direction_dependency_graph", {}) or {})
+        return report
+
     async def _pi_synthesis(self, state: WorkflowState) -> WorkflowState:
         """PI synthesizes all results and prepares round summary for user"""
         analysis_state = state["analysis_state"]
@@ -188,9 +234,10 @@ class SynthesisMixin:
                 "Generating exploration report (Report A)...",
                 AgentType.PI
             )
+            report_generated = False
             try:
-                exploration_report = await self.pi_agent.generate_exploration_report(
-                    analysis_state, round_result
+                exploration_report = await self._generate_evidence_gated_exploration_report(
+                    state, analysis_state, round_result
                 )
                 analysis_state.exploration_report = exploration_report
                 round_result.exploration_report = exploration_report
@@ -228,17 +275,23 @@ class SynthesisMixin:
                     "html_url": html_url,
                     "detailed_report_url": detailed_report_url,
                 }, AgentType.PI)
+                report_generated = True
             except Exception as e:
                 logger.exception(f"[{self.session_id}] Exploration report generation failed")
                 await self._send_message(
                     "error",
-                    f"Exploration report generation failed: {e}. You can still select a research direction based on the analysis findings above.",
+                    f"Exploration report generation failed: {e}. Staying in the exploration phase — please fix the issue and retry generating the exploration report and direction candidates.",
                     AgentType.PI
                 )
 
-            # Transition to innovation phase for next round
-            analysis_state.analysis_phase = AnalysisPhase.INNOVATION
-            logger.info(f"[{self.session_id}] Transitioning to innovation phase")
+            # Only advance to innovation when an exploration report was actually produced.
+            if report_generated:
+                analysis_state.analysis_phase = AnalysisPhase.INNOVATION
+                logger.info(f"[{self.session_id}] Transitioning to innovation phase")
+            else:
+                logger.warning(
+                    f"[{self.session_id}] Exploration report not generated; staying in EXPLORATION phase for retry"
+                )
 
         elif analysis_state.analysis_phase == AnalysisPhase.EXPLORATION:
             # Exploration did NOT succeed (bioinformatics stage1 failed/incomplete).
@@ -481,8 +534,8 @@ class SynthesisMixin:
                     try:
                         last_round = analysis_state.round_results[-1] if analysis_state.round_results else None
                         if last_round and analysis_state.exploration_report:
-                            exploration_report = await self.pi_agent.generate_exploration_report(
-                                analysis_state, last_round
+                            exploration_report = await self._generate_evidence_gated_exploration_report(
+                                state, analysis_state, last_round
                             )
                             analysis_state.exploration_report = exploration_report
 

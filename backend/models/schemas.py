@@ -312,6 +312,112 @@ class AnalysisPlan(BaseModel):
     approved_at: Optional[datetime] = None
 
 
+SpeciesTissueQualification = Literal[
+    "",
+    "matched_species_tissue_available",
+    "no_matched_species_tissue_evidence",
+    "mouse_liver_available",
+    "no_mouse_liver_evidence",
+    "cross_tissue_only",
+    "cross_species_only",
+]
+
+
+class DirectionSearchQuery(BaseModel):
+    category: Literal[
+        "direct_prior_work",
+        "analogous_mechanism",
+        "contradictory_expectedness",
+        "methodological_precedent",
+        "gene_model_relaxed",
+        "cell_type_focused",
+        "pathway_focused",
+        "cross_species_or_tissue",
+    ]
+    query: str
+    result_count: int = 0
+    relevant_count: int = 0
+    degraded: bool = False
+    notes: str = ""
+
+
+class PubMedArticle(BaseModel):
+    """A single PubMed article reference for direction literature evidence."""
+    pubmed_id: str
+    title: str
+    authors: List[str] = Field(default_factory=list)
+    journal: str
+    publication_date: str
+    abstract: str = ""
+    url: str = ""
+
+
+class PubMedEvidenceItem(BaseModel):
+    pmid: str
+    title: str
+    year: Optional[str] = None
+    url: Optional[str] = None
+    relevance: Literal["high", "medium", "low"]
+    supports: Literal["direct", "analogous", "contradictory", "methodological"]
+    source: Literal["new_search", "session_cache"] = "new_search"
+    species_context: str = ""
+    tissue_context: str = ""
+    why_it_matters: str
+
+
+class DirectionLiteratureEvidence(BaseModel):
+    direction_id: str
+    direction: str
+    status: Literal["completed", "partial", "failed", "skipped"] = "partial"
+    search_tier: Literal["standard", "deep", "failed"] = "standard"
+    literature_novelty: Literal["high", "medium", "low", "unknown"] = "unknown"
+    confidence: Literal["high", "medium", "low", "failed"] = "low"
+    negative_validation_confidence: Literal["high", "medium", "low", "none"] = "none"
+    negative_validation_axes: Dict[str, bool] = Field(default_factory=dict)
+    direct_evidence_count: int = 0
+    analogous_evidence_count: int = 0
+    contradictory_evidence_count: int = 0
+    methodological_precedent_count: int = 0
+    direct_evidence: List[PubMedEvidenceItem] = Field(default_factory=list)
+    analogous_evidence: List[PubMedEvidenceItem] = Field(default_factory=list)
+    contradictory_evidence: List[PubMedEvidenceItem] = Field(default_factory=list)
+    methodological_precedent: List[PubMedEvidenceItem] = Field(default_factory=list)
+    queries: List[DirectionSearchQuery] = Field(default_factory=list)
+    species_tissue_qualification: SpeciesTissueQualification = ""
+    gap_assessment: str = ""
+    summary: str = ""
+    limitations: List[str] = Field(default_factory=list)
+    timeout_seconds: Optional[float] = None
+    timed_out: bool = False
+
+
+class ResearchDirectionCandidate(BaseModel):
+    direction_id: str
+    direction: str
+    rationale: str = ""
+    data_support_summary: str = ""
+    literature_support_summary: str = ""
+    data_reliability: str = ""
+    literature_novelty: str = ""
+    biology_expectedness: str = ""
+    data_novelty: str = ""
+    mechanistic_importance: str = ""
+    functional_impact: str = ""
+    data_sufficiency: str = ""
+    methodological_gap: str = ""
+    overall_priority: str = ""
+    risk_flags: List[str] = Field(default_factory=list)
+    prerequisite_dependencies: List[str] = Field(default_factory=list)
+    evidence_ref: Optional[str] = None
+
+
+class DirectionSelectionDecision(BaseModel):
+    """Record of user's direction selection decision with selected and rejected directions."""
+    selected_directions: List[Dict[str, str]] = Field(default_factory=list)
+    rejected_directions: List[Dict[str, str]] = Field(default_factory=list)
+    selection_rationale: str = ""
+
+
 class ExplorationReport(BaseModel):
     """Structured exploration report (Report A) generated after Phase 1"""
     cluster_overview: str = ""
@@ -322,7 +428,10 @@ class ExplorationReport(BaseModel):
     low_confidence_annotations: List[str] = Field(default_factory=list)
     pi_direction_assessment: str = ""
     research_direction_candidates: List[Dict[str, Any]] = Field(default_factory=list)
-    # Each candidate: {"direction": str, "rationale": str, "expected_innovation": str, "expected_novelty": str, "data_reliability": str}
+    raw_direction_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    direction_literature_evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    direction_dependency_graph: Dict[str, List[str]] = Field(default_factory=dict)
+    direction_selection_summary: Dict[str, Any] = Field(default_factory=dict)
 
 class RoundResult(BaseModel):
     """Result from one analysis round"""
