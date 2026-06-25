@@ -30,8 +30,6 @@ class TestSpeciesTissueQualification:
         assert _ValidateQualification(q="").q == ""
         assert _ValidateQualification(q="matched_species_tissue_available").q == "matched_species_tissue_available"
         assert _ValidateQualification(q="no_matched_species_tissue_evidence").q == "no_matched_species_tissue_evidence"
-        assert _ValidateQualification(q="mouse_liver_available").q == "mouse_liver_available"
-        assert _ValidateQualification(q="no_mouse_liver_evidence").q == "no_mouse_liver_evidence"
         assert _ValidateQualification(q="cross_tissue_only").q == "cross_tissue_only"
         assert _ValidateQualification(q="cross_species_only").q == "cross_species_only"
 

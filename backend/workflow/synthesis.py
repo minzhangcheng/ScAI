@@ -12,6 +12,7 @@ from ..constants import (
     WaitInputReason,
 )
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisState, TaskStatus
+from ..utils.direction_evidence import build_fallback_direction_evidence
 from ..utils.llm_client import UpstreamExhaustedError
 from .helpers import wait_with_skip_time
 
@@ -122,19 +123,7 @@ class SynthesisMixin:
         return bio.get("status") == "completed"
 
     def _skipped_direction_evidence(self, raw_candidates, reason):
-        return [
-            {
-                "direction_id": c.get("direction_id", f"dir_{idx + 1:03d}"),
-                "direction": c.get("direction", ""),
-                "status": "skipped",
-                "search_tier": "failed",
-                "literature_novelty": "unknown",
-                "confidence": "failed",
-                "summary": reason,
-                "limitations": [reason],
-            }
-            for idx, c in enumerate(raw_candidates)
-        ]
+        return build_fallback_direction_evidence(raw_candidates, status="skipped", reason=reason)
 
     async def _generate_evidence_gated_exploration_report(self, graph_state, analysis_state, round_result):
         raw_candidates = await self.pi_agent.generate_raw_direction_candidates(analysis_state, round_result)
@@ -150,19 +139,12 @@ class SynthesisMixin:
             direction_evidence = await self.literature_agent.evaluate_direction_novelty_candidates(raw_candidates, state=analysis_state)
         except Exception as lit_err:
             logger.exception(f"[{self.session_id}] Direction literature evidence gate failed")
-            direction_evidence = [
-                {
-                    "direction_id": c.get("direction_id", f"dir_{idx + 1:03d}"),
-                    "direction": c.get("direction", ""),
-                    "status": "failed",
-                    "search_tier": "failed",
-                    "literature_novelty": "unknown",
-                    "confidence": "failed",
-                    "summary": f"Direction-level literature verification failed: {lit_err}",
-                    "limitations": ["Literature verification failed; PI scoring must be conservative."],
-                }
-                for idx, c in enumerate(raw_candidates)
-            ]
+            direction_evidence = build_fallback_direction_evidence(
+                raw_candidates,
+                status="failed",
+                reason=f"Direction-level literature verification failed: {lit_err}",
+                limitations=["Literature verification failed; PI scoring must be conservative."],
+            )
         report = await self.pi_agent.score_directions_with_evidence(analysis_state, round_result, raw_candidates, direction_evidence)
         self.pi_agent._validate_direction_dependency_graph(getattr(report, "direction_dependency_graph", {}) or {})
         return report

@@ -29,7 +29,6 @@ from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, LiteratureReport,
     DirectionSearchQuery, PubMedEvidenceItem, DirectionLiteratureEvidence,
 )
-SpeciesTissueQualification = str
 from ..utils.llm_client import OpenAICompatibleClient, GoogleDeepResearchClient, RETRYABLE_EXCEPTIONS
 from openai import RateLimitError
 
@@ -817,14 +816,9 @@ class LiteratureAgent(BaseAgent):
 
         # Prioritize focused evidence for synthesis because _synthesize_pubmed_results
         # intentionally truncates to the first 20 articles.
-        synthesis_seen_pmids = set()
-        synthesis_articles: List[Dict[str, Any]] = []
-        for article in focused_articles_for_synthesis + all_articles:
-            pmid = article.get("pmid")
-            if not pmid or pmid in synthesis_seen_pmids:
-                continue
-            synthesis_seen_pmids.add(pmid)
-            synthesis_articles.append(article)
+        synthesis_articles: List[Dict[str, Any]] = self._dedup_by_pmid(
+            focused_articles_for_synthesis + all_articles, lambda a: a.get("pmid"),
+            drop_empty=True)
 
         report_text = await self._synthesize_pubmed_results(topic, synthesis_articles)
 
@@ -1698,23 +1692,26 @@ Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderate
         """两级 focused 检索,按簇返回 {articles,status,tier}。
 
         rare_unresolved: tier1(加 tissue) → 仅当 exhausted/contradictory 时升级 tier2(去 tissue)。
-        suspected_contamination: 并行跑 tier1=discovery(无 tissue) + tier2=plausibility(加 tissue),
+        suspected_contamination: 顺序跑 tier1=discovery(无 tissue) 再 tier2=plausibility(加 tissue),
+        (受 NCBI 限速约束，未并发；如需并发须配 Semaphore 后再改)
                                  取相关性 rank 更高者(spec §5.2: 两条都查)。
         空 query 直接记为 exhausted,不发请求。
         """
-        import asyncio
         results: dict = {}
 
         async def _run(item, tier):
-            q = build_focused_query(item, organism, tissue, tier=tier, bucket=bucket)
-            if not q:
+            def exhausted(reason, error=None):
                 return {
                     "articles": [],
                     "status": "exhausted",
                     "tier": tier,
-                    "exhaustion_reason": "empty_query",
-                    "error": None,
+                    "exhaustion_reason": reason,
+                    "error": error,
                 }
+
+            q = build_focused_query(item, organism, tissue, tier=tier, bucket=bucket)
+            if not q:
+                return exhausted("empty_query")
             try:
                 arts = await self._pubmed_search(q, max_results=10)
             except Exception as e:
@@ -1724,22 +1721,10 @@ Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderate
                     tier,
                     e,
                 )
-                return {
-                    "articles": [],
-                    "status": "exhausted",
-                    "tier": tier,
-                    "exhaustion_reason": "search_failed",
-                    "error": str(e),
-                }
+                return exhausted("search_failed", str(e))
 
             if not arts:
-                return {
-                    "articles": [],
-                    "status": "exhausted",
-                    "tier": tier,
-                    "exhaustion_reason": "no_pubmed_results",
-                    "error": None,
-                }
+                return exhausted("no_pubmed_results")
 
             await asyncio.sleep(0.4)
 
@@ -1752,13 +1737,7 @@ Respond JSON: {{"strong": <count strongly relevant>, "moderate": <count moderate
                     tier,
                     e,
                 )
-                return {
-                    "articles": [],
-                    "status": "exhausted",
-                    "tier": tier,
-                    "exhaustion_reason": "judge_failed",
-                    "error": str(e),
-                }
+                return exhausted("judge_failed", str(e))
 
             status = judged.get("status", "exhausted") if isinstance(judged, dict) else "exhausted"
             return {
@@ -1904,8 +1883,8 @@ Reply in JSON format:
         if not parts:
             return None
 
-        org = terms["organism"][0] if terms["organism"][0] else ""
-        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        org = terms["organism"][0]
+        tis = terms["tissue"][0]
         if org:
             parts.append(f'"{org}"[all]')
         if tis and not deep:
@@ -1925,10 +1904,10 @@ Reply in JSON format:
         if not parts:
             return None
 
-        org = terms["organism"][0] if terms["organism"][0] else ""
+        org = terms["organism"][0]
         if org:
             parts.append(f'"{org}"[all]')
-        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        tis = terms["tissue"][0]
         if tis:
             parts.append(f'"{tis}"[tiab]')
 
@@ -1951,10 +1930,10 @@ Reply in JSON format:
             return None
 
         parts = [method_part]
-        org = terms["organism"][0] if terms["organism"][0] else ""
+        org = terms["organism"][0]
         if org:
             parts.append(f'"{org}"[all]')
-        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        tis = terms["tissue"][0]
         if tis:
             parts.append(f'"{tis}"[tiab]')
 
@@ -1974,7 +1953,7 @@ Reply in JSON format:
                 return None
             cell_part = gene_part
         parts = [cell_part]
-        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        tis = terms["tissue"][0]
         if tis:
             parts.append(f'"{tis}"[tiab]')
         return " AND ".join(parts)
@@ -1999,7 +1978,7 @@ Reply in JSON format:
         if not core:
             return None
         parts = [core]
-        org = terms["organism"][0] if terms["organism"][0] else ""
+        org = terms["organism"][0]
         if org:
             # Cross-species: same mechanism studied in other organisms.
             # Target tissue is intentionally omitted so cross-tissue evidence is not excluded.
@@ -2008,8 +1987,8 @@ Reply in JSON format:
 
     def _build_degraded_fallback(self, terms: Dict[str, List[str]]) -> str:
         parts = []
-        org = terms["organism"][0] if terms["organism"][0] else ""
-        tis = terms["tissue"][0] if terms["tissue"][0] else ""
+        org = terms["organism"][0]
+        tis = terms["tissue"][0]
         if org:
             parts.append(f'"{org}"[all]')
         if tis:
@@ -2051,34 +2030,51 @@ Reply in JSON format:
         ]
 
         builders = deep_builders if deep else standard_builders
+        # The degraded fallback depends only on `terms`, so every builder would
+        # produce the same query string. Compute it once and emit a single
+        # degraded query to avoid running the same PubMed search N times.
+        degraded_fallback = self._build_degraded_fallback(terms) if meaningful < 2 else None
+        emitted_degraded = False
         for category, builder in builders:
             query_str = builder(terms)
             if not query_str:
                 continue
-            if meaningful < 2:
-                fallback = self._build_degraded_fallback(terms)
-                if fallback:
+            if meaningful < 2 and degraded_fallback:
+                if not emitted_degraded:
                     queries.append(DirectionSearchQuery(
                         category=category,
-                        query=fallback,
+                        query=degraded_fallback,
                         degraded=True,
                         notes=f"Degraded: fewer than 2 meaningful axes (had {meaningful})"
                     ))
-                    continue
+                    emitted_degraded = True
+                continue
             queries.append(DirectionSearchQuery(category=category, query=query_str))
 
         return queries
 
-    def _dedup_evidence(self, items: List["PubMedEvidenceItem"]) -> List["PubMedEvidenceItem"]:
+    @staticmethod
+    def _dedup_by_pmid(items, pmid_of, drop_empty=False):
+        """Order-preserving dedup by PMID. `pmid_of` extracts the pmid from an item
+        (attr access for evidence objects, dict access for raw articles).
+        `drop_empty=True` discards items without a pmid; otherwise they are kept
+        un-deduplicated."""
         seen: set = set()
-        out: List["PubMedEvidenceItem"] = []
-        for e in items:
-            key = str(getattr(e, "pmid", "") or "")
-            if key and key in seen:
+        out = []
+        for it in items:
+            key = str(pmid_of(it) or "")
+            if not key:
+                if not drop_empty:
+                    out.append(it)
+                continue
+            if key in seen:
                 continue
             seen.add(key)
-            out.append(e)
+            out.append(it)
         return out
+
+    def _dedup_evidence(self, items: List["PubMedEvidenceItem"]) -> List["PubMedEvidenceItem"]:
+        return self._dedup_by_pmid(items, lambda e: getattr(e, "pmid", ""))
 
     def _article_matches_candidate(self, article: Dict[str, Any], candidate: Dict[str, Any]) -> bool:
         genes = [str(g).lower() for g in candidate.get("key_genes", []) if str(g).strip()]
@@ -2181,16 +2177,13 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             items_raw = []
 
         evidence_items: List[PubMedEvidenceItem] = []
-        bucket_map = {"direct": "direct", "analogous": "analogous",
-                       "contradictory": "contradictory", "methodological": "methodological",
-                       "irrelevant": "irrelevant"}
         for it in items_raw:
             pmid = str(it.get("pmid", ""))
             bucket = str(it.get("bucket", "irrelevant"))
             # Only keep non-irrelevant items
             if bucket == "irrelevant":
                 continue
-            supports = bucket_map.get(bucket, "analogous")
+            supports = bucket if bucket in ("direct", "analogous", "contradictory", "methodological") else "analogous"
             relevance = str(it.get("relevance", "low"))
             if relevance not in ("high", "medium", "low"):
                 relevance = "low"
@@ -2202,7 +2195,7 @@ Respond ONLY with valid JSON (no markdown, no code fences):
                 url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else None,
                 relevance=relevance,
                 supports=supports,
-                source="session_cache" if any(a.get("source") == "session_cache" for a in articles if str(a.get("pmid", "")) == pmid) else "new_search",
+                source="session_cache" if (article and article.get("source") == "session_cache") else "new_search",
                 species_context=", ".join(terms["organism"]),
                 tissue_context=", ".join(terms["tissue"]),
                 why_it_matters=str(it.get("why_it_matters", "")),
@@ -2288,30 +2281,27 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         direction_id = candidate.get("direction_id", "")
         direction_name = candidate.get("direction", "")
         result = self._build_empty_direction_result(direction_id, direction_name)
+        terms = self._candidate_terms(candidate)
         all_evidence: List[PubMedEvidenceItem] = []
         executed_categories: set = set()
-        best_qualification: str = ""
         all_limitations: List[str] = []
         timed_out_flag = False
         triage_metadata_list: List[Dict[str, Any]] = []
         queries: List[DirectionSearchQuery] = []
 
+        # Cached articles matching this candidate are invariant across all batches.
+        matching_cache = [a for a in cached_articles if self._article_matches_candidate(a, candidate)]
+
         # Phase 1: Standard queries
         standard_queries = self._direction_queries(candidate, deep=False)
         queries.extend(standard_queries)
 
-        for q in standard_queries:
-            evidence, meta, q_timedout, limitations = await self._execute_query_batch(
-                q, candidate, cached_articles, query_timeout_seconds
-            )
-            all_evidence.extend(evidence)
-            if not q.degraded:
-                executed_categories.add(q.category)
-            if meta:
-                triage_metadata_list.append(meta)
-            if q_timedout:
-                timed_out_flag = True
-            all_limitations.extend(limitations)
+        if await self._run_query_batches(
+            standard_queries, candidate, matching_cache, query_timeout_seconds,
+            all_evidence=all_evidence, executed_categories=executed_categories,
+            triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
+        ):
+            timed_out_flag = True
 
         # Check escalation conditions
         direct_ev = [e for e in all_evidence if e.supports == "direct"]
@@ -2319,7 +2309,7 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         contradictory_ev = [e for e in all_evidence if e.supports == "contradictory"]
         methodological_ev = [e for e in all_evidence if e.supports == "methodological"]
 
-        has_methods = bool(self._candidate_terms(candidate)["methods"])
+        has_methods = bool(terms["methods"])
         needs_deep = (
             len(direct_ev) < 2
             or (len(analogous_ev) < 1 and len(direct_ev) < 1)
@@ -2334,18 +2324,12 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             deep_queries = self._direction_queries(candidate, deep=True)
             queries.extend(deep_queries)
             search_tier = "deep"
-            for q in deep_queries:
-                evidence, meta, q_timedout, limitations = await self._execute_query_batch(
-                    q, candidate, cached_articles, query_timeout_seconds
-                )
-                all_evidence.extend(evidence)
-                if not q.degraded:
-                    executed_categories.add(q.category)
-                if meta:
-                    triage_metadata_list.append(meta)
-                if q_timedout:
-                    timed_out_flag = True
-                all_limitations.extend(limitations)
+            if await self._run_query_batches(
+                deep_queries, candidate, matching_cache, query_timeout_seconds,
+                all_evidence=all_evidence, executed_categories=executed_categories,
+                triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
+            ):
+                timed_out_flag = True
 
         # Deduplicate by PMID so the same article is not counted across multiple query categories.
         all_evidence = self._dedup_evidence(all_evidence)
@@ -2358,11 +2342,10 @@ Respond ONLY with valid JSON (no markdown, no code fences):
 
         # Compute axes — an axis counts as covered only when the candidate actually
         # had the relevant terms AND a non-degraded query for that axis executed.
-        axis_terms = self._candidate_terms(candidate)
-        has_gene = bool(axis_terms["genes"])
-        has_cell = bool(axis_terms["cells"])
-        has_tissue = bool(axis_terms["tissue"][0])
-        has_pathway = bool(axis_terms["pathways"])
+        has_gene = bool(terms["genes"])
+        has_cell = bool(terms["cells"])
+        has_tissue = bool(terms["tissue"][0])
+        has_pathway = bool(terms["pathways"])
         axes = {
             "gene_or_model": has_gene and (
                 "direct_prior_work" in executed_categories or "gene_model_relaxed" in executed_categories),
@@ -2440,11 +2423,32 @@ Respond ONLY with valid JSON (no markdown, no code fences):
 
         return result
 
+    async def _run_query_batches(
+        self, queries, candidate, matching_cache, timeout, *,
+        all_evidence, executed_categories, triage_metadata_list, all_limitations,
+    ) -> bool:
+        """Run a list of query batches, accumulating into the passed-in lists.
+        Returns True if any batch timed out."""
+        timed_out = False
+        for q in queries:
+            evidence, meta, q_timedout, limitations = await self._execute_query_batch(
+                q, candidate, matching_cache, timeout
+            )
+            all_evidence.extend(evidence)
+            if not q.degraded:
+                executed_categories.add(q.category)
+            if meta:
+                triage_metadata_list.append(meta)
+            if q_timedout:
+                timed_out = True
+            all_limitations.extend(limitations)
+        return timed_out
+
     async def _execute_query_batch(
         self,
         query: DirectionSearchQuery,
         candidate: Dict[str, Any],
-        cached_articles: List[Dict[str, Any]],
+        matching_cache: List[Dict[str, Any]],
         query_timeout_seconds: float,
     ) -> Tuple[List[PubMedEvidenceItem], Dict[str, Any], bool, List[str]]:
         evidence: List[PubMedEvidenceItem] = []
@@ -2452,8 +2456,8 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         timed_out = False
         meta: Dict[str, Any] = {}
 
-        # Check cached articles first
-        matching_cache = [a for a in cached_articles if self._article_matches_candidate(a, candidate)]
+        # Cached articles matching this candidate are computed once per candidate
+        # by the caller and passed in.
         if matching_cache:
             try:
                 cache_ev, cache_meta = await asyncio.wait_for(
@@ -2505,8 +2509,6 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             "no_matched_species_tissue_evidence": 4,
             "cross_tissue_only": 3,
             "cross_species_only": 2,
-            "mouse_liver_available": 1,
-            "no_mouse_liver_evidence": 0,
             "": -1,
         }
         best = ""

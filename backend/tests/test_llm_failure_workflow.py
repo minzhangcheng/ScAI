@@ -59,8 +59,9 @@ class TestWithRetryLlmFailure:
         # Mock settings_provider for client cache clearing
         mock._settings_provider = MagicMock()
         mock._settings_provider._client_cache = {}
-        # Bind real async method — MagicMock auto-creates a non-awaitable stub
+        # Bind real async methods — MagicMock auto-creates a non-awaitable stub
         mock._wait_for_llm_intervention = SingleCellAnalysisWorkflow._wait_for_llm_intervention.__get__(mock, type(mock))
+        mock._drive_hitl_gate = SingleCellAnalysisWorkflow._drive_hitl_gate.__get__(mock, type(mock))
         return mock
 
     @pytest.fixture
@@ -375,6 +376,7 @@ class TestBioinformaticsNodeUpstreamPropagation:
 
         # Bind real async methods — MagicMock auto-creates a non-awaitable stub
         mock._wait_for_llm_intervention = SingleCellAnalysisWorkflow._wait_for_llm_intervention.__get__(mock, type(mock))
+        mock._drive_hitl_gate = SingleCellAnalysisWorkflow._drive_hitl_gate.__get__(mock, type(mock))
         mock._require_core_agent = SingleCellAnalysisWorkflow._require_core_agent.__get__(mock, type(mock))
 
         # Bind the real method

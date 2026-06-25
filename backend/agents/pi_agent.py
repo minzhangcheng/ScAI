@@ -9,6 +9,7 @@ import logging
 
 from .base import BaseAgent
 from ..utils.settings_provider import AgentSettingsProvider
+from ..utils.direction_evidence import build_fallback_direction_evidence
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -1322,19 +1323,22 @@ Return a JSON object with this EXACT structure:
         """
         logger.info(f"[PI] Generating exploration report")
         raw_candidates = await self.generate_raw_direction_candidates(state, round_result)
-        fallback_evidence = [
-            {
-                "direction_id": c.get("direction_id", f"dir_{i+1:03d}"),
-                "direction": c.get("direction", ""),
-                "status": "skipped",
-                "search_tier": "failed",
-                "literature_novelty": "unknown",
-                "confidence": "failed",
-                "summary": "Literature evidence was not provided to direct generate_exploration_report call.",
-            }
-            for i, c in enumerate(raw_candidates)
-        ]
+        fallback_evidence = build_fallback_direction_evidence(
+            raw_candidates,
+            status="skipped",
+            reason="Literature evidence was not provided to direct generate_exploration_report call.",
+        )
         return await self.score_directions_with_evidence(state, round_result, raw_candidates, fallback_evidence)
+
+    def _format_cluster_annotation_summary(self, state) -> str:
+        if not (state.annotation_state and state.annotation_state.cluster_annotations):
+            return "No annotation data"
+        lines = [
+            f"- Cluster {ca.cluster_id}: {ca.cell_type} "
+            f"[confidence: {ca.confidence}] markers: {', '.join(ca.key_markers[:10])}"
+            for ca in state.annotation_state.cluster_annotations
+        ]
+        return "\n".join(lines)
 
     async def generate_raw_direction_candidates(
         self,
@@ -1348,15 +1352,7 @@ Return a JSON object with this EXACT structure:
         logger.info(f"[PI] Generating raw direction candidates")
         self.reset_history()
 
-        ann_summary = "No annotation data"
-        if state.annotation_state and state.annotation_state.cluster_annotations:
-            ann_lines = []
-            for ca in state.annotation_state.cluster_annotations:
-                ann_lines.append(
-                    f"- Cluster {ca.cluster_id}: {ca.cell_type} "
-                    f"[confidence: {ca.confidence}] markers: {', '.join(ca.key_markers[:10])}"
-                )
-            ann_summary = "\n".join(ann_lines)
+        ann_summary = self._format_cluster_annotation_summary(state)
 
         prompt = f"""Based on the Round 1 exploration results, propose 3-5 raw research direction candidates.
 
@@ -1448,15 +1444,7 @@ Return a JSON object with a single key "candidates" containing the list of candi
         logger.info(f"[PI] Scoring {len(raw_candidates)} direction candidates with evidence")
         self.reset_history()
 
-        ann_summary = "No annotation data"
-        if state.annotation_state and state.annotation_state.cluster_annotations:
-            ann_lines = []
-            for ca in state.annotation_state.cluster_annotations:
-                ann_lines.append(
-                    f"- Cluster {ca.cluster_id}: {ca.cell_type} "
-                    f"[confidence: {ca.confidence}] markers: {', '.join(ca.key_markers[:10])}"
-                )
-            ann_summary = "\n".join(ann_lines)
+        ann_summary = self._format_cluster_annotation_summary(state)
 
         prompt = f"""You are the PI scoring research direction candidates with literature evidence.
 
@@ -1951,13 +1939,14 @@ Return JSON:
         # Prerequisite closure (multi-hop): keep adding prerequisites until none are missing.
         text_by_id = {c.get("direction_id"): c.get("direction", "") for c in candidates if isinstance(c, dict)}
         id_by_text = {c.get("direction", ""): c.get("direction_id") for c in candidates if isinstance(c, dict)}
+        cand_by_id = {c.get("direction_id"): c for c in candidates if isinstance(c, dict)}
         selected_texts = {d.get("direction", "") for d in selected}
         changed = True
         while changed:
             changed = False
             for d in list(selected):
                 dir_id = id_by_text.get(d.get("direction", ""))
-                cand = next((c for c in candidates if isinstance(c, dict) and c.get("direction_id") == dir_id), None)
+                cand = cand_by_id.get(dir_id)
                 if not cand:
                     continue
                 for prereq_id in cand.get("prerequisite_dependencies", []) or []:

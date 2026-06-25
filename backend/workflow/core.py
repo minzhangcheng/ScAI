@@ -146,6 +146,61 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # Technique agent (optional, created in initialize())
         self.technique_agent: Optional[TechniqueAgent] = None
 
+    async def _drive_hitl_gate(
+        self,
+        node_name: str,
+        analysis_state: AnalysisState,
+        *,
+        reason: str,
+        info_attr: str,
+        info_payload: dict,
+        enter_change: str,
+        exit_change: str,
+        clear_cache_on_retry: bool,
+    ) -> LlmFailureAction:
+        """Shared HITL intervention scaffold (lock/event/generation/state_sync).
+
+        Callers parameterize only what differs; behavior is otherwise identical
+        across LLM-failure, disabled-agent, and marker-db gates.
+        """
+        async with self._llm_failure_lock:
+            self._llm_failure_generation += 1
+            gen = self._llm_failure_generation
+            if node_name not in self._llm_failure_events:
+                self._llm_failure_events[node_name] = asyncio.Event()
+            event = self._llm_failure_events[node_name]
+            event.clear()
+
+            analysis_state.wait_input_reason = reason
+            payload = dict(info_payload)
+            payload["node_name"] = node_name
+            payload["generation"] = gen
+            setattr(analysis_state, info_attr, payload)
+            self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+            await self._send_state_sync(analysis_state, enter_change)
+
+        try:
+            await event.wait()
+            action = self._llm_failure_actions.pop(node_name, None)
+            analysis_state.wait_input_reason = None
+            setattr(analysis_state, info_attr, None)
+            self._set_status(analysis_state, TaskStatus.RUNNING)
+            await self._send_state_sync(analysis_state, exit_change)
+        except asyncio.CancelledError:
+            analysis_state.wait_input_reason = None
+            setattr(analysis_state, info_attr, None)
+            raise
+        finally:
+            self._llm_failure_events.pop(node_name, None)
+
+        if action == LlmFailureAction.RETRY.value:
+            if clear_cache_on_retry and self._settings_provider is not None:
+                self._settings_provider._client_cache.clear()
+            return LlmFailureAction.RETRY
+        if action == LlmFailureAction.TERMINATE.value:
+            return LlmFailureAction.TERMINATE
+        return LlmFailureAction.SKIP
+
     async def _wait_for_llm_intervention(
         self,
         error: UpstreamExhaustedError,
@@ -159,65 +214,29 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             LlmFailureAction.SKIP      — user clicked Skip
             LlmFailureAction.TERMINATE — user clicked Terminate (caller should abort)
         """
-        async with self._llm_failure_lock:
-            logger.error(
-                f"[{self.session_id}] Node {node_name} LLM upstream exhausted: "
-                f"agent={error.agent_name} model={error.model} server={error.llm_server}"
-            )
-            await self._send_message(
-                "error",
-                f"Node {node_name} LLM call failed: {str(error)}",
-                AgentType.PI,
-            )
-
-            self._llm_failure_generation += 1
-            gen = self._llm_failure_generation
-
-            if node_name not in self._llm_failure_events:
-                self._llm_failure_events[node_name] = asyncio.Event()
-            event = self._llm_failure_events[node_name]
-            event.clear()
-
-            analysis_state.wait_input_reason = WaitInputReason.LLM_FAILURE.value
-            analysis_state.llm_failure_info = {
+        logger.error(
+            f"[{self.session_id}] Node {node_name} LLM upstream exhausted: "
+            f"agent={error.agent_name} model={error.model} server={error.llm_server}"
+        )
+        await self._send_message(
+            "error",
+            f"Node {node_name} LLM call failed: {str(error)}",
+            AgentType.PI,
+        )
+        return await self._drive_hitl_gate(
+            node_name, analysis_state,
+            reason=WaitInputReason.LLM_FAILURE.value,
+            info_attr="llm_failure_info",
+            info_payload={
                 "agent": error.agent_name,
                 "model": error.model,
                 "llm_server": error.llm_server,
                 "error": str(error),
-                "node_name": node_name,
-                "generation": gen,
-            }
-            self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
-            await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_FAILURE.value)
-
-            logger.info(
-                f"[{self.session_id}] Waiting for user intervention "
-                f"on LLM failure (node={node_name}, generation={gen})"
-            )
-
-        # CRITICAL: Release lock before awaiting Event so API can acquire it
-        try:
-            await event.wait()
-
-            action = self._llm_failure_actions.pop(node_name, None)
-            analysis_state.wait_input_reason = None
-            analysis_state.llm_failure_info = None
-            self._set_status(analysis_state, TaskStatus.RUNNING)
-            await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_RETRY.value)
-        except asyncio.CancelledError:
-            analysis_state.wait_input_reason = None
-            analysis_state.llm_failure_info = None
-            raise
-        finally:
-            self._llm_failure_events.pop(node_name, None)
-
-        if action == LlmFailureAction.RETRY.value:
-            if self._settings_provider is not None:
-                self._settings_provider._client_cache.clear()
-            return LlmFailureAction.RETRY
-        if action == LlmFailureAction.TERMINATE.value:
-            return LlmFailureAction.TERMINATE
-        return LlmFailureAction.SKIP
+            },
+            enter_change=StateSyncChangeType.LLM_FAILURE.value,
+            exit_change=StateSyncChangeType.LLM_RETRY.value,
+            clear_cache_on_retry=True,
+        )
 
     async def _pathology_llm_intervention_callback(
         self,
@@ -260,108 +279,51 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         same event/lock/generation infrastructure; the frontend disambiguates
         via state_sync change_type='agent_disabled'.
         """
-        async with self._llm_failure_lock:
-            logger.warning(
-                f"[{self.session_id}] Node {node_name} requires {agent_name} "
-                f"agent but its model is empty (disabled)."
-            )
-            await self._send_message(
-                "error",
-                f"Node {node_name} requires {agent_name} agent which is disabled.",
-                AgentType.PI,
-            )
-            self._llm_failure_generation += 1
-            gen = self._llm_failure_generation
-            if node_name not in self._llm_failure_events:
-                self._llm_failure_events[node_name] = asyncio.Event()
-            event = self._llm_failure_events[node_name]
-            event.clear()
-
-            analysis_state.wait_input_reason = WaitInputReason.AGENT_DISABLED.value
-            analysis_state.agent_disabled_info = {
-                "agent": agent_name,
-                "node_name": node_name,
-                "generation": gen,
-            }
-            self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
-            await self._send_state_sync(analysis_state, StateSyncChangeType.AGENT_DISABLED.value)
-
-            logger.info(
-                f"[{self.session_id}] Waiting for user to resolve disabled "
-                f"agent (agent={agent_name}, node={node_name}, generation={gen})"
-            )
-
-        try:
-            await event.wait()
-            action = self._llm_failure_actions.pop(node_name, None)
-            analysis_state.wait_input_reason = None
-            analysis_state.agent_disabled_info = None
-            self._set_status(analysis_state, TaskStatus.RUNNING)
-            await self._send_state_sync(analysis_state, StateSyncChangeType.AGENT_RESUMED.value)
-        except asyncio.CancelledError:
-            analysis_state.wait_input_reason = None
-            analysis_state.agent_disabled_info = None
-            raise
-        finally:
-            self._llm_failure_events.pop(node_name, None)
-
-        if action == LlmFailureAction.RETRY.value:
-            if self._settings_provider is not None:
-                self._settings_provider._client_cache.clear()
-            return LlmFailureAction.RETRY
-        if action == LlmFailureAction.TERMINATE.value:
-            return LlmFailureAction.TERMINATE
-        return LlmFailureAction.SKIP
+        logger.warning(
+            f"[{self.session_id}] Node {node_name} requires {agent_name} "
+            f"agent but its model is empty (disabled)."
+        )
+        await self._send_message(
+            "error",
+            f"Node {node_name} requires {agent_name} agent which is disabled.",
+            AgentType.PI,
+        )
+        return await self._drive_hitl_gate(
+            node_name, analysis_state,
+            reason=WaitInputReason.AGENT_DISABLED.value,
+            info_attr="agent_disabled_info",
+            info_payload={"agent": agent_name},
+            enter_change=StateSyncChangeType.AGENT_DISABLED.value,
+            exit_change=StateSyncChangeType.AGENT_RESUMED.value,
+            clear_cache_on_retry=True,
+        )
 
     async def _wait_for_marker_db_intervention(
         self, node_name: str, analysis_state: AnalysisState,
     ) -> LlmFailureAction:
         """缺 marker TSV 时复用 LlmTimeoutDialog 通道。retry 不清 LLM cache。"""
-        async with self._llm_failure_lock:
-            self._llm_failure_generation += 1
-            gen = self._llm_failure_generation
-            if node_name not in self._llm_failure_events:
-                self._llm_failure_events[node_name] = asyncio.Event()
-            event = self._llm_failure_events[node_name]
-            event.clear()
-            analysis_state.wait_input_reason = WaitInputReason.MARKER_DB_MISSING.value
-            analysis_state.llm_failure_info = {
+        return await self._drive_hitl_gate(
+            node_name, analysis_state,
+            reason=WaitInputReason.MARKER_DB_MISSING.value,
+            info_attr="llm_failure_info",
+            info_payload={
                 "agent": "bioinformatics", "model": "", "llm_server": "",
                 "error": ("Marker database TSV not found at backend/data/markers/. "
                           "Click 'Fetch' to download or 'Skip'."),
-                "node_name": node_name, "generation": gen, "reason": "marker_db_missing",
-            }
-            self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
-            await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_FAILURE.value)
-
-        try:
-            await event.wait()
-            action = self._llm_failure_actions.pop(node_name, None)
-            analysis_state.wait_input_reason = None
-            analysis_state.llm_failure_info = None
-            self._set_status(analysis_state, TaskStatus.RUNNING)
-            await self._send_state_sync(analysis_state, StateSyncChangeType.LLM_RETRY.value)
-        except asyncio.CancelledError:
-            analysis_state.wait_input_reason = None
-            analysis_state.llm_failure_info = None
-            raise
-        finally:
-            self._llm_failure_events.pop(node_name, None)
-
-        if action == LlmFailureAction.RETRY.value:
-            return LlmFailureAction.RETRY
-        if action == LlmFailureAction.TERMINATE.value:
-            return LlmFailureAction.TERMINATE
-        return LlmFailureAction.SKIP
+                "reason": "marker_db_missing",
+            },
+            enter_change=StateSyncChangeType.LLM_FAILURE.value,
+            exit_change=StateSyncChangeType.LLM_RETRY.value,
+            clear_cache_on_retry=False,
+        )
 
     async def _marker_db_intervention_callback(self) -> LlmFailureAction:
         """传给 bio agent 的回调：缺 marker DB 时弹 HITL；retry 即时联网补齐。"""
-        import asyncio as _aio
         from backend.services import marker_priors
         action = await self._wait_for_marker_db_intervention(
             "bioinformatics_analysis", self._current_analysis_state)
         if action == LlmFailureAction.RETRY:
-            ok = await _aio.to_thread(marker_priors.trigger_fetch)
+            ok = await asyncio.to_thread(marker_priors.trigger_fetch)
             await self._send_message(
                 "status",
                 "Marker DB fetched, computing priors" if ok else "Marker DB fetch failed; skipping DB priors",

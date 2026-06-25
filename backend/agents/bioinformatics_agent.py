@@ -29,6 +29,8 @@ import inspect
 import json as _json
 from backend.services import ora_kernel
 from backend.services.marker_priors import MarkerDB, summarize_database_priors
+
+_ORA_KERNEL_SRC = inspect.getsource(ora_kernel)
 from ..utils.formatting import format_revision_history, truncate_for_llm
 
 # Configure logger
@@ -399,12 +401,21 @@ def _build_swallowed_error_feedback(error_type: str, doc_hint: str) -> str:
     return msg
 
 
-_MARKER_DB = MarkerDB()
+_MARKER_DB = None
+
+
+def _get_marker_db():
+    """Lazily construct the shared MarkerDB; sessions that never need DB priors
+    don't pay for it at import time."""
+    global _MARKER_DB
+    if _MARKER_DB is None:
+        _MARKER_DB = MarkerDB()
+    return _MARKER_DB
 
 
 def marker_priors_write(organism: str, workspace_dir):
     """模块级间接层，便于测试 monkeypatch。"""
-    return _MARKER_DB.write_workspace_input(organism, workspace_dir)
+    return _get_marker_db().write_workspace_input(organism, workspace_dir)
 
 
 class BioinformaticsAgent(BaseAgent):
@@ -1406,7 +1417,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         try:
             if not marker_priors_write(organism, workspace_dir):
                 return {}
-            src = inspect.getsource(ora_kernel)
+            src = _ORA_KERNEL_SRC
             call = (
                 f"\n_priors = compute_ora_priors({adata_var}, "
                 f"'tables/marker_priors_input.tsv', {cluster_key!r}, {rank_key!r})\n"
@@ -2927,14 +2938,14 @@ finally:
                     await self._notify("status", f"Annotating {n_clusters} clusters using literature evidence ({organism} {tissue})...")
 
                     # 缺文件 HITL 门控（必须在算 priors 之前）
-                    if not _MARKER_DB.present() and self.marker_db_intervention_callback:
+                    if not _get_marker_db().present() and self.marker_db_intervention_callback:
                         from backend.constants import LlmFailureAction as _LFA
                         from backend.workflow.helpers import WorkflowTerminatedError
                         action = await self.marker_db_intervention_callback()
                         if action == _LFA.TERMINATE:
                             raise WorkflowTerminatedError("Analysis terminated by user at marker DB gate")
                         if action == _LFA.RETRY:
-                            _MARKER_DB.reload()  # clear stale empty cache after fetch
+                            _get_marker_db().reload()  # clear stale empty cache after fetch
                     workspace_dir = getattr(self.sandbox, "working_dir", None)
                     database_priors = {}
                     if workspace_dir is not None:

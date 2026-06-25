@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
-from typing import Optional as _Optional
+
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ def trigger_fetch() -> bool:
         return False
 
 
-def summarize_database_priors(database_priors, total_clusters: int) -> _Optional[str]:
+def summarize_database_priors(database_priors, total_clusters: int) -> Optional[str]:
     if not database_priors:
         return None
     n = len(database_priors)

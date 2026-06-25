@@ -316,8 +316,6 @@ SpeciesTissueQualification = Literal[
     "",
     "matched_species_tissue_available",
     "no_matched_species_tissue_evidence",
-    "mouse_liver_available",
-    "no_mouse_liver_evidence",
     "cross_tissue_only",
     "cross_species_only",
 ]

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.29.2 · **Last updated**: 2026-06-25
+**Version**: 0.29.3 · **Last updated**: 2026-06-25
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,20 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.29.x — (2026-06-24 → 2026-06-25)**
+
+- `0.29.3` — Refactoring pass: HITL gate scaffold, dead-code removal, UI component extraction, lazy init, query dedup (2026-06-25):
+  - **Shared HITL gate scaffold (`backend/workflow/core.py`)**: Extracted `_drive_hitl_gate()` unifying lock/event/generation/state_sync pattern duplicated across `_wait_for_llm_intervention`, `_wait_for_disabled_agent`, and `_wait_for_marker_db_intervention`. Each caller parameterizes only what differs (reason, payload, change types, cache-on-retry). Replaces ~120 lines of near-identical code.
+  - **Direction evidence shared factory (`backend/utils/direction_evidence.py`)**: New `build_fallback_direction_evidence()` in utils — both `PIAgent` and `SynthesisMixin` consume it without the agent layer importing the orchestration layer.
+  - **PI annotation summary helper (`backend/agents/pi_agent.py`)**: Extracted `_format_cluster_annotation_summary()` replacing inline annotation-summary construction duplicated across `generate_raw_direction_candidates` and `score_directions_with_evidence`.
+  - **Score badge & species-label unification (`backend/services/report/variants.py`)**: Extracted module-level `_render_score_badge()` and `_SPECIES_TISSUE_LABELS` map — removes two inline score-badge helpers (`score_badge`, `_sb`) and inline `_species_tissue_labels` dict.
+  - **Query batch loop dedup (`backend/agents/literature_agent.py`)**: Extracted `_run_query_batches()` replacing duplicated inline loop across standard and deep search paths. Extracted `_dedup_by_pmid()` static method replacing hardcoded dedup inline.
+  - **Lazy MarkerDB (`backend/agents/bioinformatics_agent.py`)**: Replaced eager `_MARKER_DB = MarkerDB()` with `_get_marker_db()` lazy accessor. Hoisted `ora_kernel` source to module-level constant.
+  - **O(1) candidate lookup (`backend/agents/pi_agent.py`)**: `cand_by_id` dict in prerequisite closure loop replaces O(n) `next()` scan.
+  - **Focused `exhausted()` helper (`backend/agents/literature_agent.py`)**: Local closure in `_focused_rare_search` consolidates 9-line exhausted-result construction.
+  - **Dead `mouse_liver_*` qualification (`backend/models/schemas.py`)**: Removed `mouse_liver_available` / `no_mouse_liver_evidence` from `SpeciesTissueQualification` — unused by evidence layer.
+  - **Frontend `DirectionEvidence` component extraction**: Inline 130-line evidence rendering IIFE from `ExplorationReportDialog.tsx` moved to standalone `components/analysis/DirectionEvidence.tsx` with `language`/`expanded`/`onToggle` props.
+  - **Frontend `LlmTimeoutDialog` refactoring**: Unifies marker-db and agent-disabled branches via `isMarkerDb`/`isAgentDisabled` booleans instead of duplicate JSX trees.
+  - **Cleanup**: Removed redundant `asyncio` imports, dead assignments, no-op map, unused imports across `backend/agents/literature_agent.py`, `backend/services/marker_priors.py`, `backend/workflow/`; fixed unbalanced JSX in `LlmTimeoutDialog`.
 
 - `0.29.2` — Evidence-gated direction selection: PI raw candidate generation, multi-axis literature evidence review, scored direction table with full audit trail (2026-06-25):
   - **Direction selection evidence gating (`backend/workflow/synthesis.py`)**: New `_generate_evidence_gated_exploration_report()` splits exploration report creation into three phases — (1) PI generates raw direction candidates (`generate_raw_direction_candidates`), (2) literature agent evaluates each candidate via multi-axis PubMed queries (`evaluate_direction_novelty_candidates`), (3) PI scores candidates with evidence (`score_directions_with_evidence`). Skips literature gate when Literature Agent is disabled. Stays in EXPLORATION phase on failure instead of advancing to INNOVATION. Dependency graph validated via `_validate_direction_dependency_graph()`.

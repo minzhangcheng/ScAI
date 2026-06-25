@@ -17,6 +17,26 @@ from backend.models.schemas import AnalysisState
 logger = __import__('logging').getLogger(__name__)
 
 
+_SPECIES_TISSUE_LABELS = {
+    "matched_species_tissue_available": "Matched species/tissue evidence available",
+    "no_matched_species_tissue_evidence": "No matched species/tissue evidence",
+    "cross_tissue_only": "Cross-tissue evidence only",
+    "cross_species_only": "Cross-species evidence only",
+    "": "",
+}
+
+
+def _render_score_badge(text, fallback_class="badge-na"):
+    t = str(text).lower() if text else ""
+    if t.startswith("high"):
+        return '<span class="badge-high">High</span>'
+    if t.startswith("medium"):
+        return '<span class="badge-medium">Medium</span>'
+    if t.startswith("low"):
+        return '<span class="badge-low">Low</span>'
+    return f'<span class="{fallback_class}">{html_module.escape(str(text)[:20])}</span>'
+
+
 def _render_direction_evidence_section(exploration_report) -> str:
     candidates = exploration_report.research_direction_candidates or []
     if not candidates:
@@ -27,26 +47,6 @@ def _render_direction_evidence_section(exploration_report) -> str:
         eid = ev.get("direction_id", "")
         if eid:
             evidence_lookup[eid] = ev
-
-    _species_tissue_labels = {
-        "matched_species_tissue_available": "Matched species/tissue evidence available",
-        "no_matched_species_tissue_evidence": "No matched species/tissue evidence",
-        "cross_tissue_only": "Cross-tissue evidence only",
-        "cross_species_only": "Cross-species evidence only",
-        "mouse_liver_available": "Matched species/tissue evidence available",
-        "no_mouse_liver_evidence": "No matched species/tissue evidence",
-        "": "",
-    }
-
-    def _sb(text):
-        t = text.lower() if text else ""
-        if t.startswith("high"):
-            return '<span class="badge-high">High</span>'
-        elif t.startswith("medium"):
-            return '<span class="badge-medium">Medium</span>'
-        elif t.startswith("low"):
-            return '<span class="badge-low">Low</span>'
-        return f'<span class="badge-medium">{html_module.escape(str(text)[:20])}</span>'
 
     def _status_badge(status):
         s = status.lower()
@@ -92,9 +92,9 @@ def _render_direction_evidence_section(exploration_report) -> str:
         <tr{row_class}>
             <td class="dir-number">{i}</td>
             <td><div class="dir-title">{direction}</div></td>
-            <td class="score-cell">{_sb(overall_priority)}</td>
-            <td class="score-cell">{_sb(data_reliability)}</td>
-            <td class="score-cell">{_sb(literature_novelty)}</td>
+            <td class="score-cell">{_render_score_badge(overall_priority, fallback_class="badge-medium")}</td>
+            <td class="score-cell">{_render_score_badge(data_reliability, fallback_class="badge-medium")}</td>
+            <td class="score-cell">{_render_score_badge(literature_novelty, fallback_class="badge-medium")}</td>
             <td class="score-cell">{_status_badge(status)}</td>
         </tr>"""
 
@@ -111,7 +111,7 @@ def _render_direction_evidence_section(exploration_report) -> str:
         negative_val = html_module.escape(str(ev.get("negative_validation_confidence", "N/A"))) if ev else "N/A"
 
         species_tissue = ev.get("species_tissue_qualification", "") if ev else ""
-        species_label = _species_tissue_labels.get(species_tissue, "")
+        species_label = _SPECIES_TISSUE_LABELS.get(species_tissue, "")
         species_display = f"{html_module.escape(species_tissue)} ({html_module.escape(species_label)})" if species_label else (html_module.escape(species_tissue) if species_tissue else "")
 
         prereqs = c.get("prerequisite_dependencies", [])
@@ -173,9 +173,9 @@ def _render_direction_evidence_section(exploration_report) -> str:
         detail_items = f"""
                 <ul class="ev-list">
                     {("<li><strong>Data Support Summary:</strong> " + data_support + "</li>") if data_support else ""}
-                    <li><strong>Data Reliability:</strong> {_sb(data_reliability)}</li>
-                    <li><strong>Literature Novelty:</strong> {_sb(literature_novelty)}</li>
-                    <li><strong>Overall Priority:</strong> {_sb(overall_priority)}</li>
+                    <li><strong>Data Reliability:</strong> {_render_score_badge(data_reliability, fallback_class="badge-medium")}</li>
+                    <li><strong>Literature Novelty:</strong> {_render_score_badge(literature_novelty, fallback_class="badge-medium")}</li>
+                    <li><strong>Overall Priority:</strong> {_render_score_badge(overall_priority, fallback_class="badge-medium")}</li>
                     <li><strong>Biology Expectedness:</strong> {bio_expected}</li>
                     <li><strong>Data Novelty:</strong> {data_novelty}</li>
                     <li><strong>Mechanistic Importance:</strong> {mech_importance}</li>
@@ -250,16 +250,6 @@ def _render_direction_candidates_rows(candidates) -> str:
     data_reliability) produced by score_directions_with_evidence(), falling back
     to the legacy expected_innovation / expected_novelty fields for old sessions.
     """
-    def score_badge(text):
-        t = str(text).lower()
-        if t.startswith("high"):
-            return '<span class="badge-high">High</span>'
-        elif t.startswith("medium"):
-            return '<span class="badge-medium">Medium</span>'
-        elif t.startswith("low"):
-            return '<span class="badge-low">Low</span>'
-        return f'<span class="badge-na">{html_module.escape(str(text)[:20])}</span>'
-
     def score_detail(text):
         text = str(text)
         for sep in [" — ", " - ", ": ", " "]:
@@ -284,9 +274,9 @@ def _render_direction_candidates_rows(candidates) -> str:
                 <div class="dir-title">{direction}</div>
                 <div class="dir-rationale">{rationale}</div>
             </td>
-            <td class="score-cell">{score_badge(priority)}<div class="score-detail">{score_detail(priority)}</div></td>
-            <td class="score-cell">{score_badge(novelty)}<div class="score-detail">{score_detail(novelty)}</div></td>
-            <td class="score-cell">{score_badge(reliability)}<div class="score-detail">{score_detail(reliability)}</div></td>
+            <td class="score-cell">{_render_score_badge(priority)}<div class="score-detail">{score_detail(priority)}</div></td>
+            <td class="score-cell">{_render_score_badge(novelty)}<div class="score-detail">{score_detail(novelty)}</div></td>
+            <td class="score-cell">{_render_score_badge(reliability)}<div class="score-detail">{score_detail(reliability)}</div></td>
         </tr>
         """
     return rows
