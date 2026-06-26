@@ -239,7 +239,23 @@ class SystemConfig(BaseModel):
         default=_ENABLE_REPRODUCIBILITY,
         description="Enable reproducibility bundle generation (checksums, environment snapshot, commands, decisions)",
     )
-    
+
+    enable_annotation_validation_round: bool = Field(
+        default=True,
+        description="Enable the automatic annotation validation round (PI plan -> restricted bioinformatics checks -> PI revision) before user annotation confirmation. Gated by trigger conditions; does not run on every annotation.",
+    )
+    annotation_validation_timeout_seconds: int = Field(
+        default=180,
+        ge=1,
+        description="Wall-clock timeout (seconds) for the whole annotation validation executor. On timeout it returns a partial/failed result rather than blocking the annotation dialog.",
+    )
+    annotation_validation_max_iterations: int = Field(
+        default=5,
+        ge=1,
+        le=8,
+        description="Max code-generation iterations for the annotation validation executor (hard-capped at 8 in code).",
+    )
+
     # State persistence (deprecated: use get_session_states/get_session_workspace instead)
     # Kept for serialization compatibility only.
     state_dir: str = str(STATE_DIR)

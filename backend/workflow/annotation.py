@@ -7,6 +7,7 @@ from ..models.schemas import (
     ClusterAnnotation, TaskStatus,
 )
 from .helpers import safe_pi_brief, wait_with_skip_time
+from .annotation_validation import compute_validation_attempt_id, should_run_validation
 
 if TYPE_CHECKING:
     from .state import WorkflowState
@@ -95,10 +96,33 @@ class AnnotationMixin:
                 evidence=info.get("evidence", ""),
                 alternative_cell_types=info.get("alternative_cell_types", []),
                 low_confidence_reason=info.get("low_confidence_reason", ""),
+                requires_reclustering=info.get("requires_reclustering", False),
+                reclustering_reason=info.get("reclustering_reason", ""),
+                suggested_reclustering_scope=info.get("suggested_reclustering_scope"),
             )
             for cid, info in annotations.items()
             if isinstance(info, dict)
         ]
+
+    @staticmethod
+    def _annotations_from_cluster_annotations(cluster_annotations) -> Dict[str, Any]:
+        """Rebuild an annotations dict from a saved ClusterAnnotation list (the
+        inverse of _build_cluster_annotations), preserving validation revisions."""
+        out: Dict[str, Any] = {}
+        for ca in (cluster_annotations or []):
+            out[ca.cluster_id] = {
+                "cell_type": ca.user_override or ca.cell_type,
+                "subtypes": list(ca.subtypes),
+                "key_markers": list(ca.key_markers),
+                "confidence": ca.confidence,
+                "evidence": ca.evidence,
+                "alternative_cell_types": list(ca.alternative_cell_types),
+                "low_confidence_reason": ca.low_confidence_reason,
+                "requires_reclustering": ca.requires_reclustering,
+                "reclustering_reason": ca.reclustering_reason,
+                "suggested_reclustering_scope": ca.suggested_reclustering_scope,
+            }
+        return out
 
     async def _generate_annotation_brief(self, cluster_markers, organism, tissue, state):
         """Ask PI for a focused annotation Deep Research brief (None on failure/empty)."""
@@ -336,6 +360,19 @@ class AnnotationMixin:
             except Exception as e:
                 logger.warning(f"[{self.session_id}] PI annotation review failed: {e}")
 
+            # Annotation validation round: data-grounded checks + PI revision before user sees them.
+            validation_meta = self._empty_validation_meta("not_run")
+            try:
+                annotations, validation_meta = await self._run_annotation_validation_round(
+                    state, annotations, cluster_markers, tissue, organism,
+                    triage=result.get("triage", {}), database_priors=database_priors,
+                    focused_evidence=result.get("focused_evidence", {}),
+                    literature_report=result.get("literature_report", ""),
+                )
+                result["annotations"] = annotations
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] annotation validation round failed (non-fatal): {e}")
+
             cluster_anns = self._build_cluster_annotations(annotations)
 
             if state.annotation_state and state.annotation_state.confirmed:
@@ -387,6 +424,7 @@ class AnnotationMixin:
                 tissue_summary=result.get("tissue_summary", ""),
                 analysis_summary=analysis_summary,
                 pending=True,
+                **validation_meta,
             )
             state.annotation_state = ann_state
 
@@ -397,15 +435,14 @@ class AnnotationMixin:
             while True:
                 self._annotation_event.clear()
 
-                await self._send_message("annotation_confirmation", {
-                    "annotations": [a.model_dump(mode="json") for a in cluster_anns],
-                    "tissue": tissue,
-                    "organism": organism,
-                    "tissue_summary": result.get("tissue_summary", ""),
-                    "analysis_summary": analysis_summary,
-                    "report_html_url": report_html_url,
-                    "detailed_report_url": detailed_report_url,
-                }, AgentType.LITERATURE)
+                await self._send_message(
+                    "annotation_confirmation",
+                    self._build_annotation_confirmation_payload(
+                        state, cluster_anns, tissue, organism,
+                        result.get("tissue_summary", ""), analysis_summary,
+                        report_html_url, detailed_report_url),
+                    AgentType.LITERATURE,
+                )
 
                 self._set_status(state, TaskStatus.WAITING_ANNOTATION)
                 await self._send_state_sync(state, "annotation_confirmation")
@@ -442,9 +479,22 @@ class AnnotationMixin:
                             if cid in annotations and isinstance(review, dict):
                                 annotations[cid].update(review)
                         result["annotations"] = annotations
-                        cluster_anns = self._build_cluster_annotations(annotations)
                     except Exception as e:
                         logger.warning(f"[{self.session_id}] PI re-review after supplementary failed: {e}")
+
+                    # Supplementary re-review changed labels -> re-validate (force past idempotency).
+                    try:
+                        annotations, validation_meta = await self._run_annotation_validation_round(
+                            state, annotations, cluster_markers, tissue, organism,
+                            triage=result.get("triage", {}), database_priors=database_priors,
+                            focused_evidence=result.get("focused_evidence", {}),
+                            literature_report=result.get("literature_report", ""),
+                            force=True,
+                        )
+                        result["annotations"] = annotations
+                        cluster_anns = self._build_cluster_annotations(annotations)
+                    except Exception as e:
+                        logger.warning(f"[{self.session_id}] post-supplementary re-validation failed: {e}")
 
                     try:
                         html_path = generate_annotation_context_report_html(state, self._current_graph_state, cluster_anns)
@@ -462,6 +512,7 @@ class AnnotationMixin:
                         tissue_summary=result.get("tissue_summary", ""),
                         analysis_summary=analysis_summary,
                         pending=True,
+                        **validation_meta,
                     )
                     state.annotation_state = ann_state
                     continue
@@ -493,3 +544,223 @@ class AnnotationMixin:
             )
 
         return result
+
+    def _validation_enabled(self) -> bool:
+        """Whether the annotation validation round is enabled (config flag; default True)."""
+        try:
+            from ..config import default_config
+            cfg = getattr(self, "config", None) or default_config
+            return bool(getattr(cfg, "enable_annotation_validation_round", True))
+        except Exception:
+            return True
+
+    @staticmethod
+    def _empty_validation_meta(status: str, summary: str = "", attempt_id: Optional[str] = None) -> Dict[str, Any]:
+        return {
+            "validation_attempt_id": attempt_id,
+            "validation_status": status,
+            "validation_plan": None,
+            "validation_result": None,
+            "validation_summary": summary or None,
+            "validation_text_summary": None,
+            "reclustering_recommendations": None,
+        }
+
+    @staticmethod
+    def _build_validation_text_summary(val_result: Dict[str, Any]) -> str:
+        """Compact, vision-free per-cluster verdict summary."""
+        lines = [val_result.get("summary", "")]
+        for cid, cr in (val_result.get("cluster_results") or {}).items():
+            if isinstance(cr, dict):
+                lines.append(f"- Cluster {cid}: {cr.get('support_level','?')}; "
+                             f"action={cr.get('suggested_action','')}; qc={cr.get('qc_flags', [])}")
+        return "\n".join(l for l in lines if l)
+
+    @staticmethod
+    def _build_annotation_confirmation_payload(
+        state: AnalysisState, cluster_anns: List[ClusterAnnotation], tissue: str, organism: str,
+        tissue_summary: str, analysis_summary: str,
+        report_html_url: Optional[str], detailed_report_url: Optional[str],
+    ) -> Dict[str, Any]:
+        """Build the annotation_confirmation payload, including the six optional
+        validation fields read from the (already-built) pending annotation state."""
+        vstate = state.annotation_state
+        return {
+            "annotations": [a.model_dump(mode="json") for a in cluster_anns],
+            "tissue": tissue,
+            "organism": organism,
+            "tissue_summary": tissue_summary,
+            "analysis_summary": analysis_summary,
+            "report_html_url": report_html_url,
+            "detailed_report_url": detailed_report_url,
+            "validation_status": getattr(vstate, "validation_status", None),
+            "validation_summary": getattr(vstate, "validation_summary", None),
+            "validation_text_summary": getattr(vstate, "validation_text_summary", None),
+            "validation_plan": getattr(vstate, "validation_plan", None),
+            "validation_result": getattr(vstate, "validation_result", None),
+            "reclustering_recommendations": getattr(vstate, "reclustering_recommendations", None),
+        }
+
+    def _validation_limits(self):
+        """(max_iterations, timeout_seconds) from config; defaults 5 / 180.
+        Clamped defensively (iter in [1,8], timeout >= 1) so a stray config can't
+        make validation time out instantly or loop unboundedly."""
+        try:
+            from ..config import default_config
+            cfg = getattr(self, "config", None) or default_config
+            it = int(getattr(cfg, "annotation_validation_max_iterations", 5))
+            to = int(getattr(cfg, "annotation_validation_timeout_seconds", 180))
+        except Exception:
+            return (5, 180)
+        return (max(1, min(it, 8)), max(1, to))
+
+    async def _run_annotation_validation_round(
+        self,
+        state: AnalysisState,
+        annotations: Dict[str, Any],
+        cluster_markers: Dict[str, Any],
+        tissue: str,
+        organism: str,
+        triage: Optional[Dict[str, Any]] = None,
+        database_priors: Optional[Dict[str, Any]] = None,
+        focused_evidence: Optional[Dict[str, Any]] = None,
+        literature_report: str = "",
+        force: bool = False,
+    ):
+        """Run the gated annotation validation round.
+
+        Returns (annotations, validation_meta). Never raises into the caller and
+        never writes state.annotation_state (the caller folds validation_meta into
+        the AnnotationConfirmationState it builds). `force=True` bypasses the
+        idempotency reuse (used after supplementary analysis re-reviews labels)."""
+        triage = triage or {}; database_priors = database_priors or {}; focused_evidence = focused_evidence or {}
+
+        if not self._validation_enabled():
+            return annotations, self._empty_validation_meta(
+                "skipped", "Annotation validation is disabled by configuration.")
+
+        # 1) Metadata introspection (also yields cluster_key for the attempt id).
+        try:
+            context = await self.bioinformatics_agent.introspect_validation_metadata(None)
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] validation introspection failed: {e}")
+            context = {}
+        cluster_key = context.get("cluster_key") or ""
+
+        # 2) Idempotency guard (reads PREVIOUS pending state, e.g. after snapshot restore).
+        attempt_id = compute_validation_attempt_id(
+            getattr(state, "current_round", 0), tissue, organism, cluster_key, cluster_markers)
+        prev = state.annotation_state
+        if (not force and prev is not None and getattr(prev, "validation_attempt_id", None) == attempt_id
+                and getattr(prev, "validation_status", None) in ("completed", "failed", "skipped", "partial")):
+            logger.info(f"[{self.session_id}] reusing validation result for attempt {attempt_id[:8]}")
+            reused = self._annotations_from_cluster_annotations(getattr(prev, "cluster_annotations", None))
+            return (reused or annotations), {
+                "validation_attempt_id": attempt_id,
+                "validation_status": prev.validation_status,
+                "validation_plan": prev.validation_plan,
+                "validation_result": prev.validation_result,
+                "validation_summary": prev.validation_summary,
+                "validation_text_summary": prev.validation_text_summary,
+                "reclustering_recommendations": prev.reclustering_recommendations,
+            }
+
+        # 3) Trigger gate.
+        if not should_run_validation(annotations, triage):
+            return annotations, self._empty_validation_meta(
+                "skipped", "All annotations high-confidence; no validation concerns detected.", attempt_id)
+        if not context.get("var"):
+            return annotations, self._empty_validation_meta(
+                "skipped", "No active analysis object available for validation.", attempt_id)
+
+        # 4) PI validation questions.
+        await self._send_message("status", "PI is planning annotation validation checks...", AgentType.PI)
+        try:
+            plan = await self.pi_agent.generate_annotation_validation_questions(
+                cluster_markers=cluster_markers, annotations=annotations, tissue=tissue, organism=organism,
+                triage=triage, focused_evidence=focused_evidence, database_priors=database_priors,
+                metadata_context=context) or {}
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] validation planning failed: {e}")
+            return annotations, self._empty_validation_meta(
+                "failed", "Validation planning failed; using preliminary annotations.", attempt_id)
+
+        if not plan.get("tasks"):
+            meta = self._empty_validation_meta(
+                "skipped", "PI determined no validation checks were necessary.", attempt_id)
+            meta["validation_plan"] = plan
+            return annotations, meta
+
+        # 5) Restricted bioinformatics execution.
+        await self._send_message("status", "Bioinformatics agent is validating preliminary annotations...",
+                                 AgentType.BIOINFORMATICS)
+        max_iter, timeout_s = self._validation_limits()
+        try:
+            val_result = await self.bioinformatics_agent.validate_annotations_with_plan(
+                validation_plan=plan, annotations=annotations, cluster_markers=cluster_markers,
+                tissue=tissue, organism=organism, context=context,
+                max_iterations=max_iter, timeout_seconds=timeout_s)
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] validation execution failed: {e}")
+            val_result = {"status": "failed", "summary": str(e), "cluster_results": {},
+                          "suggested_annotation_changes": {}, "artifacts": [], "warnings": [str(e)]}
+
+        # 5b) Resolve artifact paths to session-rooted ABSOLUTE paths. The /api/file
+        # route validates ownership by a 'sessions/<sid>/' path segment, so a bare
+        # 'workspace/...' relative path would be rejected. The executor saves under
+        # the session workspace; rebuild the absolute path here.
+        try:
+            from ..config import get_session_workspace
+            from .annotation_validation import resolve_artifact_path
+            ws = get_session_workspace(self.session_id)  # .../sessions/<sid>/workspace
+            for art in (val_result.get("artifacts") or []):
+                if isinstance(art, dict) and art.get("path"):
+                    art["path"] = resolve_artifact_path(art["path"], str(ws))
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] artifact path resolution failed: {e}")
+
+        # 6) PI revision (PI sees even failed results). Build a short literature
+        # context from focused evidence + the literature report so revision is
+        # literature-grounded per spec, without dumping the full report.
+        lit_bits = []
+        if focused_evidence:
+            import json as _jl
+            lit_bits.append("Focused evidence: " + _jl.dumps(focused_evidence, ensure_ascii=False)[:1200])
+        if literature_report:
+            lit_bits.append("Literature report: " + literature_report[:1500])
+        literature_context = "\n".join(lit_bits)
+
+        await self._send_message("status", "PI is revising annotations using validation results...", AgentType.PI)
+        try:
+            revision = await self.pi_agent.revise_annotations_after_validation(
+                annotations=annotations, validation_plan=plan, validation_result=val_result,
+                literature_context=literature_context, tissue=tissue, organism=organism)
+            revised = revision.get("annotations", annotations)
+            summary_for_user = revision.get("validation_summary_for_user", "")
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] validation revision failed: {e}")
+            revised = annotations
+            summary_for_user = "Validation revision failed; using preliminary annotations."
+
+        # 7) Reclustering recommendations + write per-cluster flags into annotations dict.
+        recs = []
+        for cid, cr in (val_result.get("cluster_results") or {}).items():
+            if isinstance(cr, dict) and cr.get("requires_reclustering"):
+                recs.append({"cluster_id": cid, "requires_reclustering": True,
+                             "reclustering_reason": cr.get("reclustering_reason", ""),
+                             "suggested_reclustering_scope": cr.get("suggested_reclustering_scope")})
+                if cid in revised and isinstance(revised[cid], dict):
+                    revised[cid]["requires_reclustering"] = True
+                    revised[cid]["reclustering_reason"] = cr.get("reclustering_reason", "")
+                    revised[cid]["suggested_reclustering_scope"] = cr.get("suggested_reclustering_scope")
+
+        meta = {
+            "validation_attempt_id": attempt_id,
+            "validation_status": val_result.get("status", "failed"),
+            "validation_plan": plan,
+            "validation_result": val_result,
+            "validation_summary": summary_for_user or None,
+            "validation_text_summary": self._build_validation_text_summary(val_result),
+            "reclustering_recommendations": recs or None,
+        }
+        return revised, meta

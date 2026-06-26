@@ -24,6 +24,9 @@ export interface ClusterAnnotation {
   low_confidence_reason: string
   user_confirmed: boolean
   user_override: string | null
+  requires_reclustering?: boolean;
+  reclustering_reason?: string;
+  suggested_reclustering_scope?: string | null;
 }
 
 interface AnnotationConfirmationDialogProps {
@@ -33,6 +36,14 @@ interface AnnotationConfirmationDialogProps {
   tissueSummary: string
   reportHtmlUrl?: string
   detailedReportUrl?: string
+  validationStatus?: string;
+  validationSummary?: string;
+  validationTextSummary?: string;
+  validationResult?: { artifacts?: Array<{ type: string; name: string; path: string }> } & Record<string, any>;
+  reclusteringRecommendations?: Array<{
+    cluster_id: string; requires_reclustering: boolean;
+    reclustering_reason: string; suggested_reclustering_scope?: string | null;
+  }>;
   language: Language
   countdownSeconds: number  // countdown for high-confidence auto-confirm
   onConfirm: (annotations: Array<{ cluster_id: string; user_override?: string; user_confirmed: boolean }>) => Promise<void>
@@ -48,6 +59,11 @@ export function AnnotationConfirmationDialog({
   tissueSummary,
   reportHtmlUrl,
   detailedReportUrl,
+  validationStatus,
+  validationSummary,
+  validationTextSummary,
+  validationResult,
+  reclusteringRecommendations,
   language,
   countdownSeconds,
   onConfirm,
@@ -66,7 +82,11 @@ export function AnnotationConfirmationDialog({
 
   // Update annotations only when genuinely new data arrives (e.g. after supplementary analysis),
   // not on every parent re-render which would discard user edits
-  const annotationKey = JSON.stringify(initialAnnotations.map(a => [a.cluster_id, a.confidence]))
+  const annotationKey = JSON.stringify(initialAnnotations.map(a => [
+    a.cluster_id, a.confidence, a.cell_type, a.user_override ?? null,
+    a.requires_reclustering ?? false, a.reclustering_reason ?? '',
+    a.suggested_reclustering_scope ?? null,
+  ]))
   useEffect(() => {
     setAnnotations(initialAnnotations)
   }, [annotationKey])
@@ -216,6 +236,47 @@ export function AnnotationConfirmationDialog({
           {/* Annotations panel (full width now) */}
           <div className="flex-1 flex flex-col overflow-hidden relative">
             <div className="flex-1 overflow-y-auto px-6 py-4">
+              {/* Validation evidence section */}
+              {(validationSummary || validationTextSummary ||
+                (reclusteringRecommendations && reclusteringRecommendations.length > 0) ||
+                (validationResult?.artifacts && validationResult.artifacts.length > 0)) && (
+                <div className="mb-4 rounded border border-blue-200 bg-blue-50 p-3 text-sm">
+                  <div className="font-semibold text-blue-800 mb-1">Validation evidence</div>
+                  {validationSummary && <p className="text-gray-700 mb-2">{validationSummary}</p>}
+                  {validationTextSummary && (
+                    <pre className="whitespace-pre-wrap text-xs text-gray-600 mb-2">{validationTextSummary}</pre>
+                  )}
+                  {validationResult?.artifacts && validationResult.artifacts.length > 0 && (
+                    <div className="mb-2">
+                      <div className="text-xs font-semibold text-gray-700">Artifacts</div>
+                      <ul className="list-disc pl-5 text-xs text-blue-700">
+                        {validationResult.artifacts.map((art) => (
+                          <li key={art.path}>
+                            <a href={`/api/file?path=${encodeURIComponent(art.path)}`}
+                               target="_blank" rel="noreferrer" className="underline">
+                              {art.name} ({art.type})
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {reclusteringRecommendations && reclusteringRecommendations.length > 0 && (
+                    <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-2">
+                      <div className="font-semibold text-amber-800">Reclustering recommended</div>
+                      <ul className="list-disc pl-5 text-xs text-amber-900">
+                        {reclusteringRecommendations.map((r) => (
+                          <li key={r.cluster_id}>
+                            Cluster {r.cluster_id}: {r.reclustering_reason}
+                            {r.suggested_reclustering_scope ? ` (${r.suggested_reclustering_scope})` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Warning banner for low confidence */}
               {hasLowConfidence && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">

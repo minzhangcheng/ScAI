@@ -526,6 +526,133 @@ Reply in JSON format (include ALL clusters):
                         alts.append(cand)
         return result
 
+    async def generate_annotation_validation_questions(
+        self,
+        cluster_markers: Dict[str, Any],
+        annotations: Dict[str, Any],
+        tissue: str,
+        organism: str,
+        triage: Optional[Dict[str, Any]] = None,
+        focused_evidence: Optional[Dict[str, Any]] = None,
+        database_priors: Optional[Dict[str, Any]] = None,
+        metadata_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """PI produces biological validation QUESTIONS (not code). Returns {} on
+        failure (caller treats as skip)."""
+        self.refresh_runtime_config_if_needed()
+        import json as _j
+        triage = triage or {}; focused_evidence = focused_evidence or {}
+        database_priors = database_priors or {}; metadata_context = metadata_context or {}
+
+        ann_lines = []
+        for cid, info in annotations.items():
+            if isinstance(info, dict):
+                ann_lines.append(
+                    f"- Cluster {cid}: {info.get('cell_type','Unknown')} [conf={info.get('confidence','?')}] "
+                    f"markers={', '.join(info.get('key_markers', [])[:8])} "
+                    f"alt={info.get('alternative_cell_types', [])} reason={info.get('low_confidence_reason','')}")
+        ann_text = "\n".join(ann_lines) or "No annotations."
+
+        prompt = f"""You are the PI planning a focused annotation-VALIDATION round for {organism} {tissue}.
+Raise biological validation QUESTIONS for clusters whose labels are uncertain, triage-flagged,
+technical/QC-suspect, or possibly a state rather than a lineage. Do NOT write code; a bioinformatics
+agent will translate your questions into concrete checks against real columns.
+
+## Preliminary annotations
+{ann_text}
+
+## Triage from search phase
+{_j.dumps(triage, ensure_ascii=False)[:1500]}
+
+## Focused literature evidence
+{_j.dumps(focused_evidence, ensure_ascii=False)[:1500]}
+
+## Database priors (marker-based cell-type priors)
+{_j.dumps(database_priors, ensure_ascii=False)[:1000]}
+
+## Available analysis metadata (real columns you may reference)
+{_j.dumps(metadata_context, ensure_ascii=False)[:1500]}
+
+For each uncertain cluster, ask whether the candidate label is lineally supported, whether it might be
+technical/mixed/doublet, whether a state label fits better, or whether exclusion-marker evidence is needed.
+You MAY suggest tissue markers from your reasoning, but do not assume columns that aren't listed.
+
+Reply with STRICT JSON only:
+{{
+  "overall_goal": "Validate preliminary cell annotations before user confirmation.",
+  "scope": "annotation_validation_only",
+  "tasks": [{{"task_id": "<id>", "cluster_ids": ["<id>"], "question": "<biological question>",
+      "biological_concern": "<why>", "suggested_checks": ["<high-level check>"],
+      "decision_rule": "<evidence -> label/confidence>"}}],
+  "required_outputs": ["per_cluster_validation_summary", "suggested_annotation_changes", "generated_tables_or_figures"],
+  "constraints": ["No DEG/pathway/communication/trajectory/velocity.",
+                  "No clustering/filtering/normalization changes to the main object."]
+}}
+If every annotation is high-confidence and unflagged, return {{"scope": "annotation_validation_only", "tasks": []}}."""
+
+        result = self._safe_parse_json(await self.chat(prompt, temperature=0.2), default={})
+        if not result or "parse_error" in result:
+            return {}
+        return result if isinstance(result, dict) else {}
+
+    async def revise_annotations_after_validation(
+        self,
+        annotations: Dict[str, Any],
+        validation_plan: Dict[str, Any],
+        validation_result: Dict[str, Any],
+        literature_context: str,
+        tissue: str,
+        organism: str,
+    ) -> Dict[str, Any]:
+        """PI revises annotations using validation evidence. Returns
+        {"annotations": <revised>, "validation_summary_for_user": <str>}. On parse
+        failure returns originals unchanged with a generic summary."""
+        self.refresh_runtime_config_if_needed()
+        import json as _j, copy as _copy
+        revised = _copy.deepcopy(annotations)
+
+        ann_lines = [f"- Cluster {cid}: {info.get('cell_type','Unknown')} [conf={info.get('confidence','?')}]"
+                     for cid, info in annotations.items() if isinstance(info, dict)]
+        ann_text = "\n".join(ann_lines) or "No annotations."
+
+        prompt = f"""You are the PI revising preliminary cell annotations for {organism} {tissue}
+using data-grounded validation evidence. Update labels/confidence ONLY where evidence warrants.
+Never remove a cluster: if evidence is poor, use a broad or technical/QC label with low confidence.
+
+## Preliminary annotations
+{ann_text}
+
+## Validation plan (questions asked)
+{_j.dumps(validation_plan, ensure_ascii=False)[:2000]}
+
+## Validation evidence (restricted bioinformatics checks)
+{_j.dumps(validation_result, ensure_ascii=False)[:5000]}
+
+## Literature context
+{(literature_context or '')[:1500]}
+
+Per cluster you may update: cell_type, subtypes, confidence, evidence, alternative_cell_types, low_confidence_reason.
+Reply with STRICT JSON only:
+{{
+  "revisions": {{"<id>": {{"cell_type": "...", "confidence": "high|medium|low", "evidence": "...",
+      "subtypes": [], "alternative_cell_types": [], "low_confidence_reason": "..."}}}},
+  "validation_summary_for_user": "<2-4 sentences: what changed and what remains uncertain>"
+}}
+Only include clusters you are actually changing in "revisions"."""
+
+        parsed = self._safe_parse_json(await self.chat(prompt, temperature=0.2), default={})
+        if not isinstance(parsed, dict):
+            return {"annotations": revised,
+                    "validation_summary_for_user": "Validation completed; no annotation changes were applied."}
+        for cid, change in (parsed.get("revisions") or {}).items():
+            if cid in revised and isinstance(revised[cid], dict) and isinstance(change, dict):
+                for k, v in change.items():
+                    if v not in (None, ""):
+                        revised[cid][k] = v
+        summary = parsed.get("validation_summary_for_user") or \
+            "Validation completed; annotations reviewed against data evidence."
+        return {"annotations": revised, "validation_summary_for_user": str(summary)}
+
     async def review_bioinfo_plan(
         self,
         state: AnalysisState,

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.29.3 · **Last updated**: 2026-06-25
+**Version**: 0.29.4 · **Last updated**: 2026-06-26
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,20 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.29.x — (2026-06-24 → 2026-06-25)**
+**0.29.x — (2026-06-24 → 2026-06-26)**
+
+- `0.29.4` — Annotation validation round: PI-planned restricted bioinformatics checks + PI revision before user annotation confirmation (2026-06-26):
+  - **Annotation validation round (`backend/workflow/annotation.py`, `annotation_validation.py`)**: New `_run_annotation_validation_round()` orchestration that runs between PI literature annotation and user confirmation. Gated by trigger conditions (low/medium confidence, uncertainty keywords, risk triage buckets). PI generates biological validation questions (`generate_annotation_validation_questions()`), bioinformatics agent executes restricted code checks on a `.copy()` of the main AnnData object with invariant guards (`signatures_match()`), and PI revises annotations based on evidence (`revise_annotations_after_validation()`). Idempotent via deterministic `compute_validation_attempt_id()` for snapshot-restore/WS-reconnect safety. Post-supplementary analysis re-validates with `force=True`.
+  - **Main-object invariant protection (`signatures_match()`)**: Compares 12-key signature before/after each validation code iteration. Detects in-place mutations of `.X`, `.obs`, `.layers`, cluster counts, or content fingerprints. Aborts on first mutation with `"failed"` status. Order-insensitive for set-valued keys (`obs_columns`, `layers`). Missing `after` signature is always unsafe.
+  - **Validation result sanitization (`sanitize_validation_result()`)**: Caps summary at 4000 chars, artifacts at 30, warnings at 30, cluster_results at 200. Enforces text-first rule — every figure artifact must carry a non-empty `summary` or status downgrades to `partial`.
+  - **PI planning & revision agents (`backend/agents/pi_agent.py`)**: `generate_annotation_validation_questions()` produces JSON tasks with cluster_ids, biological questions, suggested checks, decision rules. `revise_annotations_after_validation()` merges validation evidence into annotations, preserving untouched fields.
+  - **Restricted bioinformatics executor (`backend/agents/bioinformatics_agent.py`)**: `validate_annotations_with_plan()` — sandbox code generation on `adata.copy()` with strict denylist (no DEG/pathway/communication/trajectory/velocity/clustering/filtering/normalization) and per-iteration invariant check. Artifacts saved under absolute `{workspace}/annotation_validation/` path. `capture_main_object_signature()` / `introspect_validation_metadata()` helpers.
+  - **Reclustering recommendations**: Clusters flagged as `requires_reclustering` by validation evidence carry `reclustering_reason` and `suggested_reclustering_scope` through `ClusterAnnotation` model and frontend UI.
+  - **AnnotationConfirmationState extended**: 6 new optional validation fields (`validation_attempt_id`, `validation_status`, `validation_plan`, `validation_result`, `validation_summary`, `validation_text_summary`, `reclustering_recommendations`). `ClusterAnnotation` gains `requires_reclustering`, `reclustering_reason`, `suggested_reclustering_scope`.
+  - **Config gate (`backend/config/_config.py`)**: `enable_annotation_validation_round` (default True), `annotation_validation_timeout_seconds` (180), `annotation_validation_max_iterations` (5, hard-capped at 8). All validated via Pydantic field constraints.
+  - **Frontend validation UI (`frontend/src/components/AnnotationConfirmationDialog.tsx`)**: Blue validation evidence banner above annotations showing summary, text verdicts, artifact links (`/api/file?path=`), and amber reclustering recommendations.
+  - **Artifact path resolver (`resolve_artifact_path()`)**: Reroutes stray absolute paths (e.g. repo paths containing `/workspace/`) to session-rooted absolute paths, ensuring `/api/file` ownership validation passes.
+  - **13 new test files** (~800 lines): attempt-id stability, trigger gating, sanitizer, schema defaults, signature capture, signature invariants, executor (completion, mutation abort, max-iter limit, denylist enforcement, pre-sig failure, artifact dir creation), PI plan/revision, full round orchestration, artifact path resolution, config validation, callback wire-up with payload builder inspection.
 
 - `0.29.3` — Refactoring pass: HITL gate scaffold, dead-code removal, UI component extraction, lazy init, query dedup (2026-06-25):
   - **Shared HITL gate scaffold (`backend/workflow/core.py`)**: Extracted `_drive_hitl_gate()` unifying lock/event/generation/state_sync pattern duplicated across `_wait_for_llm_intervention`, `_wait_for_disabled_agent`, and `_wait_for_marker_db_intervention`. Each caller parameterizes only what differs (reason, payload, change types, cache-on-retry). Replaces ~120 lines of near-identical code.

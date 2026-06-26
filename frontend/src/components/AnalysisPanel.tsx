@@ -49,6 +49,15 @@ interface AnnotationData {
   tissue_summary?: string
   report_html_url?: string
   detailed_report_url?: string
+  validation_status?: string;
+  validation_summary?: string;
+  validation_text_summary?: string;
+  validation_plan?: any;
+  validation_result?: { artifacts?: Array<{ type: string; name: string; path: string }> } & Record<string, any>;
+  reclustering_recommendations?: Array<{
+    cluster_id: string; requires_reclustering: boolean;
+    reclustering_reason: string; suggested_reclustering_scope?: string | null;
+  }>;
 }
 
 // Content shape for plan_review HITL message from backend
@@ -1350,6 +1359,11 @@ export function AnalysisPanel() {
           tissueSummary={annotationData.tissue_summary || ''}
           reportHtmlUrl={annotationData.report_html_url || undefined}
           detailedReportUrl={annotationData.detailed_report_url || undefined}
+          validationStatus={annotationData.validation_status}
+          validationSummary={annotationData.validation_summary}
+          validationTextSummary={annotationData.validation_text_summary}
+          validationResult={annotationData.validation_result}
+          reclusteringRecommendations={annotationData.reclustering_recommendations}
           language={language}
           countdownSeconds={roundWaitSeconds}
           onConfirm={handleConfirmAnnotations}

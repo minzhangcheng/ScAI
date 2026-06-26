@@ -236,6 +236,10 @@ class ClusterAnnotation(BaseModel):
     low_confidence_reason: str = ""  # Why confidence is low/medium
     user_confirmed: bool = False
     user_override: Optional[str] = None  # User-provided cell type override
+    # Validation round: signal that current clustering may be insufficient for this cluster
+    requires_reclustering: bool = False
+    reclustering_reason: str = ""
+    suggested_reclustering_scope: Optional[str] = None  # targeted_subcluster | higher_resolution_review | rerun_stage1_clustering
 
 class AnnotationConfirmationState(BaseModel):
     """State for cell annotation confirmation pause during exploration phase"""
@@ -246,6 +250,14 @@ class AnnotationConfirmationState(BaseModel):
     analysis_summary: str = ""
     pending: bool = False
     confirmed: bool = False
+    # Annotation validation round (all optional for backward/snapshot compatibility)
+    validation_attempt_id: Optional[str] = None
+    validation_status: Optional[str] = None  # not_run | completed | failed | partial | skipped
+    validation_plan: Optional[Dict[str, Any]] = None
+    validation_result: Optional[Dict[str, Any]] = None
+    validation_summary: Optional[str] = None
+    validation_text_summary: Optional[str] = None
+    reclustering_recommendations: Optional[List[Dict[str, Any]]] = None
 
 class AgentRoundCache(BaseModel):
     """Per-round agent-result cache for snapshot-restore idempotency.

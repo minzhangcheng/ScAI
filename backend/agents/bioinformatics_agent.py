@@ -1345,6 +1345,278 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
 
         return (None, None)
 
+    async def introspect_validation_metadata(self, cluster_key_hint: Optional[str]) -> Dict[str, Any]:
+        if not self.sandbox:
+            return {}
+        hint_repr = repr(cluster_key_hint)
+        code = (
+            "import json as _json, os as _os, anndata as _ad\n"
+            "import pandas as _pd\n"
+            f"_hint = {hint_repr}\n"
+            "_qc = ('n_genes','n_counts','total_counts','pct_counts','percent','mito','ribo','hb',"
+            "'hemoglobin','doublet','scrublet','ambient','cycle','phase','s_score','g2m')\n"
+            "_cond = ('condition','treatment','genotype','disease','status')\n"
+            "_samp = ('sample','donor','patient','subject')\n"
+            "_batch = ('batch','lane','run','library')\n"
+            "_out = {}\n"
+            "for _name, _o in list(globals().items()):\n"
+            "    if not isinstance(_o, _ad.AnnData) or _name.startswith('_'): continue\n"
+            "    _cols = [str(_c) for _c in _o.obs.columns]; _low = {_c: _c.lower() for _c in _cols}\n"
+            "    _cand = [_c for _c in _cols if _c.startswith('leiden') or _c.startswith('louvain') or _c=='cluster']\n"
+            "    _key = _hint if (_hint and _hint in _cols) else (_cand[0] if _cand else None)\n"
+            "    _summ = {}\n"
+            "    for _c in _cols:\n"
+            "        try:\n"
+            "            _s = _o.obs[_c]\n"
+            "            if str(_s.dtype) in ('category','object') or _s.nunique() <= 30:\n"
+            "                _vc = _s.value_counts().head(5)\n"
+            "                _summ[_c] = {'n_categories': int(_s.nunique()), 'top': [str(_i) for _i in _vc.index]}\n"
+            "        except Exception: pass\n"
+            "    try: _writable = _os.access('workspace', _os.W_OK)\n"
+            "    except Exception: _writable = False\n"
+            "    _out = {'var': _name, 'cluster_key': _key, 'candidate_cluster_keys': _cand,\n"
+            "            'obs_columns': _cols,\n"
+            "            'qc_like': [_c for _c in _cols if any(_p in _low[_c] for _p in _qc)],\n"
+            "            'condition_like': [_c for _c in _cols if any(_p in _low[_c] for _p in _cond)],\n"
+            "            'sample_like': [_c for _c in _cols if any(_p in _low[_c] for _p in _samp)],\n"
+            "            'batch_like': [_c for _c in _cols if any(_p in _low[_c] for _p in _batch)],\n"
+            "            'obs_summaries': _summ,\n"
+            "            'layers': [str(_l) for _l in list(_o.layers.keys())],\n"
+            "            'n_obs': int(_o.n_obs), 'n_vars': int(_o.n_vars),\n"
+            "            'has_raw': _o.raw is not None, 'output_dir_writable': bool(_writable)}\n"
+            "    break\n"
+            "print(_json.dumps(_out))\n"
+        )
+        try:
+            result = await self.sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+            out = (getattr(result, "output", "") or "").strip()
+            line = next((ln for ln in out.splitlines()[::-1] if ln.strip().startswith("{")), None)
+            parsed = json.loads(line) if line else {}
+            return parsed if isinstance(parsed, dict) and parsed.get("var") else {}
+        except Exception as e:
+            logger.warning(f"[{getattr(self, 'session_id', '?')}] validation metadata introspection failed: {e}")
+            return {}
+
+    async def capture_main_object_signature(self, var_name: str, cluster_key: Optional[str]) -> Dict[str, Any]:
+        """Capture a CONTENT fingerprint of the MAIN AnnData for tamper detection.
+
+        Keys match annotation_validation.MAIN_OBJECT_SIGNATURE_KEYS. x_sum/x_nnz
+        catch in-place X edits; obs_hash/var_hash catch edits to existing columns
+        that leave shape/id unchanged. Returns {} on failure.
+        """
+        if not self.sandbox or not var_name:
+            return {}
+        ck_repr = repr(cluster_key)
+        code = (
+            "import json as _json, numpy as _np, pandas as _pd\n"
+            "from scipy import sparse as _sp\n"
+            f"_a = {var_name}\n"
+            f"_ck = {ck_repr}\n"
+            "_X = _a.X\n"
+            "_xsum = float(_X.sum())\n"
+            "_xnnz = int(_X.nnz) if _sp.issparse(_X) else int(_np.count_nonzero(_X))\n"
+            "_counts = (_a.obs[_ck].value_counts().to_dict() if (_ck and _ck in _a.obs.columns) else {})\n"
+            "try: _obsh = str(int(_pd.util.hash_pandas_object(_a.obs, index=True).sum()))\n"
+            "except Exception: _obsh = 'na'\n"
+            "try: _varh = str(int(_pd.util.hash_pandas_object(_a.var.index.to_series(), index=False).sum()))\n"
+            "except Exception: _varh = 'na'\n"
+            "_lfp = {}\n"
+            "for _ln in list(_a.layers.keys()):\n"
+            "    _L = _a.layers[_ln]\n"
+            "    _lfp[str(_ln)] = {'sum': float(_L.sum()),\n"
+            "        'nnz': (int(_L.nnz) if _sp.issparse(_L) else int(_np.count_nonzero(_L)))}\n"
+            "_sig = {'id': id(_a), 'n_obs': int(_a.n_obs), 'n_vars': int(_a.n_vars),\n"
+            "        'obs_columns': [str(_c) for _c in _a.obs.columns],\n"
+            "        'cluster_counts': {str(_k): int(_v) for _k, _v in _counts.items()},\n"
+            "        'layers': [str(_l) for _l in list(_a.layers.keys())],\n"
+            "        'x_id': id(_X), 'x_sum': _xsum, 'x_nnz': _xnnz,\n"
+            "        'obs_hash': _obsh, 'var_hash': _varh, 'layers_fingerprint': _lfp}\n"
+            "print(_json.dumps(_sig))\n"
+        )
+        try:
+            result = await self.sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+            out = (getattr(result, "output", "") or "").strip()
+            line = next((ln for ln in out.splitlines()[::-1] if ln.strip().startswith("{")), None)
+            parsed = json.loads(line) if line else {}
+            return parsed if isinstance(parsed, dict) and "id" in parsed else {}
+        except Exception as e:
+            logger.warning(f"[{getattr(self, 'session_id', '?')}] signature capture failed: {e}")
+            return {}
+
+    # Patterns that must never appear in validation cells (extra safeguard; the
+    # copy + per-iteration invariant check are the primary mechanisms).
+    _VALIDATION_DENYLIST = (
+        "sc.pp.filter_", "sc.tl.leiden", "sc.tl.louvain", "sc.tl.umap", "rank_genes_groups",
+        "sc.tl.dpt", "scvelo", "velocity", "sc.pp.normalize_total", "sc.pp.log1p",
+        "sc.pp.scale", ".write(", ".write_h5ad",
+    )
+
+    def _validation_code_is_safe(self, code: str, main_var: str) -> Optional[str]:
+        """Return a reason string if code is statically unsafe, else None."""
+        low = code.lower()
+        for pat in self._VALIDATION_DENYLIST:
+            if pat in low:
+                return f"disallowed operation '{pat}'"
+        # crude assignment-to-main-var guard: '<main_var> =' but not '<main_var>_val ='
+        if re.search(rf"(^|\n)\s*{re.escape(main_var)}\s*=(?!=)", code):
+            return f"assignment to main object '{main_var}'"
+        return None
+
+    async def validate_annotations_with_plan(
+        self,
+        validation_plan: Dict[str, Any],
+        annotations: Dict[str, Any],
+        cluster_markers: Dict[str, Any],
+        tissue: str,
+        organism: str,
+        context: Dict[str, Any],
+        max_iterations: int = 5,
+        timeout_seconds: int = 180,
+    ) -> Dict[str, Any]:
+        """Run annotation-validation code on a COPY (`adata_val`) of the live
+        AnnData, re-checking main-object invariants after EVERY cell. Never
+        touches CheckpointManager / autonomous chat history; exposes only code
+        execution. Bounded by max_iterations (cap 8) and a wall-clock timeout."""
+        import asyncio as _asyncio
+        from ..workflow.annotation_validation import signatures_match, sanitize_validation_result
+
+        max_iterations = max(1, min(int(max_iterations), 8))
+        var_name = context.get("var")
+        cluster_key = context.get("cluster_key")
+        empty = {"status": "failed", "cluster_results": {}, "suggested_annotation_changes": {},
+                 "artifacts": [], "warnings": []}
+        if not var_name:
+            return {**empty, "summary": "No active AnnData found for validation."}
+
+        # Create an absolute artifact dir under the session workspace and surface it
+        # to the executor prompt. The sandbox cwd is the workspace, and matplotlib's
+        # savefig redirect only fires for workspace-ROOT paths, so an absolute subdir
+        # is left untouched and artifacts land where they are reported.
+        ctx = dict(context)
+        try:
+            wd = getattr(self.sandbox, "working_dir", None)
+            if wd:
+                art_dir = Path(wd) / "annotation_validation"
+                art_dir.mkdir(parents=True, exist_ok=True)
+                ctx["artifact_dir"] = str(art_dir)
+        except Exception as e:
+            logger.warning(f"[{getattr(self, 'session_id', '?')}] could not create artifact dir: {e}")
+
+        async def _run() -> Dict[str, Any]:
+            pre_sig = await self.capture_main_object_signature(var_name, cluster_key)
+            if not pre_sig:
+                logger.error(f"[{getattr(self, 'session_id', '?')}] could not capture pre-validation signature")
+                return {**empty,
+                        "summary": "Validation aborted: could not capture pre-validation main-object signature.",
+                        "warnings": ["pre-validation main-object signature unavailable"]}
+            transcript: List[str] = []
+            final_result: Optional[Dict[str, Any]] = None
+
+            for _ in range(max_iterations):
+                prompt = self._build_validation_executor_prompt(
+                    validation_plan, annotations, cluster_markers, tissue, organism,
+                    ctx, "\n\n".join(transcript[-3:]))
+                parsed = self._safe_parse_json(await self.chat(prompt, temperature=0.2), default={})
+                if not isinstance(parsed, dict):
+                    transcript.append("Executor returned unparseable response; reply with valid JSON.")
+                    continue
+                if parsed.get("done"):
+                    final_result = parsed.get("validation_result") or {}
+                    break
+
+                code = parsed.get("code", "")
+                if not code or not isinstance(code, str):
+                    transcript.append("No code provided; provide `code` or set done=true.")
+                    continue
+
+                unsafe = self._validation_code_is_safe(code, var_name)
+                if unsafe:
+                    transcript.append(f"[rejected] {unsafe}. Operate only on adata_val with read-only summaries.")
+                    continue
+
+                wrapped = f"adata_val = {var_name}.copy()\n{code}"
+                exec_result = await self.sandbox.execute(wrapped, save_to_history=False, skip_safety_check=True)
+                out = (getattr(exec_result, "output", "") or "")[:6000]
+                err = getattr(exec_result, "error", None)
+                transcript.append(f"[code]\n{code[:1500]}\n[stdout]\n{out}\n[error]\n{err or 'none'}")
+
+                # Per-iteration invariant check: abort immediately on first mutation.
+                post_sig = await self.capture_main_object_signature(var_name, cluster_key)
+                ok, changed = signatures_match(pre_sig, post_sig)
+                if not ok:
+                    logger.error(f"[{getattr(self, 'session_id', '?')}] validation mutated main object: {changed}")
+                    return {**empty,
+                            "summary": f"Validation aborted: main object invariant changed ({changed}).",
+                            "warnings": [f"main-object invariant changed: {changed}"]}
+
+            if final_result is None:
+                return {**empty, "status": "partial",
+                        "summary": "Validation reached its iteration limit without a final result.",
+                        "warnings": ["max_iterations reached"]}
+            return sanitize_validation_result(final_result)
+
+        try:
+            return await _asyncio.wait_for(_run(), timeout=timeout_seconds)
+        except _asyncio.TimeoutError:
+            logger.warning(f"[{getattr(self, 'session_id', '?')}] validation executor timed out")
+            return {**empty, "status": "partial", "summary": "Validation executor timed out.",
+                    "warnings": ["timeout"]}
+        except Exception as e:
+            logger.exception(f"[{getattr(self, 'session_id', '?')}] validation executor failed")
+            return {**empty, "summary": f"Validation executor error: {e}", "warnings": [str(e)]}
+
+    def _build_validation_executor_prompt(
+        self, validation_plan, annotations, cluster_markers, tissue, organism, context, transcript_tail: str,
+    ) -> str:
+        import json as _j
+        main_var = context.get("var")
+        artifact_dir = context.get("artifact_dir") or "annotation_validation"
+        return f"""You are a restricted ANNOTATION-VALIDATION code generator for {organism} {tissue}.
+You may ONLY generate Python that runs in the existing Jupyter kernel. No analysis tools, literature,
+PI consultation, or autonomous analysis.
+
+## Hard rules
+- A copy `adata_val = {main_var}.copy()` is created before your code runs. Use ONLY `adata_val`.
+  NEVER assign to or mutate `{main_var}` (the main object).
+- Do NOT filter cells, recluster, reintegrate, normalize, or change preprocessing.
+- Do NOT run DEG between conditions, pathway enrichment, communication, trajectory, or velocity.
+- Validation-only QC/doublet computation on `adata_val` is allowed when a needed field is absent.
+
+## Output safety
+- Never print raw matrices, full .X, full .obs, or gene-by-cell tables.
+- Use grouped summaries (.groupby().mean()/median(), detection fractions, small crosstabs); cap rows/cols.
+- Save large tables/figures under the ABSOLUTE directory {artifact_dir}/ (it already exists) using
+  absolute paths, e.g. plt.savefig(f'{artifact_dir}/<name>.jpg') or df.to_csv(f'{artifact_dir}/<name>.csv'),
+  and print only the path + a compact summary. Do NOT save with bare filenames.
+- For EVERY figure, ALSO print a text summary with quantitative values (group means, detection fractions,
+  enrichment direction, QC distributions, per-cluster verdicts). PI vision may be disabled; text must stand alone.
+
+## Available metadata
+{_j.dumps(context, ensure_ascii=False)[:2000]}
+
+## Validation plan (PI questions)
+{_j.dumps(validation_plan, ensure_ascii=False)[:3000]}
+
+## Preliminary annotations
+{_j.dumps({k: (v.get('cell_type') if isinstance(v, dict) else v) for k, v in annotations.items()}, ensure_ascii=False)[:2000]}
+
+## Prior execution transcript (recent)
+{transcript_tail or '(none yet)'}
+
+Reply with STRICT JSON only:
+- To run a check:  {{"code": "<python on adata_val>", "done": false}}
+- When finished:   {{"done": true, "validation_result": {{
+      "status": "completed", "summary": "<short>",
+      "cluster_results": {{"<id>": {{"support_level": "supported|ambiguous|contradicted",
+          "evidence_for": [], "evidence_against": [], "qc_flags": [], "suggested_action": "<text>",
+          "requires_reclustering": false, "reclustering_reason": "", "suggested_reclustering_scope": null}}}},
+      "suggested_annotation_changes": {{"<id>": {{"confidence": "low|medium|high", "low_confidence_reason": "<text>"}}}},
+      "artifacts": [{{"type": "figure|table", "name": "<n>", "path": "{artifact_dir}/<f>",
+          "summary": "<REQUIRED for every figure: the quantitative values it shows>"}}],
+      "warnings": []}}}}
+Every figure artifact MUST include a non-empty "summary" with its quantitative values, or the result is marked incomplete.
+Set requires_reclustering true ONLY for strong intra-cluster mixed/bimodal lineage evidence not explained by QC."""
+
     async def _auto_validate_species_genes(self) -> bool:
         """Automatically validate gene names against session species.
 
