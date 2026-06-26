@@ -72,6 +72,8 @@ export interface DirectionLiteratureEvidence {
   queries?: DirectionSearchQuery[]
   summary?: string
   limitations?: string[]
+  timed_out?: boolean
+  timeout_seconds?: number | null
 }
 
 export interface DirectionCandidate {

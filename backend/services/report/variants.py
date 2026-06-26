@@ -48,13 +48,15 @@ def _render_direction_evidence_section(exploration_report) -> str:
         if eid:
             evidence_lookup[eid] = ev
 
-    def _status_badge(status):
+    def _status_badge(status, timed_out=False, total_evidence=0):
         s = status.lower()
         if s == "completed":
             return '<span class="badge-high">Completed</span>'
-        elif s == "partial":
+        if s == "partial" and timed_out and total_evidence == 0:
+            return '<span class="badge-na">Timed out</span>'
+        if s == "partial":
             return '<span class="badge-medium">Partial</span>'
-        elif s in ("failed", "skipped"):
+        if s in ("failed", "skipped"):
             return '<span class="badge-low">Failed/Skipped</span>'
         return f'<span class="badge-medium">{html_module.escape(status[:20])}</span>'
 
@@ -82,6 +84,13 @@ def _render_direction_evidence_section(exploration_report) -> str:
         ev = evidence_lookup.get(c.get("evidence_ref") or did, {})
         status = ev.get("status", "no_evidence") if ev else "no_evidence"
 
+        direct_count = ev.get("direct_evidence_count", 0) if ev else 0
+        analogous_count = ev.get("analogous_evidence_count", 0) if ev else 0
+        contradictory_count = ev.get("contradictory_evidence_count", 0) if ev else 0
+        method_precedent_count = ev.get("methodological_precedent_count", 0) if ev else 0
+        total_evidence = direct_count + analogous_count + contradictory_count + method_precedent_count
+        timed_out = bool(ev.get("timed_out", False)) if ev else False
+
         row_class = ""
         if status in ("failed", "skipped"):
             row_class = ' class="evidence-failed-row"'
@@ -95,7 +104,7 @@ def _render_direction_evidence_section(exploration_report) -> str:
             <td class="score-cell">{_render_score_badge(overall_priority, fallback_class="badge-medium")}</td>
             <td class="score-cell">{_render_score_badge(data_reliability, fallback_class="badge-medium")}</td>
             <td class="score-cell">{_render_score_badge(literature_novelty, fallback_class="badge-medium")}</td>
-            <td class="score-cell">{_status_badge(status)}</td>
+            <td class="score-cell">{_status_badge(status, timed_out=timed_out, total_evidence=total_evidence)}</td>
         </tr>"""
 
         data_support = html_module.escape(str(c.get("data_support_summary", "")))
@@ -123,11 +132,6 @@ def _render_direction_evidence_section(exploration_report) -> str:
         risk_html = ""
         if risk_flags:
             risk_html = "<li><strong>Risk Flags:</strong> " + ", ".join(html_module.escape(str(r)) for r in risk_flags) + "</li>"
-
-        direct_count = ev.get("direct_evidence_count", 0) if ev else 0
-        analogous_count = ev.get("analogous_evidence_count", 0) if ev else 0
-        contradictory_count = ev.get("contradictory_evidence_count", 0) if ev else 0
-        method_precedent_count = ev.get("methodological_precedent_count", 0) if ev else 0
 
         method_pmids = []
         for mp in (ev.get("methodological_precedent", []) if ev else []):
@@ -167,8 +171,10 @@ def _render_direction_evidence_section(exploration_report) -> str:
         warning_html = ""
         if status in ("failed", "skipped"):
             warning_html = '<div class="ev-warning ev-failed">&#9888; Literature evidence search failed or was skipped.</div>'
+        elif status == "partial" and timed_out and total_evidence == 0:
+            warning_html = '<div class="ev-warning ev-partial">&#9888; Literature search timed out before references could be retained.</div>'
         elif status == "partial":
-            warning_html = '<div class="ev-warning ev-partial">&#9888; Literature evidence search only partially completed.</div>'
+            warning_html = '<div class="ev-warning ev-partial">&#9888; Literature evidence search only partially completed; listed references are partial.</div>'
 
         detail_items = f"""
                 <ul class="ev-list">

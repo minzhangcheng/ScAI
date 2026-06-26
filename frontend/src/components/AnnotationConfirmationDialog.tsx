@@ -59,7 +59,6 @@ export function AnnotationConfirmationDialog({
   tissueSummary,
   reportHtmlUrl,
   detailedReportUrl,
-  validationStatus,
   validationSummary,
   validationTextSummary,
   validationResult,

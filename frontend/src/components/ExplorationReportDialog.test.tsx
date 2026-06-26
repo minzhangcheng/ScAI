@@ -45,4 +45,114 @@ describe('ExplorationReportDialog evidence-gated directions', () => {
     expect(screen.getByText(/Cross-tissue evidence only/i)).toBeInTheDocument()
     expect(screen.getByText(/No direct evidence/i)).toBeInTheDocument()
   })
+
+  it('shows search timed out when partial evidence has zero retained references', () => {
+    render(<ExplorationReportDialog
+      report={{
+        cluster_overview: '',
+        data_quality_warnings: [],
+        strongest_heterogeneity: [],
+        key_pathway_changes: [],
+        abnormal_markers: [],
+        low_confidence_annotations: [],
+        pi_direction_assessment: '',
+        research_direction_candidates: [{
+          direction_id: 'dir_001',
+          direction: 'Resolve copper redistribution',
+          rationale: 'Copper data are contradictory.',
+          overall_priority: 'high',
+          data_reliability: 'medium',
+          literature_novelty: 'unknown',
+          functional_impact: 'high',
+          evidence_ref: 'dir_001',
+        }],
+        direction_literature_evidence: [{
+          direction_id: 'dir_001',
+          direction: 'Resolve copper redistribution',
+          status: 'partial',
+          timed_out: true,
+          timeout_seconds: 180,
+          direct_evidence_count: 0,
+          analogous_evidence_count: 0,
+          contradictory_evidence_count: 0,
+          methodological_precedent_count: 0,
+          direct_evidence: [],
+          analogous_evidence: [],
+          contradictory_evidence: [],
+          methodological_precedent: [],
+          limitations: ['Direction-level timeout exceeded'],
+        }],
+      }}
+      roundSummary="Round 1 complete"
+      language="en"
+      countdownSeconds={-1}
+      onChooseDirections={vi.fn()}
+      onLetPiDecide={vi.fn()}
+      onRequestSupplementary={vi.fn()}
+      onClose={vi.fn()}
+    />)
+
+    expect(screen.getByText(/Search timed out/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByText(/View evidence/i))
+    expect(screen.getByText(/timed out before references could be retained/i)).toBeInTheDocument()
+    expect(screen.getByText(/Direct: 0/i)).toBeInTheDocument()
+  })
+
+  it('shows partial evidence with retained PMID when timed out after collecting references', () => {
+    render(<ExplorationReportDialog
+      report={{
+        cluster_overview: '',
+        data_quality_warnings: [],
+        strongest_heterogeneity: [],
+        key_pathway_changes: [],
+        abnormal_markers: [],
+        low_confidence_annotations: [],
+        pi_direction_assessment: '',
+        research_direction_candidates: [{
+          direction_id: 'dir_003',
+          direction: 'Investigate metabolic collapse',
+          rationale: 'Metabolic pathways are downregulated.',
+          overall_priority: 'high',
+          data_reliability: 'high',
+          literature_novelty: 'medium',
+          functional_impact: 'high',
+          evidence_ref: 'dir_003',
+        }],
+        direction_literature_evidence: [{
+          direction_id: 'dir_003',
+          direction: 'Investigate metabolic collapse',
+          status: 'partial',
+          timed_out: true,
+          timeout_seconds: 180,
+          direct_evidence_count: 1,
+          analogous_evidence_count: 0,
+          contradictory_evidence_count: 0,
+          methodological_precedent_count: 0,
+          direct_evidence: [{
+            pmid: '12345678',
+            title: 'Mouse liver metabolism and copper stress',
+            relevance: 'high',
+            supports: 'direct',
+            why_it_matters: 'Retained before timeout.',
+          }],
+          analogous_evidence: [],
+          contradictory_evidence: [],
+          methodological_precedent: [],
+          limitations: ['Direction-level timeout exceeded'],
+        }],
+      }}
+      roundSummary="Round 1 complete"
+      language="en"
+      countdownSeconds={-1}
+      onChooseDirections={vi.fn()}
+      onLetPiDecide={vi.fn()}
+      onRequestSupplementary={vi.fn()}
+      onClose={vi.fn()}
+    />)
+
+    expect(screen.getByText(/Partial evidence/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByText(/View evidence/i))
+    expect(screen.getByText(/references below are partial/i)).toBeInTheDocument()
+    expect(screen.getByText(/PMID: 12345678/i)).toBeInTheDocument()
+  })
 })

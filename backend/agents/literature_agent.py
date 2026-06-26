@@ -16,6 +16,7 @@ import json
 import re
 import asyncio
 import logging
+import time
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -2223,19 +2224,16 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             direction_id = candidate.get("direction_id", "")
             direction_name = candidate.get("direction", "")
             dir_result = self._build_empty_direction_result(direction_id, direction_name)
+            deadline = time.monotonic() + direction_timeout_seconds
 
             try:
-                dir_result = await asyncio.wait_for(
-                    self._evaluate_single_candidate(
-                        candidate, cached_articles, query_timeout_seconds
-                    ),
-                    timeout=direction_timeout_seconds,
+                dir_result = await self._evaluate_single_candidate(
+                    candidate,
+                    cached_articles,
+                    query_timeout_seconds,
+                    deadline=deadline,
+                    direction_timeout_seconds=direction_timeout_seconds,
                 )
-            except asyncio.TimeoutError:
-                dir_result["status"] = "partial"
-                dir_result["timed_out"] = True
-                dir_result["timeout_seconds"] = direction_timeout_seconds
-                dir_result["limitations"].append("Direction-level timeout exceeded")
             except Exception as exc:
                 logger.warning(f"[Literature] Direction evaluation failed for {direction_id}: {exc}")
                 dir_result["status"] = "failed"
@@ -2277,6 +2275,8 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         candidate: Dict[str, Any],
         cached_articles: List[Dict[str, Any]],
         query_timeout_seconds: float,
+        deadline: Optional[float] = None,
+        direction_timeout_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         direction_id = candidate.get("direction_id", "")
         direction_name = candidate.get("direction", "")
@@ -2289,19 +2289,33 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         triage_metadata_list: List[Dict[str, Any]] = []
         queries: List[DirectionSearchQuery] = []
 
+        def mark_direction_timeout() -> None:
+            nonlocal timed_out_flag
+            timed_out_flag = True
+            if "Direction-level timeout exceeded" not in all_limitations:
+                all_limitations.append("Direction-level timeout exceeded")
+
+        def direction_deadline_expired() -> bool:
+            return deadline is not None and time.monotonic() >= deadline
+
         # Cached articles matching this candidate are invariant across all batches.
         matching_cache = [a for a in cached_articles if self._article_matches_candidate(a, candidate)]
+
+        if direction_deadline_expired():
+            mark_direction_timeout()
 
         # Phase 1: Standard queries
         standard_queries = self._direction_queries(candidate, deep=False)
         queries.extend(standard_queries)
 
-        if await self._run_query_batches(
-            standard_queries, candidate, matching_cache, query_timeout_seconds,
-            all_evidence=all_evidence, executed_categories=executed_categories,
-            triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
-        ):
-            timed_out_flag = True
+        if not timed_out_flag:
+            if await self._run_query_batches(
+                standard_queries, candidate, matching_cache, query_timeout_seconds,
+                all_evidence=all_evidence, executed_categories=executed_categories,
+                triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
+                deadline=deadline,
+            ):
+                timed_out_flag = True
 
         # Check escalation conditions
         direct_ev = [e for e in all_evidence if e.supports == "direct"]
@@ -2320,7 +2334,7 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         )
 
         search_tier = "standard"
-        if needs_deep:
+        if needs_deep and not timed_out_flag:
             deep_queries = self._direction_queries(candidate, deep=True)
             queries.extend(deep_queries)
             search_tier = "deep"
@@ -2328,6 +2342,7 @@ Respond ONLY with valid JSON (no markdown, no code fences):
                 deep_queries, candidate, matching_cache, query_timeout_seconds,
                 all_evidence=all_evidence, executed_categories=executed_categories,
                 triage_metadata_list=triage_metadata_list, all_limitations=all_limitations,
+                deadline=deadline,
             ):
                 timed_out_flag = True
 
@@ -2417,7 +2432,7 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             "gap_assessment": gap,
             "summary": summary,
             "limitations": all_limitations,
-            "timeout_seconds": query_timeout_seconds if timed_out_flag else None,
+            "timeout_seconds": direction_timeout_seconds if timed_out_flag else None,
             "timed_out": timed_out_flag,
         })
 
@@ -2426,13 +2441,25 @@ Respond ONLY with valid JSON (no markdown, no code fences):
     async def _run_query_batches(
         self, queries, candidate, matching_cache, timeout, *,
         all_evidence, executed_categories, triage_metadata_list, all_limitations,
+        deadline: Optional[float] = None,
     ) -> bool:
         """Run a list of query batches, accumulating into the passed-in lists.
-        Returns True if any batch timed out."""
+        Returns True if any batch timed out or the direction deadline expired."""
         timed_out = False
+
+        def direction_deadline_expired() -> bool:
+            return deadline is not None and time.monotonic() >= deadline
+
+        def mark_direction_timeout() -> None:
+            if "Direction-level timeout exceeded" not in all_limitations:
+                all_limitations.append("Direction-level timeout exceeded")
+
         for q in queries:
+            if direction_deadline_expired():
+                mark_direction_timeout()
+                return True
             evidence, meta, q_timedout, limitations = await self._execute_query_batch(
-                q, candidate, matching_cache, timeout
+                q, candidate, matching_cache, timeout, deadline=deadline
             )
             all_evidence.extend(evidence)
             if not q.degraded:
@@ -2442,6 +2469,10 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             if q_timedout:
                 timed_out = True
             all_limitations.extend(limitations)
+            if direction_deadline_expired():
+                mark_direction_timeout()
+                timed_out = True
+                break
         return timed_out
 
     async def _execute_query_batch(
@@ -2450,36 +2481,65 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         candidate: Dict[str, Any],
         matching_cache: List[Dict[str, Any]],
         query_timeout_seconds: float,
+        deadline: Optional[float] = None,
     ) -> Tuple[List[PubMedEvidenceItem], Dict[str, Any], bool, List[str]]:
         evidence: List[PubMedEvidenceItem] = []
         limitations: List[str] = []
         timed_out = False
         meta: Dict[str, Any] = {}
 
+        def remaining_timeout() -> Optional[float]:
+            if deadline is None:
+                return query_timeout_seconds
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            return min(query_timeout_seconds, remaining)
+
+        def mark_direction_timeout() -> None:
+            nonlocal timed_out
+            timed_out = True
+            if "Direction-level timeout exceeded" not in limitations:
+                limitations.append("Direction-level timeout exceeded")
+
         # Cached articles matching this candidate are computed once per candidate
         # by the caller and passed in.
         if matching_cache:
             try:
+                step_timeout = remaining_timeout()
+                if step_timeout is None:
+                    mark_direction_timeout()
+                    return evidence, meta, timed_out, limitations
                 cache_ev, cache_meta = await asyncio.wait_for(
                     self._triage_articles_with_llm(matching_cache, candidate, query),
-                    timeout=query_timeout_seconds,
+                    timeout=step_timeout,
                 )
                 evidence.extend(cache_ev)
                 meta = cache_meta
             except asyncio.TimeoutError:
-                limitations.append(f"Cache triage timeout for query: {query.category}")
-                timed_out = True
+                if deadline is not None and time.monotonic() >= deadline:
+                    mark_direction_timeout()
+                else:
+                    limitations.append(f"Cache triage timeout for query: {query.category}")
+                    timed_out = True
 
         # PubMed search
         try:
+            step_timeout = remaining_timeout()
+            if step_timeout is None:
+                mark_direction_timeout()
+                return evidence, meta, timed_out, limitations
             articles = await asyncio.wait_for(
                 self._pubmed_search(query.query, max_results=20),
-                timeout=query_timeout_seconds,
+                timeout=step_timeout,
             )
             query.result_count = len(articles)
         except asyncio.TimeoutError:
-            limitations.append(f"PubMed search timeout for query: {query.category}")
-            timed_out = True
+            if deadline is not None and time.monotonic() >= deadline:
+                mark_direction_timeout()
+            else:
+                limitations.append(f"PubMed search timeout for query: {query.category}")
+                timed_out = True
             return evidence, meta, timed_out, limitations
         except Exception as exc:
             limitations.append(f"PubMed search failed for {query.category}: {str(exc)[:100]}")
@@ -2490,16 +2550,23 @@ Respond ONLY with valid JSON (no markdown, no code fences):
 
         # LLM triage
         try:
+            step_timeout = remaining_timeout()
+            if step_timeout is None:
+                mark_direction_timeout()
+                return evidence, meta, timed_out, limitations
             llm_ev, llm_meta = await asyncio.wait_for(
                 self._triage_articles_with_llm(articles, candidate, query),
-                timeout=query_timeout_seconds,
+                timeout=step_timeout,
             )
             evidence.extend(llm_ev)
             meta = llm_meta
             query.relevant_count = len(llm_ev)
         except asyncio.TimeoutError:
-            limitations.append(f"LLM triage timeout for query: {query.category}")
-            timed_out = True
+            if deadline is not None and time.monotonic() >= deadline:
+                mark_direction_timeout()
+            else:
+                limitations.append(f"LLM triage timeout for query: {query.category}")
+                timed_out = True
 
         return evidence, meta, timed_out, limitations
 

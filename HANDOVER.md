@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.29.4 · **Last updated**: 2026-06-26
+**Version**: 0.29.5 · **Last updated**: 2026-06-26
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,14 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.29.x — (2026-06-24 → 2026-06-26)**
+
+- `0.29.5` — Direction evidence deadline enforcement: per-direction monotonic deadline preserves partially-collected evidence, report visual distinction between timeout-without-evidence and partial-with-evidence (2026-06-26):
+  - **Per-direction deadline enforcement (`backend/agents/literature_agent.py`)**: `evaluate_direction_novelty_candidates()` replaced the single `asyncio.wait_for` wrapping the entire candidate with a `time.monotonic()` deadline that propagates through `_evaluate_single_candidate()` → `_run_query_batches()` → `_execute_query_batch()`. Each sub-step (cache triage, PubMed search, LLM triage) computes a `remaining_timeout()` from the deadline and caps its own `asyncio.wait_for`. When the deadline expires mid-batch, the current query is interrupted but evidence collected before the deadline is preserved in the result. `_evaluate_single_candidate()` checks the deadline before running standard queries, deep queries, and each batch iteration. Empty-result timeouts (deadline expires before any step succeeds) are marked as `timed_out=True` with zero counts, while partial-collection timeouts retain the evidence gathered so far.
+  - **Report timed-out badge (`backend/services/report/variants.py`)**: `_status_badge()` renders `"Timed out"` (badge-na, gray) when `status=partial && timed_out && total_evidence==0`, reserving `"Partial"` (badge-medium, amber) for partial status with retained references. Warning messages similarly distinguish "timed out before references could be retained" from "only partially completed; listed references are partial."
+  - **Frontend visual distinction (`frontend/src/components/analysis/DirectionEvidence.tsx`)**: New gray "Search timed out" badge for timed-out zero-evidence directions; amber "Partial evidence" badge preserved for directions with retained references. Detail panel shows contextual messages: "timed out before references could be retained" (gray) vs "references below are partial" (amber). Existing "Literature verification failed" message refined to "failed or was skipped."
+  - **Frontend type expansion (`frontend/src/components/ExplorationReportDialog.tsx`)**: `DirectionLiteratureEvidence` interface extended with `timed_out` and `timeout_seconds` fields.
+  - **Frontend cleanup (`frontend/src/components/AnnotationConfirmationDialog.tsx`)**: Removed unused `validationStatus` prop.
+  - **5 new test cases**: 3 backend async tests (`test_direction_literature_triage.py` — deadline preservation, early-expiry zero-counts, in-flight budget limiting), 2 backend HTML tests (`test_exploration_report_direction_evidence_html.py` — timed-out zero-ref badge, partial-with-refs badge), 2 frontend Vitest tests (`ExplorationReportDialog.test.tsx` — search timed out display, partial evidence with retained PMID).
 
 - `0.29.4` — Annotation validation round: PI-planned restricted bioinformatics checks + PI revision before user annotation confirmation (2026-06-26):
   - **Annotation validation round (`backend/workflow/annotation.py`, `annotation_validation.py`)**: New `_run_annotation_validation_round()` orchestration that runs between PI literature annotation and user confirmation. Gated by trigger conditions (low/medium confidence, uncertainty keywords, risk triage buckets). PI generates biological validation questions (`generate_annotation_validation_questions()`), bioinformatics agent executes restricted code checks on a `.copy()` of the main AnnData object with invariant guards (`signatures_match()`), and PI revises annotations based on evidence (`revise_annotations_after_validation()`). Idempotent via deterministic `compute_validation_attempt_id()` for snapshot-restore/WS-reconnect safety. Post-supplementary analysis re-validates with `force=True`.

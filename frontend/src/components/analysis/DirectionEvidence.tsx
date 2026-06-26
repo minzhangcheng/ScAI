@@ -30,6 +30,14 @@ export default function DirectionEvidence({
   const qualPair = speciesQual ? qualLabels[speciesQual] : undefined
   const c = candidate
 
+  const totalEvidence =
+    (evidence.direct_evidence_count || 0) +
+    (evidence.analogous_evidence_count || 0) +
+    (evidence.contradictory_evidence_count || 0) +
+    (evidence.methodological_precedent_count || 0)
+  const timedOutWithoutEvidence = Boolean(evidence.timed_out) && totalEvidence === 0
+  const partialWithEvidence = evidence.status === 'partial' && totalEvidence > 0
+
   return (
     <>
       <div className="px-4 pb-1 pl-12 flex flex-wrap gap-1.5">
@@ -38,9 +46,14 @@ export default function DirectionEvidence({
             {isZh ? '证据已验证' : 'Evidence verified'}
           </span>
         )}
-        {evidence.status === 'partial' && (
+        {partialWithEvidence && (
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
             {isZh ? '部分证据' : 'Partial evidence'}
+          </span>
+        )}
+        {timedOutWithoutEvidence && (
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-200 text-slate-700">
+            {isZh ? '检索超时' : 'Search timed out'}
           </span>
         )}
         {(evidence.status === 'failed' || evidence.status === 'skipped') && (
@@ -94,9 +107,19 @@ export default function DirectionEvidence({
       </div>
       {expanded && (
         <div className="mx-4 mb-4 ml-12 p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-2">
+          {timedOutWithoutEvidence && (
+            <div className="text-slate-700 bg-slate-100 border border-slate-200 rounded p-2">
+              {isZh ? '文献检索在保留引用前超时；该方向已保守评分。' : 'Literature search timed out before references could be retained; this direction was scored conservatively.'}
+            </div>
+          )}
+          {partialWithEvidence && (
+            <div className="text-amber-700 bg-amber-50 border border-amber-100 rounded p-2">
+              {isZh ? '文献检索仅部分完成；下方引用是不完整结果。' : 'Literature search partially completed; references below are partial.'}
+            </div>
+          )}
           {evidenceFailed && (
             <div className="text-red-700 bg-red-50 border border-red-100 rounded p-2">
-              {isZh ? '文献验证失败或不完整；该方向已保守评分。' : 'Literature verification failed or is incomplete; this direction was scored conservatively.'}
+              {isZh ? '文献验证失败或已跳过；该方向已保守评分。' : 'Literature verification failed or was skipped; this direction was scored conservatively.'}
             </div>
           )}
           {evidence.summary && <div>{evidence.summary}</div>}

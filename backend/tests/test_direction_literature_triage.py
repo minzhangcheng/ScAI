@@ -1,10 +1,12 @@
 import asyncio
 import json
+import time
 from unittest.mock import MagicMock
 
 import pytest
 
 from backend.agents.literature_agent import LiteratureAgent
+from backend.models.schemas import PubMedEvidenceItem
 
 
 def _make_literature_agent():
@@ -164,3 +166,128 @@ async def test_relevant_count_matches_all_evidence(monkeypatch):
     for q in result[0]["queries"]:
         if q["result_count"] > 0:
             assert q["relevant_count"] == 1, f"relevant_count should be 1, got {q['relevant_count']}"
+
+
+@pytest.mark.asyncio
+async def test_direction_timeout_preserves_evidence_collected_before_deadline(monkeypatch):
+    agent = _make_literature_agent()
+    calls = {"count": 0}
+
+    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return (
+                [PubMedEvidenceItem(
+                    pmid="12345678",
+                    title="Copper metabolism in mouse liver",
+                    year="2024",
+                    url="https://pubmed.ncbi.nlm.nih.gov/12345678/",
+                    relevance="high",
+                    supports="direct",
+                    source="new_search",
+                    species_context="Mus musculus",
+                    tissue_context="Liver",
+                    why_it_matters="Collected before the direction deadline expired.",
+                )],
+                {"species_tissue_qualification": "matched_species_tissue_available"},
+                False,
+                [],
+            )
+        await asyncio.sleep(0.05)
+        return [], {}, False, []
+
+    monkeypatch.setattr(agent, "_execute_query_batch", fake_execute_query_batch)
+
+    result = await agent.evaluate_direction_novelty_candidates(
+        [{
+            "direction_id": "dir_001",
+            "direction": "Resolve hepatic copper redistribution",
+            "key_genes": ["Slc31a1"],
+            "key_cell_types": ["Hepatocytes"],
+            "key_pathways": ["Copper homeostasis"],
+            "suggested_methods": [],
+            "organism": "Mus musculus",
+            "tissue": "liver",
+        }],
+        query_timeout_seconds=1.0,
+        direction_timeout_seconds=0.01,
+    )
+
+    ev = result[0]
+    assert ev["direction_id"] == "dir_001"
+    assert ev["status"] == "partial"
+    assert ev["timed_out"] is True
+    assert ev["timeout_seconds"] == 0.01
+    assert "Direction-level timeout exceeded" in ev["limitations"]
+    assert ev["direct_evidence_count"] == 1
+    assert ev["direct_evidence"][0]["pmid"] == "12345678"
+
+
+@pytest.mark.asyncio
+async def test_direction_timeout_before_any_query_keeps_zero_counts(monkeypatch):
+    agent = _make_literature_agent()
+
+    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None):
+        raise AssertionError("No query should run after an already-expired direction deadline")
+
+    monkeypatch.setattr(agent, "_execute_query_batch", fake_execute_query_batch)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+
+    result = await agent._evaluate_single_candidate(
+        {
+            "direction_id": "dir_002",
+            "direction": "B cell infiltration",
+            "key_genes": ["Cd19"],
+            "key_cell_types": ["B cells"],
+            "key_pathways": ["Inflammation"],
+            "suggested_methods": [],
+            "organism": "Mus musculus",
+            "tissue": "liver",
+        },
+        cached_articles=[],
+        query_timeout_seconds=1.0,
+        deadline=99.0,
+        direction_timeout_seconds=0.5,
+    )
+
+    assert result["status"] == "partial"
+    assert result["timed_out"] is True
+    assert result["timeout_seconds"] == 0.5
+    assert result["direct_evidence_count"] == 0
+    assert result["analogous_evidence_count"] == 0
+    assert "Direction-level timeout exceeded" in result["limitations"]
+
+
+@pytest.mark.asyncio
+async def test_direction_deadline_limits_in_flight_query_batch_runtime(monkeypatch):
+    agent = _make_literature_agent()
+
+    async def slow_search(query, max_results=20):
+        await asyncio.sleep(0.2)
+        return []
+
+    monkeypatch.setattr(agent, "_pubmed_search", slow_search)
+    monkeypatch.setattr(agent, "_extract_session_cached_pubmed_articles", lambda state: [])
+
+    started = time.monotonic()
+    result = await agent.evaluate_direction_novelty_candidates(
+        [{
+            "direction_id": "dir_budget",
+            "direction": "Budget-limited search",
+            "key_genes": ["Slc31a1"],
+            "key_cell_types": ["Hepatocytes"],
+            "key_pathways": ["Copper homeostasis"],
+            "suggested_methods": [],
+            "organism": "Mus musculus",
+            "tissue": "liver",
+        }],
+        query_timeout_seconds=1.0,
+        direction_timeout_seconds=0.02,
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.12
+    assert result[0]["status"] == "partial"
+    assert result[0]["timed_out"] is True
+    assert result[0]["timeout_seconds"] == 0.02
+    assert "Direction-level timeout exceeded" in result[0]["limitations"]
