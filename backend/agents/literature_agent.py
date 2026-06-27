@@ -2276,8 +2276,11 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             queries.append(DirectionSearchQuery(category="direct_prior_work", query=support))
         if challenge:
             queries.append(DirectionSearchQuery(category="challenge_contradiction", query=challenge))
+        # Keep both support and challenge so the minimum-attempt path can still
+        # surface contradictory evidence (parity with the tier3 fallback below,
+        # which also runs both); the shared direction deadline bounds total cost.
         if queries:
-            return queries[:1]
+            return queries[:2]
         broad_support = self._build_tier3_broad_query(terms, challenge=False)
         broad_challenge = self._build_tier3_broad_query(terms, challenge=True)
         fallback = []
