@@ -1502,7 +1502,10 @@ Return a JSON object with this EXACT structure:
 For each candidate, provide ALL of the following fields:
 - direction_id: Unique identifier like "dir_001"
 - direction: A specific, actionable research question
-- hypothesis: Brief hypothesis for this direction
+- core_observation: Concrete Round 1 data observation motivating the candidate. Must cite specific data elements such as cluster ID, cell type, gene, pathway, fold-change, p-value, correlation, module score, or sample-level observation.
+- main_hypothesis: Primary testable hypothesis.
+- alternative_hypotheses: At least two plausible alternatives unless the data clearly excludes alternatives. Consider different transcriptional regulators, different ions/metals, different biological process classes, different causal direction, and technical artifacts.
+- artifact_risks: Specific technical or interpretive risks such as batch effect, doublets, low-quality cluster, annotation uncertainty, ambient RNA, dropout, or confounded design.
 - rationale: Why this direction is interesting based on the data
 - supporting_data: What specific data supports this direction
 - key_genes: List of relevant genes
@@ -1510,13 +1513,17 @@ For each candidate, provide ALL of the following fields:
 - key_pathways: List of relevant pathways
 - key_uncertainties: What remains uncertain or needs validation
 - suggested_literature_topics: Natural-language topics for literature search
-- suggested_methods: Specific methods to investigate this direction
+- suggested_validation_analysis: Computational follow-up analyses.
+- suggested_wet_lab_validation: Wet-lab validation experiments.
+- decision_criteria: Results that would support or weaken the hypothesis.
 - biology_expectedness: one of "expected", "partially_expected", "unexpected", "unknown"
 - functional_impact_hypothesis: Brief hypothesis about functional/clinical impact
 - prerequisite_dependencies: List of direction_ids that should be investigated first (empty list if none)
 - organism: {state.species or "Not specified"}
 - tissue: Tissue context from the experiment
 - experimental_context: The experimental design context
+
+Do not produce generic core_observation text like "the data suggest interesting patterns". The core_observation must name the specific data element that triggered the direction.
 
 IMPORTANT: Do NOT assign final innovation, literature novelty, data reliability, or priority scores. Those will be evaluated in a separate step with literature evidence.
 
@@ -1630,6 +1637,22 @@ Also derive:
 - **prerequisite_dependencies**: Which other direction_ids must be completed first.
 - **evidence_ref**: Must match the direction_id from literature evidence.
 
+Scoring rubric:
+
+biological_plausibility:
+- high: mechanism is consistent with established biology and direct pathway/literature evidence.
+- medium: biologically possible but depends on indirect or analogous evidence.
+- low: contradicts known biology, lacks meaningful support, or requires a novel pathway with no precedent.
+
+validation_feasibility:
+- high: routine assays such as qPCR, Western, IF/IHC, ELISA, standard flow cytometry, or standard perturbation.
+- medium: specialized equipment or expertise such as ICP-MS, Seahorse, FACS sorting, spatial transcriptomics, advanced imaging, or animal generation.
+- low: technically prohibitive, unavailable reagents/models, or cannot distinguish competing hypotheses.
+
+If direction evidence contains novelty_status=known_area, literature_novelty should usually be low or medium unless novelty comes from a new model, species, tissue, cell type, perturbation, or validation strategy.
+If direction evidence contains novelty_status=unknown_due_to_timeout or unknown_due_to_failure, literature_novelty must be unknown and recommendation must be conservative.
+Support evidence and contradictory evidence must have equal weight in the scoring decision.
+
 Finally, produce the **direction_dependency_graph** — a mapping from each direction_id to a list of direction_ids it depends on (from prerequisite_dependencies).
 
 Return a complete structured report JSON:
@@ -1645,6 +1668,19 @@ Return a complete structured report JSON:
         {{
             "direction_id": "dir_001",
             "direction": "...",
+            "core_observation": "...",
+            "main_hypothesis": "...",
+            "alternative_hypotheses": ["..."],
+            "artifact_risks": ["..."],
+            "supporting_data": [{{"source": "bioinformatics", "evidence": "...", "strength": "high|medium|low"}}],
+            "contradictory_or_missing_evidence": ["..."],
+            "contradicts_stated_premise": false,
+            "validation_plan": {{"next_analysis": ["..."], "wet_lab_validation": ["..."], "decision_criteria": ["..."]}},
+            "biological_plausibility": "high|medium|low",
+            "validation_feasibility": "high|medium|low",
+            "artifact_risk": "high|medium|low",
+            "recommendation": "prioritize|secondary|needs_more_data|avoid",
+            "pi_review_summary": "...",
             "rationale": "...",
             "data_support_summary": "...",
             "literature_support_summary": "...",
@@ -1692,6 +1728,28 @@ Return a complete structured report JSON:
                 c["direction_id"] = (raw_by_index.get(i, {}) or {}).get("direction_id", f"dir_{i+1:03d}")
             if not c.get("evidence_ref"):
                 c["evidence_ref"] = c["direction_id"]
+        # Build round context for soft retry of missing critical fields.
+        round_context = "\n".join([
+            "Bioinformatics findings: " + json.dumps(round_result.bioinformatics_findings[:15], ensure_ascii=False),
+            "Pathology findings: " + json.dumps(round_result.pathology_findings[:5], ensure_ascii=False),
+            "Biochemistry findings: " + json.dumps(round_result.biochemistry_findings[:5], ensure_ascii=False),
+            "Literature findings: " + json.dumps(round_result.literature_findings[:5], ensure_ascii=False),
+            "PI summary: " + (round_result.pi_summary or "")[:1000],
+        ])
+        for i, candidate in enumerate(scored):
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("overall_priority") != "high" and candidate.get("recommendation") != "prioritize":
+                continue
+            missing = self._critical_direction_fields_missing(candidate)
+            if not missing:
+                continue
+            try:
+                scored[i] = await self._soft_retry_direction_candidate(candidate, round_context, missing)
+            except Exception as retry_err:
+                self._append_unique_flag(candidate, "critical_field_retry_failed")
+                candidate.setdefault("limitations", []).append(f"Critical field retry failed: {str(retry_err)[:120]}")
+        scored = self._apply_direction_guardrails(scored, raw_candidates, literature_evidence)
         report.research_direction_candidates = scored
 
         # raw_direction_candidates always holds the ORIGINAL raw input.
@@ -1724,6 +1782,121 @@ Return a complete structured report JSON:
 
         for node in graph:
             visit(node)
+
+    @staticmethod
+    def _candidate_has_specific_core_observation(candidate: Dict[str, Any]) -> bool:
+        text = str(candidate.get("core_observation") or "").strip()
+        if len(text) < 25:
+            return False
+        generic = (
+            "interesting pattern", "interesting patterns", "data suggests",
+            "data suggest", "further analysis", "needs investigation"
+        )
+        lowered = text.lower()
+        if any(g in lowered for g in generic) and not any(ch.isdigit() for ch in text):
+            return False
+        markers = (
+            "cluster", "log2", "fold", "p=", "padj", "rho", "correlation",
+            "score", "cell", "gene", "pathway", "module", "pmid"
+        )
+        return any(m in lowered for m in markers) or any(ch.isdigit() for ch in text)
+
+    @staticmethod
+    def _append_unique_flag(candidate: Dict[str, Any], flag: str) -> None:
+        flags = candidate.get("risk_flags")
+        if not isinstance(flags, list):
+            flags = []
+        if flag not in flags:
+            flags.append(flag)
+        candidate["risk_flags"] = flags
+
+    @classmethod
+    def _apply_direction_guardrails(
+        cls,
+        scored: List[Dict[str, Any]],
+        raw_candidates: List[Dict[str, Any]],
+        literature_evidence: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        evidence_by_id = {
+            str(e.get("direction_id", "")): e
+            for e in literature_evidence or []
+            if isinstance(e, dict)
+        }
+        for candidate in scored:
+            if not isinstance(candidate, dict):
+                continue
+            if not cls._candidate_has_specific_core_observation(candidate):
+                candidate["recommendation"] = "needs_more_data"
+                cls._append_unique_flag(candidate, "generic_core_observation")
+            # A "prioritize" recommendation is downgraded if any quality
+            # dimension is disqualifying. Add a (field, bad_value) tuple to extend.
+            downgrade_conditions = (
+                ("data_reliability", "low"),
+                ("artifact_risk", "high"),
+                ("data_sufficiency", "insufficient"),
+            )
+            if candidate.get("recommendation") == "prioritize" and any(
+                str(candidate.get(field, "")).lower() == bad_value
+                for field, bad_value in downgrade_conditions
+            ):
+                candidate["recommendation"] = "needs_more_data"
+            if candidate.get("contradicts_stated_premise") is True:
+                cls._append_unique_flag(candidate, "contradicts_premise")
+            ev = evidence_by_id.get(str(candidate.get("evidence_ref") or candidate.get("direction_id") or ""), {})
+            novelty_status = str(ev.get("novelty_status", "")).lower()
+            if novelty_status in {"unknown_due_to_timeout", "unknown_due_to_failure"}:
+                candidate["literature_novelty"] = "unknown"
+                if candidate.get("recommendation") == "prioritize":
+                    candidate["recommendation"] = "needs_more_data"
+                cls._append_unique_flag(
+                    candidate,
+                    "literature_evidence_timeout" if novelty_status == "unknown_due_to_timeout" else "literature_evidence_failed",
+                )
+        return scored
+
+    @staticmethod
+    def _critical_direction_fields_missing(candidate: Dict[str, Any]) -> List[str]:
+        missing = []
+        for key in (
+            "core_observation", "alternative_hypotheses", "artifact_risks",
+            "contradictory_or_missing_evidence", "validation_plan", "recommendation",
+        ):
+            value = candidate.get(key)
+            if value is None or value == "" or value == [] or value == {}:
+                missing.append(key)
+        return missing
+
+    async def _soft_retry_direction_candidate(
+        self,
+        candidate: Dict[str, Any],
+        round_context: str,
+        missing_fields: List[str],
+    ) -> Dict[str, Any]:
+        prompt = f"""Repair one research direction candidate by filling only missing critical fields.
+
+Round context:
+{round_context[:3000]}
+
+Candidate JSON:
+{json.dumps(candidate, ensure_ascii=False, indent=2)}
+
+Missing fields: {', '.join(missing_fields)}
+
+Return ONLY the complete candidate JSON object. Preserve existing fields unless they directly conflict with the repaired fields. Required repaired fields:
+- core_observation: specific Round 1 data element, not generic prose
+- alternative_hypotheses: list of plausible alternatives
+- artifact_risks: list of technical or interpretive risks
+- contradictory_or_missing_evidence: list of missing or conflicting evidence
+- validation_plan: object with next_analysis, wet_lab_validation, decision_criteria lists
+- recommendation: prioritize|secondary|needs_more_data|avoid
+"""
+        response = await self.chat_without_history(prompt, temperature=0.2)
+        repaired = self._safe_parse_json(response, default={})
+        if isinstance(repaired, dict) and repaired.get("direction"):
+            merged = dict(candidate)
+            merged.update(repaired)
+            return merged
+        return candidate
 
     async def innovation_instruction(
         self,

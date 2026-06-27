@@ -228,7 +228,9 @@ async def test_direction_timeout_before_any_query_keeps_zero_counts(monkeypatch)
     agent = _make_literature_agent()
 
     async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None):
-        raise AssertionError("No query should run after an already-expired direction deadline")
+        if query.category in ("tier3_support", "tier3_challenge"):
+            return [], {}, True, ["Tier-3 query timed out"]
+        raise AssertionError("No standard/deep query should run after an already-expired direction deadline")
 
     monkeypatch.setattr(agent, "_execute_query_batch", fake_execute_query_batch)
     monkeypatch.setattr(time, "monotonic", lambda: 100.0)
@@ -258,6 +260,49 @@ async def test_direction_timeout_before_any_query_keeps_zero_counts(monkeypatch)
     assert "Direction-level timeout exceeded" in result["limitations"]
 
 
+def test_direction_queries_include_support_challenge_and_prior_art():
+    agent = _make_literature_agent()
+    candidate = {
+        "direction_id": "dir_001",
+        "direction": "NRF2 metallothionein response",
+        "key_genes": ["Nfe2l2", "Mt1", "Mt2"],
+        "key_cell_types": ["Hepatocytes"],
+        "key_pathways": ["oxidative stress"],
+        "suggested_methods": ["ChIP-seq"],
+        "organism": "Mus musculus",
+        "tissue": "liver",
+        "experimental_context": "DKO liver",
+    }
+
+    categories = {q.category for q in agent._direction_queries(candidate, deep=False)}
+
+    assert "direct_prior_work" in categories
+    assert "challenge_contradiction" in categories
+    assert "prior_art" in categories
+
+
+def test_tier3_broad_query_uses_simplified_terms_without_field_tags():
+    agent = _make_literature_agent()
+    terms = agent._candidate_terms({
+        "key_genes": ["Nfe2l2", "Mt1"],
+        "key_cell_types": ["Hepatocytes"],
+        "key_pathways": ["oxidative stress"],
+        "suggested_methods": [],
+        "organism": "Mus musculus",
+        "tissue": "liver",
+        "experimental_context": "DKO liver",
+    })
+
+    support = agent._build_tier3_broad_query(terms, challenge=False)
+    challenge = agent._build_tier3_broad_query(terms, challenge=True)
+
+    assert "[tiab]" not in support
+    assert "[all]" not in support
+    assert "Nfe2l2" in support
+    assert "oxidative stress" in support
+    assert "alternative mechanism" in challenge
+
+
 @pytest.mark.asyncio
 async def test_direction_deadline_limits_in_flight_query_batch_runtime(monkeypatch):
     agent = _make_literature_agent()
@@ -271,19 +316,20 @@ async def test_direction_deadline_limits_in_flight_query_batch_runtime(monkeypat
 
     started = time.monotonic()
     result = await agent.evaluate_direction_novelty_candidates(
-        [{
-            "direction_id": "dir_budget",
-            "direction": "Budget-limited search",
-            "key_genes": ["Slc31a1"],
-            "key_cell_types": ["Hepatocytes"],
-            "key_pathways": ["Copper homeostasis"],
-            "suggested_methods": [],
-            "organism": "Mus musculus",
-            "tissue": "liver",
-        }],
-        query_timeout_seconds=1.0,
-        direction_timeout_seconds=0.02,
-    )
+            [{
+                "direction_id": "dir_budget",
+                "direction": "Budget-limited search",
+                "key_genes": ["Slc31a1"],
+                "key_cell_types": ["Hepatocytes"],
+                "key_pathways": ["Copper homeostasis"],
+                "suggested_methods": [],
+                "organism": "Mus musculus",
+                "tissue": "liver",
+            }],
+            query_timeout_seconds=1.0,
+            direction_timeout_seconds=0.02,
+            tier3_query_timeout_seconds=0.01,
+        )
     elapsed = time.monotonic() - started
 
     assert elapsed < 0.12
@@ -291,3 +337,60 @@ async def test_direction_deadline_limits_in_flight_query_batch_runtime(monkeypat
     assert result[0]["timed_out"] is True
     assert result[0]["timeout_seconds"] == 0.02
     assert "Direction-level timeout exceeded" in result[0]["limitations"]
+
+
+@pytest.mark.asyncio
+async def test_slow_first_candidate_does_not_starve_later_candidates(monkeypatch):
+    agent = _make_literature_agent()
+    calls = []
+
+    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None):
+        calls.append((candidate["direction_id"], query.category))
+        if candidate["direction_id"] == "dir_slow" and query.category == "direct_prior_work":
+            await asyncio.sleep(0.05)
+            return [], {}, True, ["PubMed search timeout for query: direct_prior_work"]
+        return [], {"summary": "No evidence."}, False, []
+
+    monkeypatch.setattr(agent, "_execute_query_batch", fake_execute_query_batch)
+    monkeypatch.setattr(agent, "_extract_session_cached_pubmed_articles", lambda state: [])
+
+    candidates = [
+        {"direction_id": "dir_slow", "direction": "Slow", "key_genes": ["A"], "key_cell_types": ["B"], "key_pathways": ["C"], "suggested_methods": [], "organism": "Mus musculus", "tissue": "liver"},
+        {"direction_id": "dir_fast", "direction": "Fast", "key_genes": ["D"], "key_cell_types": ["E"], "key_pathways": ["F"], "suggested_methods": [], "organism": "Mus musculus", "tissue": "liver"},
+        {"direction_id": "dir_capped", "direction": "Capped", "key_genes": ["G"], "key_cell_types": ["H"], "key_pathways": ["I"], "suggested_methods": [], "organism": "Mus musculus", "tissue": "liver"},
+    ]
+
+    result = await agent.evaluate_direction_novelty_candidates(
+        candidates,
+        query_timeout_seconds=0.01,
+        direction_timeout_seconds=0.06,
+        max_full_evidence_candidates=2,
+    )
+
+    called_candidates = {cid for cid, _ in calls}
+    assert "dir_slow" in called_candidates
+    assert "dir_fast" in called_candidates
+    assert "dir_capped" in called_candidates
+    assert result[1]["queries"], "Later candidate must receive a minimum attempt"
+    assert result[2]["scheduler_limitation"] == "full_evaluation_skipped_by_candidate_cap"
+
+
+@pytest.mark.asyncio
+async def test_timeout_zero_evidence_records_unknown_due_to_timeout_and_fallback(monkeypatch):
+    agent = _make_literature_agent()
+
+    async def fake_execute_query_batch(query, candidate, matching_cache, timeout, deadline=None):
+        return [], {}, True, [f"PubMed search timeout for query: {query.category}"]
+
+    monkeypatch.setattr(agent, "_execute_query_batch", fake_execute_query_batch)
+    monkeypatch.setattr(agent, "_extract_session_cached_pubmed_articles", lambda state: [])
+
+    result = await agent.evaluate_direction_novelty_candidates([
+        {"direction_id": "dir_timeout", "direction": "Timeout", "key_genes": ["A"], "key_cell_types": ["B"], "key_pathways": ["C"], "suggested_methods": [], "organism": "Mus musculus", "tissue": "liver"}
+    ], query_timeout_seconds=0.01, direction_timeout_seconds=0.03)
+
+    ev = result[0]
+    assert ev["novelty_status"] == "unknown_due_to_timeout"
+    assert ev["literature_novelty"] == "unknown"
+    assert ev["fallback_tier"] in {"standard", "tier3_broad", "minimum_attempt"}
+    assert ev["queries"], "Timed-out candidates should still record attempted queries"

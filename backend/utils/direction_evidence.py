@@ -20,6 +20,12 @@ def build_fallback_direction_evidence(raw_candidates, *, status, reason, limitat
             "confidence": "failed",
             "summary": reason,
             "limitations": lims,
+            "novelty_status": "unknown_due_to_failure",
+            "support_level": "unknown",
+            "contradiction_level": "unknown",
+            "prior_art_level": "unknown",
+            "fallback_tier": "failed",
+            "knowledge_gap_summary": reason,
         }
         for idx, c in enumerate(raw_candidates)
     ]

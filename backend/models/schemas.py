@@ -343,6 +343,10 @@ class DirectionSearchQuery(BaseModel):
         "cell_type_focused",
         "pathway_focused",
         "cross_species_or_tissue",
+        "challenge_contradiction",
+        "prior_art",
+        "tier3_support",
+        "tier3_challenge",
     ]
     query: str
     result_count: int = 0
@@ -399,6 +403,17 @@ class DirectionLiteratureEvidence(BaseModel):
     limitations: List[str] = Field(default_factory=list)
     timeout_seconds: Optional[float] = None
     timed_out: bool = False
+    support_level: Literal["strong", "moderate", "weak", "none", "unknown"] = "unknown"
+    contradiction_level: Literal["strong", "moderate", "weak", "none", "unknown"] = "unknown"
+    prior_art_level: Literal["high", "medium", "low", "unknown"] = "unknown"
+    novelty_status: Literal[
+        "genuine_novelty", "known_area", "unknown_due_to_failure",
+        "unknown_due_to_timeout", "unknown"
+    ] = "unknown"
+    similar_published_directions: List[Dict[str, Any]] = Field(default_factory=list)
+    knowledge_gap_summary: str = ""
+    fallback_tier: str = ""
+    scheduler_limitation: str = ""
 
 
 class ResearchDirectionCandidate(BaseModel):

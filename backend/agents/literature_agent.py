@@ -170,6 +170,12 @@ class LiteratureAgent(BaseAgent):
     - Gemini Deep Research → PubMed + LLM → quick_search (LLM knowledge only)
     """
 
+    # Upper bounds on the per-query / per-direction budget for the cheap
+    # minimum-attempt fallback path, so a slow fallback can't consume the full
+    # budget meant for the primary evaluation.
+    MIN_ATTEMPT_QUERY_TIMEOUT = 10.0
+    MIN_ATTEMPT_DIRECTION_TIMEOUT = 15.0
+
     # Citation guidance for the deep_research-LLM prompt. Deliberately format-agnostic:
     # _extract_references_from_text accepts BOTH end-of-text "[N] Title URL" lists and
     # inline "[text](URL)" markdown links, so the footer no longer mandates one rigid
@@ -1867,22 +1873,15 @@ Reply in JSON format:
         return "(" + " OR ".join(quoted) + ")"
 
     def _build_direct_prior_work(self, terms: Dict[str, List[str]], deep: bool) -> Optional[str]:
-        parts = []
-        gene_part = self._format_term_list(terms["genes"])
-        if gene_part:
-            parts.append(gene_part)
-        # Fall back to cells or pathways if no genes
-        if not gene_part:
-            cell_part = self._format_term_list(terms["cells"])
-            if cell_part:
-                parts.append(cell_part)
-        if not gene_part and not parts:
-            pathway_part = self._format_term_list(terms["pathways"])
-            if pathway_part:
-                parts.append(pathway_part)
-
-        if not parts:
+        # Prefer genes, then fall back to cells, then pathways.
+        core = (
+            self._format_term_list(terms["genes"])
+            or self._format_term_list(terms["cells"])
+            or self._format_term_list(terms["pathways"])
+        )
+        if not core:
             return None
+        parts = [core]
 
         org = terms["organism"][0]
         tis = terms["tissue"][0]
@@ -1924,6 +1923,58 @@ Reply in JSON format:
             return None
 
         return f"({gene_part}) AND (adverse[tiab] OR negative[tiab] OR inhibition[tiab] OR antagonist[tiab] OR detrimental[tiab])"
+
+    def _build_active_challenge_query(self, terms: Dict[str, List[str]]) -> Optional[str]:
+        core = (
+            self._format_term_list(terms["genes"])
+            or self._format_term_list(terms["pathways"])
+            or self._format_term_list(terms["cells"])
+        )
+        if not core:
+            return None
+        challenge_terms = (
+            "contradict*[tiab] OR negative[tiab] OR absence[tiab] OR "
+            "downregulat*[tiab] OR alternative[tiab] OR contrary[tiab] OR "
+            "not associated[tiab]"
+        )
+        return f"({core}) AND ({challenge_terms})"
+
+    def _build_prior_art_query(self, terms: Dict[str, List[str]]) -> Optional[str]:
+        core_parts = []
+        gene_part = self._format_term_list(terms["genes"])
+        pathway_part = self._format_term_list(terms["pathways"])
+        cell_part = self._format_term_list(terms["cells"])
+        if gene_part:
+            core_parts.append(gene_part)
+        if pathway_part:
+            core_parts.append(pathway_part)
+        if cell_part:
+            core_parts.append(cell_part)
+        if not core_parts:
+            return None
+        parts = [" AND ".join(core_parts[:2])]
+        org = terms["organism"][0]
+        tis = terms["tissue"][0]
+        if org:
+            parts.append(f'"{org}"[all]')
+        if tis:
+            parts.append(f'"{tis}"[tiab]')
+        return " AND ".join(parts)
+
+    def _build_tier3_broad_query(self, terms: Dict[str, List[str]], challenge: bool) -> str:
+        tokens: List[str] = []
+        for key in ("genes", "pathways", "cells"):
+            for term in terms.get(key, []):
+                clean = str(term).strip()
+                if clean and clean not in tokens:
+                    tokens.append(clean)
+        if not tokens:
+            context = terms.get("context", [""])[0]
+            tokens = [w for w in str(context).split()[:6] if w]
+        query = " ".join(tokens[:8])
+        if challenge:
+            query = f"{query} alternative mechanism negative evidence contradiction contrary findings"
+        return query.strip()
 
     def _build_methodological_precedent(self, terms: Dict[str, List[str]]) -> Optional[str]:
         method_part = self._format_term_list(terms["methods"])
@@ -2018,8 +2069,11 @@ Reply in JSON format:
         meaningful = self._meaningful_term_count(terms)
 
         standard_builders = [
+            # Keep direct_prior_work because negative-validation axes rely on this category name.
             ("direct_prior_work", lambda t: self._build_direct_prior_work(t, deep=False)),
             ("analogous_mechanism", self._build_analogous_mechanism),
+            ("challenge_contradiction", self._build_active_challenge_query),
+            ("prior_art", self._build_prior_art_query),
             ("contradictory_expectedness", self._build_contradictory_expectedness),
             ("methodological_precedent", self._build_methodological_precedent),
         ]
@@ -2077,6 +2131,18 @@ Reply in JSON format:
     def _dedup_evidence(self, items: List["PubMedEvidenceItem"]) -> List["PubMedEvidenceItem"]:
         return self._dedup_by_pmid(items, lambda e: getattr(e, "pmid", ""))
 
+    @staticmethod
+    def _partition_evidence(
+        items: List["PubMedEvidenceItem"],
+    ) -> Tuple[List["PubMedEvidenceItem"], ...]:
+        """Split evidence into (direct, analogous, contradictory, methodological)."""
+        return (
+            [e for e in items if e.supports == "direct"],
+            [e for e in items if e.supports == "analogous"],
+            [e for e in items if e.supports == "contradictory"],
+            [e for e in items if e.supports == "methodological"],
+        )
+
     def _article_matches_candidate(self, article: Dict[str, Any], candidate: Dict[str, Any]) -> bool:
         genes = [str(g).lower() for g in candidate.get("key_genes", []) if str(g).strip()]
         pathways = [str(p).lower() for p in candidate.get("key_pathways", []) if str(p).strip()]
@@ -2084,16 +2150,7 @@ Reply in JSON format:
         title = (article.get("title") or "").lower()
         abstract = (article.get("abstract") or "").lower()
         text = f"{title} {abstract}"
-        for g in genes:
-            if g in text:
-                return True
-        for p in pathways:
-            if p in text:
-                return True
-        for c in cells:
-            if c in text:
-                return True
-        return False
+        return any(needle in text for needle in genes + pathways + cells)
 
     def _extract_session_cached_pubmed_articles(self, state: Optional[AnalysisState]) -> List[Dict[str, Any]]:
         if not state:
@@ -2210,22 +2267,102 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         }
         return evidence_items, metadata
 
+    def _minimum_attempt_queries(self, candidate: Dict[str, Any]) -> List[DirectionSearchQuery]:
+        terms = self._candidate_terms(candidate)
+        support = self._build_direct_prior_work(terms, deep=False)
+        challenge = self._build_active_challenge_query(terms)
+        queries: List[DirectionSearchQuery] = []
+        if support:
+            queries.append(DirectionSearchQuery(category="direct_prior_work", query=support))
+        if challenge:
+            queries.append(DirectionSearchQuery(category="challenge_contradiction", query=challenge))
+        if queries:
+            return queries[:1]
+        broad_support = self._build_tier3_broad_query(terms, challenge=False)
+        broad_challenge = self._build_tier3_broad_query(terms, challenge=True)
+        fallback = []
+        if broad_support:
+            fallback.append(DirectionSearchQuery(category="tier3_support", query=broad_support, degraded=True))
+        if broad_challenge:
+            fallback.append(DirectionSearchQuery(category="tier3_challenge", query=broad_challenge, degraded=True))
+        if fallback:
+            return fallback
+        return []
+
+    def _finalize_seeded_direction_result(
+        self,
+        result: Dict[str, Any],
+        evidence: List[PubMedEvidenceItem],
+        queries: List[DirectionSearchQuery],
+        limitations: List[str],
+        *,
+        fallback_tier: str,
+        scheduler_limitation: str = "",
+    ) -> Dict[str, Any]:
+        deduped = self._dedup_evidence(evidence)
+        direct_ev, analogous_ev, contradictory_ev, methodological_ev = self._partition_evidence(deduped)
+        timed_out = any("timeout" in str(lim).lower() for lim in limitations)
+        confidence = "failed" if timed_out and not deduped else ("medium" if deduped else "low")
+        novelty = "unknown" if timed_out else ("medium" if (direct_ev or analogous_ev) else "unknown")
+        result.update({
+            "status": "partial",
+            "literature_novelty": novelty,
+            "confidence": confidence,
+            "direct_evidence_count": len(direct_ev),
+            "analogous_evidence_count": len(analogous_ev),
+            "contradictory_evidence_count": len(contradictory_ev),
+            "methodological_precedent_count": len(methodological_ev),
+            "direct_evidence": [e.model_dump() for e in direct_ev],
+            "analogous_evidence": [e.model_dump() for e in analogous_ev],
+            "contradictory_evidence": [e.model_dump() for e in contradictory_ev],
+            "methodological_precedent": [e.model_dump() for e in methodological_ev],
+            "queries": [q.model_dump() for q in queries],
+            "limitations": result.get("limitations", []) + limitations,
+            "timed_out": timed_out,
+            "fallback_tier": fallback_tier,
+            "scheduler_limitation": scheduler_limitation,
+            "support_level": self._support_level(len(direct_ev), len(analogous_ev)),
+            "contradiction_level": self._contradiction_level(len(contradictory_ev)),
+            "prior_art_level": self._prior_art_level(len(direct_ev), len(analogous_ev)),
+            "novelty_status": self._resolve_novelty_status(
+                novelty=novelty,
+                timed_out=timed_out,
+                confidence=confidence,
+                direct_count=len(direct_ev),
+                analogous_count=len(analogous_ev),
+                neg_conf="none",
+            ),
+            "similar_published_directions": [e.model_dump() for e in direct_ev[:5]],
+            "knowledge_gap_summary": "Minimum-attempt evidence only; full evidence evaluation was capped or unavailable.",
+        })
+        return result
+
     async def evaluate_direction_novelty_candidates(
         self,
         candidates: List[Dict[str, Any]],
         state: Optional[AnalysisState] = None,
         query_timeout_seconds: float = 30.0,
         direction_timeout_seconds: float = 180.0,
+        max_full_evidence_candidates: int = 4,
+        tier3_query_timeout_seconds: float = 45.0,
     ) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
         cached_articles = self._extract_session_cached_pubmed_articles(state)
 
-        for candidate in candidates:
+        for index, candidate in enumerate(candidates):
             direction_id = candidate.get("direction_id", "")
             direction_name = candidate.get("direction", "")
-            dir_result = self._build_empty_direction_result(direction_id, direction_name)
-            deadline = time.monotonic() + direction_timeout_seconds
+            if index >= max_full_evidence_candidates:
+                results.append(await self._evaluate_minimum_attempt_candidate(
+                    candidate,
+                    cached_articles,
+                    query_timeout_seconds=query_timeout_seconds,
+                    direction_timeout_seconds=direction_timeout_seconds,
+                    scheduler_limitation="full_evaluation_skipped_by_candidate_cap",
+                ))
+                continue
 
+            deadline = time.monotonic() + direction_timeout_seconds
             try:
                 dir_result = await self._evaluate_single_candidate(
                     candidate,
@@ -2233,13 +2370,31 @@ Respond ONLY with valid JSON (no markdown, no code fences):
                     query_timeout_seconds,
                     deadline=deadline,
                     direction_timeout_seconds=direction_timeout_seconds,
+                    tier3_query_timeout_seconds=tier3_query_timeout_seconds,
                 )
+                if not dir_result.get("queries"):
+                    dir_result = await self._evaluate_minimum_attempt_candidate(
+                        candidate,
+                        cached_articles,
+                        query_timeout_seconds=query_timeout_seconds,
+                        direction_timeout_seconds=direction_timeout_seconds,
+                        scheduler_limitation="full_evaluation_returned_no_queries",
+                    )
+                results.append(dir_result)
             except Exception as exc:
                 logger.warning(f"[Literature] Direction evaluation failed for {direction_id}: {exc}")
-                dir_result["status"] = "failed"
-                dir_result["limitations"].append(str(exc)[:200])
-
-            results.append(dir_result)
+                fallback = await self._evaluate_minimum_attempt_candidate(
+                    candidate,
+                    cached_articles,
+                    query_timeout_seconds=query_timeout_seconds,
+                    direction_timeout_seconds=direction_timeout_seconds,
+                    scheduler_limitation="full_evaluation_failed_before_minimum_attempt",
+                )
+                fallback["status"] = "failed" if not fallback.get("queries") else "partial"
+                fallback["limitations"].append(str(exc)[:200])
+                if not fallback.get("timed_out"):
+                    fallback["novelty_status"] = "unknown_due_to_failure"
+                results.append(fallback)
 
         return results
 
@@ -2268,7 +2423,67 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             "limitations": [],
             "timeout_seconds": None,
             "timed_out": False,
+            "fallback_tier": "",
+            "scheduler_limitation": "",
+            "novelty_status": "unknown",
+            "support_level": "unknown",
+            "contradiction_level": "unknown",
+            "prior_art_level": "unknown",
+            "similar_published_directions": [],
+            "knowledge_gap_summary": "",
         }
+
+    async def _evaluate_minimum_attempt_candidate(
+        self,
+        candidate: Dict[str, Any],
+        cached_articles: List[Dict[str, Any]],
+        query_timeout_seconds: float,
+        direction_timeout_seconds: float,
+        scheduler_limitation: str,
+    ) -> Dict[str, Any]:
+        """Run the minimum evidence attempt for one candidate.
+
+        _run_query_batches returns True when any query batch timed out or when
+        the direction deadline expired; False means all attempted batches ended
+        without timeout.
+        """
+        query_timeout_seconds = min(query_timeout_seconds, self.MIN_ATTEMPT_QUERY_TIMEOUT)
+        direction_timeout_seconds = min(direction_timeout_seconds, self.MIN_ATTEMPT_DIRECTION_TIMEOUT)
+        direction_id = candidate.get("direction_id", "")
+        direction_name = candidate.get("direction", "")
+        result = self._build_empty_direction_result(direction_id, direction_name)
+        queries = self._minimum_attempt_queries(candidate)
+        if not queries:
+            result["limitations"].append("No valid minimum-attempt query could be built")
+            result["scheduler_limitation"] = "no_minimum_query"
+            result["novelty_status"] = "unknown_due_to_failure"
+            return result
+        evidence: List[PubMedEvidenceItem] = []
+        executed_categories: set = set()
+        triage_metadata_list: List[Dict[str, Any]] = []
+        limitations: List[str] = []
+        matching_cache = [a for a in cached_articles if self._article_matches_candidate(a, candidate)]
+        timed_out = await self._run_query_batches(
+            queries,
+            candidate,
+            matching_cache,
+            query_timeout_seconds,
+            all_evidence=evidence,
+            executed_categories=executed_categories,
+            triage_metadata_list=triage_metadata_list,
+            all_limitations=limitations,
+            deadline=time.monotonic() + direction_timeout_seconds,
+        )
+        if timed_out and "Minimum-attempt query timed out" not in limitations:
+            limitations.append("Minimum-attempt query timed out")
+        return self._finalize_seeded_direction_result(
+            result,
+            evidence,
+            queries,
+            limitations,
+            fallback_tier="minimum_attempt",
+            scheduler_limitation=scheduler_limitation,
+        )
 
     async def _evaluate_single_candidate(
         self,
@@ -2277,6 +2492,7 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         query_timeout_seconds: float,
         deadline: Optional[float] = None,
         direction_timeout_seconds: Optional[float] = None,
+        tier3_query_timeout_seconds: float = 45.0,
     ) -> Dict[str, Any]:
         direction_id = candidate.get("direction_id", "")
         direction_name = candidate.get("direction", "")
@@ -2318,10 +2534,7 @@ Respond ONLY with valid JSON (no markdown, no code fences):
                 timed_out_flag = True
 
         # Check escalation conditions
-        direct_ev = [e for e in all_evidence if e.supports == "direct"]
-        analogous_ev = [e for e in all_evidence if e.supports == "analogous"]
-        contradictory_ev = [e for e in all_evidence if e.supports == "contradictory"]
-        methodological_ev = [e for e in all_evidence if e.supports == "methodological"]
+        direct_ev, analogous_ev, contradictory_ev, methodological_ev = self._partition_evidence(all_evidence)
 
         has_methods = bool(terms["methods"])
         needs_deep = (
@@ -2346,14 +2559,45 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             ):
                 timed_out_flag = True
 
+        # Tier-3 fallback: if deep search timed out with zero evidence, try broad queries
+        fallback_tier = search_tier
+        if timed_out_flag and not all_evidence:
+            terms = self._candidate_terms(candidate)
+            tier3_queries = [
+                DirectionSearchQuery(
+                    category="tier3_support",
+                    query=self._build_tier3_broad_query(terms, challenge=False),
+                    degraded=True,
+                    notes="Tier 3 broad support fallback",
+                ),
+                DirectionSearchQuery(
+                    category="tier3_challenge",
+                    query=self._build_tier3_broad_query(terms, challenge=True),
+                    degraded=True,
+                    notes="Tier 3 broad challenge fallback",
+                ),
+            ]
+            tier3_queries = [q for q in tier3_queries if q.query]
+            if tier3_queries:
+                queries.extend(tier3_queries)
+                fallback_tier = "tier3_broad"
+                await self._run_query_batches(
+                    tier3_queries,
+                    candidate,
+                    matching_cache,
+                    min(tier3_query_timeout_seconds, query_timeout_seconds),
+                    all_evidence=all_evidence,
+                    executed_categories=executed_categories,
+                    triage_metadata_list=triage_metadata_list,
+                    all_limitations=all_limitations,
+                    deadline=time.monotonic() + tier3_query_timeout_seconds,
+                )
+
         # Deduplicate by PMID so the same article is not counted across multiple query categories.
         all_evidence = self._dedup_evidence(all_evidence)
 
         # Re-count after deep search
-        direct_ev = [e for e in all_evidence if e.supports == "direct"]
-        analogous_ev = [e for e in all_evidence if e.supports == "analogous"]
-        contradictory_ev = [e for e in all_evidence if e.supports == "contradictory"]
-        methodological_ev = [e for e in all_evidence if e.supports == "methodological"]
+        direct_ev, analogous_ev, contradictory_ev, methodological_ev = self._partition_evidence(all_evidence)
 
         # Compute axes — an axis counts as covered only when the candidate actually
         # had the relevant terms AND a non-degraded query for that axis executed.
@@ -2412,6 +2656,15 @@ Respond ONLY with valid JSON (no markdown, no code fences):
         gap = self._build_gap_assessment(direct_ev, analogous_ev, contradictory_ev, axes, all_limitations)
         summary = self._build_triage_summary(triage_metadata_list, direct_ev, analogous_ev, contradictory_ev)
 
+        novelty_status = self._resolve_novelty_status(
+            novelty=novelty,
+            timed_out=timed_out_flag,
+            confidence=confidence,
+            direct_count=len(direct_ev),
+            analogous_count=len(analogous_ev),
+            neg_conf=neg_conf,
+        )
+
         result.update({
             "status": "completed" if not timed_out_flag else "partial",
             "search_tier": search_tier,
@@ -2434,6 +2687,13 @@ Respond ONLY with valid JSON (no markdown, no code fences):
             "limitations": all_limitations,
             "timeout_seconds": direction_timeout_seconds if timed_out_flag else None,
             "timed_out": timed_out_flag,
+            "fallback_tier": fallback_tier,
+            "novelty_status": novelty_status,
+            "support_level": self._support_level(len(direct_ev), len(analogous_ev)),
+            "contradiction_level": self._contradiction_level(len(contradictory_ev)),
+            "prior_art_level": self._prior_art_level(len(direct_ev), len(analogous_ev)),
+            "similar_published_directions": [e.model_dump() for e in direct_ev[:5]],
+            "knowledge_gap_summary": gap,
         })
 
         return result
@@ -2569,6 +2829,51 @@ Respond ONLY with valid JSON (no markdown, no code fences):
                 timed_out = True
 
         return evidence, meta, timed_out, limitations
+
+    def _support_level(self, direct_count: int, analogous_count: int) -> str:
+        if direct_count >= 2:
+            return "strong"
+        if direct_count >= 1 or analogous_count >= 2:
+            return "moderate"
+        if analogous_count >= 1:
+            return "weak"
+        return "none"
+
+    def _contradiction_level(self, contradictory_count: int) -> str:
+        if contradictory_count >= 2:
+            return "strong"
+        if contradictory_count == 1:
+            return "moderate"
+        return "none"
+
+    def _prior_art_level(self, direct_count: int, analogous_count: int) -> str:
+        if direct_count >= 2:
+            return "high"
+        if direct_count == 1 or analogous_count >= 2:
+            return "medium"
+        if analogous_count == 1:
+            return "low"
+        return "low"
+
+    def _resolve_novelty_status(
+        self,
+        *,
+        novelty: str,
+        timed_out: bool,
+        confidence: str,
+        direct_count: int,
+        analogous_count: int,
+        neg_conf: str,
+    ) -> str:
+        if timed_out:
+            return "unknown_due_to_timeout"
+        if confidence == "failed":
+            return "unknown_due_to_failure"
+        if direct_count > 0 or analogous_count > 0:
+            return "known_area"
+        if novelty == "high" and neg_conf in {"high", "medium"}:
+            return "genuine_novelty"
+        return "unknown"
 
     def _aggregate_qualification(self, triage_metadata_list: List[Dict[str, Any]]) -> str:
         priority = {

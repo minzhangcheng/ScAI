@@ -1,5 +1,7 @@
 import type { AppState } from '../stores/appStore'
 
+// API contract: must stay in sync with MASKED_SECRET_VALUE in
+// backend/utils/settings_provider.py (the masking sentinel for secret fields).
 export const MASKED_SECRET_VALUE = '********'
 
 type LiteratureConfigState = Pick<

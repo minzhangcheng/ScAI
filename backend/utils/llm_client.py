@@ -1931,7 +1931,8 @@ class OpenAICompatibleClient:
             tried: set = set()
             last_error: Optional[Exception] = None
             while pending:
-                await asyncio.sleep(1.0)
+                # No inter-protocol sleep: PROBE_RETRY_DELAYS already back off on
+                # transient errors, and protocol switches should be immediate.
                 protocol = pending.pop(0)
                 if protocol in tried:
                     continue

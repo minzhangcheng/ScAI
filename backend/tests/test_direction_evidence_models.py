@@ -360,6 +360,31 @@ class TestResearchDirectionCandidate:
         assert d["direction"] == "Test"
 
 
+def test_direction_literature_evidence_enhanced_fields_round_trip():
+    evidence = DirectionLiteratureEvidence(
+        direction_id="dir_001",
+        direction="Resolve copper paradox",
+        support_level="weak",
+        contradiction_level="moderate",
+        prior_art_level="low",
+        novelty_status="genuine_novelty",
+        similar_published_directions=[{"pmid": "123", "title": "Related mechanism"}],
+        knowledge_gap_summary="No direct prior work in matched liver DKO context.",
+        fallback_tier="tier3_broad",
+        scheduler_limitation="",
+    )
+
+    dumped = evidence.model_dump()
+
+    assert dumped["support_level"] == "weak"
+    assert dumped["contradiction_level"] == "moderate"
+    assert dumped["prior_art_level"] == "low"
+    assert dumped["novelty_status"] == "genuine_novelty"
+    assert dumped["similar_published_directions"] == [{"pmid": "123", "title": "Related mechanism"}]
+    assert dumped["knowledge_gap_summary"] == "No direct prior work in matched liver DKO context."
+    assert dumped["fallback_tier"] == "tier3_broad"
+
+
 class TestDirectionSelectionDecision:
     def test_empty_lists(self):
         decision = DirectionSelectionDecision()
@@ -447,3 +472,10 @@ class TestExplorationReportExtension:
         assert len(d["research_direction_candidates"]) == 1
         assert len(d["raw_direction_candidates"]) == 1
         assert len(d["direction_literature_evidence"]) == 1
+
+
+def test_direction_search_query_accepts_new_evidence_categories():
+    categories = ["challenge_contradiction", "prior_art", "tier3_support", "tier3_challenge"]
+    for category in categories:
+        q = DirectionSearchQuery(category=category, query="test")
+        assert q.category == category

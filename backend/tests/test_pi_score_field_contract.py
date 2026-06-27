@@ -87,3 +87,65 @@ async def test_scored_candidates_land_in_research_direction_candidates(monkeypat
     assert final.get("evidence_ref") == "dir_001"
     # raw_direction_candidates must hold the ORIGINAL raw input, not the scored set
     assert report.raw_direction_candidates[0].get("key_genes") == ["Stat1"]
+
+
+def test_candidate_specific_core_observation_requires_data_element():
+    assert PIAgent._candidate_has_specific_core_observation({
+        "core_observation": "Cluster 7 hepatocytes show Mt2 log2FC=1.3 and NRF2 score correlation rho=0.38."
+    }) is True
+    assert PIAgent._candidate_has_specific_core_observation({
+        "core_observation": "The data suggest interesting patterns."
+    }) is False
+
+
+def test_direction_guardrails_downgrade_generic_core_observation_and_premise_conflict():
+    scored = [{
+        "direction_id": "dir_001",
+        "direction": "Generic direction",
+        "core_observation": "The data suggest interesting patterns.",
+        "data_reliability": "high",
+        "artifact_risk": "low",
+        "data_sufficiency": "sufficient",
+        "recommendation": "prioritize",
+        "overall_priority": "high",
+        "contradicts_stated_premise": True,
+        "risk_flags": [],
+    }]
+
+    guarded = PIAgent._apply_direction_guardrails(scored, [], [])
+
+    assert guarded[0]["recommendation"] == "needs_more_data"
+    assert "generic_core_observation" in guarded[0]["risk_flags"]
+    assert "contradicts_premise" in guarded[0]["risk_flags"]
+
+
+def test_direction_guardrails_conservative_when_literature_timed_out():
+    scored = [{
+        "direction_id": "dir_001",
+        "direction": "Timed out direction",
+        "core_observation": "Cluster 7 hepatocytes show Mt2 log2FC=1.3.",
+        "data_reliability": "high",
+        "artifact_risk": "low",
+        "data_sufficiency": "sufficient",
+        "literature_novelty": "high",
+        "recommendation": "prioritize",
+        "risk_flags": [],
+    }]
+    evidence = [{"direction_id": "dir_001", "novelty_status": "unknown_due_to_timeout"}]
+
+    guarded = PIAgent._apply_direction_guardrails(scored, [], evidence)
+
+    assert guarded[0]["literature_novelty"] == "unknown"
+    assert guarded[0]["recommendation"] == "needs_more_data"
+    assert "literature_evidence_timeout" in guarded[0]["risk_flags"]
+
+
+def test_critical_direction_fields_missing_lists_absent_fields():
+    missing = PIAgent._critical_direction_fields_missing({
+        "core_observation": "Cluster 7 shows Mt2 log2FC=1.3.",
+        "recommendation": "prioritize",
+    })
+
+    assert "alternative_hypotheses" in missing
+    assert "artifact_risks" in missing
+    assert "validation_plan" in missing

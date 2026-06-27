@@ -123,6 +123,23 @@ export default function DirectionEvidence({
             </div>
           )}
           {evidence.summary && <div>{evidence.summary}</div>}
+          <div className="grid grid-cols-2 gap-2 text-slate-500">
+            {evidence.support_level && <div>{isZh ? '支持强度' : 'Support level'}: {evidence.support_level}</div>}
+            {evidence.contradiction_level && <div>{isZh ? '反证强度' : 'Contradiction level'}: {evidence.contradiction_level}</div>}
+            {evidence.prior_art_level && <div>{isZh ? '已有研究' : 'Prior art'}: {evidence.prior_art_level}</div>}
+            {evidence.novelty_status && <div>{isZh ? '新颖性状态' : 'Novelty status'}: {evidence.novelty_status}</div>}
+            {evidence.fallback_tier && <div>{isZh ? '降级层级' : 'Fallback tier'}: {evidence.fallback_tier}</div>}
+          </div>
+          {evidence.knowledge_gap_summary && (
+            <div className="text-slate-700 bg-white border border-slate-200 rounded p-2">
+              {evidence.knowledge_gap_summary}
+            </div>
+          )}
+          {evidence.scheduler_limitation && (
+            <div className="text-amber-700 bg-amber-50 border border-amber-100 rounded p-2">
+              {evidence.scheduler_limitation}
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-2">
             <div>{isZh ? '直接证据' : 'Direct'}: {evidence.direct_evidence_count || 0}</div>
             <div>{isZh ? '相似证据' : 'Analogous'}: {evidence.analogous_evidence_count || 0}</div>
@@ -140,6 +157,16 @@ export default function DirectionEvidence({
               {item.why_it_matters ? <span className="block text-slate-400">{item.why_it_matters}</span> : null}
             </div>
           ))}
+          {(evidence.similar_published_directions || []).length > 0 && (
+            <div className="border-t border-slate-200 pt-2">
+              <div className="font-medium">{isZh ? '相似已发表方向' : 'Similar published directions'}</div>
+              {(evidence.similar_published_directions || []).slice(0, 5).map((item, idx) => (
+                <div key={idx} className="text-slate-500">
+                  {item.pmid ? `PMID: ${item.pmid} — ` : ''}{item.title || item.url || 'Untitled reference'}
+                </div>
+              ))}
+            </div>
+          )}
           {evidence.confidence && (
             <div className="text-slate-500">{isZh ? '文献置信度' : 'Literature confidence'}: {evidence.confidence}</div>
           )}

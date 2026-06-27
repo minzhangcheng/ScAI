@@ -98,6 +98,121 @@ describe('ExplorationReportDialog evidence-gated directions', () => {
     expect(screen.getByText(/Direct: 0/i)).toBeInTheDocument()
   })
 
+  it('renders enhanced direction fields and premise conflict badge', () => {
+    render(<ExplorationReportDialog
+      report={{
+        cluster_overview: '',
+        data_quality_warnings: [],
+        strongest_heterogeneity: [],
+        key_pathway_changes: [],
+        abnormal_markers: [],
+        low_confidence_annotations: [],
+        pi_direction_assessment: '',
+        research_direction_candidates: [{
+          direction_id: 'dir_001',
+          direction: 'Resolve premise conflict',
+          rationale: 'Rationale',
+          overall_priority: 'high',
+          data_reliability: 'medium',
+          literature_novelty: 'unknown',
+          functional_impact: 'high',
+          recommendation: 'needs_more_data',
+          biological_plausibility: 'medium',
+          artifact_risk: 'high',
+          core_observation: 'Cluster 7 hepatocytes show Mt2 log2FC=1.3.',
+          main_hypothesis: 'Copper redistribution drives stress.',
+          alternative_hypotheses: ['Zinc response', 'Annotation artifact'],
+          artifact_risks: ['sample confounding'],
+          supporting_data: [{ source: 'bioinformatics', evidence: 'Cluster 7 hepatocytes show Mt2 log2FC=1.3.', strength: 'high' }],
+          contradictory_or_missing_evidence: ['No direct matched model evidence'],
+          contradicts_stated_premise: true,
+          validation_plan: {
+            next_analysis: ['Sample-level pseudobulk'],
+            wet_lab_validation: ['ICP-MS'],
+            decision_criteria: ['Copper redistribution supports premise conflict'],
+          },
+          pi_review_summary: 'Premise conflict needs validation first.',
+        }],
+      }}
+      roundSummary="summary"
+      language="en"
+      countdownSeconds={-1}
+      onChooseDirections={vi.fn()}
+      onLetPiDecide={vi.fn()}
+      onRequestSupplementary={vi.fn()}
+      onClose={vi.fn()}
+    />)
+
+    expect(screen.getByText('Premise conflict')).toBeInTheDocument()
+    expect(screen.getByText('Needs more data')).toBeInTheDocument()
+    expect(screen.getByText('Artifact risk:')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Resolve premise conflict'))
+    expect(screen.getByText('Cluster 7 hepatocytes show Mt2 log2FC=1.3.')).toBeInTheDocument()
+    expect(screen.getByText('Copper redistribution drives stress.')).toBeInTheDocument()
+    expect(screen.getByText('Zinc response')).toBeInTheDocument()
+    expect(screen.getByText('[bioinformatics] Cluster 7 hepatocytes show Mt2 log2FC=1.3. (strength: high)')).toBeInTheDocument()
+    expect(screen.getByText('ICP-MS')).toBeInTheDocument()
+    expect(screen.getByText('Consider requesting supplementary analysis before choosing this direction for Stage 2.')).toBeInTheDocument()
+  })
+
+  it('renders enhanced literature evidence metadata', () => {
+    render(<ExplorationReportDialog
+      report={{
+        cluster_overview: '',
+        data_quality_warnings: [],
+        strongest_heterogeneity: [],
+        key_pathway_changes: [],
+        abnormal_markers: [],
+        low_confidence_annotations: [],
+        pi_direction_assessment: '',
+        research_direction_candidates: [{
+          direction_id: 'dir_001',
+          direction: 'Evidence rich direction',
+          rationale: 'Rationale',
+          overall_priority: 'high',
+          data_reliability: 'high',
+        }],
+        direction_literature_evidence: [{
+          direction_id: 'dir_001',
+          direction: 'Evidence rich direction',
+          status: 'partial',
+          search_tier: 'standard',
+          confidence: 'medium',
+          support_level: 'weak',
+          contradiction_level: 'moderate',
+          prior_art_level: 'low',
+          novelty_status: 'unknown_due_to_timeout',
+          knowledge_gap_summary: 'Matched model evidence is missing.',
+          fallback_tier: 'tier3_broad',
+          scheduler_limitation: 'minimum attempt only',
+          direct_evidence_count: 0,
+          analogous_evidence_count: 1,
+          contradictory_evidence_count: 1,
+          methodological_precedent_count: 0,
+          analogous_evidence: [],
+          contradictory_evidence: [],
+          queries: [],
+          limitations: ['Direction-level timeout exceeded'],
+        }],
+      }}
+      roundSummary="summary"
+      language="en"
+      countdownSeconds={-1}
+      onChooseDirections={vi.fn()}
+      onLetPiDecide={vi.fn()}
+      onRequestSupplementary={vi.fn()}
+      onClose={vi.fn()}
+    />)
+
+    fireEvent.click(screen.getByText('View evidence'))
+    expect(screen.getByText('Support level: weak')).toBeInTheDocument()
+    expect(screen.getByText('Contradiction level: moderate')).toBeInTheDocument()
+    expect(screen.getByText('Prior art: low')).toBeInTheDocument()
+    expect(screen.getByText('Novelty status: unknown_due_to_timeout')).toBeInTheDocument()
+    expect(screen.getByText('Matched model evidence is missing.')).toBeInTheDocument()
+    expect(screen.getByText('Fallback tier: tier3_broad')).toBeInTheDocument()
+  })
+
   it('shows partial evidence with retained PMID when timed out after collecting references', () => {
     render(<ExplorationReportDialog
       report={{

@@ -69,6 +69,14 @@ export interface DirectionLiteratureEvidence {
   contradictory_evidence?: PubMedEvidenceItem[]
   methodological_precedent?: PubMedEvidenceItem[]
   species_tissue_qualification?: string
+  support_level?: string
+  contradiction_level?: string
+  prior_art_level?: string
+  novelty_status?: string
+  similar_published_directions?: Array<{ pmid?: string; title?: string; url?: string }>
+  knowledge_gap_summary?: string
+  fallback_tier?: string
+  scheduler_limitation?: string
   queries?: DirectionSearchQuery[]
   summary?: string
   limitations?: string[]
@@ -95,6 +103,23 @@ export interface DirectionCandidate {
   risk_flags?: string[]
   prerequisite_dependencies?: string[]
   species_tissue_qualification?: string
+  core_observation?: string
+  main_hypothesis?: string
+  alternative_hypotheses?: string[]
+  artifact_risks?: string[]
+  supporting_data?: Array<{ source?: string; evidence?: string; strength?: string }>
+  contradictory_or_missing_evidence?: string[]
+  contradicts_stated_premise?: boolean
+  validation_plan?: {
+    next_analysis?: string[]
+    wet_lab_validation?: string[]
+    decision_criteria?: string[]
+  }
+  biological_plausibility?: string
+  validation_feasibility?: string
+  artifact_risk?: string
+  recommendation?: string
+  pi_review_summary?: string
 }
 
 export interface SelectedDirection {
@@ -139,6 +164,36 @@ function ScoreBadge({ text }: { text?: string }) {
     <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${colorClasses}`}>
       {score}
     </span>
+  )
+}
+
+function RecommendationBadge({ value, isZh }: { value?: string; isZh: boolean }) {
+  if (!value) return null
+  const labelMap: Record<string, string> = {
+    prioritize: isZh ? '优先' : 'Prioritize',
+    secondary: isZh ? '次要' : 'Secondary',
+    needs_more_data: isZh ? '需更多数据' : 'Needs more data',
+    avoid: isZh ? '暂不建议' : 'Avoid',
+  }
+  const cls = value === 'prioritize'
+    ? 'bg-emerald-100 text-emerald-700'
+    : value === 'secondary'
+      ? 'bg-blue-100 text-blue-700'
+      : value === 'needs_more_data'
+        ? 'bg-amber-100 text-amber-700'
+        : 'bg-red-100 text-red-700'
+  return <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${cls}`}>{labelMap[value] || value}</span>
+}
+
+function DetailList({ title, items }: { title: string; items?: string[] }) {
+  if (!items || items.length === 0) return null
+  return (
+    <div>
+      <div className="font-medium text-slate-600">{title}</div>
+      <ul className="list-disc pl-4 space-y-0.5">
+        {items.map((item, idx) => <li key={idx}>{item}</li>)}
+      </ul>
+    </div>
   )
 }
 
@@ -396,12 +451,13 @@ export function ExplorationReportDialog({
               <div className="space-y-2">
                 {(report.research_direction_candidates || []).map((c, i) => {
                   const isSelected = selectedIndices.has(i)
+                  const lowConfidence = c.recommendation === 'avoid' || c.recommendation === 'needs_more_data'
                   return (
                     <div key={i} className={`rounded-xl border-2 transition-all ${
                       isSelected
                         ? 'border-accent-400 bg-accent-50/50'
                         : 'border-slate-200 hover:border-accent-200'
-                    }`}>
+                    } ${lowConfidence && !isSelected ? 'opacity-80 bg-slate-50/60' : ''}`}>
                       {/* Checkbox + direction header */}
                       <button
                         onClick={() => toggleCandidate(i)}
@@ -425,10 +481,57 @@ export function ExplorationReportDialog({
                             <ScoreBadge text={c.literature_novelty || c.expected_novelty} />
                             <span className="text-xs text-slate-500 ml-1">{isZh ? '功能影响' : 'Impact'}:</span>
                             <ScoreBadge text={c.functional_impact} />
+                            {c.contradicts_stated_premise && (
+                              <span className="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">
+                                {isZh ? '前提冲突' : 'Premise conflict'}
+                              </span>
+                            )}
+                            <span className="text-xs text-slate-500 ml-1">{isZh ? '建议' : 'Recommendation'}:</span>
+                            <RecommendationBadge value={c.recommendation} isZh={isZh} />
+                            <span className="text-xs text-slate-500 ml-1">{isZh ? '生物学合理性' : 'Plausibility'}:</span>
+                            <ScoreBadge text={c.biological_plausibility} />
+                            <span className="text-xs text-slate-500 ml-1">{isZh ? '伪影风险' : 'Artifact risk'}:</span>
+                            <ScoreBadge text={c.artifact_risk} />
                           </div>
                           {/* Show rationale when selected */}
                           {isSelected && (
                             <div className="text-xs text-slate-500 mt-2 leading-relaxed">{c.rationale}</div>
+                          )}
+                          {/* Expanded scientific details */}
+                          {isSelected && (
+                            <div className="mt-3 space-y-2 text-xs text-slate-600 leading-relaxed">
+                              {(c.recommendation === 'needs_more_data' || c.artifact_risk === 'high') && (
+                                <div className="bg-amber-50 border border-amber-200 rounded p-2 text-amber-800 mb-2">
+                                  {isZh
+                                    ? '建议：在将此方向用于 Stage 2 之前，考虑请求补充分析。'
+                                    : 'Consider requesting supplementary analysis before choosing this direction for Stage 2.'}
+                                </div>
+                              )}
+                              {c.core_observation && <div><span className="font-medium text-slate-700">{isZh ? '核心观察' : 'Core observation'}:</span> {c.core_observation}</div>}
+                              {c.main_hypothesis && <div><span className="font-medium text-slate-700">{isZh ? '主假说' : 'Main hypothesis'}:</span> {c.main_hypothesis}</div>}
+                              {c.supporting_data && c.supporting_data.length > 0 && (
+                                <div>
+                                  <div className="font-medium text-slate-600">{isZh ? '支撑数据' : 'Supporting data'}</div>
+                                  {c.supporting_data.map((d, idx) => (
+                                    <div key={idx} className="ml-2 text-slate-500">
+                                      [{d.source || 'unknown'}] {d.evidence || ''}{d.strength ? ` (strength: ${d.strength})` : ''}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              <DetailList title={isZh ? '替代假说' : 'Alternative hypotheses'} items={c.alternative_hypotheses} />
+                              <DetailList title={isZh ? '伪影风险' : 'Artifact risks'} items={c.artifact_risks} />
+                              <DetailList title={isZh ? '缺失或矛盾证据' : 'Contradictory or missing evidence'} items={c.contradictory_or_missing_evidence} />
+                              {c.validation_plan && (
+                                <div className="space-y-1">
+                                  <div className="font-medium text-slate-600">{isZh ? '验证计划' : 'Validation plan'}</div>
+                                  <DetailList title={isZh ? '下一步分析' : 'Next analysis'} items={c.validation_plan.next_analysis} />
+                                  <DetailList title={isZh ? '湿实验验证' : 'Wet-lab validation'} items={c.validation_plan.wet_lab_validation} />
+                                  <DetailList title={isZh ? '判定标准' : 'Decision criteria'} items={c.validation_plan.decision_criteria} />
+                                </div>
+                              )}
+                              {c.pi_review_summary && <div><span className="font-medium text-slate-700">{isZh ? 'PI评审' : 'PI review'}:</span> {c.pi_review_summary}</div>}
+                            </div>
                           )}
                         </div>
                       </button>

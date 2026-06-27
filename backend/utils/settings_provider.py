@@ -19,6 +19,9 @@ from backend.state import sessions
 
 logger = logging.getLogger(__name__)
 
+# API contract: must stay in sync with MASKED_SECRET_VALUE in
+# frontend/src/utils/literatureConfig.ts — secrets masked with this sentinel on
+# the way out are detected and preserved (not overwritten) on the way back in.
 MASKED_SECRET_VALUE = "********"
 _SECRET_FIELD_NAMES = {"api_key", "deep_research_api_key", "google_api_key"}
 
