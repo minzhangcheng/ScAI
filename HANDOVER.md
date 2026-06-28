@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.29.6 · **Last updated**: 2026-06-27
+**Version**: 0.29.7 · **Last updated**: 2026-06-28
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,13 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.29.x — (2026-06-24 → 2026-06-27)**
+**0.29.x — (2026-06-24 → 2026-06-28)**
+
+- `0.29.7` — Figure deduplication fix: auto-save wrapper refactored to save/display only newly-created figures, safe plt.close through no-op stubs, baseline plt.close/show captured before monkey-patch (2026-06-28):
+  - **`_build_exec_autosave_wrapper()` extracted (`backend/agents/bioinformatics_agent.py`)**: Inline figure auto-save code moved into reusable factory function. Snapshot of `plt.get_fignums()` taken before user code execution; only figures whose numbers are NOT in the pre-existing set are saved/displayed (`_pre_fignums` diff filter). Prevents re-dumping stale figures accumulated in the kernel — the root cause of the same image appearing 100+ times in reports.
+  - **Safe `plt.close` through no-op stubs (`backend/agents/bioinformatics_agent.py`)**: `_TPL_SAFE_CLOSE_ALL` now uses `_original_plt_close` baseline (captured before monkey-patches) instead of `plt.close`, which may be a SCAI no-op stub left by interrupted cells. Avoids silent no-op close where figures only accumulate.
+  - **Baseline close/show capture (`backend/utils/sandbox.py`)**: `_original_plt_close` and `_original_plt_show` captured before the Combined Monkey-patch installs stubs over them, placed before `<WORKSPACE_DIR>` code to avoid NameError dead-code issue.
+  - **3 new regression tests (`backend/tests/test_figure_dedup.py`)**: `test_safe_close_all_closes_through_noop_stub` (close works through no-op), `test_exec_wrapper_saves_only_new_figures` (3 runs × 1 fig = 3 files, not 6), `test_exec_wrapper_filters_by_pre_fignums` (template contains diff filter).
 
 - `0.29.6` — Direction exploration optimization: enhanced evidence structure (support/contradiction/prior-art levels, novelty status), minimum-attempt per-candidate budget with tier-3 broad fallback queries, active challenge/prior-art query generation, PI scoring guardrails (core-observation validity, literature timeout awareness, premise conflict enforcement), soft retry for critical direction fields, enhanced frontend candidate/evidence display with backward compatibility (2026-06-27):
   - **Enhanced direction evidence structure (`backend/agents/literature_agent.py`)**: Direction literature evidence now carries `support_level` (strong/moderate/weak/none/unknown), `contradiction_level`, `prior_art_level` (high/medium/low/unknown), `novelty_status` (genuine_novelty/known_area/unknown_due_to_timeout/unknown_due_to_failure/unknown), `similar_published_directions`, `knowledge_gap_summary`, `fallback_tier`, and `scheduler_limitation`. `_finalize_seeded_direction_result()` produces all enhanced fields from base evidence. `_partition_evidence()` splits evidence by support type.

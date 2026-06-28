@@ -774,6 +774,13 @@ plt.rcParams.update({
     'ps.fonttype': 42,
 })
 
+# Capture the true matplotlib.pyplot.close/show baselines before any wrapper
+# installs stubs over them (e.g. _TPL_NOOP_INSTALL).  Placed before the
+# Combined Monkey-patch below to avoid the _WORKSPACE_DIR NameError that
+# makes lines 781+ dead code in the kernel.
+_original_plt_close = plt.close
+_original_plt_show = plt.show
+
 # === Combined Monkey-patch: Figure.savefig with PNG->JPG + path redirect ===
 import matplotlib.figure as _mpl_figure
 _original_savefig = _mpl_figure.Figure.savefig
