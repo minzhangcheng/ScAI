@@ -7,6 +7,9 @@ from datetime import datetime
 from enum import Enum
 import uuid
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_ROUND_WAIT_SECONDS: int = 300
 
@@ -457,6 +460,39 @@ class ExplorationReport(BaseModel):
     direction_literature_evidence: List[Dict[str, Any]] = Field(default_factory=list)
     direction_dependency_graph: Dict[str, List[str]] = Field(default_factory=dict)
     direction_selection_summary: Dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_llm_dict(cls, data: Dict[str, Any]) -> "ExplorationReport":
+        """Build a report from loosely-typed LLM JSON, dropping any field whose
+        value fails type validation so a single malformed field cannot crash the
+        whole report.
+
+        The PI LLM occasionally emits a field with the wrong shape (e.g. a
+        free-text string for the Dict[str, Any] `direction_selection_summary`).
+        Before this guard, ExplorationReport(**valid_fields) raised a
+        ValidationError that aborted Report-A generation, silently skipping the
+        exploration->innovation transition and the direction-selection gate.
+        A dropped field falls back to its schema default.
+        """
+        from pydantic import TypeAdapter, ValidationError as _ValidationError
+
+        clean: Dict[str, Any] = {}
+        for name, value in data.items():
+            field = cls.model_fields.get(name)
+            if field is None:
+                continue
+            try:
+                TypeAdapter(field.annotation).validate_python(value)
+            except _ValidationError:
+                logger.warning(
+                    "ExplorationReport.from_llm_dict dropping field %r: value of "
+                    "type %s failed validation against %s",
+                    name, type(value).__name__, field.annotation,
+                )
+                continue
+            clean[name] = value
+        return cls(**clean)
+
 
 class RoundResult(BaseModel):
     """Result from one analysis round"""

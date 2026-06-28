@@ -474,6 +474,49 @@ class TestExplorationReportExtension:
         assert len(d["direction_literature_evidence"]) == 1
 
 
+class TestExplorationReportFromLlmDict:
+    """ExplorationReport.from_llm_dict must tolerate type-mismatched LLM output.
+
+    Regression: the PI LLM occasionally fills `direction_selection_summary`
+    (typed Dict[str, Any]) with a free-text string, which crashed
+    ExplorationReport(**valid_fields) with a ValidationError and silently
+    aborted the exploration->innovation transition + direction selection.
+    """
+
+    def test_string_direction_selection_summary_is_dropped(self):
+        report = ExplorationReport.from_llm_dict({
+            "cluster_overview": "ok",
+            "direction_selection_summary": "The PI prioritizes dir_0 ...",
+        })
+        # Bad field dropped -> falls back to default, no exception raised.
+        assert report.direction_selection_summary == {}
+        assert report.cluster_overview == "ok"
+
+    def test_valid_fields_preserved(self):
+        report = ExplorationReport.from_llm_dict({
+            "direction_dependency_graph": {"d1": ["d2"]},
+            "direction_selection_summary": {"selected": ["d1"]},
+            "data_quality_warnings": ["w1"],
+        })
+        assert report.direction_dependency_graph == {"d1": ["d2"]}
+        assert report.direction_selection_summary == {"selected": ["d1"]}
+        assert report.data_quality_warnings == ["w1"]
+
+    def test_list_field_given_string_is_dropped(self):
+        report = ExplorationReport.from_llm_dict({
+            "data_quality_warnings": "should be a list",
+        })
+        assert report.data_quality_warnings == []
+
+    def test_unknown_fields_ignored(self):
+        report = ExplorationReport.from_llm_dict({
+            "cluster_overview": "ok",
+            "not_a_real_field": 123,
+        })
+        assert report.cluster_overview == "ok"
+        assert not hasattr(report, "not_a_real_field")
+
+
 def test_direction_search_query_accepts_new_evidence_categories():
     categories = ["challenge_contradiction", "prior_art", "tier3_support", "tier3_challenge"]
     for category in categories:

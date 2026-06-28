@@ -1707,9 +1707,12 @@ Return a complete structured report JSON:
         response = await self.chat(prompt, temperature=0.3)
         data = self._safe_parse_json(response, default={})
 
-        # Build ExplorationReport from parsed data
-        valid_fields = {k: v for k, v in data.items() if k in ExplorationReport.model_fields}
-        report = ExplorationReport(**valid_fields)
+        # Build ExplorationReport from parsed data. Use from_llm_dict so a single
+        # type-mismatched field (e.g. the LLM emitting a string for the dict-typed
+        # direction_selection_summary) is dropped rather than raising a
+        # ValidationError that would abort Report-A generation and silently skip
+        # the exploration->innovation transition + direction-selection gate.
+        report = ExplorationReport.from_llm_dict(data)
 
         # Normalize: research_direction_candidates must hold the FINAL scored candidates.
         scored = data.get("research_direction_candidates") or []

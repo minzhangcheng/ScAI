@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.29.8 · **Last updated**: 2026-06-28
+**Version**: 0.29.9 · **Last updated**: 2026-06-28
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.29.x — (2026-06-24 → 2026-06-28)**
+
+- `0.29.9` — ExplorationReport.from_llm_dict type-tolerant parser, direction selection gate reliability fix (2026-06-28):
+  - **Type-tolerant ExplorationReport construction (`backend/models/schemas.py`)**: New `ExplorationReport.from_llm_dict()` classmethod validates each field individually via `TypeAdapter`, dropping type-mismatched values (e.g. a string for `Dict[str, Any]` `direction_selection_summary`) instead of raising a `ValidationError`. A dropped field falls back to its Pydantic default, preventing a single malformed LLM output from aborting Report-A generation and silently skipping the exploration→innovation transition and direction-selection gate.
+  - **Direction selection gate preservation (`backend/agents/pi_agent.py`)**: `score_directions_with_evidence` switched from `ExplorationReport(**valid_fields)` to `ExplorationReport.from_llm_dict(data)`, ensuring that a type-mismatched LLM field no longer crashes Report-A generation.
+  - **Regression tests (`backend/tests/test_direction_evidence_models.py`)**: Four tests cover string-in-dict-field, valid-field-preservation, list-getting-string, and unknown-field-ignored scenarios.
 
 - `0.29.8` — Reasoning model truncation guard, auto-download marker DB HITL, sandbox FD passthrough, max_tokens bump for reasoning models (2026-06-28):
   - **Reasoning model truncation guard (`backend/utils/llm_client.py`)**: New `_response_length_truncated()` and `_answer_content_empty()` static methods detect when a reasoning model exhausts its `max_tokens` budget on `reasoning_content`. On `finish_reason="length"` with empty answer content, retries once with `max_tokens` bumped to `min(max(max_tokens * 4, _TRUNCATION_RETRY_FLOOR=4096), _TRUNCATION_RETRY_CEILING=32768)`. `_truncation_retried` sentinel prevents infinite retry. Prevents silent empty answers from reasoning models without affecting non-reasoning models.
