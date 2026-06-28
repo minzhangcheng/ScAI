@@ -56,31 +56,54 @@ async def test_wait_for_marker_db_released_via_signal():
 
 
 @pytest.mark.asyncio
-async def test_marker_db_callback_retry_runs_fetch(monkeypatch):
+async def test_marker_db_callback_auto_download_no_dialog(monkeypatch):
+    """默认自动下载成功时直接返回 RETRY，不弹 HITL 窗口。"""
     wf = _bare_workflow()
     wf._current_analysis_state = _State()
     fetched = {"n": 0}
+    waited = {"called": False}
 
-    async def _wait(node, st): return LlmFailureAction.RETRY
+    async def _wait(node, st):
+        waited["called"] = True
+        return LlmFailureAction.TERMINATE
     wf._wait_for_marker_db_intervention = _wait
     monkeypatch.setattr("backend.services.marker_priors.trigger_fetch",
                         lambda: fetched.__setitem__("n", fetched["n"] + 1) or True)
     action = await wf._marker_db_intervention_callback()
     assert action == LlmFailureAction.RETRY
-    assert fetched["n"] == 1  # retry 触发了 fetch
+    assert fetched["n"] == 1       # 自动下载触发了一次 fetch
+    assert not waited["called"]    # 未弹窗
 
 
 @pytest.mark.asyncio
-async def test_marker_db_callback_terminate_returns_terminate(monkeypatch):
-    """TERMINATE 在 callback 中透传返回 TERMINATE，由 bio handler 侧 raise。"""
+async def test_marker_db_callback_retry_after_failed_download(monkeypatch):
+    """自动下载失败 → 弹窗 → 用户重试，第二次成功返回 RETRY。"""
     wf = _bare_workflow()
     wf._current_analysis_state = _State()
-    fetched = {"called": False}
+    fetched = {"n": 0}
+
+    # 第 1 次（自动）失败，第 2 次（用户重试）成功
+    def _fetch():
+        fetched["n"] += 1
+        return fetched["n"] >= 2
+    monkeypatch.setattr("backend.services.marker_priors.trigger_fetch", _fetch)
+
+    async def _wait(node, st): return LlmFailureAction.RETRY
+    wf._wait_for_marker_db_intervention = _wait
+    action = await wf._marker_db_intervention_callback()
+    assert action == LlmFailureAction.RETRY
+    assert fetched["n"] == 2  # 自动 1 次 + 重试 1 次
+
+
+@pytest.mark.asyncio
+async def test_marker_db_callback_terminate_after_failed_download(monkeypatch):
+    """自动下载失败 → 弹窗 → 用户终止，透传 TERMINATE。"""
+    wf = _bare_workflow()
+    wf._current_analysis_state = _State()
+
+    monkeypatch.setattr("backend.services.marker_priors.trigger_fetch", lambda: False)
 
     async def _wait(node, st): return LlmFailureAction.TERMINATE
     wf._wait_for_marker_db_intervention = _wait
-    monkeypatch.setattr("backend.services.marker_priors.trigger_fetch",
-                        lambda: fetched.__setattr__("called", True) or True)
     action = await wf._marker_db_intervention_callback()
     assert action == LlmFailureAction.TERMINATE
-    assert not fetched["called"]  # terminate 不走 fetch

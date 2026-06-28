@@ -4253,7 +4253,7 @@ Example: ["umap_cell_types", "cell_type_proportions", "volcano_<celltype>_<condi
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=512
+                max_tokens=4096  # reasoning models need headroom or content comes back empty
             )
             text = (response.content or "").strip()
             match = re.search(r'\[.*?\]', text, re.DOTALL)

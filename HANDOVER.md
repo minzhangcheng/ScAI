@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.29.7 · **Last updated**: 2026-06-28
+**Version**: 0.29.8 · **Last updated**: 2026-06-28
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,15 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.29.x — (2026-06-24 → 2026-06-28)**
+
+- `0.29.8` — Reasoning model truncation guard, auto-download marker DB HITL, sandbox FD passthrough, max_tokens bump for reasoning models (2026-06-28):
+  - **Reasoning model truncation guard (`backend/utils/llm_client.py`)**: New `_response_length_truncated()` and `_answer_content_empty()` static methods detect when a reasoning model exhausts its `max_tokens` budget on `reasoning_content`. On `finish_reason="length"` with empty answer content, retries once with `max_tokens` bumped to `min(max(max_tokens * 4, _TRUNCATION_RETRY_FLOOR=4096), _TRUNCATION_RETRY_CEILING=32768)`. `_truncation_retried` sentinel prevents infinite retry. Prevents silent empty answers from reasoning models without affecting non-reasoning models.
+  - **max_tokens bump for reasoning models (`backend/agents/supervisor_agent.py`, `technique_agent.py`, `pi_agent.py`)**: Supervisor checkpoint/code-review calls bumped from 512/1024 to 4096; Technique agent summarization calls from 1024 to 4096; PI direction-figure-name call from 512 to 4096. Figure review callback (`callbacks.py`) bumped from 1024 to 4096.
+  - **Sandbox FD passthrough (`backend/utils/sandbox.py`)**: Integer file descriptors (used by multiprocessing/dask pipes in GRNBoost2) now bypass `_sandboxed_open` write-access checks — they are already-open resources not subject to path-based permissions.
+  - **Marker DB missing HITL auto-download (`backend/workflow/core.py`)**: First attempt silently downloads without user dialog. Only on failure does the HITL popup appear, with a retry loop that re-prompts on repeated download failures. Error message: "Automatic download failed" instead of "TSV not found".
+  - **Marker DB tests rewritten (`backend/tests/test_marker_db_missing_hitl.py`)**: 3 tests cover auto-download-success (no dialog), auto-fail+retry (dialog→success), auto-fail+terminate.
+  - **bar/barh positional arg guidance (`backend/agents/bioinformatics_agent.py`)**: Rule 9 warns against passing width/height as both positional arg and keyword in `ax.bar()`/`ax.barh()`.
+  - **Frontend i18n (`frontend/src/i18n/translations.ts`)**: Marker DB dialog title/desc/button changed from "needed"/"Fetch" to "download failed"/"Retry download" in both Chinese and English.
 
 - `0.29.7` — Figure deduplication fix: auto-save wrapper refactored to save/display only newly-created figures, safe plt.close through no-op stubs, baseline plt.close/show captured before monkey-patch (2026-06-28):
   - **`_build_exec_autosave_wrapper()` extracted (`backend/agents/bioinformatics_agent.py`)**: Inline figure auto-save code moved into reusable factory function. Snapshot of `plt.get_fignums()` taken before user code execution; only figures whose numbers are NOT in the pre-existing set are saved/displayed (`_pre_fignums` diff filter). Prevents re-dumping stale figures accumulated in the kernel — the root cause of the same image appearing 100+ times in reports.

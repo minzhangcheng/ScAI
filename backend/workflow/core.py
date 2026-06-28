@@ -308,8 +308,8 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             info_attr="llm_failure_info",
             info_payload={
                 "agent": "bioinformatics", "model": "", "llm_server": "",
-                "error": ("Marker database TSV not found at backend/data/markers/. "
-                          "Click 'Fetch' to download or 'Skip'."),
+                "error": ("Automatic download of the marker database failed. "
+                          "Retry the download, skip (literature-only annotation), or terminate."),
                 "reason": "marker_db_missing",
             },
             enter_change=StateSyncChangeType.LLM_FAILURE.value,
@@ -318,19 +318,37 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         )
 
     async def _marker_db_intervention_callback(self) -> LlmFailureAction:
-        """传给 bio agent 的回调：缺 marker DB 时弹 HITL；retry 即时联网补齐。"""
+        """传给 bio agent 的回调：缺 marker DB 时默认自动联网补齐，不打扰用户；
+        仅当下载失败才弹 HITL 让用户选择重试 / 跳过 / 终止。"""
         from backend.services import marker_priors
-        action = await self._wait_for_marker_db_intervention(
-            "bioinformatics_analysis", self._current_analysis_state)
-        if action == LlmFailureAction.RETRY:
-            ok = await asyncio.to_thread(marker_priors.trigger_fetch)
+
+        # 默认行为：自动下载，无需用户确认
+        await self._send_message(
+            "status", "Marker database missing; downloading automatically...",
+            AgentType.BIOINFORMATICS)
+        ok = await asyncio.to_thread(marker_priors.trigger_fetch)
+        if ok:
             await self._send_message(
-                "status",
-                "Marker DB fetched, computing priors" if ok else "Marker DB fetch failed; skipping DB priors",
-                AgentType.BIOINFORMATICS)
-        elif action == LlmFailureAction.SKIP:
-            await self._send_message("status", "Skipped DB priors", AgentType.BIOINFORMATICS)
-        return action
+                "status", "Marker DB downloaded, computing priors", AgentType.BIOINFORMATICS)
+            return LlmFailureAction.RETRY
+
+        # 下载失败才弹窗：重试 / 跳过 / 终止
+        while True:
+            action = await self._wait_for_marker_db_intervention(
+                "bioinformatics_analysis", self._current_analysis_state)
+            if action == LlmFailureAction.RETRY:
+                ok = await asyncio.to_thread(marker_priors.trigger_fetch)
+                if ok:
+                    await self._send_message(
+                        "status", "Marker DB fetched, computing priors", AgentType.BIOINFORMATICS)
+                    return LlmFailureAction.RETRY
+                await self._send_message(
+                    "status", "Marker DB fetch failed again; awaiting your choice",
+                    AgentType.BIOINFORMATICS)
+                continue  # 失败后重新弹窗
+            if action == LlmFailureAction.SKIP:
+                await self._send_message("status", "Skipped DB priors", AgentType.BIOINFORMATICS)
+            return action
 
     def signal_continue(self):
         """Signal the workflow to continue from wait_for_user_input"""

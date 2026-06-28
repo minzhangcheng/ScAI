@@ -405,7 +405,7 @@ Approve if quality_score >= 7."""
 
         review = await self._vision_figure_review(
             self.supervisor_agent, figure, prompt, compressed,
-            temperature=0.2, label="Supervisor", max_tokens=1024,
+            temperature=0.2, label="Supervisor", max_tokens=4096,  # reasoning headroom
         )
 
         # --- Supervisor-as-sole-reviewer degradation logic ---

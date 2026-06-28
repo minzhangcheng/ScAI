@@ -1008,6 +1008,12 @@ def _is_write_allowed(filepath):
 
 def _sandboxed_open(file, mode='r', *args, **kwargs):
     '''Sandboxed open() that blocks writes outside allowed directories.'''
+    # Integer file descriptors are already-open resources (e.g. the inter-process
+    # pipes multiprocessing/dask use under GRNBoost2). The access decision was made
+    # when they were opened, and they are not path-resolvable — only path-like
+    # targets are subject to the write check.
+    if isinstance(file, int):
+        return _ORIGINAL_OPEN(file, mode, *args, **kwargs)
     if isinstance(mode, str) and any(m in mode for m in ('w', 'a', 'x')):
         if not _is_write_allowed(file):
             raise PermissionError(

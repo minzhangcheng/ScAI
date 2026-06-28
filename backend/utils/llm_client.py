@@ -157,6 +157,12 @@ RETRYABLE_EXCEPTIONS = (
 # a persistent issue rather than a transient network problem.
 MAX_JSON_RETRIES = 2
 EMPTY_CONTENT_PLACEHOLDER = "[Error: LLM generated a response but content extraction failed. Please retry.]"
+# Floor for the one-shot retry budget when a reasoning model truncates an empty
+# response — large enough to hold reasoning_content plus a short JSON answer.
+_TRUNCATION_RETRY_FLOOR = 4096
+# Ceiling so an already-large budget that truncates empty doesn't balloon into an
+# oversized request the endpoint may reject.
+_TRUNCATION_RETRY_CEILING = 32768
 
 
 def compute_rate_limit_delay(rate_limit_attempt: int, max_retries: int) -> Optional[float]:
@@ -1742,6 +1748,30 @@ class OpenAICompatibleClient:
 
         return content
 
+    @staticmethod
+    def _response_length_truncated(response) -> bool:
+        """True when the response was cut off because it hit the token cap
+        (finish_reason == 'length') — the signature of a reasoning model that
+        burned its whole budget on reasoning_content."""
+        try:
+            return response.choices[0].finish_reason == "length"
+        except (AttributeError, IndexError, TypeError):
+            return False
+
+    @staticmethod
+    def _answer_content_empty(response) -> bool:
+        """True when the assistant's *answer* content field is empty and no tool
+        call was made. Note this looks at the raw message.content, not the
+        extracted content — the extractor may have salvaged truncated reasoning
+        text, which is still not a usable answer."""
+        try:
+            message = response.choices[0].message
+        except (AttributeError, IndexError, TypeError):
+            return False
+        if getattr(message, "tool_calls", None):
+            return False
+        return not getattr(message, "content", None)
+
     def _log_empty_content_diagnostic(self, message, response) -> tuple:
         """Log diagnostic info when content extraction yielded empty string.
 
@@ -2048,7 +2078,8 @@ class OpenAICompatibleClient:
         max_tokens: Optional[int] = None,
         stream: bool = False,
         timeout: Optional[float] = None,
-        max_retries: Optional[int] = None
+        max_retries: Optional[int] = None,
+        _truncation_retried: bool = False,
     ) -> LLMResponse:
         # Create log record
         interaction = self.llm_logger.log_request(
@@ -2083,6 +2114,36 @@ class OpenAICompatibleClient:
             if response and response.choices and len(response.choices) > 0:
                 message = response.choices[0].message
                 content = self._extract_content_from_message(message, response)
+
+            # Reasoning-model truncation guard: when a reasoning model spends the
+            # entire max_tokens budget on reasoning the response comes back with an
+            # empty answer field AND length-truncated. The extractor may salvage the
+            # (also truncated) reasoning text into `content`, so we cannot rely on
+            # the EMPTY_CONTENT_PLACEHOLDER alone — gate on the *answer* content field
+            # being empty instead. Callers that don't special-case this (supervisor,
+            # PI, technique...) would otherwise silently treat it as "no answer".
+            # Retry once with a larger budget so the model can finish.
+            if (
+                not _truncation_retried
+                and max_tokens is not None
+                and self._response_length_truncated(response)
+                and self._answer_content_empty(response)
+            ):
+                bumped = min(max(max_tokens * 4, _TRUNCATION_RETRY_FLOOR), _TRUNCATION_RETRY_CEILING)
+                logger.warning(
+                    f"[{self.agent_name}] Empty content from a length-truncated response "
+                    f"(max_tokens={max_tokens}); retrying once with max_tokens={bumped}"
+                )
+                self.llm_logger.log_response(
+                    interaction=interaction,
+                    response_content=content,
+                    usage=self._extract_usage(response),
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
+                return await self._chat_inline(
+                    model, messages, temperature, bumped, stream, timeout, max_retries,
+                    _truncation_retried=True,
+                )
 
             result = LLMResponse(
                 content=content,

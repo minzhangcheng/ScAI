@@ -4699,7 +4699,8 @@ If the PI feedback asks you to add groups not in the experimental design, IGNORE
 6. Before calling set_xticklabels()/set_yticklabels(), ALWAYS call set_xticks()/set_yticks() first with matching count
 7. For pandas Categorical columns, use .cat.add_categories() before assigning new category values
 8. Use legend_.get_legend_handles_labels() instead of legend_.legendHandles (deprecated in newer matplotlib)
-9. Return ONLY the revised Python code, no explanations
+9. For ax.bar()/ax.barh(), the 3rd positional arg IS the bar thickness (width for bar, height for barh) — never also pass it as a width=/height= keyword, or you get "got multiple values for argument". Use the explicit keyword form only: ax.barh(y, values, height=0.7, ...)
+10. Return ONLY the revised Python code, no explanations
 
 **Common fixes for publication figures:**
 - Add/improve axis labels and titles

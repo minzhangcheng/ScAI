@@ -244,7 +244,7 @@ except ImportError as e:
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=self.config.temperature,
-                max_tokens=1024,
+                max_tokens=4096,  # reasoning models need headroom or content comes back empty
             )
             summary = response.content if response.content else raw_doc[:2000]
             await self._notify("result", summary)
@@ -332,7 +332,7 @@ except ImportError as e:
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=self.config.temperature,
-                max_tokens=1024,
+                max_tokens=4096,  # reasoning models need headroom or content comes back empty
             )
             summary = response.content if response.content else combined[:1500]
             await self._notify("result", summary)

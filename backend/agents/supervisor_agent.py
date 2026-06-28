@@ -1066,7 +1066,7 @@ class SupervisorAgent:
                     text_prompt=f"{effective_prompt}\n\n{text_with_fig_note}",
                     images=compressed,
                     temperature=self.temperature,
-                    max_tokens=512,
+                    max_tokens=4096,  # reasoning models need headroom or content comes back empty
                 )
                 return self._parse_supervisor_response(response.content if response else "")
 
@@ -1085,7 +1085,7 @@ class SupervisorAgent:
                 {"role": "user", "content": text_context},
             ],
             temperature=self.temperature,
-            max_tokens=512,
+            max_tokens=4096,  # reasoning models need headroom or content comes back empty
         )
         return self._parse_supervisor_response(response.content if response else "")
 
@@ -1149,7 +1149,7 @@ Respond in JSON:
                 {"role": "user", "content": user_message},
             ],
             temperature=0.1,  # Strict review
-            max_tokens=1024,
+            max_tokens=4096,  # reasoning models need headroom or content comes back empty
         )
         response_text = response.content if response and response.content else ""
         if not response_text.strip():
