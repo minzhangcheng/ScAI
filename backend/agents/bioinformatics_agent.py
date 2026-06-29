@@ -2061,6 +2061,24 @@ Return the plan as a JSON object:
         response = await self.chat(prompt, temperature=0.3)
         plan_data = self._safe_parse_json(response, default={})
 
+        if "parse_error" in plan_data or not plan_data.get("steps"):
+            retry_prompt = (
+                prompt
+                + f"\n\nIMPORTANT: Use valid JSON only. Numeric fields must be numbers, "
+                f"e.g. \"id\": 1 and \"depends_on\": [1, 2]. "
+                f"Do not add stray quotes after numbers. "
+                f"Double-check JSON syntax before responding.\n[retry:{uuid.uuid4().hex[:8]}]"
+            )
+            resp2 = await self.chat(retry_prompt, temperature=0.3)
+            data2 = self._safe_parse_json(resp2, default={})
+            if "parse_error" not in data2:
+                plan_data = data2
+            else:
+                logger.warning(
+                    "[Bioinformatics] generate_analysis_plan: retry also failed to parse; "
+                    "returning 0-step plan (caller will handle via planning dialogue)"
+                )
+
         steps = []
         for s in plan_data.get("steps", []):
             steps.append(PlanStep(
@@ -2156,6 +2174,18 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
         response = await self.chat(prompt, temperature=0.3)
         plan_data = self._safe_parse_json(response, default={})
 
+        if "parse_error" in plan_data or not plan_data.get("steps"):
+            retry_prompt = (
+                prompt
+                + f"\n\nIMPORTANT: Use valid JSON only. Numeric fields must be numbers, "
+                f"e.g. \"id\": 1 and \"depends_on\": [1, 2]. "
+                f"Do not add stray quotes after numbers.\n[retry:{uuid.uuid4().hex[:8]}]"
+            )
+            resp2 = await self.chat(retry_prompt, temperature=0.3)
+            data2 = self._safe_parse_json(resp2, default={})
+            if "parse_error" not in data2:
+                plan_data = data2
+
         steps = []
         for s in plan_data.get("steps", []):
             sid = s.get("id", len(steps) + 1)
@@ -2172,6 +2202,33 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                 depends_on=s.get("depends_on", []),
                 status=status,
             ))
+
+        if not steps:
+            logger.warning(
+                "[Bioinformatics] revise_plan_incrementally produced 0 steps; "
+                "retaining current_plan steps unchanged"
+            )
+            return AnalysisPlan(
+                phase=current_plan.phase,
+                stage=current_plan.stage,
+                overview=current_plan.overview,
+                steps=[PlanStep(
+                    id=s.id,
+                    title=s.title,
+                    method=s.method,
+                    input=s.input,
+                    expected_output=s.expected_output,
+                    rationale=s.rationale,
+                    depends_on=list(s.depends_on),
+                    status=s.status,
+                    executed_at=s.executed_at,
+                ) for s in current_plan.steps],
+                key_decision_points=current_plan.key_decision_points,
+                expected_runtime=current_plan.expected_runtime,
+                status="draft",
+                revision_of=current_plan.id,
+                revision_reason=f"Retained previous plan (revision parse failed): {pi_feedback[:500]}",
+            )
 
         revised_plan = AnalysisPlan(
             phase=current_plan.phase,

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.29.9 · **Last updated**: 2026-06-28
+**Version**: 0.29.10 · **Last updated**: 2026-06-29
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,17 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.29.x — (2026-06-24 → 2026-06-28)**
+**0.29.x — (2026-06-24 → 2026-06-29)**
+
+- `0.29.10` — Plan JSON parse failure fallback: four-layer defense (2026-06-29):
+  - **Layer 1 — json_repair recovery (`backend/utils/formatting.py`)**: `safe_parse_json` now tries `json_repair` on the bracket-extracted segment, then the full response, after bracket extraction fails due to unbalanced quotes. Prevents a single stray `"` in LLM output from producing a 0-step plan. Graceful degradation when `json_repair` is unavailable (deferring to Layers 2-4).
+  - **Layer 2A/2B — Parse-failure retry with cache-busting (`backend/agents/bioinformatics_agent.py`)**: `generate_analysis_plan` and `revise_plan_incrementally` detect parse errors or empty steps and retry once with a UUID cache-busting token (`[retry:<hex>]`) and explicit JSON-format instructions. The `f"..."` prefix on the UUID line is critical for correctness — a missing `f` produces an identical retry prompt and the server-side cache returns the same malformed response.
+  - **Layer 2.5 — Never discard existing steps on revision (`backend/agents/bioinformatics_agent.py`)**: When `revise_plan_incrementally` produces 0 steps (parse failure or LLM returned empty), returns a new `AnalysisPlan` derived from `current_plan` with a `revision_reason` explaining the retention. `depends_on=list(s.depends_on)` avoids shared mutable list references.
+  - **Layer 4 — MAX_PLANNING_ROUNDS fallback to history (`backend/workflow/planning.py`)**: When max rounds are exhausted, prefers `existing_plan` only if it has steps and was not PI-rejected. Otherwise scans `dialogue_history` in reverse for the last valid non-empty plan using `AnalysisPlan.model_validate`. Manual fallback preserves `id`, `revision_of`, `revision_reason`; `AnalysisPlan.id` default_factory handles missing `id`. Skips PI-rejected history entries. Last resort calls `generate_final_plan_from_dialogue` for PI unilateral generation.
+  - **Layer 5 — User review gate rejects empty plans (`backend/workflow/planning.py`)**: `_user_review_gate` now checks `not plan or not plan.steps`, logging at `logger.error` level (all prior layers failed), then sets `should_continue=False` and routes to final report without sending a `plan_review` message.
+  - **New test files**: `test_safe_parse_json_unbalanced_quote.py` (3 tests: repair, repair-with-wrapping-text, no-repair fallback), `test_bioinformatics_plan_parse_retry.py` (5 tests: retry prompt uniqueness, generate retry on empty steps, retry fallback, revise preserves current plan, revise empty steps preserves), `test_planning_dialogue_llm_failure.py` (5 new tests: history picks last valid, rejected existing plan uses history, skipping rejected history, no-valid-history calls PI final, user review gate rejects empty).
+  - **Design spec**: `docs/superpowers/specs/2026-06-29-plan-parse-fallback-design.md` documents the full analysis with session 56145c54 timeline, defense-in-depth trace, and all 16 unit test cases.
+  - **Project context files**: Added `AGENTS.md` and `CLAUDE.md` for agentic workers (OpenCode/Claude).
 
 - `0.29.9` — ExplorationReport.from_llm_dict type-tolerant parser, direction selection gate reliability fix (2026-06-28):
   - **Type-tolerant ExplorationReport construction (`backend/models/schemas.py`)**: New `ExplorationReport.from_llm_dict()` classmethod validates each field individually via `TypeAdapter`, dropping type-mismatched values (e.g. a string for `Dict[str, Any]` `direction_selection_summary`) instead of raising a `ValidationError`. A dropped field falls back to its Pydantic default, preventing a single malformed LLM output from aborting Report-A generation and silently skipping the exploration→innovation transition and direction-selection gate.

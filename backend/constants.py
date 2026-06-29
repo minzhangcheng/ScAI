@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.29.9"
+VERSION = "0.29.10"
 
 
 # ── Node → Agent mapping ───────────────────────────────────────────

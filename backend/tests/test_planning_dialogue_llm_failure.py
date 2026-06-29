@@ -315,3 +315,184 @@ class TestPlanningDialoguePIReviewFailure:
         assert result.get("failed_node") is None
         assert result["planning_result"]["dialogue"][0]["pi_decision"] == "approved"
         assert "Looks good after retry" in result["planning_result"]["dialogue"][0]["pi_feedback"]
+
+
+class TestPlanningDialogueMaxRoundsFallback:
+    """Behavior tests for max-rounds fallback and empty user-review plans."""
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_history_picks_last_valid(self):
+        wf = _make_workflow()
+        analysis_state = AnalysisState(user_id="test")
+        analysis_state.analysis_phase = MagicMock()
+        analysis_state.analysis_phase.value = "exploration"
+
+        round3 = AnalysisPlan(
+            phase="exploration",
+            stage="full",
+            overview="round 3",
+            steps=[PlanStep(id=i, title=f"R3 step {i}", method="m") for i in range(1, 44)],
+        )
+        round4 = AnalysisPlan(
+            phase="exploration",
+            stage="full",
+            overview="round 4",
+            steps=[PlanStep(id=i, title=f"R4 step {i}", method="m") for i in range(1, 46)],
+        )
+        empty = AnalysisPlan(phase="exploration", stage="full", overview="empty", steps=[])
+
+        wf.bioinformatics_agent = MagicMock()
+        wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(return_value=empty)
+        wf.bioinformatics_agent.revise_plan_incrementally = AsyncMock(
+            side_effect=[round3, round4, empty, empty]
+        )
+        wf.pi_agent = MagicMock()
+        wf.pi_agent.review_bioinfo_plan = AsyncMock(side_effect=[
+            {"decision": "revise", "feedback": "need steps", "modifications": []},
+            {"decision": "revise", "feedback": "good but revise", "modifications": []},
+            {"decision": "revise", "feedback": "add more", "modifications": []},
+            {"decision": "revise", "feedback": "still revise", "modifications": []},
+            {"decision": "reject", "feedback": "empty", "modifications": []},
+        ])
+
+        state = _make_state(analysis_state=analysis_state)
+        result = await wf._planning_dialogue(state)
+
+        plan = result["planning_result"]["plan"]
+        assert plan["overview"] == "round 4"
+        assert len(plan["steps"]) == 45
+        assert analysis_state.current_plan.overview == "round 4"
+        assert analysis_state.current_plan.status == "pi_reviewing"
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_rejected_existing_plan_uses_history(self):
+        wf = _make_workflow()
+        analysis_state = AnalysisState(user_id="test")
+        analysis_state.analysis_phase = MagicMock()
+        analysis_state.analysis_phase.value = "exploration"
+
+        valid_history_plan = AnalysisPlan(
+            phase="exploration",
+            stage="full",
+            overview="valid history",
+            steps=[PlanStep(id=1, title="Valid", method="m")],
+        )
+        rejected_plan = AnalysisPlan(
+            phase="exploration",
+            stage="full",
+            overview="rejected final",
+            steps=[PlanStep(id=1, title="Rejected", method="m")],
+        )
+
+        wf.bioinformatics_agent = MagicMock()
+        wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(return_value=valid_history_plan)
+        wf.bioinformatics_agent.revise_plan_incrementally = AsyncMock(return_value=rejected_plan)
+        wf.pi_agent = MagicMock()
+        wf.pi_agent.review_bioinfo_plan = AsyncMock(side_effect=[
+            {"decision": "revise", "feedback": "revise", "modifications": []},
+            {"decision": "reject", "feedback": "reject", "modifications": []},
+            {"decision": "reject", "feedback": "reject", "modifications": []},
+            {"decision": "reject", "feedback": "reject", "modifications": []},
+            {"decision": "reject", "feedback": "reject", "modifications": []},
+        ])
+
+        state = _make_state(analysis_state=analysis_state)
+        result = await wf._planning_dialogue(state)
+
+        plan = result["planning_result"]["plan"]
+        assert plan["overview"] == "valid history"
+        assert plan["steps"][0]["title"] == "Valid"
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_skips_rejected_history_plan(self):
+        """A non-empty plan rejected by PI must not be recovered from history."""
+        wf = _make_workflow()
+        analysis_state = AnalysisState(user_id="test")
+        analysis_state.analysis_phase = MagicMock()
+        analysis_state.analysis_phase.value = "exploration"
+
+        valid_plan = AnalysisPlan(
+            phase="exploration",
+            stage="full",
+            overview="valid history",
+            steps=[PlanStep(id=1, title="Valid", method="m")],
+        )
+        rejected_plan = AnalysisPlan(
+            phase="exploration",
+            stage="full",
+            overview="rejected history",
+            steps=[PlanStep(id=1, title="Rejected", method="m")],
+        )
+        empty_plan = AnalysisPlan(phase="exploration", stage="full", overview="empty", steps=[])
+
+        wf.bioinformatics_agent = MagicMock()
+        wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(
+            side_effect=[valid_plan, empty_plan]
+        )
+        wf.bioinformatics_agent.revise_plan_incrementally = AsyncMock(
+            side_effect=[rejected_plan, empty_plan, empty_plan]
+        )
+        wf.pi_agent = MagicMock()
+        wf.pi_agent.review_bioinfo_plan = AsyncMock(side_effect=[
+            {"decision": "revise", "feedback": "revise valid", "modifications": []},
+            {"decision": "reject", "feedback": "reject non-empty", "modifications": []},
+            {"decision": "revise", "feedback": "empty", "modifications": []},
+            {"decision": "revise", "feedback": "empty", "modifications": []},
+            {"decision": "revise", "feedback": "empty", "modifications": []},
+        ])
+
+        state = _make_state(analysis_state=analysis_state)
+        result = await wf._planning_dialogue(state)
+
+        plan = result["planning_result"]["plan"]
+        assert plan["overview"] == "valid history"
+        assert plan["steps"][0]["title"] == "Valid"
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_no_valid_history_calls_pi_final(self):
+        wf = _make_workflow()
+        analysis_state = AnalysisState(user_id="test")
+        analysis_state.analysis_phase = MagicMock()
+        analysis_state.analysis_phase.value = "exploration"
+        empty = AnalysisPlan(phase="exploration", stage="full", overview="empty", steps=[])
+        final = AnalysisPlan(
+            phase="exploration",
+            stage="full",
+            overview="pi final",
+            steps=[PlanStep(id=1, title="PI final step", method="m")],
+        )
+
+        wf.bioinformatics_agent = MagicMock()
+        wf.bioinformatics_agent.generate_analysis_plan = AsyncMock(return_value=empty)
+        wf.bioinformatics_agent.revise_plan_incrementally = AsyncMock(return_value=empty)
+        wf.pi_agent = MagicMock()
+        wf.pi_agent.review_bioinfo_plan = AsyncMock(return_value={
+            "decision": "revise", "feedback": "empty", "modifications": []
+        })
+        wf.pi_agent.generate_final_plan_from_dialogue = AsyncMock(return_value=final)
+
+        state = _make_state(analysis_state=analysis_state)
+        result = await wf._planning_dialogue(state)
+
+        assert result["planning_result"]["plan"]["overview"] == "pi final"
+        wf.pi_agent.generate_final_plan_from_dialogue.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_user_review_gate_rejects_empty_plan(self):
+        wf = _make_workflow()
+        wf._plan_review_action = None
+        wf._plan_review_event = MagicMock()
+        wf._plan_review_event.clear = MagicMock()
+        analysis_state = AnalysisState(user_id="test")
+        analysis_state.analysis_phase = MagicMock()
+        analysis_state.analysis_phase.value = "exploration"
+        analysis_state.current_plan = AnalysisPlan(
+            phase="exploration", stage="full", overview="empty", steps=[]
+        )
+        state = _make_state(analysis_state=analysis_state)
+
+        result = await wf._user_review_gate(state)
+
+        assert result["should_continue"] is False
+        sent_types = [call.args[0] for call in wf._send_message.call_args_list]
+        assert "plan_review" not in sent_types

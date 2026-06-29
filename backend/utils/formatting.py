@@ -12,6 +12,7 @@ try:
     from json_repair import repair_json as _repair_json
     _JSON_REPAIR_AVAILABLE = True
 except ImportError:
+    _repair_json = None  # type: ignore[assignment]
     _JSON_REPAIR_AVAILABLE = False
 
 
@@ -93,6 +94,15 @@ def safe_parse_json(response: str, default: Optional[Dict[str, Any]] = None) -> 
                 except Exception:
                     pass
             logger.debug("JSON extraction from LLM response failed at position %d-%d", start, end)
+
+    if _JSON_REPAIR_AVAILABLE:
+        for candidate in (response[start:], response):
+            try:
+                repaired = _repair_json(candidate, return_objects=True)
+                if isinstance(repaired, dict):
+                    return repaired
+            except Exception:
+                pass
 
     return default
 

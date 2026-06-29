@@ -7,7 +7,7 @@ from html import escape as _html_escape
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..constants import LlmFailureAction, PI_DECIDE_SIGNAL, WaitInputReason, StateSyncChangeType
-from ..models.schemas import AgentType, AnalysisPhase, TaskStatus
+from ..models.schemas import AgentType, AnalysisPhase, AnalysisPlan, PlanStep, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
 from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
 from .retry import MAX_NODE_RETRIES, _retry_backoff_delay, with_retry
@@ -679,32 +679,68 @@ class PlanningMixin:
             logger.warning(
                 f"[{self.session_id}] Planning dialogue reached max rounds ({MAX_PLANNING_ROUNDS})"
             )
-            if existing_plan is not None:
-                existing_plan.status = "pi_reviewing"
-                analysis_state.current_plan = existing_plan
+
+            fallback_plan = (
+                existing_plan
+                if (
+                    existing_plan is not None
+                    and existing_plan.steps
+                    and existing_plan.status != "rejected"
+                )
+                else None
+            )
+            if fallback_plan is None:
+                for entry in reversed(dialogue_history):
+                    if entry.get("pi_decision") == "reject":
+                        continue
+                    plan_dict = entry.get("plan", {})
+                    if not plan_dict.get("steps"):
+                        continue
+                    try:
+                        fallback_plan = AnalysisPlan.model_validate(plan_dict)
+                    except Exception:
+                        steps = [PlanStep(**s) for s in plan_dict["steps"]]
+                        plan_kwargs = dict(
+                            phase=plan_dict.get("phase", phase),
+                            stage=plan_dict.get("stage", stage),
+                            overview=plan_dict.get("overview", ""),
+                            steps=steps,
+                            key_decision_points=plan_dict.get("key_decision_points", []),
+                            expected_runtime=plan_dict.get("expected_runtime", f"~{len(steps)} steps"),
+                            revision_of=plan_dict.get("revision_of"),
+                            revision_reason=plan_dict.get("revision_reason"),
+                        )
+                        if plan_dict.get("id"):
+                            plan_kwargs["id"] = plan_dict["id"]
+                        fallback_plan = AnalysisPlan(**plan_kwargs)
+                    logger.info(
+                        f"[{self.session_id}] Fallback: using plan from dialogue round "
+                        f"{entry.get('round', '?')} with {len(fallback_plan.steps)} steps"
+                    )
+                    break
+
+            if fallback_plan is not None and fallback_plan.steps:
+                fallback_plan.status = "pi_reviewing"
+                analysis_state.current_plan = fallback_plan
                 analysis_state.plan_dialogue_history = dialogue_history
                 state["plan_approved"] = True
                 state["planning_result"] = {
-                    "plan": existing_plan.model_dump(mode="json"),
+                    "plan": fallback_plan.model_dump(mode="json"),
                     "dialogue": dialogue_history,
                 }
                 await self._send_message(
                     "status",
-                    "Planning dialogue: max rounds reached, proceeding with last version",
+                    "Planning dialogue: max rounds reached, proceeding with best available plan",
                     AgentType.PI,
                 )
             else:
-                # P1-10: no plan after MAX_PLANNING_ROUNDS → PI unilaterally
-                # generates a final plan from the dialogue history instead of
-                # returning empty state (which would cause an infinite revise
-                # loop in _after_review).
                 logger.warning(
-                    f"[{self.session_id}] MAX_PLANNING_ROUNDS reached without plan; "
+                    f"[{self.session_id}] MAX_PLANNING_ROUNDS reached without valid plan; "
                     f"PI finalizes unilaterally"
                 )
                 await self._send_message(
                     "status",
-                    "Planning dialogue: max rounds reached without agreement, "
+                    "Planning dialogue: max rounds reached without a valid plan, "
                     "PI is finalizing the plan unilaterally...",
                     AgentType.PI,
                 )
@@ -771,10 +807,10 @@ class PlanningMixin:
         analysis_state = state["analysis_state"]
         plan = analysis_state.current_plan
 
-        if not plan:
-            logger.warning(
-                f"[{self.session_id}] No plan to review; planning aborted, "
-                f"routing to final report"
+        if not plan or not plan.steps:
+            logger.error(
+                f"[{self.session_id}] No plan (or empty plan with {len(plan.steps) if plan else 0} "
+                f"steps) to review; planning aborted, routing to final report"
             )
             await self._send_message(
                 "status",
