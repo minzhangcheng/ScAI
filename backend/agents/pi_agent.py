@@ -1482,6 +1482,29 @@ Return a JSON object with this EXACT structure:
 
         ann_summary = self._format_cluster_annotation_summary(state)
 
+        mech_programs = getattr(state, "data_driven_mechanism_programs", []) or []
+        mech_block = ""
+        if mech_programs:
+            lines = ["## Data-Driven Mechanism Programs",
+                     "Use these programs as candidate evidence, not as conclusions.",
+                     "Do not overclaim named mechanisms unless supported by data and literature.",
+                     "Prefer directions grounded in concrete observations and cross-modal support.",
+                     "For every mechanism-derived direction, include alternative hypotheses and missing evidence.",
+                     ""]
+            for p in mech_programs[-8:]:
+                lines.append(
+                    f"- {p.label} (cells: {', '.join(p.cell_types) or 'n/a'}; "
+                    f"strength: {p.evidence_strength}; specificity: {p.specificity}; "
+                    f"bulk: {p.bulk_support})"
+                )
+                if p.triggering_observations:
+                    lines.append(f"  Observations: {'; '.join(p.triggering_observations[:2])}")
+                if p.supporting_genes:
+                    lines.append(f"  Genes: {', '.join(p.supporting_genes[:12])}")
+                if p.missing_evidence:
+                    lines.append(f"  Missing evidence: {'; '.join(p.missing_evidence[:2])}")
+            mech_block = "\n".join(lines)
+
         prompt = f"""Based on the Round 1 exploration results, propose 3-5 raw research direction candidates.
 
 ## Project Context
@@ -1499,6 +1522,8 @@ Return a JSON object with this EXACT structure:
 
 ## Cell Annotations
 {ann_summary}
+
+{mech_block}
 
 For each candidate, provide ALL of the following fields:
 - direction_id: Unique identifier like "dir_001"
@@ -3263,6 +3288,27 @@ Current research direction: {current_direction or "N/A"}
             if lit_parts:
                 cross_modal_block = "\n## Literature Context Summary\n" + "\n".join(lit_parts)
 
+        mech_lines = []
+        for r in state.round_results[-3:]:
+            for p in (getattr(r, "data_driven_mechanism_programs", []) or [])[:3]:
+                mech_lines.append(
+                    f"- {p.label} (round {p.round_number}; strength {p.evidence_strength}; "
+                    f"specificity {p.specificity}; bulk {p.bulk_support}): "
+                    f"{'; '.join(p.triggering_observations[:2])}. "
+                    f"Genes/pathways: {', '.join((p.supporting_genes + p.supporting_pathways)[:8])}. "
+                    f"Missing evidence: {'; '.join(p.missing_evidence[:2])}"
+                )
+        mechanism_block = ""
+        if mech_lines:
+            mechanism_block = (
+                "\n## Data-Driven Mechanism Programs (candidates, NOT confirmed)\n"
+                "Classify each program as one of: covered (already a current direction's "
+                "mechanism), integrated (cross-modally supported), uncovered candidate "
+                "(distinct evidence not yet pursued), or future/new direction. Use hypothesis "
+                "wording; never present a program as a confirmed mechanism.\n"
+                + "\n".join(mech_lines)
+            )
+
         prompt = f"""
 Based on all the analysis results below, write a complete analysis report:
 
@@ -3272,7 +3318,7 @@ Research Objective: {state.initial_instruction}
 
 ## Results from All Rounds
 {''.join(rounds_summary)}
-{cross_modal_block}
+{cross_modal_block}{mechanism_block}
 
 Please write a well-structured analysis report including:
 1. Research Overview
@@ -4335,6 +4381,28 @@ an earlier version may win.
 **Summary:** {result.pi_summary[:500] if result.pi_summary else 'N/A'}
 """)
 
+        mech_lines = []
+        rounds = state.round_results[-3:]
+        for rr in rounds:
+            for p in (getattr(rr, "data_driven_mechanism_programs", []) or [])[:3]:
+                elevate = p.evidence_strength in ("moderate", "strong") and len(p.triggering_observations) >= 2
+                tag = "candidate mechanism" if elevate else "exploratory signal"
+                mech_lines.append(
+                    f"- [{tag}] {p.label} (strength {p.evidence_strength}, bulk {p.bulk_support}): "
+                    f"{'; '.join(p.triggering_observations[:2])}. "
+                    f"Genes: {', '.join((p.supporting_genes + p.supporting_pathways)[:8])}. "
+                    f"Missing evidence: {'; '.join(p.missing_evidence[:2])}"
+                )
+        mech_block = ""
+        if mech_lines:
+            mech_block = (
+                "## Data-Driven Mechanism Programs\n"
+                "Moderate/strong programs with at least two triggering observations MUST appear "
+                "as candidate mechanisms (with missing evidence and hypothesis wording). Do NOT "
+                "demote them to pure future work unless contradictory evidence is explicitly stated.\n"
+                + "\n".join(mech_lines)
+            )
+
         prompt = f"""## Generate Integrated Research Report
 
 **Project Information:**
@@ -4350,6 +4418,8 @@ an earlier version may win.
 
 **Analysis Rounds Summary:**
 {''.join(rounds_summary)}
+
+{mech_block}
 
 **Task:**
 Generate a comprehensive research report in Markdown format suitable for publication. The report should:

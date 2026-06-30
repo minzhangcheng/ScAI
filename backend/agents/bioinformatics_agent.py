@@ -45,6 +45,129 @@ def build_gate_skip_note(gate_label: str) -> str:
             f"conclusions should not assume this validation was performed.")
 
 
+_OVERCLAIM_WORDS = ("confirmed", "proven", "causal", "demonstrates", "establishes")
+_NEGATION_WORDS = {"not", "no", "never", "unlikely", "cannot", "can't", "doesn't",
+                    "don't", "didn't", "won't", "wouldn't", "shouldn't", "isn't",
+                    "aren't", "wasn't", "weren't", "haven't", "hasn't", "hadn't"}
+_MAX_PROGRAMS = 8
+_MAX_GENES = 50
+_MAX_OBS_LEN = 500
+_DEFAULT_ALTERNATIVE = "generic injury or stress response"
+_DEFAULT_MISSING = "Direct causal validation is not available from the current data."
+_REQUIRED_FIELDS = ("label", "triggering_observations", "evidence_strength",
+                    "specificity", "interpretation")
+
+
+def _ensure_list(val):
+    """Normalize a value to a list — pass through lists, wrap strings, skip None/other."""
+    if isinstance(val, str):
+        return [val]
+    if isinstance(val, list):
+        return val
+    return []
+
+
+def _overclaim_unnegated(text):
+    """Check if text contains overclaim words not negated within the prior 3 words."""
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    for i, w in enumerate(words):
+        if w in _OVERCLAIM_WORDS:
+            start = max(0, i - 3)
+            if not any(n in words[start:i] for n in _NEGATION_WORDS):
+                return True
+    return False
+
+
+def validate_mechanism_program_payload(payload, *, round_number=0, phase="", stage=""):
+    """Validate a register_mechanism_programs payload conservatively.
+
+    Returns (programs, error_message). On any structural error, programs is []
+    and error_message is a corrective string to return to the agent. An empty
+    programs list is valid ONLY when no_program_reason is non-empty.
+    """
+    from ..models.schemas import DataDrivenMechanismProgram
+
+    if not isinstance(payload, dict):
+        return [], "Invalid payload: expected an object with a 'programs' list."
+
+    raw_programs = payload.get("programs") or []
+    if not isinstance(raw_programs, list):
+        return [], "'programs' must be a list."
+    no_program_reason = (payload.get("no_program_reason") or "").strip()
+
+    if not raw_programs:
+        if not no_program_reason:
+            return [], ("Empty programs list requires a non-empty no_program_reason "
+                        "explaining why no data-driven mechanism program was registered.")
+        return [], None
+
+    raw_programs = raw_programs[:_MAX_PROGRAMS]
+    programs = []
+    for idx, rp in enumerate(raw_programs):
+        if not isinstance(rp, dict):
+            return [], f"Program {idx} is not an object."
+        for field in _REQUIRED_FIELDS:
+            val = rp.get(field)
+            if val is None or (isinstance(val, str) and not val.strip()):
+                return [], f"Program {idx} is missing required field '{field}'."
+        raw_obs = rp.get("triggering_observations") or []
+        if isinstance(raw_obs, str):  # tolerate a single string instead of a list
+            raw_obs = [raw_obs]
+        if not isinstance(raw_obs, list):
+            return [], f"Program {idx} triggering_observations must be a list."
+        observations = [o for o in raw_obs if str(o).strip()]
+        if not observations:
+            return [], f"Program {idx} has empty triggering_observations."
+        observations = [str(o)[:_MAX_OBS_LEN] for o in observations]
+
+        alternatives = [a for a in _ensure_list(rp.get("alternative_explanations")) if str(a).strip()]
+        if not alternatives:
+            alternatives = [_DEFAULT_ALTERNATIVE]
+        missing = [m for m in _ensure_list(rp.get("missing_evidence")) if str(m).strip()]
+        if not missing:
+            missing = [_DEFAULT_MISSING]
+
+        interpretation = str(rp.get("interpretation", ""))
+        if _overclaim_unnegated(interpretation):
+            missing = missing + [
+                "Interpretation may overclaim (uses confirmatory/causal wording); "
+                "treat as candidate, not confirmed."
+            ]
+
+        bulk_support = rp.get("bulk_support", "unknown")
+        if bulk_support not in ("supported", "not_supported", "mixed", "not_available", "unknown"):
+            bulk_support = "unknown"
+        evidence_strength = rp.get("evidence_strength")
+        if evidence_strength not in ("strong", "moderate", "weak"):
+            evidence_strength = "weak"
+        specificity = rp.get("specificity")
+        if specificity not in ("high", "medium", "low"):
+            specificity = "low"
+
+        programs.append(DataDrivenMechanismProgram(
+            round_number=round_number,
+            phase=phase,
+            stage=stage,
+            label=str(rp.get("label", ""))[:200],
+            description=str(rp.get("description", "")),
+            cell_types=[str(c) for c in _ensure_list(rp.get("cell_types"))],
+            conditions_compared=str(rp.get("conditions_compared", "")),
+            triggering_observations=observations,
+            supporting_genes=[str(g) for g in _ensure_list(rp.get("supporting_genes"))][:_MAX_GENES],
+            supporting_pathways=[str(p) for p in _ensure_list(rp.get("supporting_pathways"))],
+            supporting_scores=[str(s) for s in _ensure_list(rp.get("supporting_scores"))],
+            supporting_tables=[str(t) for t in _ensure_list(rp.get("supporting_tables"))],
+            bulk_support=bulk_support,
+            evidence_strength=evidence_strength,
+            specificity=specificity,
+            alternative_explanations=alternatives,
+            missing_evidence=missing,
+            interpretation=interpretation,
+            downstream_literature_queries=[str(q) for q in _ensure_list(rp.get("downstream_literature_queries"))],
+        ))
+    return programs, None
+
+
 def count_saved_figures(analysis_log) -> int:
     """Count figures actually written to disk during a run.
 
@@ -67,7 +190,8 @@ def count_saved_figures(analysis_log) -> int:
 
 from ..models.schemas import (
     AgentType, AnalysisPhase, AnalysisState, MessageRole, CodeExecution,
-    PublicationFigure, FigureReviewStatus, AnalysisStep, PlanStage,
+    DataDrivenMechanismProgram, PublicationFigure, FigureReviewStatus,
+    AnalysisStep, PlanStage,
     DATA_TYPE_SCRNASEQ, DATA_TYPE_BULK_RNASEQ,
 )
 from ..utils.llm_client import OpenAICompatibleClient, ToolCall, UpstreamExhaustedError, EMPTY_CONTENT_PLACEHOLDER
@@ -539,6 +663,55 @@ TOOLS = [
                 "required": ["gene_names"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "register_mechanism_programs",
+            "description": (
+                "Register data-driven mechanism programs after completing downstream "
+                "analysis, BEFORE report_findings. A mechanism program is a recurring, "
+                "cell-type-localized or cross-validated pattern supported by observed "
+                "genes, pathways, module scores, enrichment terms, bulk/scRNA overlap, "
+                "or cell-state changes. Derive labels from the observed data only — do "
+                "NOT search for or assume any preset mechanism category. If no "
+                "supportable program exists, pass an empty programs list and explain "
+                "why in no_program_reason."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "programs": {
+                        "type": "array",
+                        "description": "0-8 data-driven mechanism programs.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "description": "Short descriptive label derived from observed data."},
+                                "description": {"type": "string"},
+                                "cell_types": {"type": "array", "items": {"type": "string"}},
+                                "conditions_compared": {"type": "string"},
+                                "triggering_observations": {"type": "array", "items": {"type": "string"}, "description": "Concrete observations that triggered this program (required, non-empty)."},
+                                "supporting_genes": {"type": "array", "items": {"type": "string"}},
+                                "supporting_pathways": {"type": "array", "items": {"type": "string"}},
+                                "supporting_scores": {"type": "array", "items": {"type": "string"}},
+                                "supporting_tables": {"type": "array", "items": {"type": "string"}},
+                                "bulk_support": {"type": "string", "enum": ["supported", "not_supported", "mixed", "not_available", "unknown"]},
+                                "evidence_strength": {"type": "string", "enum": ["strong", "moderate", "weak"]},
+                                "specificity": {"type": "string", "enum": ["high", "medium", "low"]},
+                                "alternative_explanations": {"type": "array", "items": {"type": "string"}},
+                                "missing_evidence": {"type": "array", "items": {"type": "string"}},
+                                "interpretation": {"type": "string", "description": "Cautious interpretation; do not claim confirmation."},
+                                "downstream_literature_queries": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["label", "triggering_observations", "evidence_strength", "specificity", "interpretation"],
+                        },
+                    },
+                    "no_program_reason": {"type": "string", "description": "Required when programs is empty: why no data-driven mechanism program was registered."},
+                },
+                "required": ["programs"],
+            },
+        },
     },
 ]
 
@@ -2537,6 +2710,14 @@ If results significantly deviate from plan expectations, report via consult_pi i
             annotation_completed = True
         annotation_retry_required = False
         annotation_retry_attempts = 0
+        mechanism_programs: List[DataDrivenMechanismProgram] = []
+        mechanism_programs_registered = bool(analysis_log and any(
+            s.step_type == "register_mechanism_programs"
+            and not (s.findings_summary or "").startswith("REJECTED")
+            for s in analysis_log
+        ))
+        mechanism_gate_reject_count = 0
+        MAX_MECHANISM_REJECTIONS = 2
         integration_reject_count = 0  # Track rejections for bulk/scRNA-seq integration gate
         MAX_INTEGRATION_REJECTIONS = 2  # Escape hatch: allow through after N rejections
         deconv_reject_count = 0  # Track rejections for cell-type deconvolution gate
@@ -3495,6 +3676,43 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     # (exploration / stage1 / innovation) can read it post-gate.
                     _escaped_notes = []
 
+                    # Gate M (mandatory data-driven mechanism program capture) — Stage 2
+                    # downstream exploration only. Flag + bounded counter (NOT keyword gate):
+                    # a legitimate empty-programs call with no_program_reason sets the flag.
+                    if (state.analysis_phase == AnalysisPhase.EXPLORATION
+                            and planning_stage != "stage1"
+                            and not mechanism_programs_registered):
+                        if mechanism_gate_reject_count < MAX_MECHANISM_REJECTIONS:
+                            mechanism_gate_reject_count += 1
+                            logger.warning(
+                                f"[Bioinformatics] report_findings rejected: "
+                                f"register_mechanism_programs not called "
+                                f"({mechanism_gate_reject_count}/{MAX_MECHANISM_REJECTIONS})"
+                            )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": (
+                                    "[REJECTED] Before reporting findings you must call "
+                                    "register_mechanism_programs. After completing downstream "
+                                    "analysis, identify up to 8 data-driven mechanism programs that "
+                                    "are genuinely supported by observed genes, pathways, scores, "
+                                    "enrichment terms, or cross-validated patterns (do NOT invent "
+                                    "weak programs to reach a count). Derive labels from the data "
+                                    "only — do NOT search for any preset mechanism. If none are "
+                                    "supportable, call register_mechanism_programs with an empty "
+                                    "programs list and explain why in no_program_reason."
+                                ),
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="report_findings",
+                                agent_reasoning=agent_reasoning,
+                                findings=[], findings_summary="REJECTED: register_mechanism_programs not called",
+                            ))
+                            continue
+                        else:
+                            _escaped_notes.append(build_gate_skip_note("data-driven mechanism program capture"))
+
                     # Gate 0 (mandatory annotate_clusters) always applies in exploration;
                     # Gates 1-3 are Stage 2 tasks, skip in stage1.
                     if state.analysis_phase == AnalysisPhase.EXPLORATION and planning_stage != "stage1":
@@ -3703,6 +3921,48 @@ If results significantly deviate from plan expectations, report via consult_pi i
                         step_number=step_count, step_type="register_score",
                         agent_reasoning=agent_reasoning,
                         code_description=f"Score: {score_def.score_name} via {score_def.method}",
+                    ))
+
+                elif tool_name == "register_mechanism_programs":
+                    progs, err = validate_mechanism_program_payload(
+                        args,
+                        round_number=state.current_round,
+                        phase=str(getattr(state.analysis_phase, "value", state.analysis_phase)),
+                        stage=planning_stage,
+                    )
+                    if err:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": f"[REJECTED] {err} Please correct and call register_mechanism_programs again.",
+                        })
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="register_mechanism_programs",
+                            agent_reasoning=agent_reasoning,
+                            findings=[], findings_summary=f"REJECTED: {err}",
+                        ))
+                        continue
+                    mechanism_programs_registered = True
+                    mechanism_programs.extend(progs)
+                    # Handler is the single writer to AnalysisState (see plan decision 1).
+                    state.data_driven_mechanism_programs.extend(progs)
+                    if progs:
+                        await self._notify("status", f"Registered {len(progs)} data-driven mechanism program(s)")
+                        content = (
+                            f"Registered {len(progs)} data-driven mechanism program(s). They will be "
+                            "reviewed by the PI, mapped against literature, and may appear as CANDIDATE "
+                            "mechanisms (not confirmed) in the report. You may now call report_findings."
+                        )
+                    else:
+                        await self._notify("status", "No data-driven mechanism program registered (reason recorded)")
+                        content = "Recorded that no data-driven mechanism program was registered. You may now call report_findings."
+                    messages.append({
+                        "role": "tool", "tool_call_id": tool_call.id, "content": content,
+                    })
+                    analysis_log.append(AnalysisStep(
+                        step_number=step_count, step_type="register_mechanism_programs",
+                        agent_reasoning=agent_reasoning,
+                        code_description=f"{len(progs)} mechanism program(s)",
                     ))
 
                 elif tool_name == "validate_species_genes":
@@ -4019,6 +4279,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
             "code_history": self.code_history,
             "analysis_log": analysis_log,
             "success": status != "error",
+            "mechanism_programs": mechanism_programs,
             **({"error": llm_error} if llm_error else {}),
             "plan_revision_needed": _plan_revision_needed,
             "plan_revision_context": _plan_revision_context if _plan_revision_needed else {},
@@ -4078,7 +4339,8 @@ If results significantly deviate from plan expectations, report via consult_pi i
             "code_history": self.code_history,
             "analysis_log": result.get("analysis_log", []),
             "success": result["success"],
-            "steps_executed": result["steps_executed"]
+            "steps_executed": result["steps_executed"],
+            "mechanism_programs": result.get("mechanism_programs", []),
         }
     
     def get_all_code(self) -> str:

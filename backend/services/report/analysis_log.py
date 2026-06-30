@@ -21,6 +21,18 @@ def build_round_summaries(state):
                     "relation_to_current_direction": c.relation_to_current_direction,
                     "report_recommendation": c.report_recommendation,
                 })
+        mechanism_programs = []
+        for p in (getattr(r, "data_driven_mechanism_programs", []) or [])[:3]:
+            mechanism_programs.append({
+                "label": p.label,
+                "cell_types": p.cell_types,
+                "triggering_observations": p.triggering_observations[:2],
+                "supporting_genes": p.supporting_genes[:8],
+                "evidence_strength": p.evidence_strength,
+                "specificity": p.specificity,
+                "bulk_support": p.bulk_support,
+                "missing_evidence": p.missing_evidence[:2],
+            })
         summaries.append({
             "round_number": r.round_number,
             "pi_summary": r.pi_summary or "",
@@ -29,6 +41,7 @@ def build_round_summaries(state):
             "biochemistry_findings": r.biochemistry_findings or [],
             "literature_findings": r.literature_findings or [],
             "cross_modal_candidates": candidates,
+            "mechanism_programs": mechanism_programs,
         })
     return summaries
 

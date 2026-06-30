@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.30.1 · **Last updated**: 2026-06-30
+**Version**: 0.30.2 · **Last updated**: 2026-06-30
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,19 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.30.x — (2026-06-30)**
+
+- `0.30.2` — Data-driven mechanism program capture & report integration (2026-06-30):
+  - **New tool `register_mechanism_programs` (`backend/agents/bioinformatics_agent.py`)**: Bioinformatics agent can now register data-driven mechanism programs via a new function-calling tool. `validate_mechanism_program_payload()` enforces conservative validation: requires required fields, bounds programs to 8, genes to 50, observations to 500 chars, fills defaults for alternative_explanations and missing_evidence, detects overclaiming wording in interpretations. Tool schema is mechanism-agnostic — no hardcoded mechanism names.
+  - **Mandatory Gate M (`backend/agents/bioinformatics_agent.py`)**: Exploration Stage-2 downstream analysis now has a bounded (2-rejection) mandatory gate requiring `register_mechanism_programs` before `report_findings`. An empty programs list with a `no_program_reason` satisfies the gate. After exhaustion, gate is skipped with a documented note. Scoped to `analysis_phase == exploration AND planning_stage != "stage1"`.
+  - **New model `DataDrivenMechanismProgram` (`backend/models/schemas.py`)**: Pydantic model with fields: label, description, cell_types, conditions_compared, triggering_observations, supporting_genes/pathways/scores/tables, bulk_support, evidence_strength, specificity, alternative_explanations, missing_evidence, interpretation, downstream_literature_queries, timestamp. `RoundResult` gains `data_driven_mechanism_programs`. `AnalysisState` gains `data_driven_mechanism_programs` as cross-round accumulator. Excluded from `to_api_dict()`.
+  - **Instruction injection (`backend/workflow/agents.py`)**: `_MECHANISM_CAPTURE_INSTRUCTION` injected into exploration and stage-2 instructions. Agents are instructed to derive labels from data only (no preset categories), include alternative explanations and missing evidence, and call `register_mechanism_programs` before `report_findings`.
+  - **Round-result persistence (`backend/workflow/synthesis.py`)**: `round_result.data_driven_mechanism_programs` is populated from `bioinformatics_result.mechanism_programs` during round synthesis.
+  - **PI prompt consumption (`backend/agents/pi_agent.py`)**: Three PI prompts now consume mechanism programs: `generate_raw_direction_candidates()` (shows last 8 programs with cells/strength/specificity/observations/genes), `generate_final_summary()` (last 3 rounds, classifies as covered/integrated/uncovered/future), `generate_integrated_report()` (last 3 rounds, tags moderate/strong as `candidate mechanism` vs `exploratory signal`).
+  - **Supervisor report prompt (`backend/agents/supervisor_agent.py`)**: `_build_report_prompt()` includes data-driven mechanism programs and cross-modal synthesis candidates from last 3 rounds, plus a new `[mechanism_candidates]` report section.
+  - **Literature mechanism context (`backend/workflow/agents.py`)**: `_build_observed_context_for_literature()` injects mechanism programs at the front of observed context (survives 4000-char truncation) so `extract_mechanism_signals()` can map them to literature. Blob guard: reports with unresolved blob tokens (`@scai-blob:...`) are skipped during mechanism signal extraction.
+  - **Report analysis log (`backend/services/report/analysis_log.py`)**: `build_round_summaries()` now includes per-round `mechanism_programs` (label, cell_types, observations, genes, strength, specificity, bulk_support, missing), bounded to top 3 per round.
+  - **Report cross-modal/mechanism section (`backend/services/report/planning.py`)**: `insert_cross_modal_section()` falls back to title "Data-Driven Mechanism Candidates" and includes mechanism program data when no cross-modal candidates exist. `_generate_section_from_existing_figures()` injects mechanism programs into cross-modal context. Bounded to most recent 3 rounds.
+  - **17 new test files**: `test_detailed_report_mechanism.py`, `test_direction_candidates_mechanism_prompt.py`, `test_final_summary_mechanism_prompt.py`, `test_integrated_report_mechanism_prompt.py`, `test_literature_mechanism_blob_guard.py`, `test_literature_observed_context_mechanism.py`, `test_mechanism_gate_source.py`, `test_mechanism_handler_return.py`, `test_mechanism_plumbing_source.py`, `test_mechanism_program_schema.py`, `test_mechanism_program_validation.py`, `test_mechanism_tool_schema.py`, `test_stage2_instruction_mechanism.py`, `test_supervisor_report_prompt_mechanism.py`. Plus `test_to_api_dict_coverage.py` updated.
 
 - `0.30.1` — Cross-modal mechanism audit & literature UpstreamExhaustedError propagation (2026-06-30):
   - **Cross-modal mechanism synthesis (`backend/workflow/synthesis.py`)**: New `_build_literature_audit_context()` and `_build_biochemistry_raw_context()` build bounded multi-modal evidence surfaces for the PI. Cross-modal audit runs during innovation-round synthesis (`_synthesize_round`): PI LLM call (`pi_agent.build_cross_modal_synthesis()`) produces a `CrossModalSynthesis` with evidence matrix and mechanism candidates graded by confidence, consistency, and report recommendation. Round summary includes `cross_modal_candidates` for frontend display.

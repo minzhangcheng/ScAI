@@ -24,16 +24,23 @@ def insert_cross_modal_section(plan, round_summaries):
         for c in (rs.get("cross_modal_candidates") or []):
             if c.get("report_recommendation") != "do_not_emphasize":
                 displayable.append(c)
-    if not displayable:
+    # Bounded to most recent 3 rounds (spec line 347). round_summaries is in round order.
+    mechanism_programs = []
+    for rs in (round_summaries or [])[-3:]:
+        for p in (rs.get("mechanism_programs") or []):
+            mechanism_programs.append(p)
+    if not displayable and not mechanism_programs:
         return plan
     displayable.sort(key=lambda c: _REPORT_RECO_ORDER.get(c.get("report_recommendation"), 1))
+    section_title = "Cross-Modal Mechanism Candidates" if displayable else "Data-Driven Mechanism Candidates"
     section = {
-        "title": "Cross-Modal Mechanism Candidates",
+        "title": section_title,
         "analysis_type": "cross_modal",
-        "description": "Candidate mechanisms supported by evidence across multiple modalities, with labeled evidence strength and gaps.",
+        "description": "Candidate mechanisms supported by evidence across modalities and/or data-derived programs, with labeled evidence strength and gaps.",
         "existing_figures": [],
         "existing_tables": [],
         "cross_modal_candidates": displayable,
+        "mechanism_programs": mechanism_programs,
     }
     sections = list(plan.get("sections") or [])
     insert_at = len(sections)
@@ -435,6 +442,17 @@ Then create sections in this EXACT order.
                 "headline → secondary → future_direction.\n"
                 + "\n".join(lines)
             )
+        mechanism_programs = section_plan.get("mechanism_programs", [])
+        if mechanism_programs:
+            mech_lines = []
+            for p in mechanism_programs:
+                mech_lines.append(
+                    f"- {p.get('label','')} (evidence {p.get('evidence_strength','weak')}, "
+                    f"bulk {p.get('bulk_support','unknown')}): "
+                    f"{'; '.join(p.get('triggering_observations', [])[:2])}. "
+                    f"Missing evidence: {'; '.join(p.get('missing_evidence', [])[:2])}"
+                )
+            cross_modal_context += "\nData-driven mechanism programs (candidates, not confirmed):\n" + "\n".join(mech_lines)
         provided_narrative = section_plan.get("narrative", "")
 
         logger.info(f"Generating section '{section_title}' with {len(existing_figures)} figures, {len(existing_tables)} tables")

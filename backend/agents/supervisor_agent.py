@@ -1554,6 +1554,26 @@ Respond in JSON:
 
         findings_text = "\n".join(findings_parts) or ("None")
 
+        # Collect data-driven mechanism programs from last 3 rounds
+        mech_parts = []
+        for rr in state.round_results[-3:]:
+            progs = (getattr(rr, "data_driven_mechanism_programs", []) or [])[:3]
+            for p in progs:
+                mech_parts.append(
+                    f"- {p.label} (evidence {p.evidence_strength}, specificity {p.specificity}, "
+                    f"bulk {p.bulk_support}): {'; '.join(p.triggering_observations[:2])}. "
+                    f"Genes/pathways: {', '.join((p.supporting_genes + p.supporting_pathways)[:8])}. "
+                    f"Alternatives: {'; '.join(p.alternative_explanations[:2])}. "
+                    f"Missing evidence: {'; '.join(p.missing_evidence[:2])}"
+                )
+            if getattr(rr, "cross_modal_synthesis", None):
+                for c in rr.cross_modal_synthesis.candidates[:3]:
+                    mech_parts.append(
+                        f"- (cross-modal) {c.theme}: {c.mechanism_statement} "
+                        f"[confidence {c.confidence}; recommendation {c.report_recommendation}]"
+                    )
+        mechanism_text = "\n".join(mech_parts) or "None"
+
         # Build dynamic section template
         base_sections = [
             "[abstract] - Research summary (background, methods, key findings, conclusions)",
@@ -1561,6 +1581,8 @@ Respond in JSON:
             "[data_qc] - Data overview and quality control",
             "[clustering_annotation] - Clustering and cell type annotation (include PI checkpoint guidance if available)",
             "[differential_expression] - Differential expression analysis (include PI checkpoint guidance if available)",
+            "[mechanism_candidates] - Data-driven candidate mechanisms (use hypothesis wording for "
+            "low/medium confidence; never present as confirmed; include missing evidence)",
         ]
 
         if has_innovation:
@@ -1616,6 +1638,9 @@ Respond in JSON:
 
 ## Key Findings (Per Round)
 {findings_text}
+
+## Data-Driven Candidate Mechanisms (candidates, NOT confirmed)
+{mechanism_text}
 
 ## Available Figures
 {figure_list}

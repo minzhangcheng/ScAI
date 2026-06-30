@@ -43,6 +43,7 @@ _EXCLUDED_FIELDS = {
     "agent_vision_settings",
         "chat_messages",
     "score_definitions",
+    "data_driven_mechanism_programs",
     "current_round_cache",
     "messages",
     "revision_history",

@@ -230,6 +230,43 @@ class LiteratureMechanismSignal(BaseModel):
     limitations: List[str] = Field(default_factory=list)
 
 
+class DataDrivenMechanismProgram(BaseModel):
+    """A recurring, data-derived mechanism pattern captured by the bioinformatics
+    agent after downstream analysis. Labels are descriptive only; all downstream
+    interpretation relies on the structured evidence fields, never the label."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    round_number: int = 0
+    phase: str = ""
+    stage: str = ""
+    source_agent: Literal["bioinformatics"] = "bioinformatics"
+
+    label: str
+    description: str = ""
+
+    cell_types: List[str] = Field(default_factory=list)
+    conditions_compared: str = ""
+
+    triggering_observations: List[str] = Field(default_factory=list)
+    supporting_genes: List[str] = Field(default_factory=list)
+    supporting_pathways: List[str] = Field(default_factory=list)
+    supporting_scores: List[str] = Field(default_factory=list)
+    supporting_tables: List[str] = Field(default_factory=list)
+
+    bulk_support: Literal[
+        "supported", "not_supported", "mixed", "not_available", "unknown",
+    ] = "unknown"
+
+    evidence_strength: Literal["strong", "moderate", "weak"] = "weak"
+    specificity: Literal["high", "medium", "low"] = "low"
+
+    alternative_explanations: List[str] = Field(default_factory=list)
+    missing_evidence: List[str] = Field(default_factory=list)
+
+    interpretation: str = ""
+    downstream_literature_queries: List[str] = Field(default_factory=list)
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
 class LiteratureReport(BaseModel):
     """Literature research report"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -557,6 +594,7 @@ class RoundResult(BaseModel):
     direction: str = ""  # Research direction for innovation rounds
     exploration_report: Optional[ExplorationReport] = None  # Only for Phase 1
     cross_modal_synthesis: Optional[CrossModalSynthesis] = None
+    data_driven_mechanism_programs: List[DataDrivenMechanismProgram] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class PublicationFigure(BaseModel):
@@ -697,6 +735,9 @@ class AnalysisState(BaseModel):
     # Round results
     round_results: List[RoundResult] = Field(default_factory=list)
     current_round_cache: Optional[AgentRoundCache] = None
+
+    # Data-driven mechanism programs captured across rounds
+    data_driven_mechanism_programs: List[DataDrivenMechanismProgram] = Field(default_factory=list)
 
     # Final summary
     final_summary: Optional[str] = None

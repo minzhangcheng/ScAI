@@ -68,6 +68,25 @@ These Stage 1 findings will be used by PI to plan Stage 2 downstream analysis.
 """
 
 
+_MECHANISM_CAPTURE_INSTRUCTION = """
+
+After completing downstream analysis, identify up to 8 data-driven mechanism programs when
+the results support them (do NOT invent weak programs just to reach a count). A data-driven
+mechanism program is a recurring, cell-type-localized or cross-validated pattern supported by
+observed genes, pathways, module scores, enrichment terms, bulk/scRNA overlap, or cell-state
+changes.
+
+Do NOT use preset mechanism categories or search for a specific mechanism. Derive labels from
+the observed data only. For each program include: the cell type/compartment, concrete
+triggering observations, supporting genes/pathways/scores/tables, whether bulk RNA-seq supports
+it if bulk data exists, alternative explanations, missing evidence, and a cautious
+interpretation.
+
+Call register_mechanism_programs BEFORE report_findings. If no supportable program exists, call
+register_mechanism_programs with an empty programs list and explain why in no_program_reason.
+"""
+
+
 def _build_exploration_instruction(has_bulk: bool, has_scrna: bool) -> str:
     instr = """
 ## EXPLORATION PHASE INSTRUCTIONS
@@ -114,6 +133,7 @@ This is Round 1 — comprehensive, unbiased exploration. You MUST:
     - Run pathway enrichment via gseapy with organism-appropriate libraries
     Cross-validation against scRNA-seq and cell-type deconvolution are NOT applicable in bulk-only mode.
 """
+    instr += _MECHANISM_CAPTURE_INSTRUCTION
     return instr
 
 
@@ -191,6 +211,7 @@ and proceed to downstream analysis ONLY:
 6. **Bulk RNA-seq DEG**: run pydeseq2 (fallback ttest_ind+FDR), volcano + heatmap,
    pathway enrichment via gseapy. Cross-validation/deconvolution not applicable in bulk-only mode.
 """
+    instr += _MECHANISM_CAPTURE_INSTRUCTION
     return instr
 
 
@@ -704,7 +725,8 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             "figures": all_figures,
             "summary": summary,
             "steps_executed": result.get("steps_executed", 0),
-            "status": result.get("status", "completed")
+            "status": result.get("status", "completed"),
+            "mechanism_programs": result.get("mechanism_programs", []),
         }
 
         _saved_fig_count = count_saved_figures(result.get("analysis_log", []))
@@ -1171,10 +1193,24 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
         ] if report_ids else []
         if not reports:
             return
-        # Combine current-round report bodies + references for one extraction pass
-        combined_text = "\n\n".join((r.report or "") for r in reports)
-        combined_refs = []
+        # Combine current-round report bodies + references for one extraction pass.
+        # Skip reports whose body is an unresolved blob token (offloaded to blob store).
+        from ..utils.blob_store import BLOB_REF_PREFIX
+        usable_reports = []
         for r in reports:
+            body = r.report or ""
+            if body.startswith(BLOB_REF_PREFIX):
+                logger.warning(
+                    f"[{self.session_id}] literature report {r.id} body is an unresolved "
+                    f"blob token; skipping mechanism extraction for it"
+                )
+                continue
+            usable_reports.append(r)
+        if not usable_reports:
+            return
+        combined_text = "\n\n".join((r.report or "") for r in usable_reports)
+        combined_refs = []
+        for r in usable_reports:
             combined_refs.extend(r.references or [])
         try:
             signals = await literature_agent.extract_mechanism_signals(
@@ -1229,6 +1265,31 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 f"{i.indicator}={i.value}{i.unit or ''}" for i in analysis_state.biochemistry_indicators[:20]
             )
             parts.append(f"Biochemistry indicators: {inds}")
+        # (4) Data-driven mechanism programs from bioinformatics analysis.
+        # Computed here (after the (2) fallback gate has already evaluated `not parts`)
+        # but inserted at the FRONT of the output so this high-value mechanism signal
+        # survives the trailing [:4000] truncation in data-heavy runs — it is exactly
+        # what extract_mechanism_signals() maps to literature.
+        programs = getattr(analysis_state, "data_driven_mechanism_programs", []) or []
+        if programs:
+            recent = programs[-8:]
+            prog_lines = ["Bioinformatics data-driven mechanism programs:"]
+            for p in recent:
+                prog_lines.append(f"- Program: {p.label}")
+                if p.cell_types:
+                    prog_lines.append(f"  Cell types: {', '.join(p.cell_types)}")
+                if p.triggering_observations:
+                    prog_lines.append(f"  Observations: {'; '.join(p.triggering_observations[:3])}")
+                if p.supporting_genes:
+                    prog_lines.append(f"  Genes: {', '.join(p.supporting_genes[:15])}")
+                if p.supporting_pathways:
+                    prog_lines.append(f"  Pathways: {', '.join(p.supporting_pathways[:8])}")
+                prog_lines.append(f"  Bulk support: {p.bulk_support}")
+                if p.alternative_explanations:
+                    prog_lines.append(f"  Alternatives: {'; '.join(p.alternative_explanations[:3])}")
+                if p.missing_evidence:
+                    prog_lines.append(f"  Missing evidence: {'; '.join(p.missing_evidence[:3])}")
+            parts.insert(0, "\n".join(prog_lines))
         return ("\n".join(parts))[:4000]
 
     async def _evaluate_dr_coverage(self, topics: List[str], dr_result: Dict) -> List[str]:

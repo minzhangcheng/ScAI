@@ -399,6 +399,7 @@ class SynthesisMixin:
                 f"staying in EXPLORATION, prompting user to check data"
             )
 
+        round_result.data_driven_mechanism_programs = (state.get("bioinformatics_result") or {}).get("mechanism_programs", [])
         analysis_state.round_results.append(round_result)
         # Round is now canonical in round_results; clear the per-round cache
         # so a later snapshot-restored round can't replay stale agent outputs.
