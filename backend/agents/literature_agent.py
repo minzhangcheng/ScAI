@@ -1263,8 +1263,6 @@ Create a unified, well-structured review that:
         """Generic, mechanism-agnostic extraction of biological mechanisms in the
         retrieved literature that co-occur with this study's observed data.
         Returns None on no content or any failure (non-critical path)."""
-        from ..models.schemas import LiteratureMechanismSignal
-
         if not (report_text and report_text.strip()) and not references:
             return None
 

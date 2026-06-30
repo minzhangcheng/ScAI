@@ -1,7 +1,7 @@
 """
 Data models for the Multi-Agent Single-Cell Analysis System
 """
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
@@ -266,6 +266,84 @@ class DataDrivenMechanismProgram(BaseModel):
     downstream_literature_queries: List[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
 
+    def to_prompt_text(
+        self,
+        *,
+        style: str = "compact",
+        max_observations: int = 2,
+        max_genes: int = 8,
+        max_pathways: int = 8,
+        max_alternatives: int = 2,
+        max_missing: int = 2,
+    ) -> str:
+        """Format this program as human-readable text for LLM prompts.
+
+        Styles (each is a deliberate unified format, not a 1:1 copy of any
+        single former ad-hoc site):
+
+          "compact"    — single-line with evidence/specificity/bulk, merged
+                         genes+pathways, alternatives, missing. Used by
+                         supervisor _build_report_prompt.
+          "detailed"   — multi-line block with per-field lines. Used by
+                         agents.py _build_observed_context_for_literature.
+          "direction"  — single-line with [candidate mechanism]/[exploratory signal]
+                         tag, strength/bulk, merged genes+pathways. Used by
+                         pi_agent generate_raw_direction_candidates and
+                         generate_integrated_report.
+        """
+        obs = "; ".join(self.triggering_observations[:max_observations])
+        genes_pathways = ", ".join(
+            (self.supporting_genes + self.supporting_pathways)[:max_genes]
+        )
+        alts = "; ".join(self.alternative_explanations[:max_alternatives])
+        miss = "; ".join(self.missing_evidence[:max_missing])
+
+        if style == "compact":
+            parts = [f"{self.label} (evidence {self.evidence_strength}, specificity {self.specificity}, bulk {self.bulk_support})"]
+            if obs:
+                parts.append(f"{obs}")
+            if genes_pathways:
+                parts.append(f"Genes/pathways: {genes_pathways}")
+            if alts:
+                parts.append(f"Alternatives: {alts}")
+            if miss:
+                parts.append(f"Missing evidence: {miss}")
+            return ". ".join(parts)
+
+        if style == "direction":
+            elevate = (
+                self.evidence_strength in ("moderate", "strong")
+                and len(self.triggering_observations) >= 2
+            )
+            tag = "candidate mechanism" if elevate else "exploratory signal"
+            cells = ", ".join(self.cell_types) if self.cell_types else "n/a"
+            parts = [f"[{tag}] {self.label} (cells: {cells}; strength {self.evidence_strength}, bulk {self.bulk_support})"]
+            if obs:
+                parts.append(f"{obs}")
+            if genes_pathways:
+                parts.append(f"Genes: {genes_pathways}")
+            if miss:
+                parts.append(f"Missing evidence: {miss}")
+            return ". ".join(parts)
+
+        # style == "detailed"
+        lines = [f"- Program: {self.label}"]
+        if self.cell_types:
+            lines.append(f"  Cell types: {', '.join(self.cell_types)}")
+        if obs:
+            lines.append(f"  Observations: {obs}")
+        if self.supporting_genes:
+            lines.append(f"  Genes: {', '.join(self.supporting_genes[:max_genes])}")
+        pathways = ", ".join(self.supporting_pathways[:max_pathways])
+        if pathways:
+            lines.append(f"  Pathways: {pathways}")
+        lines.append(f"  Bulk support: {self.bulk_support}")
+        if alts:
+            lines.append(f"  Alternatives: {alts}")
+        if miss:
+            lines.append(f"  Missing evidence: {miss}")
+        return "\n".join(lines)
+
 
 class LiteratureReport(BaseModel):
     """Literature research report"""
@@ -300,6 +378,18 @@ class CrossModalMechanismCandidate(BaseModel):
     missing_evidence: List[str] = Field(default_factory=list)
     report_recommendation: Literal["headline", "secondary", "future_direction", "do_not_emphasize"] = "future_direction"
 
+    def to_summary_dict(self) -> dict:
+        """Return a lightweight 5-field dict for WebSocket/API payloads and
+        report planning.  Omits supporting_evidence, evidence_consistency,
+        novelty_relative_to_current_direction, and missing_evidence to keep
+        round-summary payloads small."""
+        return {
+            "theme": self.theme,
+            "mechanism_statement": self.mechanism_statement,
+            "confidence": self.confidence,
+            "relation_to_current_direction": self.relation_to_current_direction,
+            "report_recommendation": self.report_recommendation,
+        }
 
 class CrossModalSynthesis(BaseModel):
     matrix_markdown: str = ""                        # Markdown evidence matrix table (server-side only)
@@ -527,6 +617,32 @@ class DirectionSelectionDecision(BaseModel):
     selection_rationale: str = ""
 
 
+def tolerant_from_llm_dict(cls: type, data: Dict[str, Any]) -> Any:
+    """Build a Pydantic model from loosely-typed LLM JSON, dropping any field
+    whose value fails type validation so a single malformed field cannot crash
+    the whole model.  Dropped fields fall back to their schema defaults.
+
+    This is a generalised version of ExplorationReport.from_llm_dict that
+    works for any BaseModel subclass that receives LLM-generated JSON.
+    """
+    clean: Dict[str, Any] = {}
+    for name, value in data.items():
+        field = cls.model_fields.get(name)
+        if field is None:
+            continue
+        try:
+            TypeAdapter(field.annotation).validate_python(value)
+        except ValidationError:
+            logger.warning(
+                "tolerant_from_llm_dict(%s) dropping field %r: value of "
+                "type %s failed validation against %s",
+                cls.__name__, name, type(value).__name__, field.annotation,
+            )
+            continue
+        clean[name] = value
+    return cls(**clean)
+
+
 class ExplorationReport(BaseModel):
     """Structured exploration report (Report A) generated after Phase 1"""
     cluster_overview: str = ""
@@ -546,33 +662,9 @@ class ExplorationReport(BaseModel):
     def from_llm_dict(cls, data: Dict[str, Any]) -> "ExplorationReport":
         """Build a report from loosely-typed LLM JSON, dropping any field whose
         value fails type validation so a single malformed field cannot crash the
-        whole report.
-
-        The PI LLM occasionally emits a field with the wrong shape (e.g. a
-        free-text string for the Dict[str, Any] `direction_selection_summary`).
-        Before this guard, ExplorationReport(**valid_fields) raised a
-        ValidationError that aborted Report-A generation, silently skipping the
-        exploration->innovation transition and the direction-selection gate.
-        A dropped field falls back to its schema default.
+        whole report.  Delegates to tolerant_from_llm_dict.
         """
-        from pydantic import TypeAdapter, ValidationError as _ValidationError
-
-        clean: Dict[str, Any] = {}
-        for name, value in data.items():
-            field = cls.model_fields.get(name)
-            if field is None:
-                continue
-            try:
-                TypeAdapter(field.annotation).validate_python(value)
-            except _ValidationError:
-                logger.warning(
-                    "ExplorationReport.from_llm_dict dropping field %r: value of "
-                    "type %s failed validation against %s",
-                    name, type(value).__name__, field.annotation,
-                )
-                continue
-            clean[name] = value
-        return cls(**clean)
+        return tolerant_from_llm_dict(cls, data)
 
 
 class RoundResult(BaseModel):
@@ -1110,16 +1202,16 @@ class AnalysisState(BaseModel):
         def _simplify_candidates(cms):
             if not cms:
                 return []
-            out = []
-            for c in (cms.get("candidates") or []):
-                out.append({
-                    "theme": c.get("theme", ""),
-                    "mechanism_statement": c.get("mechanism_statement", ""),
-                    "confidence": c.get("confidence", "low"),
-                    "relation_to_current_direction": c.get("relation_to_current_direction", "uncovered"),
-                    "report_recommendation": c.get("report_recommendation", "future_direction"),
-                })
-            return out
+            # Same 5 fields as CrossModalMechanismCandidate.to_summary_dict().
+            # Per-field defaults match the Pydantic model defaults.
+            _SUMMARY_DEFAULTS = {
+                "theme": "", "mechanism_statement": "",
+                "confidence": "low",
+                "relation_to_current_direction": "uncovered",
+                "report_recommendation": "future_direction",
+            }
+            return [{k: c.get(k, v) for k, v in _SUMMARY_DEFAULTS.items()}
+                    for c in (cms.get("candidates") or [])]
 
         return [
             {"round": r["round_number"], "pi_summary": r["pi_summary"],

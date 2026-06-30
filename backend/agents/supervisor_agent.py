@@ -23,6 +23,7 @@ from urllib.parse import quote as url_quote
 
 from ..utils.formatting import safe_parse_json, format_revision_history
 from ..utils.files import resolve_figure_in_workspace
+from ..constants import REASONING_MODEL_MIN_TOKENS
 
 logger = logging.getLogger(__name__)
 
@@ -1066,7 +1067,7 @@ class SupervisorAgent:
                     text_prompt=f"{effective_prompt}\n\n{text_with_fig_note}",
                     images=compressed,
                     temperature=self.temperature,
-                    max_tokens=4096,  # reasoning models need headroom or content comes back empty
+                    max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
                 )
                 return self._parse_supervisor_response(response.content if response else "")
 
@@ -1085,7 +1086,7 @@ class SupervisorAgent:
                 {"role": "user", "content": text_context},
             ],
             temperature=self.temperature,
-            max_tokens=4096,  # reasoning models need headroom or content comes back empty
+            max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
         )
         return self._parse_supervisor_response(response.content if response else "")
 
@@ -1149,7 +1150,7 @@ Respond in JSON:
                 {"role": "user", "content": user_message},
             ],
             temperature=0.1,  # Strict review
-            max_tokens=4096,  # reasoning models need headroom or content comes back empty
+            max_tokens=REASONING_MODEL_MIN_TOKENS,  # reasoning models need headroom or content comes back empty
         )
         response_text = response.content if response and response.content else ""
         if not response_text.strip():
@@ -1559,13 +1560,7 @@ Respond in JSON:
         for rr in state.round_results[-3:]:
             progs = (getattr(rr, "data_driven_mechanism_programs", []) or [])[:3]
             for p in progs:
-                mech_parts.append(
-                    f"- {p.label} (evidence {p.evidence_strength}, specificity {p.specificity}, "
-                    f"bulk {p.bulk_support}): {'; '.join(p.triggering_observations[:2])}. "
-                    f"Genes/pathways: {', '.join((p.supporting_genes + p.supporting_pathways)[:8])}. "
-                    f"Alternatives: {'; '.join(p.alternative_explanations[:2])}. "
-                    f"Missing evidence: {'; '.join(p.missing_evidence[:2])}"
-                )
+                mech_parts.append(f"- {p.to_prompt_text(style='compact', max_observations=2, max_genes=8, max_alternatives=2, max_missing=2)}")
             if getattr(rr, "cross_modal_synthesis", None):
                 for c in rr.cross_modal_synthesis.candidates[:3]:
                     mech_parts.append(

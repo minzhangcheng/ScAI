@@ -96,7 +96,13 @@ def safe_parse_json(response: str, default: Optional[Dict[str, Any]] = None) -> 
             logger.debug("JSON extraction from LLM response failed at position %d-%d", start, end)
 
     if _JSON_REPAIR_AVAILABLE:
-        for candidate in (response[start:], response):
+        # Skip response[start:] when it's identical to the already-tried
+        # response[start:end] (i.e., bracket extraction reached the string end).
+        candidates = []
+        if end < len(response):
+            candidates.append(response[start:])
+        candidates.append(response)
+        for candidate in candidates:
             try:
                 repaired = _repair_json(candidate, return_objects=True)
                 if isinstance(repaired, dict):

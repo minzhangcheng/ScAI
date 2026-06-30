@@ -24,6 +24,7 @@ from ..constants import (
     CONTINUE_SIGNAL,
     PI_DECIDE_SIGNAL,
     PI_REVIEW_FALLBACK_DECISION,
+    REASONING_MODEL_MIN_TOKENS,
     STOP_KEYWORDS,
 )
 
@@ -1492,17 +1493,7 @@ Return a JSON object with this EXACT structure:
                      "For every mechanism-derived direction, include alternative hypotheses and missing evidence.",
                      ""]
             for p in mech_programs[-8:]:
-                lines.append(
-                    f"- {p.label} (cells: {', '.join(p.cell_types) or 'n/a'}; "
-                    f"strength: {p.evidence_strength}; specificity: {p.specificity}; "
-                    f"bulk: {p.bulk_support})"
-                )
-                if p.triggering_observations:
-                    lines.append(f"  Observations: {'; '.join(p.triggering_observations[:2])}")
-                if p.supporting_genes:
-                    lines.append(f"  Genes: {', '.join(p.supporting_genes[:12])}")
-                if p.missing_evidence:
-                    lines.append(f"  Missing evidence: {'; '.join(p.missing_evidence[:2])}")
+                lines.append(f"- {p.to_prompt_text(style='direction', max_observations=2, max_genes=12, max_missing=2)}")
             mech_block = "\n".join(lines)
 
         prompt = f"""Based on the Round 1 exploration results, propose 3-5 raw research direction candidates.
@@ -3186,7 +3177,6 @@ Current research direction: {current_direction or "N/A"}
         return self._parse_cross_modal_response(response)
 
     def _parse_cross_modal_response(self, response: str) -> "CrossModalSynthesis":
-        from ..models.schemas import CrossModalSynthesis, CrossModalMechanismCandidate
         data = self._safe_parse_json(response, default=None)
         if not isinstance(data, dict) or "parse_error" in data:
             # Entire response unparseable: keep raw text capped at 20K chars
@@ -3247,34 +3237,29 @@ Current research direction: {current_direction or "N/A"}
         cross_modal_block = ""
         # O5 + consistency with planning.py: filter out do_not_emphasize candidates
         # from the final summary narrative (they remain in the appendix for traceability).
-        has_candidates = any(
-            (r.cross_modal_synthesis and any(
-                c.report_recommendation != "do_not_emphasize"
-                for c in r.cross_modal_synthesis.candidates
-            ))
-            for r in state.round_results
-        )
-        if has_candidates:
-            cm_parts = ["\n## Cross-Modal Mechanism Candidates (persisted audit)"]
-            for r in state.round_results:
-                cms = r.cross_modal_synthesis
-                if not cms or not cms.candidates:
-                    continue
-                displayable = [c for c in cms.candidates if c.report_recommendation != "do_not_emphasize"]
-                if not displayable:
-                    continue
-                cm_parts.append(f"\n### From Round {r.round_number}")
-                for c in displayable:
-                    ev = "; ".join(
-                        f"{e.source}: {e.evidence} ({e.strength})" for e in c.supporting_evidence
-                    ) or "N/A"
-                    cm_parts.append(
-                        f"- **{c.theme}** — {c.mechanism_statement}\n"
-                        f"  Evidence: {ev}\n"
-                        f"  Confidence: {c.confidence}; consistency: {c.evidence_consistency}; "
-                        f"relation: {c.relation_to_current_direction}; recommendation: {c.report_recommendation}\n"
-                        f"  Missing evidence: {'; '.join(c.missing_evidence) or 'None'}"
-                    )
+        cm_parts = []
+        for r in state.round_results:
+            cms = r.cross_modal_synthesis
+            if not cms or not cms.candidates:
+                continue
+            displayable = [c for c in cms.candidates if c.report_recommendation != "do_not_emphasize"]
+            if not displayable:
+                continue
+            if not cm_parts:
+                cm_parts.append("\n## Cross-Modal Mechanism Candidates (persisted audit)")
+            cm_parts.append(f"\n### From Round {r.round_number}")
+            for c in displayable:
+                ev = "; ".join(
+                    f"{e.source}: {e.evidence} ({e.strength})" for e in c.supporting_evidence
+                ) or "N/A"
+                cm_parts.append(
+                    f"- **{c.theme}** — {c.mechanism_statement}\n"
+                    f"  Evidence: {ev}\n"
+                    f"  Confidence: {c.confidence}; consistency: {c.evidence_consistency}; "
+                    f"relation: {c.relation_to_current_direction}; recommendation: {c.report_recommendation}\n"
+                    f"  Missing evidence: {'; '.join(c.missing_evidence) or 'None'}"
+                )
+        if cm_parts:
             cross_modal_block = "\n".join(cm_parts)
         else:
             # Fallback: lightweight literature context summary
@@ -3291,13 +3276,7 @@ Current research direction: {current_direction or "N/A"}
         mech_lines = []
         for r in state.round_results[-3:]:
             for p in (getattr(r, "data_driven_mechanism_programs", []) or [])[:3]:
-                mech_lines.append(
-                    f"- {p.label} (round {p.round_number}; strength {p.evidence_strength}; "
-                    f"specificity {p.specificity}; bulk {p.bulk_support}): "
-                    f"{'; '.join(p.triggering_observations[:2])}. "
-                    f"Genes/pathways: {', '.join((p.supporting_genes + p.supporting_pathways)[:8])}. "
-                    f"Missing evidence: {'; '.join(p.missing_evidence[:2])}"
-                )
+                mech_lines.append(f"- {p.to_prompt_text(style='compact', max_observations=2, max_genes=8, max_alternatives=2, max_missing=2)}")
         mechanism_block = ""
         if mech_lines:
             mechanism_block = (
@@ -4385,14 +4364,7 @@ an earlier version may win.
         rounds = state.round_results[-3:]
         for rr in rounds:
             for p in (getattr(rr, "data_driven_mechanism_programs", []) or [])[:3]:
-                elevate = p.evidence_strength in ("moderate", "strong") and len(p.triggering_observations) >= 2
-                tag = "candidate mechanism" if elevate else "exploratory signal"
-                mech_lines.append(
-                    f"- [{tag}] {p.label} (strength {p.evidence_strength}, bulk {p.bulk_support}): "
-                    f"{'; '.join(p.triggering_observations[:2])}. "
-                    f"Genes: {', '.join((p.supporting_genes + p.supporting_pathways)[:8])}. "
-                    f"Missing evidence: {'; '.join(p.missing_evidence[:2])}"
-                )
+                mech_lines.append(f"- {p.to_prompt_text(style='direction', max_observations=2, max_genes=8, max_missing=2)}")
         mech_block = ""
         if mech_lines:
             mech_block = (
@@ -4511,7 +4483,7 @@ Example: ["umap_cell_types", "cell_type_proportions", "volcano_<celltype>_<condi
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=4096  # reasoning models need headroom or content comes back empty
+                max_tokens=REASONING_MODEL_MIN_TOKENS  # reasoning models need headroom or content comes back empty
             )
             text = (response.content or "").strip()
             match = re.search(r'\[.*?\]', text, re.DOTALL)

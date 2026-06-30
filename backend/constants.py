@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.30.2"
+VERSION = "0.30.3"
 
 
 # ── Node → Agent mapping ───────────────────────────────────────────
@@ -116,3 +116,10 @@ STOP_KEYWORDS: frozenset[str] = frozenset({
     "summarize", "report",
     "停止", "终止", "结束", "总结", "报告",
 })
+
+# ── Reasoning model output-token floor ──────────────────────────────
+# OpenAI-style reasoning models (o1, o3, o4) may produce empty content
+# when max_tokens is too low because the reasoning budget consumes the
+# entire allocation.  This floor ensures enough headroom for the actual
+# content.  Call sites should use this constant instead of hardcoding 4096.
+REASONING_MODEL_MIN_TOKENS: int = 4096

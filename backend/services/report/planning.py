@@ -2,6 +2,7 @@
 from typing import Dict, Any, List, Optional
 
 from backend.utils.report_html import _safe_parse_json
+from .analysis_log import build_round_summaries
 
 _REPORT_RECO_ORDER = {"headline": 0, "secondary": 1, "future_direction": 2}
 
@@ -322,6 +323,7 @@ Then create sections in this EXACT order.
 """
 
         response = await self._pi_chat(prompt, temperature=0.4, max_tokens=32768)
+        round_summaries = build_round_summaries(state)
 
         try:
             plan = _safe_parse_json(response)
@@ -379,9 +381,7 @@ Then create sections in this EXACT order.
 
                 plan["_existing_figures"] = existing_figures
                 plan["_existing_tables"] = existing_tables
-                from .analysis_log import build_round_summaries
-                plan = insert_cross_modal_section(plan, build_round_summaries(state))
-                return plan
+                return insert_cross_modal_section(plan, round_summaries)
             else:
                 logger.warning(
                     f"Plan JSON parsing returned {'empty plan' if plan else 'None'}. "
@@ -392,9 +392,8 @@ Then create sections in this EXACT order.
 
         # Fallback to auto-assignment based on figure types
         logger.warning("Using fallback plan (auto-assignment by figure type)")
-        from .analysis_log import build_round_summaries
         fallback = self._create_fallback_plan_with_existing_figures(state, existing_figures)
-        return insert_cross_modal_section(fallback, build_round_summaries(state))
+        return insert_cross_modal_section(fallback, round_summaries)
 
     async def _generate_section_from_existing_figures(
         self,

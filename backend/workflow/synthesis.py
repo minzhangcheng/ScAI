@@ -123,8 +123,8 @@ class SynthesisMixin:
         analysis_state = state["analysis_state"]
         parts = []
 
-        # (1) mechanism_signals from persisted LiteratureReports
-        for rep in analysis_state.literature_reports:
+        # (1) mechanism_signals from persisted LiteratureReports (last 8)
+        for rep in analysis_state.literature_reports[-8:]:
             if rep.mechanism_signals:
                 for sig in rep.mechanism_signals:
                     parts.append(
@@ -480,13 +480,7 @@ class SynthesisMixin:
         cross_modal_candidates = []
         if round_result.cross_modal_synthesis:
             for c in round_result.cross_modal_synthesis.candidates:
-                cross_modal_candidates.append({
-                    "theme": c.theme,
-                    "mechanism_statement": c.mechanism_statement,
-                    "confidence": c.confidence,
-                    "relation_to_current_direction": c.relation_to_current_direction,
-                    "report_recommendation": c.report_recommendation,
-                })
+                cross_modal_candidates.append(c.to_summary_dict())
 
         round_summary = {
             "round": round_result.round_number,

@@ -2115,6 +2115,34 @@ IMPORTANT: Reply with ONLY a JSON object, no other text:
             logger.warning(f"[Bioinformatics] Gene-species assessment failed: {e}")
             return {"match": True}
 
+    async def _retry_on_parse_failure(self, prompt: str, plan_data: dict, *, warn_on_double_failure: bool = True, caller_name: str = "") -> dict:
+        """If plan_data has a parse_error or no steps, retry the LLM call once
+        with a cache-busting suffix and JSON-format instructions.
+        Returns the better of the two results (or the original on double-failure).
+        """
+        if "parse_error" not in plan_data and plan_data.get("steps"):
+            return plan_data
+
+        retry_prompt = (
+            prompt
+            + f"\n\nIMPORTANT: Use valid JSON only. Numeric fields must be numbers, "
+            f"e.g. \"id\": 1 and \"depends_on\": [1, 2]. "
+            f"Do not add stray quotes after numbers. "
+            f"Double-check JSON syntax before responding.\n[retry:{uuid.uuid4().hex[:8]}]"
+        )
+        resp2 = await self.chat(retry_prompt, temperature=0.3)
+        data2 = self._safe_parse_json(resp2, default={})
+        if "parse_error" not in data2:
+            return data2
+
+        if warn_on_double_failure:
+            logger.warning(
+                "[Bioinformatics] %s: retry also failed to parse; "
+                "returning original result (caller will handle)",
+                caller_name or self.__class__.__name__,
+            )
+        return plan_data
+
     async def generate_analysis_plan(
         self,
         state: AnalysisState,
@@ -2234,23 +2262,7 @@ Return the plan as a JSON object:
         response = await self.chat(prompt, temperature=0.3)
         plan_data = self._safe_parse_json(response, default={})
 
-        if "parse_error" in plan_data or not plan_data.get("steps"):
-            retry_prompt = (
-                prompt
-                + f"\n\nIMPORTANT: Use valid JSON only. Numeric fields must be numbers, "
-                f"e.g. \"id\": 1 and \"depends_on\": [1, 2]. "
-                f"Do not add stray quotes after numbers. "
-                f"Double-check JSON syntax before responding.\n[retry:{uuid.uuid4().hex[:8]}]"
-            )
-            resp2 = await self.chat(retry_prompt, temperature=0.3)
-            data2 = self._safe_parse_json(resp2, default={})
-            if "parse_error" not in data2:
-                plan_data = data2
-            else:
-                logger.warning(
-                    "[Bioinformatics] generate_analysis_plan: retry also failed to parse; "
-                    "returning 0-step plan (caller will handle via planning dialogue)"
-                )
+        plan_data = await self._retry_on_parse_failure(prompt, plan_data, warn_on_double_failure=True, caller_name="generate_analysis_plan")
 
         steps = []
         for s in plan_data.get("steps", []):
@@ -2347,17 +2359,7 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
         response = await self.chat(prompt, temperature=0.3)
         plan_data = self._safe_parse_json(response, default={})
 
-        if "parse_error" in plan_data or not plan_data.get("steps"):
-            retry_prompt = (
-                prompt
-                + f"\n\nIMPORTANT: Use valid JSON only. Numeric fields must be numbers, "
-                f"e.g. \"id\": 1 and \"depends_on\": [1, 2]. "
-                f"Do not add stray quotes after numbers.\n[retry:{uuid.uuid4().hex[:8]}]"
-            )
-            resp2 = await self.chat(retry_prompt, temperature=0.3)
-            data2 = self._safe_parse_json(resp2, default={})
-            if "parse_error" not in data2:
-                plan_data = data2
+        plan_data = await self._retry_on_parse_failure(prompt, plan_data, warn_on_double_failure=False, caller_name="revise_plan_incrementally")
 
         steps = []
         for s in plan_data.get("steps", []):
@@ -2381,27 +2383,14 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
                 "[Bioinformatics] revise_plan_incrementally produced 0 steps; "
                 "retaining current_plan steps unchanged"
             )
-            return AnalysisPlan(
-                phase=current_plan.phase,
-                stage=current_plan.stage,
-                overview=current_plan.overview,
-                steps=[PlanStep(
-                    id=s.id,
-                    title=s.title,
-                    method=s.method,
-                    input=s.input,
-                    expected_output=s.expected_output,
-                    rationale=s.rationale,
-                    depends_on=list(s.depends_on),
-                    status=s.status,
-                    executed_at=s.executed_at,
-                ) for s in current_plan.steps],
-                key_decision_points=current_plan.key_decision_points,
-                expected_runtime=current_plan.expected_runtime,
-                status="draft",
-                revision_of=current_plan.id,
-                revision_reason=f"Retained previous plan (revision parse failed): {pi_feedback[:500]}",
-            )
+            retained = current_plan.model_copy(deep=True, update={
+                "status": "draft",
+                "revision_of": current_plan.id,
+                "revision_reason": f"Retained previous plan (revision parse failed): {pi_feedback[:500]}",
+                "id": str(uuid.uuid4()),
+                "approved_at": None,
+            })
+            return retained
 
         revised_plan = AnalysisPlan(
             phase=current_plan.phase,

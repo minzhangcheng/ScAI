@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.30.2 · **Last updated**: 2026-06-30
+**Version**: 0.30.3 · **Last updated**: 2026-06-30
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,9 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.30.x — (2026-06-30)**
+
+- `0.30.3` — PI prompt mechanism program display refactor (2026-06-30):
+  - **PI prompt compact display (`backend/agents/pi_agent.py`)**: Replaced verbose inline f-string formatting of `DataDrivenMechanismProgram` fields (label, round_number, evidence_strength, specificity, bulk_support, triggering_observations, supporting_genes/pathways, missing_evidence) with a dedicated `to_prompt_text(style='compact', ...)` method call, reducing code duplication and improving maintainability.
 
 - `0.30.2` — Data-driven mechanism program capture & report integration (2026-06-30):
   - **New tool `register_mechanism_programs` (`backend/agents/bioinformatics_agent.py`)**: Bioinformatics agent can now register data-driven mechanism programs via a new function-calling tool. `validate_mechanism_program_payload()` enforces conservative validation: requires required fields, bounds programs to 8, genes to 50, observations to 500 chars, fills defaults for alternative_explanations and missing_evidence, detects overclaiming wording in interpretations. Tool schema is mechanism-agnostic — no hardcoded mechanism names.

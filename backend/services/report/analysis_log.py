@@ -14,13 +14,7 @@ def build_round_summaries(state):
         candidates = []
         if r.cross_modal_synthesis:
             for c in r.cross_modal_synthesis.candidates:
-                candidates.append({
-                    "theme": c.theme,
-                    "mechanism_statement": c.mechanism_statement,
-                    "confidence": c.confidence,
-                    "relation_to_current_direction": c.relation_to_current_direction,
-                    "report_recommendation": c.report_recommendation,
-                })
+                candidates.append(c.to_summary_dict())
         mechanism_programs = []
         for p in (getattr(r, "data_driven_mechanism_programs", []) or [])[:3]:
             mechanism_programs.append({

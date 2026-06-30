@@ -9,6 +9,7 @@ from ..models.schemas import AgentType, AnalysisPhase, AnalysisStep, MessageRole
 from ..utils.llm_client import UpstreamExhaustedError
 from ..agents.bioinformatics_agent import count_saved_figures
 from .helpers import _get_task_text, _has_stage1_keyword, _normalize_tasks, cache_hit, cache_invalidate, cache_store, decide_bioinfo_post_execution, prepend_species, safe_pi_brief, STAGE1_KEYWORDS
+from ..utils.blob_store import BLOB_REF_PREFIX
 from .retry import with_retry
 
 if TYPE_CHECKING:
@@ -1195,7 +1196,6 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             return
         # Combine current-round report bodies + references for one extraction pass.
         # Skip reports whose body is an unresolved blob token (offloaded to blob store).
-        from ..utils.blob_store import BLOB_REF_PREFIX
         usable_reports = []
         for r in reports:
             body = r.report or ""
@@ -1275,20 +1275,7 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             recent = programs[-8:]
             prog_lines = ["Bioinformatics data-driven mechanism programs:"]
             for p in recent:
-                prog_lines.append(f"- Program: {p.label}")
-                if p.cell_types:
-                    prog_lines.append(f"  Cell types: {', '.join(p.cell_types)}")
-                if p.triggering_observations:
-                    prog_lines.append(f"  Observations: {'; '.join(p.triggering_observations[:3])}")
-                if p.supporting_genes:
-                    prog_lines.append(f"  Genes: {', '.join(p.supporting_genes[:15])}")
-                if p.supporting_pathways:
-                    prog_lines.append(f"  Pathways: {', '.join(p.supporting_pathways[:8])}")
-                prog_lines.append(f"  Bulk support: {p.bulk_support}")
-                if p.alternative_explanations:
-                    prog_lines.append(f"  Alternatives: {'; '.join(p.alternative_explanations[:3])}")
-                if p.missing_evidence:
-                    prog_lines.append(f"  Missing evidence: {'; '.join(p.missing_evidence[:3])}")
+                prog_lines.append(p.to_prompt_text(style="detailed", max_observations=3, max_genes=15, max_pathways=8, max_alternatives=3, max_missing=3))
             parts.insert(0, "\n".join(prog_lines))
         return ("\n".join(parts))[:4000]
 

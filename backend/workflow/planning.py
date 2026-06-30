@@ -429,6 +429,44 @@ class PlanningMixin:
             "human_guidance_processed": True,
         }
     
+    def _select_fallback_plan_from_history(
+        self,
+        dialogue_history: list,
+    ) -> Optional["AnalysisPlan"]:
+        """Walk dialogue history in reverse and return the first plan that
+        passes model_validate.  Entries with pi_decision=='reject' or empty
+        steps are skipped.  Returns None if no valid plan is found.
+
+        Formerly, a manual PlanStep(**s) + AnalysisPlan(**plan_kwargs)
+        fallback existed in the except branch.  That fallback was removed
+        because it would fail for the same reasons model_validate failed
+        (type errors in step fields), and it created a divergence from the
+        schema that could silently accept malformed plans.
+
+        Note: phase/stage parameters were removed along with the manual
+        construction branch — they only served that deleted code path.
+        """
+        for entry in reversed(dialogue_history):
+            if entry.get("pi_decision") == "reject":
+                continue
+            plan_dict = entry.get("plan", {})
+            if not plan_dict.get("steps"):
+                continue
+            try:
+                fallback_plan = AnalysisPlan.model_validate(plan_dict)
+            except Exception:
+                logger.warning(
+                    "[%s] Fallback: model_validate failed for dialogue entry, skipping",
+                    self.session_id,
+                )
+                continue
+            logger.info(
+                f"[{self.session_id}] Fallback: using plan from dialogue round "
+                f"{entry.get('round', '?')} with {len(fallback_plan.steps)} steps"
+            )
+            return fallback_plan
+        return None
+
     async def _planning_dialogue(self, state: WorkflowState) -> WorkflowState:
         """PI ↔ Bioinformatics dialogue to design an analysis plan (max 5 rounds)."""
         analysis_state = state["analysis_state"]
@@ -690,34 +728,9 @@ class PlanningMixin:
                 else None
             )
             if fallback_plan is None:
-                for entry in reversed(dialogue_history):
-                    if entry.get("pi_decision") == "reject":
-                        continue
-                    plan_dict = entry.get("plan", {})
-                    if not plan_dict.get("steps"):
-                        continue
-                    try:
-                        fallback_plan = AnalysisPlan.model_validate(plan_dict)
-                    except Exception:
-                        steps = [PlanStep(**s) for s in plan_dict["steps"]]
-                        plan_kwargs = dict(
-                            phase=plan_dict.get("phase", phase),
-                            stage=plan_dict.get("stage", stage),
-                            overview=plan_dict.get("overview", ""),
-                            steps=steps,
-                            key_decision_points=plan_dict.get("key_decision_points", []),
-                            expected_runtime=plan_dict.get("expected_runtime", f"~{len(steps)} steps"),
-                            revision_of=plan_dict.get("revision_of"),
-                            revision_reason=plan_dict.get("revision_reason"),
-                        )
-                        if plan_dict.get("id"):
-                            plan_kwargs["id"] = plan_dict["id"]
-                        fallback_plan = AnalysisPlan(**plan_kwargs)
-                    logger.info(
-                        f"[{self.session_id}] Fallback: using plan from dialogue round "
-                        f"{entry.get('round', '?')} with {len(fallback_plan.steps)} steps"
-                    )
-                    break
+                fallback_plan = self._select_fallback_plan_from_history(
+                    dialogue_history
+                )
 
             if fallback_plan is not None and fallback_plan.steps:
                 fallback_plan.status = "pi_reviewing"
