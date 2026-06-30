@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.29.10 · **Last updated**: 2026-06-29
+**Version**: 0.30.1 · **Last updated**: 2026-06-30
 
 ## 1. Runtime Architecture
 
@@ -193,6 +193,23 @@ scai/
 ## 12. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
+
+**0.30.x — (2026-06-30)**
+
+- `0.30.1` — Cross-modal mechanism audit & literature UpstreamExhaustedError propagation (2026-06-30):
+  - **Cross-modal mechanism synthesis (`backend/workflow/synthesis.py`)**: New `_build_literature_audit_context()` and `_build_biochemistry_raw_context()` build bounded multi-modal evidence surfaces for the PI. Cross-modal audit runs during innovation-round synthesis (`_synthesize_round`): PI LLM call (`pi_agent.build_cross_modal_synthesis()`) produces a `CrossModalSynthesis` with evidence matrix and mechanism candidates graded by confidence, consistency, and report recommendation. Round summary includes `cross_modal_candidates` for frontend display.
+  - **PI cross-modal builder (`backend/agents/pi_agent.py`)**: `build_cross_modal_synthesis()` takes raw agent result dicts, bounded literature context, and raw biochemistry measurements — produces a cross-modal evidence matrix and honestly-graded mechanism candidates. `_parse_cross_modal_response()` recovers gracefully from unparseable LLM responses. `synthesize_round()` accepts `cross_modal_context` parameter. `generate_final_summary()` includes cross-modal mechanism candidates with `do_not_emphasize` filter — falls back to lightweight literature summary when no candidates exist.
+  - **Literature mechanism signal extraction (`backend/agents/literature_agent.py`)**: `extract_mechanism_signals()` is a generic, mechanism-agnostic extraction of biological mechanisms from retrieved literature that co-occur with observed experimental data. Non-critical: returns `None` on any failure. `UpstreamExhaustedError` re-raise at both `process()` and PubMed-fallback layers prevents silent degradation to `quick_search` — the workflow LLM-failure HITL gate now correctly propagates upstream exhaustion instead of hiding it behind a low-quality fallback result.
+  - **Workflow agent persistence (`backend/workflow/agents.py`)**: `_persist_literature_mechanism_signals()` extracts mechanism signals from the current round's literature reports and persists them onto `LiteratureReport.mechanism_signals`. Guards against no-data/skipped rounds. `_build_observed_context_for_literature()` builds current-round agent results or fallback prior-round findings. Signals are round-level aggregates attached to every current-round report for idempotent reload.
+  - **New Pydantic models (`backend/models/schemas.py`)**: `LiteratureMechanismSignal` (mechanism, supporting_pmids, evidence_type, relevance, observed_data_links, limitations), `CrossModalEvidenceItem` (source, evidence, strength, limitation), `CrossModalMechanismCandidate` (theme, mechanism_statement, supporting_evidence, evidence_consistency, confidence, novelty, relation_to_current_direction, missing_evidence, report_recommendation), `CrossModalSynthesis` (matrix_markdown, candidates, excluded_or_low_support_themes). `LiteratureReport` gains `mechanism_signals`. `RoundResult` gains `cross_modal_synthesis`. `AnalysisState._serialize_round_results()` includes simplified candidate summary.
+  - **Report cross-modal appendix (`backend/services/report/generator.py`)**: `build_cross_modal_appendix()` assembles per-round full cross-modal synthesis detail (including `excluded_or_low_support_themes`) for the report JSON appendix.
+  - **Report cross-modal section insertion (`backend/services/report/planning.py`)**: `insert_cross_modal_section()` places a "Cross-Modal Mechanism Candidates" section before the first closing section (conclusion/references/limitations). Only `report_recommendation != "do_not_emphasize"` candidates are included. `_generate_section_from_existing_figures()` injects cross-modal context into the per-section generation prompt. `REPORT_RECO_ORDER` and `CLOSING_SECTION_MARKERS` constants support deterministic placement.
+  - **Report analysis log shared helper (`backend/services/report/analysis_log.py`)**: `build_round_summaries()` extracted as a shared function returning per-round dicts with simplified `cross_modal_candidates`, reused by both `AnalysisLogMixin.build_analysis_log()` and `planning.py`.
+  - **Frontend cross-modal types (`frontend/src/types.ts`)**: New `CrossModalCandidate` interface with `theme`, `mechanism_statement`, `confidence`, `relation_to_current_direction`, `report_recommendation` fields. `RoundSummary` gains `cross_modal_candidates`.
+  - **Frontend store & API (`frontend/src/stores/appStore.ts`, `frontend/src/hooks/useApi.ts`, `frontend/src/utils/transformLoadResponse.ts`)**: Cross-modal candidate support — `RoundSummary` in store carries candidates; transform load maps snake_case `cross_modal_candidates` to camelCase.
+  - **Frontend ResultsPanel display (`frontend/src/components/ResultsPanel.tsx`)**: New cross-modal mechanism card layout — theme/mechanism statement with confidence badge, evidence consistency, relation badge, recommendation tag, evidence sources list (icon+color per modality), evidence gaps section. Collapsible per-candidate.
+  - **Frontend i18n (`frontend/src/i18n/translations.ts`)**: New `crossModal` translation block with keys for `title`, `theme`, `mechanism`, `confidence`, `consistency`, `relation`, `evidence`, `evidenceGaps`, `recommendation`.
+  - **13 new test files**: `test_cross_modal_fixture_quality.py`, `test_cross_modal_models.py`, `test_cross_modal_roundtrip.py`, `test_cross_modal_serialization.py`, `test_pi_synthesis_cross_modal.py`, `test_build_cross_modal_synthesis.py`, `test_final_summary_cross_modal.py`, `test_synthesize_round_cross_modal.py`, `test_report_appendix_cross_modal.py`, `test_report_plan_cross_modal_section.py`, `test_analysis_log_cross_modal.py`, `test_literature_mechanism_extraction.py`, `test_literature_node_mechanism_persist.py`, `test_literature_upstream_exhausted_propagates.py`. Frontend: `crossModal.test.ts`.
 
 **0.29.x — (2026-06-24 → 2026-06-29)**
 

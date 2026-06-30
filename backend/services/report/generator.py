@@ -53,6 +53,23 @@ def build_agent_models_appendix(state) -> dict:
     return models
 
 
+def build_cross_modal_appendix(state) -> list:
+    """Per-round cross-modal synthesis (full detail) for the report JSON appendix —
+    traceability/reproducibility, including excluded_or_low_support_themes."""
+    out = []
+    for r in state.round_results:
+        cms = r.cross_modal_synthesis
+        if not cms:
+            continue
+        out.append({
+            "round_number": r.round_number,
+            "matrix_markdown": cms.matrix_markdown,
+            "candidates": [c.model_dump(mode="json") for c in cms.candidates],
+            "excluded_or_low_support_themes": cms.excluded_or_low_support_themes,
+        })
+    return out
+
+
 class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMCallsMixin, PIReviewMixin, PlanningMixin, SectionsMixin):
     """
     Generates detailed research reports based on analysis results.
@@ -383,6 +400,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             ],
             "biochemistry_indicators_count": len(state.biochemistry_indicators),
             "max_rounds": state.max_rounds,
+            "cross_modal_synthesis": build_cross_modal_appendix(state),
             "round_results": [
                 {
                     "round_number": r.round_number,

@@ -1134,12 +1134,102 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
             json.dumps({"findings": combined_result["findings"]}, ensure_ascii=False)
         )
 
+        # Non-critical: extract generic mechanism signals co-occurring with
+        # observed data, persisted onto LiteratureReport for the cross-modal audit.
+        # GUARD (B3): combined_result has NO "status" key (verified — it only holds
+        # topics/findings/reports/search_modes), so gate on whether this round actually
+        # produced reports. Disabled/skipped is already handled by the _require_core_agent
+        # early-return above; no_data rounds produce no report_ids and short-circuit here.
+        report_ids = [r.get("report_id") for r in results if r.get("report_id")]
+        if report_ids:
+            try:
+                observed_context = self._build_observed_context_for_literature(state)
+                await self._persist_literature_mechanism_signals(
+                    analysis_state,
+                    self.literature_agent,
+                    report_ids,
+                    observed_context,
+                )
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] mechanism signal persistence skipped: {e}")
+
         cache_store(analysis_state, AgentType.LITERATURE, combined_result)
         return {
             **state,
             "analysis_state": analysis_state,
             "literature_result": combined_result
         }
+
+    async def _persist_literature_mechanism_signals(
+        self, analysis_state, literature_agent, report_ids, observed_context: str,
+    ):
+        """Extract generic mechanism signals from the current round's literature
+        reports and persist them onto the LiteratureReport models. Non-critical:
+        never raises, never changes literature_result status."""
+        reports = [
+            r for r in analysis_state.literature_reports if r.id in set(report_ids)
+        ] if report_ids else []
+        if not reports:
+            return
+        # Combine current-round report bodies + references for one extraction pass
+        combined_text = "\n\n".join((r.report or "") for r in reports)
+        combined_refs = []
+        for r in reports:
+            combined_refs.extend(r.references or [])
+        try:
+            signals = await literature_agent.extract_mechanism_signals(
+                report_text=combined_text,
+                references=combined_refs,
+                observed_context=observed_context,
+            )
+        except Exception as e:
+            logger.warning(f"[{self.session_id}] literature mechanism extraction failed: {e}")
+            return
+        if not signals:
+            return
+        # E1: attach the round-level aggregate signals to EVERY current-round report.
+        # A round may produce multiple LiteratureReports (multi-topic / PubMed gap-fill);
+        # _build_literature_audit_context (Task 7) iterates ALL reports for signals, so
+        # attaching to only the last one would silently drop them on reload. This is a
+        # deliberate round-level aggregate (one extraction over combined text → shared
+        # signal list on each report of the round), not per-topic attribution.
+        for rep in reports:
+            rep.mechanism_signals = signals
+        logger.info(
+            f"[{self.session_id}] persisted {len(signals)} literature mechanism signals "
+            f"to {len(reports)} report(s)"
+        )
+
+    def _build_observed_context_for_literature(self, workflow_state) -> str:
+        analysis_state = workflow_state["analysis_state"]
+        parts = []
+        # (1) Prefer the CURRENT round's freshly-computed agent results from WorkflowState
+        for label, key in [
+            ("Biochemistry", "biochemistry_result"),
+            ("Bioinformatics", "bioinformatics_result"),
+            ("Pathology", "pathology_result"),
+        ]:
+            result = workflow_state.get(key) or {}
+            vals = result.get("findings") or []
+            if vals:
+                parts.append(f"{label}: " + "; ".join(str(v) for v in vals[:8]))
+        # (2) Fallback to the prior round's findings if no current-round result present
+        if not parts and analysis_state.round_results:
+            last = analysis_state.round_results[-1]
+            for label, vals in [
+                ("Biochemistry", last.biochemistry_findings),
+                ("Bioinformatics", last.bioinformatics_findings),
+                ("Pathology", last.pathology_findings),
+            ]:
+                if vals:
+                    parts.append(f"{label}: " + "; ".join(str(v) for v in vals[:8]))
+        # (3) Manual biochemistry indicators are always current observed data
+        if analysis_state.biochemistry_indicators:
+            inds = "; ".join(
+                f"{i.indicator}={i.value}{i.unit or ''}" for i in analysis_state.biochemistry_indicators[:20]
+            )
+            parts.append(f"Biochemistry indicators: {inds}")
+        return ("\n".join(parts))[:4000]
 
     async def _evaluate_dr_coverage(self, topics: List[str], dr_result: Dict) -> List[str]:
         """Evaluate which topics were NOT sufficiently covered by Deep Research.

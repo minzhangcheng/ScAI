@@ -1086,6 +1086,7 @@ export function useWebSocket() {
               bioinformaticsFindings: roundData.bioinformatics_findings || [],
               biochemistryFindings: roundData.biochemistry_findings || [],
               literatureFindings: roundData.literature_findings || [],
+              crossModalCandidates: roundData.cross_modal_candidates || [],
             }
 
             let updatedRounds

@@ -218,13 +218,57 @@ class BiochemistryIndicator(BaseModel):
 
     timestamp: datetime = Field(default_factory=datetime.now)
 
+class LiteratureMechanismSignal(BaseModel):
+    """A biological mechanism extracted from retrieved literature that
+    co-occurs with this study's experimental observations (generic, not
+    mechanism-hardcoded)."""
+    mechanism: str                                  # mechanism name from the literature (not invented)
+    supporting_pmids: List[str] = Field(default_factory=list)  # may be empty when PMID unavailable (e.g. Deep Research)
+    evidence_type: Literal["experimental", "correlational", "review", "hypothesis", "unknown"] = "unknown"
+    relevance_to_current_study: str = ""            # 1-2 sentences
+    observed_data_links: List[str] = Field(default_factory=list)
+    limitations: List[str] = Field(default_factory=list)
+
+
 class LiteratureReport(BaseModel):
     """Literature research report"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     topic: str
     report: str
     references: List[Dict[str, str]] = Field(default_factory=list)
+    mechanism_signals: Optional[List[LiteratureMechanismSignal]] = None
     timestamp: datetime = Field(default_factory=datetime.now)
+
+class CrossModalEvidenceItem(BaseModel):
+    source: Literal["biochemistry", "pathology", "bioinformatics", "literature"]
+    evidence: str                                   # concrete observation
+    strength: Literal["strong", "moderate", "weak"]
+    limitation: str = ""
+
+
+class CrossModalMechanismCandidate(BaseModel):
+    # relation_to_current_direction semantics:
+    #   "central"       — candidate IS the current direction's main mechanism
+    #   "complementary" — supports/extends current direction, not competing
+    #   "downstream"    — consequence of current direction's mechanism
+    #   "alternative"   — competing hypothesis that would replace current direction
+    #   "uncovered"     — not addressed by current direction; distinct evidence base
+    theme: str
+    mechanism_statement: str
+    supporting_evidence: List[CrossModalEvidenceItem] = Field(default_factory=list)
+    evidence_consistency: Literal["high", "medium", "low", "conflicting"] = "low"
+    confidence: Literal["high", "medium", "low"] = "low"
+    novelty_relative_to_current_direction: Literal["high", "medium", "low"] = "low"
+    relation_to_current_direction: Literal["central", "complementary", "downstream", "alternative", "uncovered"] = "uncovered"
+    missing_evidence: List[str] = Field(default_factory=list)
+    report_recommendation: Literal["headline", "secondary", "future_direction", "do_not_emphasize"] = "future_direction"
+
+
+class CrossModalSynthesis(BaseModel):
+    matrix_markdown: str = ""                        # Markdown evidence matrix table (server-side only)
+    candidates: List[CrossModalMechanismCandidate] = Field(default_factory=list)
+    excluded_or_low_support_themes: List[str] = Field(default_factory=list)
+
 
 class ClusterAnnotation(BaseModel):
     """Single cluster annotation for user review during exploration phase"""
@@ -512,6 +556,7 @@ class RoundResult(BaseModel):
     phase: str = "exploration"  # "exploration" or "innovation"
     direction: str = ""  # Research direction for innovation rounds
     exploration_report: Optional[ExplorationReport] = None  # Only for Phase 1
+    cross_modal_synthesis: Optional[CrossModalSynthesis] = None
     timestamp: datetime = Field(default_factory=datetime.now)
 
 class PublicationFigure(BaseModel):
@@ -1021,6 +1066,20 @@ class AnalysisState(BaseModel):
 
     @staticmethod
     def _serialize_round_results(results):
+        def _simplify_candidates(cms):
+            if not cms:
+                return []
+            out = []
+            for c in (cms.get("candidates") or []):
+                out.append({
+                    "theme": c.get("theme", ""),
+                    "mechanism_statement": c.get("mechanism_statement", ""),
+                    "confidence": c.get("confidence", "low"),
+                    "relation_to_current_direction": c.get("relation_to_current_direction", "uncovered"),
+                    "report_recommendation": c.get("report_recommendation", "future_direction"),
+                })
+            return out
+
         return [
             {"round": r["round_number"], "pi_summary": r["pi_summary"],
              "pathology_findings": r["pathology_findings"],
@@ -1028,6 +1087,7 @@ class AnalysisState(BaseModel):
              "biochemistry_findings": r["biochemistry_findings"],
              "literature_findings": r["literature_findings"],
              "next_steps": r["next_steps"], "conflicts": r["conflicts"],
+             "cross_modal_candidates": _simplify_candidates(r.get("cross_modal_synthesis")),
              "timestamp": r["timestamp"]}
             for r in results
         ]

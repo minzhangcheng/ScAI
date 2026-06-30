@@ -29,6 +29,7 @@ export function transformRoundResults(raw: (RawRoundResult | null)[] | undefined
       bioinformaticsFindings: Array.isArray(r.bioinformatics_findings) ? r.bioinformatics_findings : [],
       biochemistryFindings: Array.isArray(r.biochemistry_findings) ? r.biochemistry_findings : [],
       literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
+      crossModalCandidates: Array.isArray(r.cross_modal_candidates) ? r.cross_modal_candidates : [],
     }
   }).filter((r): r is RoundResult => r !== null)
 }

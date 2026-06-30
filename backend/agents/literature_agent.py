@@ -29,8 +29,9 @@ logger = logging.getLogger(__name__)
 from ..models.schemas import (
     AgentType, AnalysisState, MessageRole, LiteratureReport,
     DirectionSearchQuery, PubMedEvidenceItem, DirectionLiteratureEvidence,
+    LiteratureMechanismSignal,
 )
-from ..utils.llm_client import OpenAICompatibleClient, GoogleDeepResearchClient, RETRYABLE_EXCEPTIONS
+from ..utils.llm_client import OpenAICompatibleClient, GoogleDeepResearchClient, RETRYABLE_EXCEPTIONS, UpstreamExhaustedError
 from openai import RateLimitError
 
 _FALLBACK_EXCEPTIONS = RETRYABLE_EXCEPTIONS + (RateLimitError,)
@@ -442,6 +443,13 @@ class LiteratureAgent(BaseAgent):
                 result = await self._quick_search(topic, state)
             result["search_mode"] = actual_mode
             return result
+        except UpstreamExhaustedError:
+            # The LLM upstream is genuinely exhausted (all retries failed).
+            # Do NOT silently degrade to quick_search — every fallback mode
+            # also needs the same LLM, so degrading just yields a low-quality
+            # result while hiding the failure. Propagate so the workflow's
+            # LLM-failure HITL gate lets the user choose retry/skip/stop.
+            raise
         except Exception as e:
             logger.warning(f"[Literature] Mode {mode} failed: {e}")
 
@@ -455,6 +463,8 @@ class LiteratureAgent(BaseAgent):
                     )
                     result["search_mode"] = f"pubmed_llm (fallback from {mode})"
                     return result
+                except UpstreamExhaustedError:
+                    raise
                 except Exception as e2:
                     logger.warning(f"[Literature] PubMed fallback also failed: {e2}")
 
@@ -1243,6 +1253,82 @@ Create a unified, well-structured review that:
             "report_id": report.id,
             "search_rounds": search_rounds,
         }
+
+    async def extract_mechanism_signals(
+        self,
+        report_text: str,
+        references: List[Dict[str, str]],
+        observed_context: str,
+    ) -> Optional[List["LiteratureMechanismSignal"]]:
+        """Generic, mechanism-agnostic extraction of biological mechanisms in the
+        retrieved literature that co-occur with this study's observed data.
+        Returns None on no content or any failure (non-critical path)."""
+        from ..models.schemas import LiteratureMechanismSignal
+
+        if not (report_text and report_text.strip()) and not references:
+            return None
+
+        ref_lines = []
+        for r in references[:40]:
+            title = r.get("title", "") if isinstance(r, dict) else ""
+            pmid = r.get("pmid", "") if isinstance(r, dict) else ""
+            url = r.get("url", "") if isinstance(r, dict) else ""
+            ref_lines.append(f"- {title} (PMID: {pmid or 'N/A'}; {url})")
+        refs_block = "\n".join(ref_lines) if ref_lines else "None"
+
+        prompt = f"""From the retrieved literature below, extract biological mechanisms that
+co-occur with the experimental observations in this study's data. This is a generic
+extraction — do NOT limit yourself to any particular mechanism, pathway, or gene.
+
+## This Study's Observed Data
+{observed_context or "None"}
+
+## Retrieved Literature Report
+{(report_text or "")[:24000]}
+
+## References
+{refs_block}
+
+For EACH mechanism that the literature associates with this study's observations, provide:
+- The mechanism name AS STATED in the literature (do not invent)
+- Supporting PMIDs when available; use an empty list if none
+- Whether the literature describes experimental, correlational, review, or hypothetical evidence
+- Relevance to this study's specific experimental context (1-2 sentences)
+- Which observed data points this mechanism connects to
+- Caveats/limitations the literature itself notes
+
+Return JSON only:
+{{
+    "mechanism_signals": [{{
+        "mechanism": "...",
+        "supporting_pmids": ["..."],
+        "evidence_type": "experimental|correlational|review|hypothesis|unknown",
+        "relevance_to_current_study": "...",
+        "observed_data_links": ["..."],
+        "limitations": ["..."]
+    }}]
+}}
+If no mechanisms clearly co-occur with the observed data, return {{"mechanism_signals": []}}.
+"""
+        try:
+            # Use chat_without_history (same pattern as _extract_findings): this is an
+            # independent structured extraction that must not pollute or depend on the
+            # literature agent's message history.
+            response = await self.chat_without_history(prompt, temperature=0.3)
+        except Exception as e:
+            logger.warning(f"[Literature] mechanism extraction LLM call failed: {e}")
+            return None
+
+        data = self._safe_parse_json(response, default=None)
+        if not isinstance(data, dict):
+            return None
+        out = []
+        for entry in (data.get("mechanism_signals") or []):
+            try:
+                out.append(LiteratureMechanismSignal(**entry))
+            except Exception:
+                continue
+        return out
 
     # ===================================================================
     # Quick search fallback (LLM knowledge only)

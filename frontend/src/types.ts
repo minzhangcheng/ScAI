@@ -93,6 +93,14 @@ export interface RawBiochemistryIndicator {
   sample_number?: number
 }
 
+export interface CrossModalCandidate {
+  theme: string
+  mechanism_statement: string
+  confidence: 'high' | 'medium' | 'low'
+  relation_to_current_direction: 'central' | 'complementary' | 'downstream' | 'alternative' | 'uncovered'
+  report_recommendation: 'headline' | 'secondary' | 'future_direction' | 'do_not_emphasize'
+}
+
 export interface RawRoundResult {
   round?: number
   pi_summary?: string
@@ -101,6 +109,7 @@ export interface RawRoundResult {
   bioinformatics_findings?: string[]
   biochemistry_findings?: string[]
   literature_findings?: string[]
+  cross_modal_candidates?: CrossModalCandidate[]
 }
 
 export interface RawPublicationFigure {
@@ -298,4 +307,5 @@ export interface RoundSummary {
   bioinformaticsFindings?: string[]
   biochemistryFindings?: string[]
   literatureFindings?: string[]
+  crossModalCandidates?: CrossModalCandidate[]
 }

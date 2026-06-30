@@ -285,6 +285,9 @@ export const translations = {
     bioinformaticsFindings: '生信发现',
     biochemistryFindings: '生化发现',
     literatureFindings: '文献发现',
+    crossModalCandidates: '跨模态机制候选',
+    crossModalConfidence: '证据强度',
+    crossModalRelation: '与当前方向关系',
     
     // Message Stream
     realTimeMessages: '实时消息',
@@ -785,6 +788,9 @@ Please provide a detailed literature review report with specific citation inform
     bioinformaticsFindings: 'Bioinformatics Findings',
     biochemistryFindings: 'Biochemistry Findings',
     literatureFindings: 'Literature Findings',
+    crossModalCandidates: 'Cross-Modal Mechanism Candidates',
+    crossModalConfidence: 'Evidence strength',
+    crossModalRelation: 'Relation to current direction',
     
     // Message Stream
     realTimeMessages: 'Real-time Messages',

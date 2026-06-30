@@ -17,6 +17,7 @@ from ..models.schemas import (
     AgentType, AnalysisPhase, AnalysisState, MessageRole, RoundResult, ExplorationReport,
     PublicationFigure, FigureReviewStatus, GraphicAbstract,
     DATA_TYPE_SCRNASEQ,
+    CrossModalSynthesis, CrossModalMechanismCandidate, CrossModalEvidenceItem,
 )
 from ..utils.llm_client import OpenAICompatibleClient
 from ..constants import (
@@ -2881,6 +2882,7 @@ Note: Extract biochemistry values from user message if they mention specific num
         biochemistry_result: Optional[str] = None,
         literature_result: Optional[str] = None,
         research_direction: str = "",
+        cross_modal_context: str = "",
     ) -> RoundResult:
         """
         Synthesize results from all agents for a round
@@ -2918,12 +2920,21 @@ Note: Extract biochemistry values from user message if they mention specific num
                 )
             previous_context = "\n\n## Previous Rounds Summary\n" + "\n\n".join(prev_parts)
 
+        cross_modal_section = ""
+        if cross_modal_context and cross_modal_context.strip():
+            cross_modal_section = (
+                "\n## Cross-Modal Evidence Audit\n"
+                "The following cross-modal evidence matrix was computed from this round's "
+                "multi-modal results. Use it to surface mechanisms supported across modalities:\n"
+                f"{cross_modal_context}\n"
+            )
+
         prompt = f"""
 ## Project Information
 Project Name: {state.name}
 Research Objective: {state.initial_instruction}
 {previous_context}
-
+{cross_modal_section}
 This is the results summary for Round {state.current_round}. Please synthesize:
 
 ## Biochemistry Analysis Results
@@ -2996,7 +3007,10 @@ EXPLORATION PHASE — additional synthesis requirements:
             prompt += f"""
 INNOVATION PHASE — focused synthesis:
 - Current research direction: {direction_ctx}
-- Focus your synthesis on findings relevant to this direction
+- Prioritize findings relevant to the current direction for hypothesis evaluation,
+  but additionally surface any cross-modal mechanisms that are supported by evidence
+  from two or more independent sources, even if those mechanisms are outside the
+  current direction. Flag such mechanisms with their evidence sources.
 - Evaluate whether the hypothesis is supported or contradicted by the evidence
 - Suggest deeper follow-up analyses within this specific direction
 """
@@ -3056,7 +3070,126 @@ INNOVATION PHASE — focused synthesis:
             new_findings=True,
             reanalysis_agents=[]
         )
-    
+
+    async def build_cross_modal_synthesis(
+        self,
+        state: AnalysisState,
+        current_direction: str,
+        current_agent_raw: Dict[str, Any],
+        literature_context: str,
+        biochemistry_raw: str,
+    ) -> "CrossModalSynthesis":
+        """Run a single LLM call over a wide input surface (raw agent result
+        dicts + bounded literature context + raw biochemistry measurements) to
+        produce a cross-modal evidence matrix and honestly-graded mechanism
+        candidates. Mechanism-agnostic: no preset pathway/gene/mechanism names.
+        """
+        self.refresh_runtime_config_if_needed()
+        self.reset_history()
+
+        # Accumulated round results (findings + pi_summary) for cross-round context
+        rounds_text = []
+        for r in state.round_results:
+            all_findings = (
+                (r.pathology_findings or [])[:5]
+                + (r.bioinformatics_findings or [])[:5]
+                + (r.biochemistry_findings or [])[:5]
+                + (r.literature_findings or [])[:5]
+            )
+            rounds_text.append(
+                f"### Round {r.round_number} (direction: {r.direction or 'N/A'})\n"
+                f"PI summary: {(r.pi_summary or 'N/A')[:600]}\n"
+                f"Findings: {'; '.join(str(f) for f in all_findings) if all_findings else 'None'}\n"
+                f"Suggested future work (next_steps): {'; '.join((r.next_steps or [])[:10]) if r.next_steps else 'None'}"
+            )
+        accumulated = "\n\n".join(rounds_text) if rounds_text else "None"
+
+        try:
+            current_raw_text = json.dumps(current_agent_raw, ensure_ascii=False, default=str)
+        except Exception:
+            current_raw_text = str(current_agent_raw)
+        # Safety cap on raw dump (~24K chars) to avoid runaway prompts
+        current_raw_text = current_raw_text[:24000]
+
+        prompt = f"""You are the PI performing a cross-modal mechanism audit. Correlate evidence ACROSS the four data modalities (biochemistry, pathology, bioinformatics, literature) and propose candidate biological mechanisms, each with honestly-graded evidence.
+
+## Project Context
+Project: {state.name}
+Research objective: {state.initial_instruction}
+Current research direction: {current_direction or "N/A"}
+
+## Accumulated Round Results
+{accumulated}
+
+## Current Round Agent Results (raw)
+{current_raw_text or "None"}
+
+## Literature Context (current round, bounded)
+{literature_context or "None"}
+
+## Biochemistry Raw Measurements (current round)
+{biochemistry_raw or "None"}
+
+## Output JSON Schema
+{{
+    "matrix_markdown": "Markdown table string",
+    "candidates": [{{
+        "theme": "...",
+        "mechanism_statement": "...",
+        "supporting_evidence": [{{"source": "biochemistry|pathology|bioinformatics|literature", "evidence": "concrete observation", "strength": "strong|moderate|weak", "limitation": "..."}}],
+        "evidence_consistency": "high|medium|low|conflicting",
+        "confidence": "high|medium|low",
+        "novelty_relative_to_current_direction": "high|medium|low",
+        "relation_to_current_direction": "central|complementary|downstream|alternative|uncovered",
+        "missing_evidence": ["..."],
+        "report_recommendation": "headline|secondary|future_direction|do_not_emphasize"
+    }}],
+    "excluded_or_low_support_themes": ["..."]
+}}
+
+## Constraints
+- Do NOT use any preset mechanism names, pathway names, gene sets, or example mechanism categories. Derive ALL row labels and mechanism statements from the evidence only. You MAY cite specific genes, pathways, PMIDs, or values that appear in the input evidence.
+- The matrix_markdown column headers must reflect the four agent sources plus an evidence-consistency column, in the same language as this prompt. Do not hardcode labels.
+- Each candidate must draw evidence from at least TWO different sources, and at least one must be an experimental-data agent (biochemistry, pathology, or bioinformatics) — not purely literature.
+- Each supporting_evidence item must cite a concrete observation (value, gene, pathway, morphological feature, PMID), not a vague summary.
+- STRICT evidentiary separation: items that appear only as suggested future experiments (in next_steps or data_requests) can ONLY populate missing_evidence, never supporting_evidence. A candidate built mainly from suggested future experiments must have confidence="low" and report_recommendation="future_direction" unless independent observed data also supports it.
+- Populate missing_evidence for every candidate so the report can present mechanisms as "supported but incomplete" rather than conclusive.
+- Return a SINGLE JSON object. Do NOT include example candidates or invented mechanisms.
+"""
+
+        response = await self.chat(prompt, temperature=0.3)
+        return self._parse_cross_modal_response(response)
+
+    def _parse_cross_modal_response(self, response: str) -> "CrossModalSynthesis":
+        from ..models.schemas import CrossModalSynthesis, CrossModalMechanismCandidate
+        data = self._safe_parse_json(response, default=None)
+        if not isinstance(data, dict) or "parse_error" in data:
+            # Entire response unparseable: keep raw text capped at 20K chars
+            raw = data.get("raw_response", response) if isinstance(data, dict) else response
+            return CrossModalSynthesis(
+                matrix_markdown=(raw or "")[:20000],
+                candidates=[],
+                excluded_or_low_support_themes=[],
+            )
+        matrix = data.get("matrix_markdown")
+        if not isinstance(matrix, str):
+            matrix = ""
+        candidates = []
+        for entry in (data.get("candidates") or []):
+            try:
+                candidates.append(CrossModalMechanismCandidate(**entry))
+            except Exception:
+                logger.warning("[PI] Skipping unparseable cross-modal candidate entry")
+                continue
+        excluded = data.get("excluded_or_low_support_themes") or []
+        if not isinstance(excluded, list):
+            excluded = []
+        return CrossModalSynthesis(
+            matrix_markdown=matrix,
+            candidates=candidates,
+            excluded_or_low_support_themes=excluded,
+        )
+
     async def generate_final_summary(self, state: AnalysisState) -> str:
         """
         Generate final summary of the entire analysis
@@ -3081,7 +3214,55 @@ INNOVATION PHASE — focused synthesis:
 **Literature findings**: {', '.join(str(f) for f in result.literature_findings) if result.literature_findings else 'None'}
 **PI Summary**: {result.pi_summary}
 """)
-        
+
+        # Cross-modal mechanism candidate context (primary; lightweight literature fallback).
+        # O5: gate on at least one *candidate*, not merely a CrossModalSynthesis object.
+        # A synthesis with an empty candidates list carries no narrative value, so fall
+        # back to the lightweight literature summary instead of emitting an empty header.
+        cross_modal_block = ""
+        # O5 + consistency with planning.py: filter out do_not_emphasize candidates
+        # from the final summary narrative (they remain in the appendix for traceability).
+        has_candidates = any(
+            (r.cross_modal_synthesis and any(
+                c.report_recommendation != "do_not_emphasize"
+                for c in r.cross_modal_synthesis.candidates
+            ))
+            for r in state.round_results
+        )
+        if has_candidates:
+            cm_parts = ["\n## Cross-Modal Mechanism Candidates (persisted audit)"]
+            for r in state.round_results:
+                cms = r.cross_modal_synthesis
+                if not cms or not cms.candidates:
+                    continue
+                displayable = [c for c in cms.candidates if c.report_recommendation != "do_not_emphasize"]
+                if not displayable:
+                    continue
+                cm_parts.append(f"\n### From Round {r.round_number}")
+                for c in displayable:
+                    ev = "; ".join(
+                        f"{e.source}: {e.evidence} ({e.strength})" for e in c.supporting_evidence
+                    ) or "N/A"
+                    cm_parts.append(
+                        f"- **{c.theme}** — {c.mechanism_statement}\n"
+                        f"  Evidence: {ev}\n"
+                        f"  Confidence: {c.confidence}; consistency: {c.evidence_consistency}; "
+                        f"relation: {c.relation_to_current_direction}; recommendation: {c.report_recommendation}\n"
+                        f"  Missing evidence: {'; '.join(c.missing_evidence) or 'None'}"
+                    )
+            cross_modal_block = "\n".join(cm_parts)
+        else:
+            # Fallback: lightweight literature context summary
+            lit_parts = []
+            for rep in state.literature_reports:
+                excerpt = (rep.report or "")[:500]
+                sigs = ""
+                if rep.mechanism_signals:
+                    sigs = " | signals: " + "; ".join(s.mechanism for s in rep.mechanism_signals)
+                lit_parts.append(f"- {rep.topic}: {excerpt}{sigs}")
+            if lit_parts:
+                cross_modal_block = "\n## Literature Context Summary\n" + "\n".join(lit_parts)
+
         prompt = f"""
 Based on all the analysis results below, write a complete analysis report:
 
@@ -3091,6 +3272,7 @@ Research Objective: {state.initial_instruction}
 
 ## Results from All Rounds
 {''.join(rounds_summary)}
+{cross_modal_block}
 
 Please write a well-structured analysis report including:
 1. Research Overview
@@ -3101,6 +3283,9 @@ Please write a well-structured analysis report including:
 3. Molecular Mechanism Analysis
 4. Conclusions
 5. Limitations and Future Directions
+6. Cross-Modal Mechanism Candidates: for any candidate above, present it with its
+   evidence sources, confidence, and explicitly labeled evidence gaps. Present
+   low-confidence candidates as "hypotheses with evidence gaps", NOT confirmed conclusions.
 
 Please write in academic paper style.
 """

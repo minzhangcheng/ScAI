@@ -3,6 +3,50 @@ from typing import Dict, Any, List, Optional
 
 from backend.utils.report_html import _safe_parse_json
 
+_REPORT_RECO_ORDER = {"headline": 0, "secondary": 1, "future_direction": 2}
+
+_CLOSING_SECTION_MARKERS = (
+    "conclusion", "reference", "limitation", "future",
+    "结论", "参考文献", "局限", "展望", "未来",
+)
+
+
+def insert_cross_modal_section(plan, round_summaries):
+    """Insert a Cross-Modal Mechanism Candidates section into the report plan.
+
+    Only candidates whose ``report_recommendation`` is not ``do_not_emphasize``
+    are included.  The section is placed just before the first closing section
+    (conclusion / references / limitations / future directions, including
+    Chinese equivalents).  The input *plan* dict is **not** mutated.
+    """
+    displayable = []
+    for rs in (round_summaries or []):
+        for c in (rs.get("cross_modal_candidates") or []):
+            if c.get("report_recommendation") != "do_not_emphasize":
+                displayable.append(c)
+    if not displayable:
+        return plan
+    displayable.sort(key=lambda c: _REPORT_RECO_ORDER.get(c.get("report_recommendation"), 1))
+    section = {
+        "title": "Cross-Modal Mechanism Candidates",
+        "analysis_type": "cross_modal",
+        "description": "Candidate mechanisms supported by evidence across multiple modalities, with labeled evidence strength and gaps.",
+        "existing_figures": [],
+        "existing_tables": [],
+        "cross_modal_candidates": displayable,
+    }
+    sections = list(plan.get("sections") or [])
+    insert_at = len(sections)
+    for i, s in enumerate(sections):
+        title = (s.get("title", "") or "").lower()
+        if any(k in title for k in _CLOSING_SECTION_MARKERS):
+            insert_at = i
+            break
+    sections.insert(insert_at, section)
+    new_plan = dict(plan)
+    new_plan["sections"] = sections
+    return new_plan
+
 
 class PlanningMixin:
     """Provides report planning and section generation methods."""
@@ -328,6 +372,8 @@ Then create sections in this EXACT order.
 
                 plan["_existing_figures"] = existing_figures
                 plan["_existing_tables"] = existing_tables
+                from .analysis_log import build_round_summaries
+                plan = insert_cross_modal_section(plan, build_round_summaries(state))
                 return plan
             else:
                 logger.warning(
@@ -339,7 +385,9 @@ Then create sections in this EXACT order.
 
         # Fallback to auto-assignment based on figure types
         logger.warning("Using fallback plan (auto-assignment by figure type)")
-        return self._create_fallback_plan_with_existing_figures(state, existing_figures)
+        from .analysis_log import build_round_summaries
+        fallback = self._create_fallback_plan_with_existing_figures(state, existing_figures)
+        return insert_cross_modal_section(fallback, build_round_summaries(state))
 
     async def _generate_section_from_existing_figures(
         self,
@@ -368,6 +416,25 @@ Then create sections in this EXACT order.
         analysis_type = section_plan.get("analysis_type", "general")
         existing_figures = section_plan.get("existing_figures", [])
         existing_tables = section_plan.get("existing_tables", [])
+        cross_modal_candidates = section_plan.get("cross_modal_candidates", [])
+        cross_modal_context = ""
+        if cross_modal_candidates:
+            lines = []
+            for c in cross_modal_candidates:
+                lines.append(
+                    f"- Theme: {c.get('theme','')}\n"
+                    f"  Mechanism: {c.get('mechanism_statement','')}\n"
+                    f"  Confidence: {c.get('confidence','low')}; "
+                    f"relation to current direction: {c.get('relation_to_current_direction','uncovered')}; "
+                    f"recommendation: {c.get('report_recommendation','future_direction')}"
+                )
+            cross_modal_context = (
+                "\n## Cross-Modal Mechanism Candidates (write the narrative around these)\n"
+                "Present EACH candidate below. For low/medium-confidence candidates, frame them "
+                "explicitly as hypotheses with evidence gaps — NOT confirmed conclusions. Order: "
+                "headline → secondary → future_direction.\n"
+                + "\n".join(lines)
+            )
         provided_narrative = section_plan.get("narrative", "")
 
         logger.info(f"Generating section '{section_title}' with {len(existing_figures)} figures, {len(existing_tables)} tables")
@@ -464,6 +531,7 @@ Objective: {state.initial_instruction}
 
 ## Cluster Annotations
 {findings.get('cluster_annotations', 'Not available')}
+{cross_modal_context}
 
 ## Your Task
 Write in English

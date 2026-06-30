@@ -377,6 +377,29 @@ export function ResultsPanel() {
                           </ul>
                         </div>
                       )}
+                      {(() => {
+                        const displayable = (round.crossModalCandidates ?? []).filter(
+                          (c) => c.report_recommendation !== 'do_not_emphasize'
+                        )
+                        if (displayable.length === 0) return null
+                        return (
+                          <div className="p-3 border border-purple-100 bg-purple-50/50 rounded-lg">
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="text-sm font-medium text-purple-900">{t('crossModalCandidates')}</span>
+                            </div>
+                            <ul className="text-sm text-purple-800 space-y-1 list-disc ml-5">
+                              {displayable.map((c, i) => (
+                                <li key={i}>
+                                  <span className="font-medium">{c.theme}</span> — {c.mechanism_statement}{' '}
+                                  <span className="text-gray-500">
+                                    ({t('crossModalConfidence')}: {c.confidence}; {t('crossModalRelation')}: {c.relation_to_current_direction})
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )
+                      })()}
                     </div>
                   </div>
                 )}

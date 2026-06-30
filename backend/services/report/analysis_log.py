@@ -6,6 +6,33 @@ from typing import Dict, Any, List
 from backend.models.schemas import AnalysisState
 
 
+def build_round_summaries(state):
+    """Per-round summary dicts for the detailed report, including the simplified
+    cross-modal candidate subset (no matrix_markdown / no full evidence)."""
+    summaries = []
+    for r in state.round_results:
+        candidates = []
+        if r.cross_modal_synthesis:
+            for c in r.cross_modal_synthesis.candidates:
+                candidates.append({
+                    "theme": c.theme,
+                    "mechanism_statement": c.mechanism_statement,
+                    "confidence": c.confidence,
+                    "relation_to_current_direction": c.relation_to_current_direction,
+                    "report_recommendation": c.report_recommendation,
+                })
+        summaries.append({
+            "round_number": r.round_number,
+            "pi_summary": r.pi_summary or "",
+            "pathology_findings": r.pathology_findings or [],
+            "bioinformatics_findings": r.bioinformatics_findings or [],
+            "biochemistry_findings": r.biochemistry_findings or [],
+            "literature_findings": r.literature_findings or [],
+            "cross_modal_candidates": candidates,
+        })
+    return summaries
+
+
 class AnalysisLogMixin:
     """Provides analysis log building methods for report generation."""
 
@@ -360,16 +387,7 @@ class AnalysisLogMixin:
                 })
 
         # 2. Build round summaries from round_results
-        round_summaries = []
-        for r in state.round_results:
-            round_summaries.append({
-                "round_number": r.round_number,
-                "pi_summary": r.pi_summary or "",
-                "pathology_findings": r.pathology_findings or [],
-                "bioinformatics_findings": r.bioinformatics_findings or [],
-                "biochemistry_findings": r.biochemistry_findings or [],
-                "literature_findings": r.literature_findings or [],
-            })
+        round_summaries = build_round_summaries(state)
 
         # 3. Collect publication figure metadata
         pub_figures = []

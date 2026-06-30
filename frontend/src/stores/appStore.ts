@@ -112,6 +112,7 @@ export interface RoundResult {
   bioinformaticsFindings: string[]
   biochemistryFindings: string[]
   literatureFindings: string[]
+  crossModalCandidates: import('../types').CrossModalCandidate[]
 }
 
 export interface Session {

@@ -106,6 +106,84 @@ def _should_build_innovation_segment(analysis_state, round_result) -> bool:
 class SynthesisMixin:
     """Mixin providing synthesis, user-input, and convergence methods. Composed into SingleCellAnalysisWorkflow."""
 
+    _LIT_AUDIT_CHAR_CAP = 32000  # ~8K tokens
+
+    def _build_literature_audit_context(self, state) -> str:
+        """Bounded literature context for the cross-modal audit. Priority:
+        (1) persisted mechanism_signals, (2) reference titles/abstracts,
+        (3) report body excerpt. Hard-capped.
+
+        IMPORTANT (E2): references and abstracts are read from the persisted
+        `analysis_state.literature_reports` objects, NOT from
+        `state["literature_result"]`. The combined `literature_result` dict built by
+        `_literature_research` holds only topics/findings/reports/search_modes — it has
+        NO "references" key (verified). The per-topic references are persisted on each
+        LiteratureReport, which also survive snapshot restore / session reload.
+        """
+        analysis_state = state["analysis_state"]
+        parts = []
+
+        # (1) mechanism_signals from persisted LiteratureReports
+        for rep in analysis_state.literature_reports:
+            if rep.mechanism_signals:
+                for sig in rep.mechanism_signals:
+                    parts.append(
+                        f"- Mechanism: {sig.mechanism} "
+                        f"(PMIDs: {', '.join(sig.supporting_pmids) or 'N/A'}; "
+                        f"type: {sig.evidence_type}); relevance: {sig.relevance_to_current_study}; "
+                        f"links: {', '.join(sig.observed_data_links) or 'N/A'}; "
+                        f"limitations: {', '.join(sig.limitations) or 'N/A'}"
+                    )
+
+        # (2) reference titles/abstracts from persisted LiteratureReports.
+        # Abstracts are NOT guaranteed (PubMed mode may drop them; Deep Research has none),
+        # so degrade gracefully. Bound to the most recent reports to approximate the
+        # current round; the hard char cap below is the real bound.
+        ref_count = 0
+        for rep in analysis_state.literature_reports[-4:]:
+            for ref in (rep.references or []):
+                if not isinstance(ref, dict):
+                    continue
+                title = ref.get("title", "")
+                abstract = ref.get("abstract", "")  # may be absent — degrade gracefully
+                pmid = ref.get("pmid", "")
+                line = f"- {title}"
+                if pmid:
+                    line += f" (PMID: {pmid})"
+                if abstract:
+                    line += f": {abstract[:400]}"
+                parts.append(line)
+                ref_count += 1
+                if ref_count >= 30:
+                    break
+            if ref_count >= 30:
+                break
+
+        # (3) current round's report body excerpts (this key DOES exist on literature_result)
+        lit_result = state.get("literature_result") or {}
+        for report_body in (lit_result.get("reports") or [])[:3]:
+            if report_body:
+                parts.append(f"Report excerpt: {report_body[:2000]}")
+
+        text = "\n".join(parts)
+        return text[:self._LIT_AUDIT_CHAR_CAP]
+
+    def _build_biochemistry_raw_context(self, state) -> str:
+        """Raw biochemistry measurements + manual indicators for the current round."""
+        analysis_state = state["analysis_state"]
+        parts = []
+        bio_result = state.get("biochemistry_result") or {}
+        findings = bio_result.get("findings") or []
+        if findings:
+            parts.append("Findings: " + "; ".join(str(f) for f in findings))
+        if analysis_state.biochemistry_indicators:
+            for ind in analysis_state.biochemistry_indicators[:50]:
+                parts.append(
+                    f"- {ind.indicator}: {ind.value}{ind.unit or ''} "
+                    f"(ref: {ind.reference_range or 'N/A'}; {ind.interpretation or ''})"
+                )
+        return ("\n".join(parts))[:16000]
+
     def _exploration_round_succeeded(self, state) -> bool:
         """P1-12: whitelist — exploration succeeded ONLY when bioinformatics
         explicitly reported status='completed'. All other statuses
@@ -187,6 +265,28 @@ class SynthesisMixin:
             else:
                 agent_results[agent_name] = json.dumps(findings, ensure_ascii=False)
 
+        # Cross-modal audit (Gap 0/1/2 fix) — innovation rounds only, non-critical.
+        cms = None
+        if analysis_state.analysis_phase == AnalysisPhase.INNOVATION:
+            try:
+                current_agent_raw = {
+                    "biochemistry": state.get("biochemistry_result") or {},
+                    "pathology": state.get("pathology_result") or {},
+                    "bioinformatics": state.get("bioinformatics_result") or {},
+                }
+                literature_context = self._build_literature_audit_context(state)
+                biochemistry_raw = self._build_biochemistry_raw_context(state)
+                cms = await self.pi_agent.build_cross_modal_synthesis(
+                    state=analysis_state,
+                    current_direction=analysis_state.current_round_direction,
+                    current_agent_raw=current_agent_raw,
+                    literature_context=literature_context,
+                    biochemistry_raw=biochemistry_raw,
+                )
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] cross-modal synthesis failed (non-critical): {e}")
+                cms = None
+
         round_result = await self.pi_agent.synthesize_round(
             analysis_state,
             pathology_result=agent_results["pathology"],
@@ -194,7 +294,10 @@ class SynthesisMixin:
             biochemistry_result=agent_results["biochemistry"],
             literature_result=agent_results["literature"],
             research_direction=analysis_state.current_round_direction,
+            cross_modal_context=(cms.matrix_markdown if cms else ""),
         )
+        if cms is not None:
+            round_result.cross_modal_synthesis = cms
 
         logger.info(f"[{self.session_id}] Round {round_result.round_number} synthesis complete: new_findings={round_result.new_findings}, {len(round_result.next_steps)} next steps")
 
@@ -373,6 +476,17 @@ class SynthesisMixin:
         
         # Send round summary with data requests
         effective_max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
+        cross_modal_candidates = []
+        if round_result.cross_modal_synthesis:
+            for c in round_result.cross_modal_synthesis.candidates:
+                cross_modal_candidates.append({
+                    "theme": c.theme,
+                    "mechanism_statement": c.mechanism_statement,
+                    "confidence": c.confidence,
+                    "relation_to_current_direction": c.relation_to_current_direction,
+                    "report_recommendation": c.report_recommendation,
+                })
+
         round_summary = {
             "round": round_result.round_number,
             "max_rounds": effective_max_rounds,
@@ -387,6 +501,7 @@ class SynthesisMixin:
                 *round_result.biochemistry_findings,
                 *round_result.literature_findings,
             ],
+            "cross_modal_candidates": cross_modal_candidates,
             "data_requests": data_requests,
             "status": "waiting_input"
         }
