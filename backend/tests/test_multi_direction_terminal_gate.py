@@ -82,8 +82,8 @@ async def test_terminal_multi_direction_synthesis_shows_round_wait_gate():
         directions_queue=[dir3],
         round_results=[
             RoundResult(round_number=1, phase="exploration"),
-            RoundResult(round_number=2, phase="innovation", direction="Direction one", pi_summary="One"),
-            RoundResult(round_number=3, phase="innovation", direction="Direction two", pi_summary="Two"),
+            RoundResult(round_number=2, phase="innovation", direction="Direction one", pi_summary="One", bioinformatics_findings=["finding"], evidence_status="substantive"),
+            RoundResult(round_number=3, phase="innovation", direction="Direction two", pi_summary="Two", bioinformatics_findings=["finding"], evidence_status="substantive"),
         ],
     )
     workflow = DummyWorkflow()

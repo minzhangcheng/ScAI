@@ -152,7 +152,8 @@ async def delete_session(session_id: str, request: Request):
         last_save_times.pop(session_id, None)
         from backend.state import release_session_lock_slot
         release_session_lock_slot(session_id)
-        from backend.routes.reports import clear_generation_pending
+        from backend.routes.reports import clear_detailed_report_cache, clear_generation_pending
+        clear_detailed_report_cache(session_id)
         clear_generation_pending(session_id)
 
     def _delete_from_disk():

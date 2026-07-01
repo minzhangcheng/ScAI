@@ -168,6 +168,12 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     logging.info(f"Logging initialized. Log directory: {LOG_DIR}")
     logging.info(f"Log files: app.log, error.log, debug.log")
 
+# Snapshot size policy
+MAX_SNAPSHOT_KERNEL_PKL_BYTES = 2 * 1024 * 1024 * 1024
+MAX_SESSION_SNAPSHOT_BYTES = 20 * 1024 * 1024 * 1024
+SNAPSHOT_EXCLUDED_WORKSPACE_PATTERNS = ("core.*", "*.tmp", "*.lock")
+
+
 class APIConfig(BaseModel):
     """API configuration for various services"""
     api_key: str = ""  # Main LLM API key (OpenRouter, OpenAI, etc.)

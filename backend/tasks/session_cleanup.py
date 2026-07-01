@@ -73,9 +73,9 @@ async def _evict_single_session(
             last_save_times.pop(session_id, None)
             session_locks.pop(session_id, None)
             report_websockets.pop(session_id, None)
-            detailed_reports.pop(session_id, None)
-            # Clean up report generation pending flag
-            from backend.routes.reports import clear_generation_pending
+            # Clean up report caches and pending flags
+            from backend.routes.reports import clear_detailed_report_cache, clear_generation_pending
+            clear_detailed_report_cache(session_id)
             clear_generation_pending(session_id)
 
     async with chat_task_lock:

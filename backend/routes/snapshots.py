@@ -27,6 +27,12 @@ from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
 from backend.utils.snapshot import SnapshotManager
 from backend.config import get_session_states
+from backend.workflow.direction_coverage import clone_round_results_for_branch
+from backend.workflow.restore_targets import (
+    SNAPSHOT_RESUME_TARGET,
+    stable_restore_branch_id,
+    stable_restore_branch_label,
+)
 from backend.routes._helpers import teardown_running_workflow
 
 logger = logging.getLogger(__name__)
@@ -86,6 +92,32 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
     # Move the lineage head to the restore target so forward snapshots after the
     # branch's first one keep chaining onto the restored point.
     restored_state.last_snapshot_id = snapshot.id
+
+    target = SNAPSHOT_RESUME_TARGET.get(str(snapshot.phase))
+    if target:
+        restored_state.restore_resume_phase = str(snapshot.phase)
+        restored_state.restore_resume_kind = target["kind"]
+        restored_state.restore_resume_node = target["node"]
+        restored_state.restore_resume_gate = target["gate"]
+    else:
+        restored_state.restore_resume_phase = str(snapshot.phase)
+        restored_state.restore_resume_kind = None
+        restored_state.restore_resume_node = None
+        restored_state.restore_resume_gate = None
+
+    # Restore creates a branch lineage by default, even from the latest main
+    # snapshot. This prevents restored analysis from silently overwriting main
+    # round_results or main report artifacts. A future explicit "continue main"
+    # restore mode must opt into main-line mutation deliberately.
+    restored_state.restore_branch_label = stable_restore_branch_label(snapshot.id, snapshot.branch_label)
+    restored_state.restore_branch_id = stable_restore_branch_id(snapshot.id, restored_state.restore_branch_label)
+    restored_state.round_results = clone_round_results_for_branch(
+        restored_state.round_results,
+        branch_id=restored_state.restore_branch_id,
+        branch_label=restored_state.restore_branch_label,
+        source_snapshot_id=snapshot.id,
+        source_lineage_id=snapshot.branch_id or "main",
+    )
 
     # Phase-aware status setting
     phase = snapshot.phase

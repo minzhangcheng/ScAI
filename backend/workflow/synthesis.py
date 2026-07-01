@@ -11,9 +11,17 @@ from ..constants import (
     StateSyncChangeType,
     WaitInputReason,
 )
-from ..models.schemas import AgentType, AnalysisPhase, AnalysisState, TaskStatus
+from ..models.schemas import AgentType, AnalysisPhase, AnalysisState, RoundResult, TaskStatus
 from ..utils.direction_evidence import build_fallback_direction_evidence
 from ..utils.llm_client import UpstreamExhaustedError
+from .direction_coverage import (
+    build_result_identity_key,
+    current_lineage_id,
+    direction_coverage_status,
+    has_substantive_findings,
+    normalize_direction_key,
+    normalize_legacy_round_result,
+)
 from .helpers import wait_with_skip_time
 
 if TYPE_CHECKING:
@@ -22,6 +30,23 @@ else:
     WorkflowState = dict
 
 logger = logging.getLogger(__name__)
+
+
+def build_disabled_pathology_warning(files: list[dict], pathology_enabled: bool) -> str:
+    """Return a modality-boundary warning when image files exist but pathology is disabled."""
+    if pathology_enabled:
+        return ""
+    has_image_input = any(
+        (f.get("data_type", "").lower() in {"image", "user_upload", "png", "jpg", "jpeg", "tiff"})
+        or str(f.get("filename", "")).lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff"))
+        for f in files
+    )
+    if not has_image_input:
+        return ""
+    return (
+        "Image inputs are present while the pathology agent is disabled. "
+        "Image-derived observations will be treated as non-pathology descriptive evidence unless pathology analysis is enabled."
+    )
 
 
 def classify_exploration_failure(bio) -> str:
@@ -33,6 +58,127 @@ def classify_exploration_failure(bio) -> str:
     if isinstance(bio, dict) and bio.get("error"):
         return "analysis_error"
     return "did_not_converge"
+
+
+FAILED_AGENT_STATUSES = frozenset({
+    "failed",
+    "error",
+    "timeout",
+    "max_steps_reached",
+})
+
+SKIPPED_AGENT_STATUSES = frozenset({
+    "skipped",
+})
+
+PARTIAL_AGENT_STATUSES = frozenset({
+    "partial",
+    "completed_with_fallback",
+})
+
+CORE_ROUND_AGENT_RESULT_KEYS = (
+    "bioinformatics_result",
+    "literature_result",
+)
+
+OPTIONAL_ROUND_AGENT_RESULT_KEYS = (
+    "pathology_result",
+    "biochemistry_result",
+)
+
+CORE_FAILED_NODES = frozenset({
+    "bioinformatics_analysis",
+    "literature_research",
+})
+
+
+def _agent_result_status(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    if result.get("error"):
+        return "failed"
+    return str(result.get("status") or "").strip().lower()
+
+
+def _statuses_for_keys(state: Dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    return [
+        _agent_result_status(state.get(key))
+        for key in keys
+        if isinstance(state.get(key), dict)
+    ]
+
+
+def derive_round_completion_status(state: Dict[str, Any], result: RoundResult) -> RoundResult:
+    """Populate RoundResult completion fields from actual agent execution state.
+
+    Core bioinformatics/literature failures block direction completion. Optional
+    pathology/biochemistry skipped/no-data results do not block completion when
+    core evidence exists, but optional hard failures downgrade the round to
+    partial so the report can disclose degraded modality coverage.
+    """
+    failed_node = state.get("failed_node")
+    has_evidence = has_substantive_findings(result)
+
+    if failed_node in CORE_FAILED_NODES:
+        result.round_status = "partial" if has_evidence else "skipped"
+        result.evidence_status = "substantive" if has_evidence else "failed"
+        return result
+
+    core_statuses = _statuses_for_keys(state, CORE_ROUND_AGENT_RESULT_KEYS)
+    optional_statuses = _statuses_for_keys(state, OPTIONAL_ROUND_AGENT_RESULT_KEYS)
+
+    has_core_failed = any(status in FAILED_AGENT_STATUSES for status in core_statuses)
+    has_core_skipped = any(status in SKIPPED_AGENT_STATUSES for status in core_statuses)
+    has_core_partial = any(status in PARTIAL_AGENT_STATUSES for status in core_statuses)
+    has_optional_failed = any(status in FAILED_AGENT_STATUSES for status in optional_statuses)
+    has_optional_partial = any(status in PARTIAL_AGENT_STATUSES for status in optional_statuses)
+
+    if has_core_failed:
+        result.round_status = "partial" if has_evidence else "failed"
+        result.evidence_status = "substantive" if has_evidence else "failed"
+        return result
+
+    if has_core_skipped:
+        result.round_status = "partial" if has_evidence else "skipped"
+        result.evidence_status = "substantive" if has_evidence else "failed"
+        return result
+
+    if has_core_partial or has_optional_failed or has_optional_partial:
+        result.round_status = "partial"
+        result.evidence_status = "substantive" if has_evidence else "empty"
+        return result
+
+    result.round_status = "completed"
+    result.evidence_status = "substantive" if has_evidence else "empty"
+    return result
+
+
+def _upsert_round_result(
+    results: list[RoundResult],
+    result: RoundResult,
+    *,
+    lineage_id: str,
+    branch_id: Optional[str],
+    branch_label: Optional[str],
+    restored_from_snapshot_id: Optional[str],
+) -> None:
+    result.lineage_id = lineage_id or "main"
+    result.branch_id = branch_id
+    result.branch_label = branch_label
+    result.restored_from_snapshot_id = restored_from_snapshot_id
+    result.direction_key = normalize_direction_key(result.direction)
+    result.result_identity_key = build_result_identity_key(
+        result.lineage_id,
+        result.phase,
+        result.round_number,
+        result.direction_key,
+    )
+    normalize_legacy_round_result(result)
+    for idx, existing in enumerate(results):
+        if getattr(existing, "result_identity_key", "") == result.result_identity_key:
+            results[idx] = result
+            return
+    results.append(result)
 
 
 def _should_force_next_round(analysis_state: AnalysisState) -> bool:
@@ -77,36 +223,27 @@ def _multi_direction_analysis_completed(analysis_state) -> bool:
         return False
     if analysis_state.multi_direction_correlation is None:
         return False
-    innovation_rounds_done = sum(
-        1 for r in analysis_state.round_results if r.phase == "innovation"
-    )
-    return innovation_rounds_done >= len(chosen)
+    target_lineage = current_lineage_id(analysis_state)
+    return direction_coverage_status(analysis_state, lineage_id=target_lineage).complete
 
 
 def _should_run_direction_correlation(analysis_state) -> bool:
     """Whether to run cross-direction correlation analysis.
 
-    Criterion: all chosen directions have completed their innovation rounds,
-    measured by 'completed innovation rounds >= number of chosen directions'
-    rather than 'directions_queue is empty'. Under P1-1 peek-commit the final
-    direction's queue entry is only popped on the next round's init, but the
-    terminal round has no next init, so the old empty-queue criterion would
-    silently skip this analysis.
-
-    Called after round_results.append(round_result), so the current round
-    is already counted.
+    Criterion: coverage.complete from direction_coverage_status, which is
+    lineage-aware and checks substantive findings + pi_summary per direction,
+    not a raw round count. Under P1-1 peek-commit the final direction's queue
+    entry is only popped on the next round's init, but the terminal round has
+    no next init, so the old empty-queue criterion would silently skip this.
     """
-    chosen = analysis_state.user_chosen_directions
-    if len(chosen) <= 1:
-        return False
-    if analysis_state.analysis_phase != AnalysisPhase.INNOVATION:
-        return False
-    if analysis_state.multi_direction_correlation is not None:
-        return False
-    innovation_rounds_done = sum(
-        1 for r in analysis_state.round_results if r.phase == "innovation"
+    target_lineage = current_lineage_id(analysis_state)
+    coverage = direction_coverage_status(analysis_state, lineage_id=target_lineage)
+    return (
+        analysis_state.analysis_phase == AnalysisPhase.INNOVATION
+        and len(analysis_state.user_chosen_directions) > 1
+        and coverage.complete
+        and analysis_state.multi_direction_correlation is None
     )
-    return innovation_rounds_done >= len(chosen)
 
 
 def _should_build_innovation_segment(analysis_state, round_result) -> bool:
@@ -125,6 +262,31 @@ def _should_build_innovation_segment(analysis_state, round_result) -> bool:
     return not any(
         s.phase == phase for s in analysis_state.detailed_report_segments
     )
+
+
+def _build_directions_with_results_for_correlation(analysis_state: AnalysisState) -> list[dict]:
+    target_lineage = current_lineage_id(analysis_state)
+    coverage = direction_coverage_status(analysis_state, lineage_id=target_lineage)
+    direction_summaries: Dict[str, str] = {}
+
+    for raw in analysis_state.round_results:
+        result = normalize_legacy_round_result(raw)
+        if result.lineage_id != target_lineage:
+            continue
+        if result.direction_key in coverage.completed_keys:
+            direction_summaries[result.direction_key] = result.pi_summary or ""
+
+    directions_with_results = []
+    for chosen_dir in analysis_state.user_chosen_directions:
+        key = normalize_direction_key(chosen_dir.get("direction", ""))
+        if key not in coverage.completed_keys:
+            continue
+        directions_with_results.append({
+            "direction": chosen_dir.get("direction", ""),
+            "notes": chosen_dir.get("notes", ""),
+            "round_summary": direction_summaries.get(key, ""),
+        })
+    return directions_with_results
 
 
 class SynthesisMixin:
@@ -254,6 +416,17 @@ class SynthesisMixin:
     async def _pi_synthesis(self, state: WorkflowState) -> WorkflowState:
         """PI synthesizes all results and prepares round summary for user"""
         analysis_state = state["analysis_state"]
+
+        provider = getattr(self, "_settings_provider", None)
+        pathology_enabled = True
+        if provider is not None:
+            model = provider.get_model("pathology")
+            pathology_enabled = bool(model and model.strip())
+        file_dicts = [f.model_dump() for f in analysis_state.data_files]
+        file_dicts.extend(analysis_state.pending_uploaded_files)
+        modality_warning = build_disabled_pathology_warning(file_dicts, pathology_enabled)
+        if modality_warning:
+            await self._send_message("modality_warning", modality_warning, AgentType.PI)
 
         skip = await self._require_core_agent(state, "pi", "pi_synthesis")
         if skip is not None:
@@ -424,7 +597,16 @@ class SynthesisMixin:
             )
 
         round_result.data_driven_mechanism_programs = (state.get("bioinformatics_result") or {}).get("mechanism_programs", [])
-        analysis_state.round_results.append(round_result)
+        derive_round_completion_status(state, round_result)
+        lineage_id = current_lineage_id(analysis_state)
+        _upsert_round_result(
+            analysis_state.round_results,
+            round_result,
+            lineage_id=lineage_id,
+            branch_id=None if lineage_id == "main" else lineage_id,
+            branch_label=analysis_state.restore_branch_label,
+            restored_from_snapshot_id=analysis_state.last_restored_snapshot_id,
+        )
         # Round is now canonical in round_results; clear the per-round cache
         # so a later snapshot-restored round can't replay stale agent outputs.
         analysis_state.current_round_cache = None
@@ -438,22 +620,7 @@ class SynthesisMixin:
         if _should_run_direction_correlation(analysis_state):
             try:
                 await self._send_message("status", "Analyzing correlations between research directions...", AgentType.PI)
-                # Build directions_with_results by matching direction names (not index)
-                directions_with_results = []
-                innovation_rounds = [r for r in analysis_state.round_results if r.phase == "innovation"]
-                # Build lookup: direction name -> latest round summary
-                direction_summaries: Dict[str, str] = {}
-                for r in innovation_rounds:
-                    if r.direction:
-                        direction_summaries[r.direction] = r.pi_summary or ""
-                for chosen_dir in analysis_state.user_chosen_directions:
-                    dir_name = chosen_dir.get("direction", "")
-                    round_summary = direction_summaries.get(dir_name, "")
-                    directions_with_results.append({
-                        "direction": dir_name,
-                        "notes": chosen_dir.get("notes", ""),
-                        "round_summary": round_summary
-                    })
+                directions_with_results = _build_directions_with_results_for_correlation(analysis_state)
                 correlation = await self.pi_agent.analyze_direction_correlations(
                     analysis_state, directions_with_results
                 )

@@ -201,6 +201,18 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
                 message="Continuing analysis"
             )
         else:
+            if (
+                state.restore_resume_kind == "semantic_gate"
+                and state.restore_resume_gate == "round_wait"
+            ):
+                state.status = TaskStatus.RUNNING
+                await _update_session_cache(session_id, state)
+                await async_save_session(session_id, state)
+                return APIResponse(
+                    success=True,
+                    message="Continuing restored analysis",
+                    data={"needs_reconnect": True, "restored_wait_continuation": True},
+                )
             await _pause_and_restart_ws(session_id, state)
             return APIResponse(
                 success=True,
@@ -224,7 +236,7 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
             await _pause_and_restart_ws(session_id, state)
             return APIResponse(
                 success=True,
-                message="Annotation confirmed, continuing analysis",
+                message="Continuing analysis",
                 data={"needs_reconnect": True},
             )
     elif state.status == TaskStatus.WAITING_PLAN_REVIEW:

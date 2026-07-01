@@ -1,6 +1,7 @@
 """复现并锁定多方向关联分析触发 bug：最后一个方向轮完成时必须触发。"""
 from backend.models.schemas import AnalysisState, AnalysisPhase, RoundResult
 from backend.workflow.synthesis import (
+    _build_directions_with_results_for_correlation,
     _multi_direction_analysis_completed,
     _should_force_next_round,
     _should_run_direction_correlation,
@@ -24,8 +25,22 @@ def _state_with_two_directions():
         multi_direction_correlation=None,
         round_results=[
             RoundResult(round_number=1, phase="exploration"),
-            RoundResult(round_number=2, phase="innovation", direction="Direction one"),
-            RoundResult(round_number=3, phase="innovation", direction="Direction two"),
+            RoundResult(
+                round_number=2,
+                phase="innovation",
+                direction="Direction one",
+                pi_summary="Direction one summary",
+                bioinformatics_findings=["Direction one finding"],
+                evidence_status="substantive",
+            ),
+            RoundResult(
+                round_number=3,
+                phase="innovation",
+                direction="Direction two",
+                pi_summary="Direction two summary",
+                bioinformatics_findings=["Direction two finding"],
+                evidence_status="substantive",
+            ),
         ],
     )
 
@@ -49,7 +64,14 @@ def test_no_trigger_before_last_direction_completes():
         multi_direction_correlation=None,
         round_results=[
             RoundResult(round_number=1, phase="exploration"),
-            RoundResult(round_number=2, phase="innovation", direction="Direction one"),
+            RoundResult(
+                round_number=2,
+                phase="innovation",
+                direction="Direction one",
+                pi_summary="Direction one summary",
+                bioinformatics_findings=["Direction one finding"],
+                evidence_status="substantive",
+            ),
         ],
     )
     assert _should_run_direction_correlation(state) is False
@@ -122,8 +144,107 @@ def test_force_next_round_keeps_pending_queue_before_multi_direction_completion(
         multi_direction_correlation=None,
         round_results=[
             RoundResult(round_number=1, phase="exploration"),
-            RoundResult(round_number=2, phase="innovation", direction="Direction one"),
+            RoundResult(
+                round_number=2,
+                phase="innovation",
+                direction="Direction one",
+                pi_summary="Direction one summary",
+                bioinformatics_findings=["Direction one finding"],
+                evidence_status="substantive",
+            ),
         ],
     )
 
     assert _should_force_next_round(state) is True
+
+
+def _state_with_selected_a_b_c_and_results(completed: list[str]) -> AnalysisState:
+    """Build an INNOVATION state with three chosen directions (A, B, C) and
+    completed round_results for the given completed directions.
+    """
+    results: list[RoundResult] = []
+    for i, direction in enumerate(completed):
+        if not direction:
+            continue
+        results.append(
+            RoundResult(
+                round_number=i + 2,
+                phase="innovation",
+                direction=direction,
+                pi_summary=f"{direction} summary",
+                bioinformatics_findings=[f"{direction} finding"],
+                evidence_status="substantive",
+            )
+        )
+    return AnalysisState(
+        id="s",
+        user_id="u",
+        analysis_phase=AnalysisPhase.INNOVATION,
+        user_chosen_directions=[
+            {"direction": "A", "notes": ""},
+            {"direction": "B", "notes": ""},
+            {"direction": "C", "notes": ""},
+        ],
+        round_results=[RoundResult(round_number=1, phase="exploration")] + results,
+    )
+
+
+def test_correlation_does_not_run_for_duplicate_direction_coverage():
+    state = _state_with_selected_a_b_c_and_results(["A", "B", "B"])
+    assert _should_run_direction_correlation(state) is False
+
+
+def test_correlation_does_not_run_for_failed_non_empty_direction_summary():
+    state = _state_with_selected_a_b_c_and_results(["A", "B"])
+    state.round_results.append(
+        RoundResult(
+            round_number=4,
+            phase="innovation",
+            direction="C",
+            pi_summary="Analysis failed after retries.",
+            bioinformatics_findings=[],
+            round_status="failed",
+            evidence_status="failed",
+        )
+    )
+    assert _should_run_direction_correlation(state) is False
+
+
+def test_force_next_round_keeps_queue_when_coverage_incomplete_despite_duplicate_round_count():
+    state = _state_with_selected_a_b_c_and_results(["A", "B", ""])
+    state.multi_direction_correlation = "stale correlation should not satisfy coverage"
+    state.directions_queue = [{"direction": "C", "notes": ""}]
+    assert _multi_direction_analysis_completed(state) is False
+    assert _should_force_next_round(state) is True
+
+
+def test_direction_correlation_input_uses_target_lineage_summary_only():
+    state = AnalysisState(
+        id="s",
+        user_id="u",
+        analysis_phase=AnalysisPhase.INNOVATION,
+        restore_branch_id="branch-a",
+        user_chosen_directions=[{"direction": "Direction A", "notes": ""}],
+        round_results=[
+            RoundResult(
+                round_number=2,
+                phase="innovation",
+                direction="Direction A",
+                lineage_id="main",
+                pi_summary="main summary must not be used",
+                bioinformatics_findings=["main finding"],
+                evidence_status="substantive",
+            ),
+            RoundResult(
+                round_number=2,
+                phase="innovation",
+                direction="Direction A",
+                lineage_id="branch-a",
+                pi_summary="branch summary",
+                bioinformatics_findings=["branch finding"],
+                evidence_status="substantive",
+            ),
+        ],
+    )
+
+    assert _build_directions_with_results_for_correlation(state)[0]["round_summary"] == "branch summary"

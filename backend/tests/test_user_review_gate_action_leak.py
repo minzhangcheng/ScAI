@@ -60,6 +60,8 @@ def _make_state():
     analysis_state.analysis_phase = SimpleNamespace(value="exploration")
     analysis_state.current_round = 1
     analysis_state.round_wait_seconds = -1
+    analysis_state.auto_approve_plans = False
+    analysis_state.plan_review_wait_seconds = -1
     state = {
         "analysis_state": analysis_state,
         "planning_stage": "stage1",

@@ -14,6 +14,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -24,7 +25,7 @@ from backend.config import (
     SESSION_DIR, REPORTS_DIR, WORKSPACE_DIR, UPLOAD_DIR, UPLOAD_TEMP_DIR,
     get_session_dir, get_session_reports, get_session_workspace, PI_AGENT_NAME,
 )
-from backend.models.schemas import AnalysisState
+from backend.models.schemas import AnalysisState, APIResponse, TaskStatus
 from backend.workflow import _retry_backoff_delay
 
 from backend.state import detailed_reports, report_websockets
@@ -32,6 +33,9 @@ from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import safe_filename, validate_path_within, validate_session_id, slugify_session_name, temp_file_on_error
 from backend.utils.auth import require_session_ownership
 from backend.utils.settings_provider import AgentSettingsProvider
+from backend.services.session_store import async_save_session, update_session_cache as _update_session_cache
+from backend.services.report.paths import resolve_report_output_dir, resolve_report_target_lineage
+from backend.services.report.lineage import build_lineage_report_state
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,26 @@ def _should_skip_in_report_zip(file_path: Path) -> bool:
     if name.endswith(".zip.tmp"):
         return True
     return False
+
+
+def _branch_query(branch_id: Optional[str]) -> str:
+    if not branch_id:
+        return ""
+    return f"?branch_id={quote(branch_id, safe='')}"
+
+
+def _report_cache_key(session_id: str, branch_id: Optional[str]) -> str:
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    if target_lineage_id == "main":
+        return session_id
+    return f"{session_id}:{target_lineage_id}"
+
+
+def _report_cache_key_for_lineage(session_id: str, target_lineage_id: str) -> str:
+    if target_lineage_id == "main":
+        return session_id
+    return f"{session_id}:{target_lineage_id}"
+
 
 router = APIRouter(prefix="/api/session", tags=["reports"])
 
@@ -65,6 +89,14 @@ def clear_generation_pending(session_id: str) -> None:
     """
     _report_generation_pending.discard(session_id)
 
+
+def clear_detailed_report_cache(session_id: str) -> None:
+    """Remove all in-memory detailed report cache entries for a session."""
+    detailed_reports.pop(session_id, None)
+    prefix = f"{session_id}:"
+    for key in list(detailed_reports.keys()):
+        if key.startswith(prefix):
+            detailed_reports.pop(key, None)
 
 
 def _sanitize_nan(obj):
@@ -166,16 +198,21 @@ async def get_annotation_report_html(session_id: str, request: Request):
 
 
 @router.get("/{session_id}/detailed-report/html")
-async def get_detailed_report_html(session_id: str, request: Request):
+async def get_detailed_report_html(session_id: str, request: Request, branch_id: Optional[str] = None):
     """Serve the combined incremental detailed report HTML."""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
-    if not state.detailed_report_html_path:
-        raise HTTPException(status_code=404, detail="Detailed report not yet generated")
-
-    html_path = Path(state.detailed_report_html_path)
+    if not branch_id:
+        if not state.detailed_report_html_path:
+            raise HTTPException(status_code=404, detail="Detailed report not yet generated")
+        html_path = Path(state.detailed_report_html_path)
+    else:
+        target_lineage_id = resolve_report_target_lineage(branch_id)
+        branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+        report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
+        html_path = report_dir / "report.html"
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="Detailed report file not found")
 
@@ -190,17 +227,22 @@ async def get_detailed_report_html(session_id: str, request: Request):
 # ============================================
 
 @router.get("/{session_id}/detailed-report")
-async def get_detailed_report(session_id: str, request: Request):
+async def get_detailed_report(session_id: str, request: Request, branch_id: Optional[str] = None):
     """Get existing detailed report for a session"""
     user_id = getattr(request.state, "user_id", "")
     await require_session_ownership(session_id=session_id, user_id=user_id)
 
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+    report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
+    cache_key = _report_cache_key_for_lineage(session_id, target_lineage_id)
+
     # First check memory cache
-    if session_id in detailed_reports:
-        return {"report": _sanitize_nan(detailed_reports[session_id])}
+    if cache_key in detailed_reports:
+        return {"report": _sanitize_nan(detailed_reports[cache_key])}
 
     # Try to load from disk first (avoid session loading overhead)
-    report_path = get_session_reports(session_id) / "report.json"
+    report_path = report_dir / "report.json"
     if report_path.exists():
         try:
             # Use parse_float to handle NaN/Infinity in JSON text
@@ -211,7 +253,7 @@ async def get_detailed_report(session_id: str, request: Request):
             raw = re.sub(r'\b-?Infinity\b', 'null', raw)
             report = json.loads(raw)
             report = _sanitize_nan(report)
-            detailed_reports[session_id] = report
+            detailed_reports[cache_key] = report
             return {"report": report}
         except Exception as e:
             logger.exception(f"Failed to load report for {session_id}")
@@ -219,7 +261,7 @@ async def get_detailed_report(session_id: str, request: Request):
     # Only check session exists if no report found
     from backend.config import resolve_session_metadata_path
     session_meta = resolve_session_metadata_path(session_id)
-    if not session_meta.exists() and session_id not in detailed_reports:
+    if not session_meta.exists() and cache_key not in detailed_reports:
         raise HTTPException(status_code=404, detail="Session not found")
 
     return {"report": None}
@@ -265,9 +307,13 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     logger.info(f"  sequencing files: {len(seq_files)}")
     logger.info(f"  state.status: {state.status}")
     logger.info(f"  round_results count: {len(state.round_results)}")
-    
-    output_dir = str(get_session_reports(session_id))
+
+    target_lineage_id = resolve_report_target_lineage(branch_id=None)
+    branch_id = None if target_lineage_id == "main" else target_lineage_id
+    output_dir = str(resolve_report_output_dir(session_id, branch_id))
     os.makedirs(output_dir, exist_ok=True)
+
+    report_state = build_lineage_report_state(state, target_lineage_id)
     
     # Progress callback
     async def progress_callback(data: dict):
@@ -375,14 +421,14 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                     await asyncio.sleep(_retry_backoff_delay(attempt))
 
                 report = await supervisor.generate_detailed_report(
-                    analysis_state=state,
+                    analysis_state=report_state,
                     report_model=pi_model,
                     output_dir=output_dir,
                     workspace_dir=workspace_dir,
                     progress_callback=progress_callback,
                     chat_messages=state.chat_messages,
                 )
-                detailed_reports[session_id] = report
+                detailed_reports[_report_cache_key_for_lineage(session_id, target_lineage_id)] = report
 
                 if session_id in report_websockets:
                     try:
@@ -436,10 +482,16 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
 # ============================================
 
 @router.post("/{session_id}/report/download-all-figures")
-async def download_all_figures(session_id: str, state: AnalysisState = Depends(require_session_ownership)):
+async def download_all_figures(
+    session_id: str,
+    state: AnalysisState = Depends(require_session_ownership),
+    branch_id: Optional[str] = None,
+):
     """Download all figures as a ZIP file"""
     validate_session_id(session_id)
-    figures_dir = get_session_reports(session_id) / "figures"
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+    figures_dir = resolve_report_output_dir(session_id, branch_id_resolved) / "figures"
 
     if not figures_dir.exists():
         raise HTTPException(status_code=404, detail="No figures found")
@@ -461,10 +513,16 @@ async def download_all_figures(session_id: str, state: AnalysisState = Depends(r
 
 
 @router.post("/{session_id}/report/download-all-tables")
-async def download_all_tables(session_id: str, state: AnalysisState = Depends(require_session_ownership)):
+async def download_all_tables(
+    session_id: str,
+    state: AnalysisState = Depends(require_session_ownership),
+    branch_id: Optional[str] = None,
+):
     """Download all tables as a ZIP file"""
     validate_session_id(session_id)
-    tables_dir = get_session_reports(session_id) / "tables"
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+    tables_dir = resolve_report_output_dir(session_id, branch_id_resolved) / "tables"
 
     if not tables_dir.exists():
         raise HTTPException(status_code=404, detail="No tables found")
@@ -515,10 +573,16 @@ async def download_reproducibility_bundle(
 
 
 @router.post("/{session_id}/report/download-full")
-async def download_full_report(session_id: str, state: AnalysisState = Depends(require_session_ownership)):
+async def download_full_report(
+    session_id: str,
+    state: AnalysisState = Depends(require_session_ownership),
+    branch_id: Optional[str] = None,
+):
     """Download full report including figures, tables, and report JSON"""
     validate_session_id(session_id)
-    report_dir = get_session_reports(session_id)
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+    report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
 
     if not report_dir.exists():
         raise HTTPException(status_code=404, detail="Report not found")
@@ -602,12 +666,14 @@ async def download_report_archive(session_id: str, filename: str, request: Reque
 # ============================================
 
 @router.get("/{session_id}/report/html")
-async def get_report_html(session_id: str, request: Request):
+async def get_report_html(session_id: str, request: Request, branch_id: Optional[str] = None):
     """Get the HTML report for preview"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     await require_session_ownership(session_id=session_id, user_id=user_id)
-    report_dir = get_session_reports(session_id)
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+    report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
     html_path = report_dir / "report.html"
 
     if not html_path.exists():
@@ -621,12 +687,15 @@ async def get_report_html(session_id: str, request: Request):
 
 
 @router.get("/{session_id}/report/preview")
-async def preview_report(session_id: str, request: Request):
+async def preview_report(session_id: str, request: Request, branch_id: Optional[str] = None):
     """Get report preview data including HTML content and metadata"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     await require_session_ownership(session_id=session_id, user_id=user_id)
-    report_dir = get_session_reports(session_id)
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+    report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
+    branch_query = _branch_query(branch_id_resolved)
 
     if not report_dir.exists():
         raise HTTPException(status_code=404, detail="Report not found")
@@ -656,8 +725,11 @@ async def preview_report(session_id: str, request: Request):
                 pdf_path = f.with_suffix('.pdf')
                 figures.append({
                     "name": f.stem,
-                    "png_url": f"/api/session/{session_id}/report/figure/{f.name}",
-                    "pdf_url": f"/api/session/{session_id}/report/figure/{pdf_path.name}" if pdf_path.exists() else None
+                    "png_url": f"/api/session/{session_id}/report/figure/{f.name}{branch_query}",
+                    "pdf_url": (
+                        f"/api/session/{session_id}/report/figure/{pdf_path.name}{branch_query}"
+                        if pdf_path.exists() else None
+                    ),
                 })
 
     tables = []
@@ -665,13 +737,13 @@ async def preview_report(session_id: str, request: Request):
         for f in tables_dir.glob("*.csv"):
             tables.append({
                 "name": f.stem,
-                "csv_url": f"/api/session/{session_id}/report/table/{f.name}"
+                "csv_url": f"/api/session/{session_id}/report/table/{f.name}{branch_query}"
             })
 
     return {
         "session_id": session_id,
-        "html_url": f"/api/session/{session_id}/report/html",
-        "download_url": f"/api/session/{session_id}/report/download-full",
+        "html_url": f"/api/session/{session_id}/report/html{branch_query}",
+        "download_url": f"/api/session/{session_id}/report/download-full{branch_query}",
         "report": report_data,
         "html_content": html_content,
         "figures": figures,
@@ -681,10 +753,17 @@ async def preview_report(session_id: str, request: Request):
 
 
 @router.get("/{session_id}/report/figure/{filename}")
-async def get_report_figure(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
+async def get_report_figure(
+    session_id: str,
+    filename: str,
+    branch_id: Optional[str] = None,
+    state: AnalysisState = Depends(require_session_ownership),
+):
     """Get a specific figure from the report"""
     safe_name = safe_filename(filename)
-    figure_parent = get_session_reports(session_id) / "figures"
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+    figure_parent = resolve_report_output_dir(session_id, branch_id_resolved) / "figures"
     figure_path = figure_parent / safe_name
     validate_path_within(figure_path, figure_parent)
 
@@ -709,16 +788,28 @@ async def get_report_figure(session_id: str, filename: str, state: AnalysisState
 
 
 @router.get("/{session_id}/report/figures/{filename}")
-async def get_report_figure_alt(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
+async def get_report_figure_alt(
+    session_id: str,
+    filename: str,
+    branch_id: Optional[str] = None,
+    state: AnalysisState = Depends(require_session_ownership),
+):
     """Get a specific figure from the report (alternative path for HTML relative URLs)"""
-    return await get_report_figure(session_id, filename)
+    return await get_report_figure(session_id, filename, branch_id=branch_id, state=state)
 
 
 @router.get("/{session_id}/report/table/{filename}")
-async def get_report_table(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
+async def get_report_table(
+    session_id: str,
+    filename: str,
+    branch_id: Optional[str] = None,
+    state: AnalysisState = Depends(require_session_ownership),
+):
     """Get a specific table from the report"""
     safe_name = safe_filename(filename)
-    table_parent = get_session_reports(session_id) / "tables"
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+    table_parent = resolve_report_output_dir(session_id, branch_id_resolved) / "tables"
     table_path = table_parent / safe_name
     validate_path_within(table_path, table_parent)
 
@@ -733,17 +824,29 @@ async def get_report_table(session_id: str, filename: str, state: AnalysisState 
 
 
 @router.get("/{session_id}/report/tables/{filename}")
-async def get_report_table_alt(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
+async def get_report_table_alt(
+    session_id: str,
+    filename: str,
+    branch_id: Optional[str] = None,
+    state: AnalysisState = Depends(require_session_ownership),
+):
     """Get a specific table from the report (alternative path for HTML relative URLs)"""
-    return await get_report_table(session_id, filename)
+    return await get_report_table(session_id, filename, branch_id=branch_id, state=state)
 
 
 @router.get("/{session_id}/report/{filename:path}")
-async def get_report_file(session_id: str, filename: str, state: AnalysisState = Depends(require_session_ownership)):
+async def get_report_file(
+    session_id: str,
+    filename: str,
+    branch_id: Optional[str] = None,
+    state: AnalysisState = Depends(require_session_ownership),
+):
     """Catch-all: serve any file from the report directory (notebook, sub-reports, etc.)"""
     validate_session_id(session_id)
     safe_name = safe_filename(filename)
-    report_dir = get_session_reports(session_id)
+    target_lineage_id = resolve_report_target_lineage(branch_id)
+    branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
+    report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
     file_path = report_dir / safe_name
     validate_path_within(file_path, report_dir)
 
@@ -1026,3 +1129,20 @@ async def get_report(session_id: str, request: Request):
         ],
         "final_summary": state.final_summary
     }
+
+
+@router.post("/{session_id}/report/partial/approve")
+async def approve_partial_report(session_id: str, request: Request):
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    state.allow_partial_report = True
+    state.partial_report_requested_at = datetime.now()
+    state.status = TaskStatus.RUNNING
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state, force=True)
+    return APIResponse(
+        success=True,
+        message="Partial report approved",
+        data={"needs_reconnect": True},
+    )

@@ -7,8 +7,9 @@ from html import escape as _html_escape
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..constants import LlmFailureAction, PI_DECIDE_SIGNAL, WaitInputReason, StateSyncChangeType
-from ..models.schemas import AgentType, AnalysisPhase, AnalysisPlan, PlanStep, TaskStatus
+from ..models.schemas import AgentType, AnalysisPhase, AnalysisPlan, AnalysisState, PlanStep, TaskStatus
 from ..utils.llm_client import UpstreamExhaustedError
+from .direction_coverage import current_lineage_id, normalize_direction_key
 from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
 from .retry import MAX_NODE_RETRIES, _retry_backoff_delay, with_retry
 
@@ -49,6 +50,37 @@ def _selected_directions_from_decision(selection_decision):
     return selection_decision if isinstance(selection_decision, list) else []
 
 
+def populate_plan_scope(plan: AnalysisPlan, state: AnalysisState) -> AnalysisPlan:
+    direction = state.current_round_direction or ""
+    plan.round_number = state.current_round
+    plan.direction = direction
+    plan.direction_key = normalize_direction_key(direction)
+    lineage_id = current_lineage_id(state)
+    plan.branch_id = None if lineage_id == "main" else lineage_id
+    plan.created_from_snapshot_id = state.last_restored_snapshot_id
+    return plan
+
+
+def resolve_plan_review_wait(state: AnalysisState) -> int:
+    if state.auto_approve_plans:
+        return max(0, state.plan_review_wait_seconds)
+    return -1
+
+
+def approved_plan_matches_current_context(state: AnalysisState) -> bool:
+    plan = state.current_plan
+    if not plan or plan.status != "approved":
+        return False
+    direction = state.current_round_direction or ""
+    lineage_id = current_lineage_id(state)
+    branch_id = None if lineage_id == "main" else lineage_id
+    return (
+        plan.round_number == state.current_round
+        and plan.direction_key == normalize_direction_key(direction)
+        and plan.branch_id == branch_id
+    )
+
+
 class PlanningMixin:
     """Mixin providing planning-dialogue methods. Composed into SingleCellAnalysisWorkflow."""
     @with_retry("pi_planning")
@@ -63,21 +95,19 @@ class PlanningMixin:
         human_guidance = state.get("human_guidance")
         adjusted_instructions = state.get("adjusted_instructions")
 
-        # If a plan is already approved (e.g., from no-workflow fallback resume),
-        # preserve the approval and skip re-planning so downstream routing
-        # (_should_plan, _after_bioinformatics) can act on it.
-        if analysis_state.current_plan and analysis_state.current_plan.status == "approved":
-            logger.info(
-                f"[{self.session_id}] Plan already approved "
-                f"(status={analysis_state.current_plan.status}), skipping re-planning"
-            )
+        if approved_plan_matches_current_context(analysis_state):
+            logger.info("[%s] Plan already approved for current context, skipping re-planning", self.session_id)
+            plan = analysis_state.current_plan
             state["plan_approved"] = True
-            state["planning_stage"] = analysis_state.current_plan.stage or "full"
+            state["planning_stage"] = plan.stage
             state["planning_result"] = {
-                "plan": analysis_state.current_plan.model_dump(mode="json"),
-                "dialogue": analysis_state.plan_dialogue_history or [],
+                "plan": plan.model_dump(mode="json"),
+                "dialogue": [],
             }
             return state
+        elif analysis_state.current_plan and analysis_state.current_plan.status == "approved":
+            logger.info("[%s] Approved plan is stale for current context; regenerating", self.session_id)
+            analysis_state.current_plan = None
 
         # ── Species inference (Round 1 only) ─────────────────────────────
         if analysis_state.current_round == 1 and not analysis_state.species:
@@ -539,6 +569,7 @@ class PlanningMixin:
                         # Clear only after a successful revise call.
                         if user_feedback:
                             state["user_plan_feedback"] = None
+                    populate_plan_scope(plan, analysis_state)
                     break  # success, exit inner retry loop
                 except UpstreamExhaustedError as e:
                     action = await self._wait_for_llm_intervention(
@@ -797,6 +828,7 @@ class PlanningMixin:
         self, state: WorkflowState, plan, analysis_state, action: str
     ) -> None:
         """Mark plan as approved and notify frontend."""
+        populate_plan_scope(plan, analysis_state)
         plan.status = "approved"
         plan.approved_at = datetime.now()
         analysis_state.current_plan = plan
@@ -874,14 +906,23 @@ class PlanningMixin:
             self._plan_review_event.clear()
             self._plan_review_action = None
             if not prev_action:
+                wait_seconds = resolve_plan_review_wait(analysis_state)
                 signaled = await wait_with_skip_time(
                     self._plan_review_event,
-                    analysis_state.round_wait_seconds,
+                    wait_seconds,
                     self.session_id,
                     "plan_review",
                 )
                 if not signaled:
-                    self._plan_review_action = {"action": "skip", "user_input": ""}
+                    if analysis_state.auto_approve_plans:
+                        self._plan_review_action = {"action": "skip", "user_input": ""}
+                    else:
+                        await self._send_message(
+                            "status",
+                            "Plan review timed out; still waiting for an explicit approve, skip, or modify action.",
+                            AgentType.PI,
+                        )
+                        return state
                 action = self._plan_review_action or {}
             else:
                 logger.info(f"[{self.session_id}] Plan review action already received, skipping wait")

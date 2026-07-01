@@ -41,6 +41,8 @@ class WorkflowState(TypedDict, total=False):
     plan_revision_needed: bool  # True when mid-execution revision is triggered
     plan_revision_context: Optional[Dict[str, Any]]  # Context for mid-execution revision
     plan_revision_resume: bool  # True when mid-execution revision is approved, route back to bioinfo
+    # Report validation fields
+    report_blocked: bool
 
 
 def make_initial_workflow_state(analysis_state: AnalysisState, current_round: int = 0) -> "WorkflowState":

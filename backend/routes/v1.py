@@ -147,6 +147,9 @@ async def delete_analysis(session_id: str, request: Request):
         websockets.pop(session_id, None)
         from backend.state import release_session_lock_slot
         release_session_lock_slot(session_id)
+        from backend.routes.reports import clear_detailed_report_cache, clear_generation_pending
+        clear_detailed_report_cache(session_id)
+        clear_generation_pending(session_id)
 
     await cleanup_session_uploads(session_id)
 

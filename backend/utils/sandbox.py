@@ -133,43 +133,16 @@ DANGEROUS_PATTERNS = [
 
 
 def _is_safe_os_system(code: str) -> bool:
-    """Check if all os.system calls are pip install commands."""
-    lines = [l.strip() for l in code.splitlines() if re.search(r'\bos\.system\b', l)]
-    pip_pattern = r'os\.system\s*\(\s*["\'](?:pip|pip3)\s+install'
-    return bool(lines) and all(re.search(pip_pattern, l) for l in lines)
+    """No os.system calls are allowed in notebook execution."""
+    return False
 
 
 def _is_safe_subprocess(code: str) -> bool:
-    """Check if all subprocess calls are pip install commands."""
-    # 先排除纯 import 行
+    """Allow importing subprocess, but block subprocess execution calls."""
     lines = [l.strip() for l in code.splitlines() if re.search(r'\bsubprocess\b', l)]
     import_pattern = r'^(?:import|from)\s+subprocess'
     non_import = [l for l in lines if not re.match(import_pattern, l)]
-    if not non_import:
-        return True
-
-    # 移除注释后，在完整代码上用多行正则匹配
-    code_no_comments = re.sub(r'#.*$', '', code, flags=re.MULTILINE)
-
-    pip_patterns = [
-        r'subprocess\.\w+\(\s*\[[\s\S]*?["\'](?:pip|pip3)["\'][\s\S]*?\]',  # 列表形式
-        r'subprocess\.\w+\(\s*["\'][^"\']*(?:pip|pip3)\s+install',           # 字符串形式
-    ]
-
-    # 找出所有完整的 subprocess 调用
-    all_calls = re.findall(r'subprocess\.\w+\([^)]*\)', code_no_comments, re.DOTALL)
-    if not all_calls:
-        # 有 subprocess 引用但无完整调用（可能跨行未闭合），回退到逐行检查
-        return all(
-            any(re.search(p, l) for p in pip_patterns)
-            for l in non_import
-        )
-
-    # 所有 subprocess 调用都必须是 pip install
-    return all(
-        any(re.search(p, call) for p in pip_patterns)
-        for call in all_calls
-    )
+    return not non_import
 
 
 def _is_safe_importlib(code: str) -> bool:
@@ -217,6 +190,14 @@ _DANGEROUS_AST_MODULES = frozenset({
     'os', 'sys', 'subprocess', 'shutil', 'builtins',
 })
 
+_SUBPROCESS_EXEC_FUNCS = frozenset({
+    "run",
+    "call",
+    "check_call",
+    "check_output",
+    "Popen",
+})
+
 
 def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
     """AST-based validation layer that catches reflection-based bypasses
@@ -232,15 +213,95 @@ def _validate_code_safety_ast(code: str) -> Tuple[bool, str]:
     except SyntaxError:
         return True, ""  # Cannot parse — let regex-only check decide
 
+    module_aliases: dict[str, str] = {}
+    blocked_direct_calls: dict[str, str] = {}
+
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in {"subprocess", "os"}:
+                    module_aliases[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "subprocess":
+                for alias in node.names:
+                    if alias.name in _SUBPROCESS_EXEC_FUNCS:
+                        blocked_direct_calls[alias.asname or alias.name] = f"subprocess.{alias.name}"
+            elif node.module == "os":
+                for alias in node.names:
+                    if alias.name == "system":
+                        blocked_direct_calls[alias.asname or alias.name] = "os.system"
+
+    def _module_alias_from_expr(expr) -> Optional[str]:
+        if isinstance(expr, ast.Name):
+            return module_aliases.get(expr.id)
+        return None
+
+    def _blocked_call_from_expr(expr) -> Optional[str]:
+        if isinstance(expr, ast.Name):
+            return blocked_direct_calls.get(expr.id)
+        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
+            module_name = module_aliases.get(expr.value.id)
+            if module_name == "subprocess" and expr.attr in _SUBPROCESS_EXEC_FUNCS:
+                return f"subprocess.{expr.attr}"
+            if module_name == "os" and expr.attr == "system":
+                return "os.system"
+        return None
+
+    def _propagate_alias_to_target(target, value) -> bool:
+        changed_alias = False
+        if isinstance(target, ast.Name):
+            module_name = _module_alias_from_expr(value)
+            if module_name and module_aliases.get(target.id) != module_name:
+                module_aliases[target.id] = module_name
+                changed_alias = True
+
+            blocked_reason = _blocked_call_from_expr(value)
+            if blocked_reason and blocked_direct_calls.get(target.id) != blocked_reason:
+                blocked_direct_calls[target.id] = blocked_reason
+                changed_alias = True
+            return changed_alias
+
+        if (
+            isinstance(target, (ast.Tuple, ast.List))
+            and isinstance(value, (ast.Tuple, ast.List))
+            and len(target.elts) == len(value.elts)
+        ):
+            for target_item, value_item in zip(target.elts, value.elts):
+                changed_alias = _propagate_alias_to_target(target_item, value_item) or changed_alias
+        return changed_alias
+
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    changed = _propagate_alias_to_target(target, node.value) or changed
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                changed = _propagate_alias_to_target(node.target, node.value) or changed
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in blocked_direct_calls:
+                return False, f"Call to blocked dependency/system function '{blocked_direct_calls[node.func.id]}'"
+
+            if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+                module_name = module_aliases.get(node.func.value.id)
+                if module_name == "subprocess" and node.func.attr in _SUBPROCESS_EXEC_FUNCS:
+                    return False, f"Call to blocked subprocess function 'subprocess.{node.func.attr}'"
+                if module_name == "os" and node.func.attr == "system":
+                    return False, "Call to blocked os.system"
+
         # Detect getattr(os, 'system') / getattr(os, dangerous_string)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'getattr':
             if len(node.args) >= 2:
                 target = node.args[0]
                 attr_arg = node.args[1]
                 # Check if target is a dangerous module
-                if isinstance(target, ast.Name) and target.id in _DANGEROUS_AST_MODULES:
-                    return False, f"getattr() on dangerous module '{target.id}'"
+                if isinstance(target, ast.Name):
+                    target_module = module_aliases.get(target.id, target.id)
+                    if target_module in _DANGEROUS_AST_MODULES:
+                        return False, f"getattr() on dangerous module '{target_module}'"
                 # Check if attr argument is a dangerous function name
                 if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
                     if attr_arg.value in _DANGEROUS_AST_FUNCS:

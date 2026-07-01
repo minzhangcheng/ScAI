@@ -2,11 +2,22 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from ..constants import PLAN_REVISION_KEYWORDS, PLAN_REVISION_NEEDED_TAG, REASONING_MODEL_MIN_TOKENS, StateSyncChangeType, WaitInputReason
+from ..constants import PLAN_REVISION_NEEDED_TAG, REASONING_MODEL_MIN_TOKENS, StateSyncChangeType, WaitInputReason
 from ..models.schemas import AgentType, AnalysisState, ClusterAnnotation, PublicationFigure, TaskStatus
+from ..utils.formatting import safe_parse_json
 from .helpers import wait_with_skip_time
 
 logger = logging.getLogger(__name__)
+
+
+def parse_plan_revision_signal(response_text: str) -> bool:
+    text = response_text or ""
+    if PLAN_REVISION_NEEDED_TAG in text:
+        return True
+    parsed = safe_parse_json(text)
+    if isinstance(parsed, dict):
+        return parsed.get("plan_revision_needed") is True
+    return False
 
 
 class CallbacksMixin:
@@ -106,12 +117,7 @@ IMPORTANT: Respond in English only. Do not use any other language."""
 
             # Check if plan revision is needed based on PI's response
             if analysis_state and analysis_state.current_plan and analysis_state.current_plan.status == "approved":
-                plan_revision_keywords = PLAN_REVISION_KEYWORDS
-                pi_mentions_plan_issue = any(
-                    kw in response.lower() for kw in plan_revision_keywords
-                )
-
-                if pi_mentions_plan_issue:
+                if parse_plan_revision_signal(response):
                     # PI hints plan has issues — further judge severity
                     plan = analysis_state.current_plan
                     affected_ids = []

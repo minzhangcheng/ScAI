@@ -41,7 +41,7 @@ _EXCLUDED_FIELDS = {
     "agent_disabled_info",
     "agent_server_configs",
     "agent_vision_settings",
-        "chat_messages",
+    "chat_messages",
     "score_definitions",
     "data_driven_mechanism_programs",
     "current_round_cache",
@@ -49,6 +49,16 @@ _EXCLUDED_FIELDS = {
     "revision_history",
     "all_candidates",
     "selected_index",
+    "plan_review_wait_seconds",
+    "auto_approve_plans",
+    "allow_partial_report",
+    "partial_report_requested_at",
+    "restore_resume_phase",
+    "restore_resume_kind",
+    "restore_resume_node",
+    "restore_resume_gate",
+    "restore_branch_id",
+    "restore_branch_label",
 }
 
 _COMPUTED_FIELDS = {

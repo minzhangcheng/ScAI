@@ -110,9 +110,10 @@ class RoutingMixin:
     def _check_convergence_condition(self, state: "WorkflowState") -> str:
         """Conditional check for convergence.
 
-        Missing key defaults to 'continue' to stay consistent with
-        _should_continue and avoid silently stopping a live run.
+        Delegates to the canonical hard-stop router _should_continue when a
+        real workflow state is present. Missing analysis_state is treated as a
+        defensive no-stop fallback for tests and partial states.
         """
-        if state.get("should_continue") is False:
-            return "stop"
-        return "continue"
+        if "analysis_state" not in state:
+            return "continue"
+        return self._should_continue(state)

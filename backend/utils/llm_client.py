@@ -1621,8 +1621,13 @@ class OpenAICompatibleClient:
             else:
                 raise
 
-    def _build_retry_kwargs(self, model: str, request_timeout: Optional[float] = None, max_retries_override: Optional[int] = None) -> Dict[str, Any]:
-        """统一构建 retry_kwargs，保持各方法逻辑一致."""
+    def _build_retry_kwargs(
+        self,
+        model: str,
+        request_timeout: Optional[float] = None,
+        max_retries_override: Optional[int] = None,
+        non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
+    ) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
             "agent_name": self.agent_name,
             "model_name": model,
@@ -1633,9 +1638,11 @@ class OpenAICompatibleClient:
         if max_retries_override is not None:
             kwargs["max_retries"] = max_retries_override
         elif request_timeout is not None and request_timeout > 300:
-            kwargs["max_retries"] = 0  # Don't retry expensive long-running requests
+            kwargs["max_retries"] = 0
         if self.on_retry is not None:
             kwargs["on_retry"] = self.on_retry
+        if non_retryable_predicate is not None:
+            kwargs["non_retryable_predicate"] = non_retryable_predicate
         return kwargs
 
     def _build_request_pair(
@@ -2021,6 +2028,12 @@ class OpenAICompatibleClient:
                 non_retryable_predicate=non_retryable_predicate,
                 max_retries_override=max_retries_override)
 
+        def invoke_inline(inline_call, max_retries_override=None, non_retryable_predicate=None):
+            return inline_call(
+                max_retries_override=max_retries_override,
+                non_retryable_predicate=non_retryable_predicate,
+            )
+
         def call_for(protocol, *, probe):
             mr = 0 if probe else None
             # In probe mode, the probe loop owns ALL retry logic; the backoff
@@ -2038,9 +2051,12 @@ class OpenAICompatibleClient:
                                       make_anthropic_adapter_call, max_retries_override=mr,
                                       non_retryable_predicate=np)
             if protocol == "chat":
-                if probe:
-                    return make_probe_fallback_call or make_inline_call
-                return make_inline_call
+                target = (make_probe_fallback_call or make_inline_call) if probe else make_inline_call
+                return lambda: invoke_inline(
+                    target,
+                    max_retries_override=mr,
+                    non_retryable_predicate=np,
+                )
             return None
 
         order = _route_protocol_order(self.base_url, model)
@@ -2080,6 +2096,8 @@ class OpenAICompatibleClient:
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         _truncation_retried: bool = False,
+        non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
+        max_retries_override: Optional[int] = None,
     ) -> LLMResponse:
         # Create log record
         interaction = self.llm_logger.log_request(
@@ -2101,7 +2119,11 @@ class OpenAICompatibleClient:
         _make_request, _make_request_no_temp = self._build_request_pair(
             base_params, model, temperature, max_tokens, request_timeout=timeout
         )
-        retry_kwargs = self._build_retry_kwargs(model, request_timeout=timeout, max_retries_override=max_retries)
+        effective_max_retries = max_retries_override if max_retries_override is not None else max_retries
+        retry_kwargs = self._build_retry_kwargs(
+            model, request_timeout=timeout, max_retries_override=effective_max_retries,
+            non_retryable_predicate=non_retryable_predicate,
+        )
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat request to {model}")
@@ -2143,6 +2165,8 @@ class OpenAICompatibleClient:
                 return await self._chat_inline(
                     model, messages, temperature, bumped, stream, timeout, max_retries,
                     _truncation_retried=True,
+                    non_retryable_predicate=non_retryable_predicate,
+                    max_retries_override=max_retries_override,
                 )
 
             result = LLMResponse(
@@ -2217,10 +2241,14 @@ class OpenAICompatibleClient:
                 model=model, messages=enforced, temperature=temperature,
                 max_tokens=max_tokens, timeout=timeout, skip_temperature=skip_temperature,
                 tools=tools),
-            make_inline_call=lambda: self._chat_inline(
-                model, enforced, temperature, max_tokens, False, timeout, max_retries),
-            make_probe_fallback_call=lambda: self._chat_inline(
-                model, enforced, temperature, max_tokens, False, probe_timeout, max_retries=0),
+            make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_inline(
+                model, enforced, temperature, max_tokens, False, timeout, max_retries,
+                non_retryable_predicate=non_retryable_predicate,
+                max_retries_override=max_retries_override),
+            make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_inline(
+                model, enforced, temperature, max_tokens, False, probe_timeout, max_retries=0,
+                non_retryable_predicate=non_retryable_predicate,
+                max_retries_override=max_retries_override),
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=timeout,
@@ -2234,7 +2262,9 @@ class OpenAICompatibleClient:
         tool_choice: Union[str, Dict[str, Any]] = "auto",
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
-        max_retries: Optional[int] = None
+        max_retries: Optional[int] = None,
+        non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
+        max_retries_override: Optional[int] = None,
     ) -> LLMToolResponse:
         # Create log record
         interaction = self.llm_logger.log_request(
@@ -2271,9 +2301,11 @@ class OpenAICompatibleClient:
         _make_request, _make_request_no_temp = self._build_request_pair(
             base_params, model, temperature, max_tokens
         )
-        retry_kwargs = self._build_retry_kwargs(model)
-        if max_retries is not None:
-            retry_kwargs["max_retries"] = max_retries
+        effective_max_retries = max_retries_override if max_retries_override is not None else max_retries
+        retry_kwargs = self._build_retry_kwargs(
+            model, max_retries_override=effective_max_retries,
+            non_retryable_predicate=non_retryable_predicate,
+        )
 
         try:
             logger.info(f"[{self.agent_name}] Sending chat_with_tools request to {model}")
@@ -2449,10 +2481,14 @@ class OpenAICompatibleClient:
             make_responses_adapter_call=lambda adapter, skip_temperature: adapter.complete_with_tools(
                 model=model, messages=enforced, tools=tools, tool_choice=tool_choice,
                 temperature=temperature, max_tokens=max_tokens, skip_temperature=skip_temperature),
-            make_inline_call=lambda: self._chat_with_tools_inline(
-                model, enforced, tools, tool_choice, temperature, max_tokens),
-            make_probe_fallback_call=lambda: self._chat_with_tools_inline(
-                model, enforced, tools, tool_choice, temperature, max_tokens, max_retries=0),
+            make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_tools_inline(
+                model, enforced, tools, tool_choice, temperature, max_tokens,
+                non_retryable_predicate=non_retryable_predicate,
+                max_retries_override=max_retries_override),
+            make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_tools_inline(
+                model, enforced, tools, tool_choice, temperature, max_tokens, max_retries=0,
+                non_retryable_predicate=non_retryable_predicate,
+                max_retries_override=max_retries_override),
             tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,
@@ -2573,7 +2609,8 @@ class OpenAICompatibleClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         request_timeout: Optional[float] = None,
-        max_retries: Optional[int] = None
+        max_retries: Optional[int] = None,
+        non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
     ) -> LLMResponse:
         messages = [
             {"role": "system", "content": ENGLISH_ENFORCEMENT},
@@ -2602,7 +2639,10 @@ class OpenAICompatibleClient:
         _make_request, _make_request_no_temp = self._build_request_pair(
             base_params, model, temperature, max_tokens
         )
-        retry_kwargs = self._build_retry_kwargs(model, request_timeout=request_timeout, max_retries_override=max_retries)
+        retry_kwargs = self._build_retry_kwargs(
+            model, request_timeout=request_timeout, max_retries_override=max_retries,
+            non_retryable_predicate=non_retryable_predicate,
+        )
 
         try:
             logger.info(f"[{self.agent_name}] Sending vision request to {model} with {len(images)} images")
@@ -2680,10 +2720,12 @@ class OpenAICompatibleClient:
                 model=model, text_prompt=text_prompt, images=images,
                 temperature=temperature, max_tokens=max_tokens,
                 timeout=request_timeout, skip_temperature=skip_temperature),
-            make_inline_call=lambda: self._chat_with_vision_inline(
-                model, text_prompt, images, temperature, max_tokens, request_timeout),
-            make_probe_fallback_call=lambda: self._chat_with_vision_inline(
-                model, text_prompt, images, temperature, max_tokens, probe_timeout, max_retries=0),
+            make_inline_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_vision_inline(
+                model, text_prompt, images, temperature, max_tokens, request_timeout,
+                non_retryable_predicate=non_retryable_predicate),
+            make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_with_vision_inline(
+                model, text_prompt, images, temperature, max_tokens, probe_timeout, max_retries=0,
+                non_retryable_predicate=non_retryable_predicate),
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=request_timeout,

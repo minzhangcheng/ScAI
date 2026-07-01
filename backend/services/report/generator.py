@@ -39,6 +39,8 @@ from .llm_calls import LLMCallsMixin, REPORT_TOOLS
 from .pi_review import PIReviewMixin
 from .planning import PlanningMixin
 from .sections import SectionsMixin
+from backend.services.report.lineage import build_lineage_report_state
+from backend.workflow.direction_coverage import normalize_legacy_round_result
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         session_id: str = "report",
         vision_settings: Optional[Dict[str, bool]] = None,
         supervisor_model: Optional[str] = None,
+        target_lineage_id: str = "main",
     ):
         self._session_id = session_id
         self.llm_client = llm_client
@@ -102,6 +105,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         self.progress_callback = progress_callback
         self.vision_settings = vision_settings or {}
         self.supervisor_model = supervisor_model or ""
+        self.target_lineage_id = target_lineage_id or "main"
 
         # Create subdirectories
         self.figures_dir = self.output_dir / "figures"
@@ -215,12 +219,15 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         # Force English output for all reports
         language = "en"
 
+        # Filter round_results to target lineage for branch isolation
+        report_state = build_lineage_report_state(state, self.target_lineage_id)
+
         await self._report_progress(2, "Initializing report compilation...")
 
         # Step 1: Build structured analysis record from state data
         # (Pure data extraction, fast — always re-run to pick up latest state)
         await self._report_progress(5, "Reading analysis records...")
-        analysis_record = self._build_analysis_record(state)
+        analysis_record = self._build_analysis_record(report_state)
         logger.info(
             f"Analysis record: {analysis_record['total_code_cells']} code cells, "
             f"{len(analysis_record['analysis_steps'])} steps with figures, "
@@ -230,18 +237,18 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         # Step 2: Scan workspace for existing figures and tables, copy to report dir
         await self._report_progress(10, "Collecting analysis figures and tables...")
         existing_figures = self._scan_existing_figures(
-            publication_figures=getattr(state, "publication_figures", None),
-            analysis_log=getattr(state, "analysis_log", None),
+            publication_figures=getattr(report_state, "publication_figures", None),
+            analysis_log=getattr(report_state, "analysis_log", None),
         )
         existing_tables = self._scan_existing_tables()
         logger.info(f"Collected {len(existing_figures)} figures and {len(existing_tables)} tables for report")
 
         # Step 3: Extract findings from round results
         await self._report_progress(15, "Extracting analysis findings...")
-        findings = self._extract_findings(state)
+        findings = self._extract_findings(report_state)
 
         # Extract cluster annotations from state data (no sandbox needed)
-        self._extract_cluster_annotations_from_state(state)
+        self._extract_cluster_annotations_from_state(report_state)
 
         # Step 3.5: PI reviews actual analysis code, figures, and tables (expensive LLM call)
         if last_step >= 4 and checkpoint:
@@ -250,7 +257,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         else:
             await self._report_progress(16, "PI Agent reviewing analysis code and figures...")
             analysis_summary = await self._pi_review_analysis(
-                state, analysis_record, findings, existing_figures, existing_tables, language
+                report_state, analysis_record, findings, existing_figures, existing_tables, language
             )
             logger.info(f"Analysis review complete: methodology={bool(analysis_summary.get('methodology_overview'))}, "
                          f"workflow={bool(analysis_summary.get('workflow_summary'))}, "
@@ -268,7 +275,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
         else:
             await self._report_progress(30, "PI Agent planning report structure...")
             report_plan = await self._plan_report_from_analysis(
-                state, analysis_record, findings, existing_figures, existing_tables, language,
+                report_state, analysis_record, findings, existing_figures, existing_tables, language,
                 analysis_summary=analysis_summary
             )
             await checkpoint_mgr.save({
@@ -316,7 +323,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             )
 
             section = await self._generate_section_from_existing_figures(
-                state,
+                report_state,
                 section_plan,
                 findings,
                 language,
@@ -342,7 +349,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             logger.info("Restored abstract from checkpoint")
         else:
             await self._report_progress(85, "Writing abstract...")
-            abstract = await self._generate_abstract(state, sections, findings, language, analysis_summary=analysis_summary)
+            abstract = await self._generate_abstract(report_state, sections, findings, language, analysis_summary=analysis_summary)
             await checkpoint_mgr.save({
                 'report_id': report_id, 'last_step': 7, 'step_name': 'abstract',
                 'analysis_summary': analysis_summary, 'report_plan': report_plan,
@@ -356,7 +363,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             logger.info("Restored conclusions from checkpoint")
         else:
             await self._report_progress(92, "Writing conclusions...")
-            conclusions = await self._generate_conclusions(state, sections, findings, language, analysis_summary=analysis_summary)
+            conclusions = await self._generate_conclusions(report_state, sections, findings, language, analysis_summary=analysis_summary)
             await checkpoint_mgr.save({
                 'report_id': report_id, 'last_step': 8, 'step_name': 'conclusions',
                 'analysis_summary': analysis_summary, 'report_plan': report_plan,
@@ -368,11 +375,11 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
 
         # Save graphic abstract image to figures dir if available
         graphic_abstract_path = None
-        if state.graphic_abstract and state.graphic_abstract.image_base64:
+        if report_state.graphic_abstract and report_state.graphic_abstract.image_base64:
             try:
                 from ...utils.image_utils import save_graphic_abstract_image
                 graphic_abstract_path = save_graphic_abstract_image(
-                    state.graphic_abstract.image_base64, self.figures_dir
+                    report_state.graphic_abstract.image_base64, self.figures_dir
                 )
                 logger.info(f"Saved graphic abstract to {graphic_abstract_path}")
             except Exception:
@@ -380,27 +387,27 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
 
         # Build appendix data for report.json (so regenerate can use it)
         appendix_data = {
-            "project_name": state.name,
-            "project_description": state.initial_instruction,
-            "created_at": state.created_at.isoformat() if hasattr(state.created_at, 'isoformat') else str(state.created_at),
-            "agent_models": build_agent_models_appendix(state),
-            "agent_temperatures": {k: v for k, v in state.custom_temperatures.items()} if state.custom_temperatures else {},
+            "project_name": report_state.name,
+            "project_description": report_state.initial_instruction,
+            "created_at": report_state.created_at.isoformat() if hasattr(report_state.created_at, 'isoformat') else str(report_state.created_at),
+            "agent_models": build_agent_models_appendix(report_state),
+            "agent_temperatures": {k: v for k, v in report_state.custom_temperatures.items()} if report_state.custom_temperatures else {},
             "treatment_groups": [
                 {"name": g.name, "description": g.description, "sample_count": g.sample_count}
-                for g in state.treatment_groups
+                for g in report_state.treatment_groups
             ],
             "data_files": [
                 {
                     "filename": f.filename,
                     "section": f.section,
                     "data_type": f.data_type,
-                    "group": (state.get_group_by_id(f.group_id).name if state.get_group_by_id(f.group_id) else None),
+                    "group": (report_state.get_group_by_id(f.group_id).name if report_state.get_group_by_id(f.group_id) else None),
                 }
-                for f in state.data_files
+                for f in report_state.data_files
             ],
-            "biochemistry_indicators_count": len(state.biochemistry_indicators),
-            "max_rounds": state.max_rounds,
-            "cross_modal_synthesis": build_cross_modal_appendix(state),
+            "biochemistry_indicators_count": len(report_state.biochemistry_indicators),
+            "max_rounds": report_state.max_rounds,
+            "cross_modal_synthesis": build_cross_modal_appendix(report_state),
             "round_results": [
                 {
                     "round_number": r.round_number,
@@ -410,7 +417,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                     "biochemistry_findings_count": len(r.biochemistry_findings),
                     "literature_findings_count": len(r.literature_findings),
                 }
-                for r in state.round_results
+                for r in report_state.round_results
             ],
             "human_messages": [
                 {
@@ -419,7 +426,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                     "timestamp": hm.get("timestamp", ""),
                     "round_number": hm.get("round_number", "?"),
                 }
-                for hm in state.human_messages
+                for hm in report_state.human_messages
             ],
             "user_interactions": {
                 "cluster_annotations": [
@@ -430,22 +437,25 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                         "confirmed": ca.user_confirmed,
                         "confidence": ca.confidence,
                     }
-                    for ca in state.annotation_state.cluster_annotations
-                ] if state.annotation_state and state.annotation_state.cluster_annotations else [],
-                "direction_selection": state.user_chosen_directions or [],
+                    for ca in report_state.annotation_state.cluster_annotations
+                ] if report_state.annotation_state and report_state.annotation_state.cluster_annotations else [],
+                "direction_selection": report_state.user_chosen_directions or [],
             },
             "related_reports": {
                 "exploration_report": "exploration_report.html",
                 "annotation_report": "annotation_context_report.html",
             },
-            "notebook_filename": f"{state.id}.ipynb",
-            "literature_report": LITERATURE_REPORT_FILENAME if state.literature_reports else "",
+            "notebook_filename": f"{report_state.id}.ipynb",
+            "literature_report": LITERATURE_REPORT_FILENAME if report_state.literature_reports else "",
+            "branch_id": None if self.target_lineage_id == "main" else self.target_lineage_id,
+            "branch_label": getattr(state, "restore_branch_label", None),
+            "report_kind": "partial" if getattr(state, "allow_partial_report", False) else "complete",
         }
 
         report = {
             "id": report_id,
-            "session_id": state.id,
-            "title": report_plan.get("title") or state.name,
+            "session_id": report_state.id,
+            "title": report_plan.get("title") or report_state.name,
             "abstract": abstract,
             "sections": sections,
             "conclusions": conclusions,
@@ -457,8 +467,8 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
             "progress": 100,
             "current_step": "Complete",
             "appendix": appendix_data,
-            "analysis_log": self._build_full_analysis_log(state),
-            "score_definitions": [sd.model_dump(mode="json") for sd in state.score_definitions] if state.score_definitions else []
+            "analysis_log": self._build_full_analysis_log(report_state),
+            "score_definitions": [sd.model_dump(mode="json") for sd in report_state.score_definitions] if report_state.score_definitions else []
         }
 
         # Sanitize NaN/Infinity values before saving (pandas data can contain these)
@@ -480,26 +490,26 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
 
         # Copy notebook to report directory for download
         import shutil as _shutil
-        notebook_src = get_session_states(state.id) / f"{state.id}.ipynb"
+        notebook_src = get_session_states(report_state.id) / f"{report_state.id}.ipynb"
         if notebook_src.exists():
             try:
-                _shutil.copy2(str(notebook_src), str(self.output_dir / f"{state.id}.ipynb"))
+                _shutil.copy2(str(notebook_src), str(self.output_dir / f"{report_state.id}.ipynb"))
             except Exception as e:
                 logger.warning(f"Could not copy notebook: {e}")
 
         # Write the combined literature research report for appendix download
-        lit_path = write_literature_report(state.literature_reports, self.output_dir)
+        lit_path = write_literature_report(report_state.literature_reports, self.output_dir)
         if lit_path is not None:
             logger.info(f"Literature report saved to: {lit_path}")
 
         report["reproducibility_path"] = self._maybe_generate_reproducibility_bundle(
-            state=state,
+            state=report_state,
             notebook_src=notebook_src,
         )
 
         # Generate HTML report
         await self._report_progress(95, "Generating HTML report...")
-        html_path = await self._generate_html_report(report, language, state=state)
+        html_path = await self._generate_html_report(report, language, state=report_state)
         report["html_path"] = str(html_path)
 
         # Clear checkpoint on successful completion

@@ -517,6 +517,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/report/partial/approve",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/{session_id}/report/preview",
     [
       "GET"

@@ -443,12 +443,13 @@ Please provide a comprehensive summary in JSON format:
     "conclusions": ["key conclusion 1", "key conclusion 2", ...]
 }}
 
-Requirements:
+        Requirements:
 1. Integrate findings from ALL available data sources (indicators and/or images)
 2. Highlight correlations and consistencies between different data types
 3. Identify any contradictions or gaps
 4. Prioritize experiment suggestions by importance
 5. Ensure conclusions are evidence-based and actionable
+6. IMPORTANT: Images analyzed here represent biochemistry experimental data (blots, plates, gels, etc.), NOT pathology slides. Do NOT label or categorize image observations as pathology findings — keep them in the biochemistry modality scope.
 """
 
         response = await self.chat(prompt, temperature=0.3)

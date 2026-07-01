@@ -17,8 +17,23 @@ from ..utils.llm_client import UpstreamExhaustedError
 from ..constants import LlmFailureAction
 from ..config import get_session_reports, get_session_workspace
 from ..services.report import DetailedReportGenerator, compress_image_to_base64
+from .direction_coverage import current_lineage_id, direction_coverage_status
+from ..services.report.paths import resolve_report_output_dir
+from ..services.report.lineage import build_lineage_report_state
 
 logger = logging.getLogger(__name__)
+
+
+def validate_complete_report_allowed(state: AnalysisState) -> tuple[bool, str]:
+    if state.allow_partial_report:
+        return True, ""
+    if len(state.user_chosen_directions) <= 1:
+        return True, ""
+    coverage = direction_coverage_status(state, lineage_id=current_lineage_id(state))
+    if coverage.complete:
+        return True, ""
+    missing = ", ".join(sorted(coverage.missing_keys))
+    return False, f"Complete report blocked because selected directions are missing completed evidence: {missing}"
 
 
 class ReportingMixin:
@@ -33,12 +48,32 @@ class ReportingMixin:
     """
 
     # ------------------------------------------------------------------
+    # Conditional edge: after_final_report
+    # ------------------------------------------------------------------
+
+    def _after_final_report(self, state: WorkflowState) -> str:
+        return "blocked" if state.get("report_blocked") else "continue"
+
+    # ------------------------------------------------------------------
     # Node: generate_final_report
     # ------------------------------------------------------------------
 
     async def _generate_final_report(self, state: WorkflowState) -> WorkflowState:
         """Generate final analysis report including integrated report with figures"""
         analysis_state = state["analysis_state"]
+
+        # Validate direction coverage before proceeding
+        allowed, reason = validate_complete_report_allowed(analysis_state)
+        if not allowed and not getattr(analysis_state, "allow_partial_report", False):
+            self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+            await self._send_message("report_blocked", {"reason": reason, "partial_allowed": True}, AgentType.PI)
+            await self._send_state_sync(analysis_state, "report_blocked")
+            return {
+                **state,
+                "analysis_state": analysis_state,
+                "should_continue": False,
+                "report_blocked": True,
+            }
 
         if not analysis_state.analysis_log and not analysis_state.code_history:
             # current_round may be >0 even when no work happened (initialize_round
@@ -263,6 +298,9 @@ class ReportingMixin:
         """Dispatcher: try image mode first when Painter is available; on failure (or when
         Painter is disabled) fall back to text-mode ASCII diagram drawn by the Bio agent.
         """
+        if state.get("report_blocked"):
+            return state
+
         analysis_state = state["analysis_state"]
 
         if not analysis_state.analysis_log and not analysis_state.code_history:
@@ -713,6 +751,9 @@ class ReportingMixin:
 
     async def _generate_detailed_report(self, state: WorkflowState) -> WorkflowState:
         """Generate detailed report with figures and tables"""
+        if state.get("report_blocked"):
+            return state
+
         analysis_state = state["analysis_state"]
 
         if not analysis_state.analysis_log and not analysis_state.code_history:
@@ -727,8 +768,12 @@ class ReportingMixin:
             "status", "Generating detailed report with figures and tables...", AgentType.PI
         )
 
-        output_dir = str(get_session_reports(self.session_id))
+        target_lineage_id = current_lineage_id(analysis_state)
+        branch_id = None if target_lineage_id == "main" else target_lineage_id
+        output_dir = str(resolve_report_output_dir(self.session_id, branch_id))
         os.makedirs(output_dir, exist_ok=True)
+
+        report_state = build_lineage_report_state(analysis_state, target_lineage_id)
 
         async def progress_callback(data: dict):
             await self._send_message(
@@ -752,7 +797,7 @@ class ReportingMixin:
                 self.ensure_agent_ready("supervisor")
                 if self.supervisor_agent:
                     report = await self.supervisor_agent.generate_detailed_report(
-                        analysis_state=analysis_state,
+                        analysis_state=report_state,
                         report_model=pi_model,
                         output_dir=output_dir,
                         workspace_dir=workspace_dir,
@@ -772,8 +817,9 @@ class ReportingMixin:
                         session_id=self.session_id,
                         vision_settings=self._vision_settings,
                         supervisor_model=supervisor_model,
+                        target_lineage_id=target_lineage_id,
                     )
-                    report = await generator.generate_report(analysis_state)
+                    report = await generator.generate_report(report_state)
 
                 await self._send_message(
                     "detailed_report",

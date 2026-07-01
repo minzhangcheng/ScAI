@@ -35,7 +35,7 @@ from .graph import GraphMixin
 from .reporting import ReportingMixin
 
 from ..models.schemas import (
-    AnalysisState, AgentType, TaskStatus, RoundResult,
+    AnalysisState, AgentType, TaskStatus, RoundResult, AnalysisPhase,
     WebSocketMessage, AgentMessage, MessageRole,
     DetailedReportSegment,
 )
@@ -72,6 +72,50 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         else:
             state.waiting_input_started_at = None
     
+    def _consume_restore_resume_metadata(self, analysis_state: AnalysisState) -> None:
+        analysis_state.restore_resume_phase = None
+        analysis_state.restore_resume_kind = None
+        analysis_state.restore_resume_node = None
+        analysis_state.restore_resume_gate = None
+        analysis_state.last_restored_snapshot_id = None
+
+    async def resume_restored_wait_state(self, analysis_state: AnalysisState) -> AnalysisState:
+        logger.info("[%s] Continuing restored wait-state snapshot", self.session_id)
+        if self.compiled_graph is None:
+            self._state = analysis_state
+            await self.initialize()
+
+        self._set_status(analysis_state, TaskStatus.RUNNING)
+        workflow_state = self._make_initial_workflow_state(
+            analysis_state,
+            current_round=analysis_state.current_round,
+        )
+
+        # Mirror the post-wait max-round extension from _wait_for_user_input().
+        has_real_text = bool(
+            analysis_state.pending_human_input
+            and analysis_state.pending_human_input.strip() not in ("", "[CONTINUE]", "[PI_DECIDE]")
+        )
+        has_uploaded_files = bool(analysis_state.pending_uploaded_files)
+        max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
+        if (has_real_text or has_uploaded_files) and analysis_state.current_round >= max_rounds:
+            analysis_state.max_rounds = analysis_state.current_round + 1
+
+        self._consume_restore_resume_metadata(analysis_state)
+
+        if self._should_continue(workflow_state) == "stop":
+            final_state = await self._generate_final_report(workflow_state)
+            return final_state["analysis_state"]
+
+        workflow_state = await self._check_convergence(workflow_state)
+        if self._check_convergence_condition(workflow_state) == "stop":
+            final_state = await self._generate_final_report(workflow_state)
+            return final_state["analysis_state"]
+
+        config = {"configurable": {"thread_id": self.session_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
+        final_state = await self.compiled_graph.ainvoke(workflow_state, config)
+        return final_state["analysis_state"]
+
     def __init__(
         self,
         config: SystemConfig,
@@ -816,6 +860,14 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             self._set_status(initial_state, TaskStatus.FAILED)
             return initial_state
 
+        # Guard: restored wait-state snapshot → continuation, not fresh run.
+        if (
+            initial_state.restore_resume_kind == "semantic_gate"
+            and initial_state.restore_resume_gate == "round_wait"
+            and initial_state.status == TaskStatus.RUNNING
+        ):
+            return await self.resume_restored_wait_state(initial_state)
+
         # Create initial workflow state
         workflow_state = self._make_initial_workflow_state(initial_state)
         
@@ -1011,6 +1063,13 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         if analysis_state is None:
             logger.error(f"[{self.session_id}] No checkpoint and no analysis_state for {thread_id}")
             raise ValueError(f"No saved state found for thread {thread_id}")
+
+        if (
+            analysis_state.restore_resume_kind == "semantic_gate"
+            and analysis_state.restore_resume_gate == "round_wait"
+            and analysis_state.status == TaskStatus.RUNNING
+        ):
+            return await self.resume_restored_wait_state(analysis_state)
 
         if analysis_state.status in (TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION):
             logger.info(

@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.30.4"
+VERSION = "0.30.5"
 
 
 # ── Node → Agent mapping ───────────────────────────────────────────
@@ -90,23 +90,11 @@ CORE_AGENTS = frozenset({"pi", "bioinformatics", "literature"})
 PLAN_REVISION_NEEDED_TAG = "[__PLAN_REVISION_NEEDED__]"
 PI_REVIEW_FALLBACK_DECISION = "revise"
 
-# TODO(brittleness): Substring matching is inherently fragile — PI natural-language
-# responses like "I cannot execute this step because X" will trigger false positives
-# on "cannot execute". Consider replacing with structured signals (e.g. a dedicated
-# tool call or a prefixed tag like [PLAN_REVISION]) so that intent is unambiguous.
 # HITL signal sentinel values used in analysis_state.user_chosen_direction and
 # pending_human_input fields. Centralized so a typo in any consumer is caught
 # at import time rather than silently breaking comparison semantics.
 CONTINUE_SIGNAL = "[CONTINUE]"
 PI_DECIDE_SIGNAL = "[PI_DECIDE]"
-
-
-PLAN_REVISION_KEYWORDS = frozenset([
-    "plan needs revision", "plan revision", "replan",
-    "cannot execute", "not applicable", "different approach",
-    "rethink", "redesign", "fundamental change",
-    "major change", "hypothesis change",
-])
 
 # ── PI human-input stop keywords (single source of truth) ─────────
 # Used by pi_agent.process_human_guidance and pi_agent.process_user_input

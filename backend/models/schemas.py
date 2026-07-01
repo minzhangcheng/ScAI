@@ -468,6 +468,9 @@ class Snapshot(BaseModel):
     workspace_manifest: Dict[str, List[str]] = Field(default_factory=dict)
     # e.g. {"figures": ["fig_001.jpg"], "tables": ["markers.csv"], "reproducibility": []}
     branch_label: Optional[str] = None  # "main", "branch-A", "branch-B", etc.
+    runtime_state_included: bool = False
+    skipped_files: List[Dict[str, str]] = Field(default_factory=list)
+    branch_id: Optional[str] = None
 
 class PlanStep(BaseModel):
     """A single step in an analysis plan."""
@@ -494,6 +497,11 @@ class AnalysisPlan(BaseModel):
     status: PlanStatus = "draft"
     revision_of: Optional[str] = None  # parent plan ID if this is a revision
     revision_reason: Optional[str] = None  # why this plan was revised
+    round_number: int = 0
+    direction: str = ""
+    direction_key: str = ""
+    branch_id: Optional[str] = None
+    created_from_snapshot_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
     approved_at: Optional[datetime] = None
 
@@ -687,7 +695,17 @@ class RoundResult(BaseModel):
     exploration_report: Optional[ExplorationReport] = None  # Only for Phase 1
     cross_modal_synthesis: Optional[CrossModalSynthesis] = None
     data_driven_mechanism_programs: List[DataDrivenMechanismProgram] = Field(default_factory=list)
+    lineage_id: str = "main"
+    branch_id: Optional[str] = None
+    branch_label: Optional[str] = None
+    source_snapshot_id: Optional[str] = None
+    restored_from_snapshot_id: Optional[str] = None
+    direction_key: str = ""
+    result_identity_key: str = ""
+    round_status: Literal["completed", "partial", "failed", "skipped"] = "completed"
+    evidence_status: Literal["substantive", "empty", "failed"] = "empty"
     timestamp: datetime = Field(default_factory=datetime.now)
+
 
 class PublicationFigure(BaseModel):
     """Publication-quality figure with PNG thumbnail and PDF high-res"""
@@ -753,6 +771,10 @@ class AnalysisState(BaseModel):
     max_rounds: int = 3  # User-configurable maximum rounds
     original_max_rounds: Optional[int] = Field(default=None)  # Preserved during stop to avoid clobbering max_rounds
     round_wait_seconds: int = DEFAULT_ROUND_WAIT_SECONDS  # Countdown seconds between rounds (-1=manual, 0=no wait)
+    plan_review_wait_seconds: int = -1
+    auto_approve_plans: bool = False
+    allow_partial_report: bool = False
+    partial_report_requested_at: Optional[datetime] = None
     waiting_input_started_at: Optional[datetime] = None
 
     # Two-phase workflow state
@@ -787,6 +809,12 @@ class AnalysisState(BaseModel):
     snapshots: List[Snapshot] = Field(default_factory=list)
     last_restored_snapshot_id: Optional[str] = None  # Tracks which snapshot was last restored (for parent chain)
     last_snapshot_id: Optional[str] = None  # Lineage head: id of the most recently created/restored snapshot, used as the forward parent
+    restore_resume_phase: Optional[str] = None
+    restore_resume_kind: Optional[Literal["graph_node", "semantic_gate", "terminal"]] = None
+    restore_resume_node: Optional[str] = None
+    restore_resume_gate: Optional[str] = None
+    restore_branch_id: Optional[str] = None
+    restore_branch_label: Optional[str] = None
 
     # Collaborative analysis planning
     current_plan: Optional[AnalysisPlan] = None

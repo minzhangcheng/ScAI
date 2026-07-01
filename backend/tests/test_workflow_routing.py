@@ -133,13 +133,15 @@ def test_should_continue_normal():
 
 def test_check_convergence_condition_continue():
     s = _Stub()
-    state = {"should_continue": True}
+    state = {"should_continue": True,
+             "analysis_state": type("AS", (), {"max_rounds": 0, "current_round": 0, "status": "running"})()}
     assert s._check_convergence_condition(state) == "continue"
 
 
 def test_check_convergence_condition_stop():
     s = _Stub()
-    state = {"should_continue": False}
+    state = {"should_continue": False,
+             "analysis_state": type("AS", (), {"max_rounds": 0, "current_round": 0, "status": "running"})()}
     assert s._check_convergence_condition(state) == "stop"
 
 
@@ -147,7 +149,7 @@ def test_check_convergence_condition_missing_key_defaults_continue():
     """Missing should_continue key now defaults to 'continue' to avoid
     silently stopping a live run (consistent with _should_continue)."""
     s = _Stub()
-    state = {}
+    state = {"analysis_state": type("AS", (), {"max_rounds": 0, "current_round": 0, "status": "running"})()}
     assert s._check_convergence_condition(state) == "continue"
 
 
@@ -165,3 +167,25 @@ def test_after_review_clears_plan_revision_resume_even_on_stage2():
     route = s._after_review(state)
     assert route == "approved_stage2"
     assert state.get("plan_revision_resume") is False
+
+
+def test_convergence_routes_stop_on_human_stop_requested():
+    s = _Stub()
+    state = {"analysis_state": type("AS", (), {"max_rounds": 0, "current_round": 0, "status": "running"})(),
+             "human_stop_requested": True, "should_continue": True}
+    assert s._check_convergence_condition(state) == "stop"
+
+
+def test_convergence_routes_stop_at_max_rounds():
+    s = _Stub()
+    as_ = type("AS", (), {"max_rounds": 3, "current_round": 3, "status": "running"})()
+    state = {"analysis_state": as_, "should_continue": True}
+    assert s._check_convergence_condition(state) == "stop"
+
+
+def test_convergence_routes_stop_when_paused():
+    from backend.models.schemas import TaskStatus
+    s = _Stub()
+    as_ = type("AS", (), {"max_rounds": 0, "current_round": 0, "status": TaskStatus.PAUSED})()
+    state = {"analysis_state": as_, "should_continue": True}
+    assert s._check_convergence_condition(state) == "stop"

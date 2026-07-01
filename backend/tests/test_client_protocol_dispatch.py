@@ -277,7 +277,7 @@ async def test_protocol_probe_exhausts_all_protocols_on_persistent_transient():
 
     assert "Protocol probe exhausted" in str(exc_info.value)
     assert fake.complete.await_count == 3
-    assert c.client.chat.completions.create.await_count == 1
+    assert c.client.chat.completions.create.await_count == 3
     assert anth.complete.await_count == 3
     assert ("https://api.n1n.ai/v1", "gemini-3.1-pro-preview") not in llm_mod._PROBE_CACHE
 

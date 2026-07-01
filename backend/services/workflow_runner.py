@@ -66,7 +66,14 @@ async def _headless_workflow_runner(session_id: str):
             workflows[session_id] = workflow
             _initializing_sessions.discard(session_id)
 
-        await workflow.run()
+        if state.current_round > 0 or state.status in (
+            TaskStatus.PAUSED,
+            TaskStatus.WAITING_INPUT,
+            TaskStatus.WAITING_ANNOTATION,
+        ):
+            await workflow.resume(session_id, state)
+        else:
+            await workflow.run(state, session_id)
         logger.info(f"Headless workflow completed for session {session_id}")
 
     except Exception as e:

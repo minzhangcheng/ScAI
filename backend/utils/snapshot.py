@@ -1,6 +1,7 @@
 """Snapshot manager for saving and restoring analysis state at key points."""
 
 import asyncio
+import fnmatch
 import json
 import os
 import logging
@@ -9,10 +10,26 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..models.schemas import AnalysisState, Snapshot
-from ..config import get_session_dir, get_session_states
+from ..config import (
+    MAX_SESSION_SNAPSHOT_BYTES,
+    MAX_SNAPSHOT_KERNEL_PKL_BYTES,
+    SNAPSHOT_EXCLUDED_WORKSPACE_PATTERNS,
+    get_session_dir,
+    get_session_states,
+)
 from ..utils.blob_store import externalize_blobs, inline_blobs
 
 logger = logging.getLogger(__name__)
+
+
+def should_include_runtime_state(size_bytes: int, max_bytes: int = MAX_SNAPSHOT_KERNEL_PKL_BYTES) -> tuple[bool, str]:
+    if size_bytes > max_bytes:
+        return False, f"runtime state size {size_bytes} exceeds limit {max_bytes}"
+    return True, ""
+
+
+def should_exclude_snapshot_file(filename: str, patterns=SNAPSHOT_EXCLUDED_WORKSPACE_PATTERNS) -> bool:
+    return any(fnmatch.fnmatch(filename, pattern) for pattern in patterns)
 
 
 class SnapshotManager:
@@ -140,7 +157,7 @@ class SnapshotManager:
             files = []
             if dir_path.exists():
                 for f in sorted(dir_path.iterdir()):
-                    if f.is_file():
+                    if f.is_file() and not should_exclude_snapshot_file(f.name):
                         files.append(f.name)
             manifest[subdir] = files
         # Also track files in workspace root (e.g. .h5ad, stray .csv)
@@ -148,7 +165,7 @@ class SnapshotManager:
         workspace_dir = session_dir / "workspace"
         if workspace_dir.exists():
             for f in sorted(workspace_dir.iterdir()):
-                if f.is_file():
+                if f.is_file() and not should_exclude_snapshot_file(f.name):
                     root_files.append(f.name)
         manifest["root"] = root_files
         return manifest
@@ -173,6 +190,7 @@ class SnapshotManager:
             parent_id=parent_id,
             branch_label=branch_label,
         )
+        snapshot.branch_id = state.restore_branch_id
         snapshot.state_file = f"{snapshot.id}.json"
 
         # Serialize state, excluding large/recursive fields
@@ -215,27 +233,41 @@ class SnapshotManager:
         pkl_src = get_session_states(self.session_id) / f"{self.session_id}_session.pkl"
         pkl_dst = self.snapshots_dir / f"{snapshot.id}_session.pkl.zst"
         if pkl_src.exists():
-            def _compress_to_snapshot():
-                import zstandard as zstd
-                cctx = zstd.ZstdCompressor(level=3, threads=-1)
-                tmp_dst = pkl_dst.with_suffix(pkl_dst.suffix + ".tmp")
-                try:
-                    with open(pkl_src, "rb") as src_f, open(tmp_dst, "wb") as dst_f:
-                        cctx.copy_stream(src_f, dst_f)
-                    os.replace(tmp_dst, pkl_dst)
-                except Exception:
-                    try:
-                        tmp_dst.unlink()
-                    except OSError:
-                        pass
-                    raise
-                return pkl_dst.stat().st_size
+            pkl_size = pkl_src.stat().st_size
+            include_runtime, reason = should_include_runtime_state(pkl_size)
+            if not include_runtime:
+                snapshot.runtime_state_included = False
+                snapshot.skipped_files.append({"path": str(pkl_src), "reason": reason, "size_bytes": str(pkl_size)})
+                logger.warning("[%s] Snapshot runtime state skipped: %s", self.session_id, reason)
+            elif snapshot.size_bytes + pkl_size > MAX_SESSION_SNAPSHOT_BYTES:
+                reason = f"snapshot total would exceed limit {MAX_SESSION_SNAPSHOT_BYTES}"
+                snapshot.runtime_state_included = False
+                snapshot.skipped_files.append({"path": str(pkl_src), "reason": reason, "size_bytes": str(pkl_size)})
+                logger.warning("[%s] Snapshot runtime state skipped: %s", self.session_id, reason)
+            else:
+                snapshot.runtime_state_included = True
 
-            snapshot.size_bytes += await asyncio.to_thread(_compress_to_snapshot)
-            logger.info(
-                f"[{self.session_id}] Snapshot created: {name} ({phase}), "
-                f"size={snapshot.size_bytes} bytes (includes compressed pkl)"
-            )
+                def _compress_to_snapshot():
+                    import zstandard as zstd
+                    cctx = zstd.ZstdCompressor(level=3, threads=-1)
+                    tmp_dst = pkl_dst.with_suffix(pkl_dst.suffix + ".tmp")
+                    try:
+                        with open(pkl_src, "rb") as src_f, open(tmp_dst, "wb") as dst_f:
+                            cctx.copy_stream(src_f, dst_f)
+                        os.replace(tmp_dst, pkl_dst)
+                    except Exception:
+                        try:
+                            tmp_dst.unlink()
+                        except OSError:
+                            pass
+                        raise
+                    return pkl_dst.stat().st_size
+
+                snapshot.size_bytes += await asyncio.to_thread(_compress_to_snapshot)
+                logger.info(
+                    f"[{self.session_id}] Snapshot created: {name} ({phase}), "
+                    f"size={snapshot.size_bytes} bytes (includes compressed pkl)"
+                )
         else:
             logger.info(
                 f"[{self.session_id}] Snapshot created: {name} ({phase}), "
