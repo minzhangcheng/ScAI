@@ -23,7 +23,8 @@ import {
   Clock,
   Loader2,
   Eye,
-  TrendingUp
+  TrendingUp,
+  AlertTriangle
 } from 'lucide-react'
 import { base64ToDataUri } from '../utils/image'
 import { agentIcons, agentBgColors, agentGradients, FALLBACK_AGENT_ICON } from '../constants/agents'
@@ -446,6 +447,35 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           )
         }
         
+        if (message.type === 'modality_warning') {
+          return (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs text-amber-600">
+                <AlertTriangle className="w-3 h-3" />
+                <span>{language === 'zh' ? '模态提示' : 'Modality Warning'}</span>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+                <pre className="whitespace-pre-wrap text-xs">{typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}</pre>
+              </div>
+            </div>
+          )
+        }
+
+        if (message.type === 'report_blocked') {
+          const rb = (typeof message.content === 'object' && message.content) ? message.content as { reason?: string; partial_allowed?: boolean } : {}
+          return (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs text-amber-600">
+                <AlertTriangle className="w-3 h-3" />
+                <span>{language === 'zh' ? '报告生成受阻' : 'Report Blocked'}</span>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+                <pre className="whitespace-pre-wrap text-xs">{rb.reason || (typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2))}</pre>
+              </div>
+            </div>
+          )
+        }
+
         if (message.type === 'direction_correlation') {
           const data = typeof message.content === 'object' ? message.content : {}
           const correlation = data.correlation || (typeof message.content === 'string' ? message.content : '')

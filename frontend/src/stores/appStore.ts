@@ -21,7 +21,7 @@ export interface AuthUser {
 
 export interface Message {
   id: string
-  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report' | 'exploration_failed' | 'direction_correlation' | 'plan_review' | 'plan_approved'
+  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report' | 'exploration_failed' | 'direction_correlation' | 'plan_review' | 'plan_approved' | 'modality_warning' | 'report_blocked'
   agent?: AgentType
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   content: any  // Message content varies significantly by type (string | object | figure | findings etc.)

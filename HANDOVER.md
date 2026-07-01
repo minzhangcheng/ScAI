@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.30.5 · **Last updated**: 2026-07-01
+**Version**: 0.30.6 · **Last updated**: 2026-07-01
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.30.x — (2026-06-30 → 2026-07-01)**
+
+- `0.30.6` — Modality warning & report-blocked WebSocket message types (2026-07-01):
+  - **New WebSocket message types (`backend/models/schemas.py`)**: `modality_warning` and `report_blocked` added to `WebSocketMessage` allowed message types, enabling the backend to surface modality-related warnings (e.g., imaging data uploaded but pathology agent disabled) and report-generation blocks (e.g., insufficient direction coverage) as structured messages.
+  - **Frontend modality/report-block display (`frontend/src/components/MessageStream.tsx`, `frontend/src/stores/appStore.ts`)**: `modality_warning` renders as an amber-themed warning with `AlertTriangle` icon and modal header. `report_blocked` renders as a report-generation-blocked card with reason and partial-approval status. Both added to the `Message` type union in `appStore.ts`.
 
 - `0.30.5` — Snapshot size policy, branch lineage restore, direction coverage tracking, complete-report validation gate, sandbox subprocess hardening, LLM retry-propagation fix (2026-07-01):
   - **Snapshot size governance (`backend/config/_config.py`, `backend/utils/snapshot.py`)**: New `MAX_SNAPSHOT_KERNEL_PKL_BYTES` (2 GB) and `MAX_SESSION_SNAPSHOT_BYTES` (20 GB) caps prevent oversized snapshots from silently consuming disk space. `SNAPSHOT_EXCLUDED_WORKSPACE_PATTERNS` filter out transient files (`core.*`, `*.tmp`, `*.lock`). Snapshot manager now conditionally includes runtime state (compressed `.pkl.zst`) and tracks skipped files with reasons. `Snapshot` model gains `runtime_state_included`, `skipped_files`, `branch_id`.

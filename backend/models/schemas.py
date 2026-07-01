@@ -1369,6 +1369,10 @@ class WebSocketMessage(BaseModel):
         "plan_review", "plan_approved",
         # Exploration failure (likely a data problem) — prompt user to check data
         "exploration_failed",
+        # Modality warning (e.g. imaging data uploaded but its agent is disabled)
+        "modality_warning",
+        # Final report blocked (e.g. insufficient direction coverage) — awaits user
+        "report_blocked",
     ]
     agent: Optional[AgentType] = None
     content: Any
