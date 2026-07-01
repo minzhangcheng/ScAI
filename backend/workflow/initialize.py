@@ -27,6 +27,8 @@ class InitializeMixin:
         # (otherwise LangGraph would have replayed from checkpoint without
         # current_round_direction set) → consume it now.
         if (
+            not analysis_state.last_restored_snapshot_id
+            and
             analysis_state.current_round_direction
             and analysis_state.directions_queue
             and analysis_state.directions_queue[0].get("direction") == analysis_state.current_round_direction
@@ -36,7 +38,8 @@ class InitializeMixin:
                 f"[{self.session_id}] Direction consumed at round entry: "
                 f"{consumed.get('direction', '')[:80]} (remaining queue: {len(analysis_state.directions_queue)})"
             )
-        analysis_state.current_round_direction = ""
+        if not analysis_state.last_restored_snapshot_id:
+            analysis_state.current_round_direction = ""
 
         # P3-5: business default — if resuming in INNOVATION after round 1 with
         # no direction chosen and no pending input, default to PI_DECIDE so the
@@ -242,4 +245,3 @@ class InitializeMixin:
             "human_stop_requested": False,
             "human_guidance_processed": False
         }
-

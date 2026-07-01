@@ -1,6 +1,10 @@
 """复现并锁定多方向关联分析触发 bug：最后一个方向轮完成时必须触发。"""
 from backend.models.schemas import AnalysisState, AnalysisPhase, RoundResult
-from backend.workflow.synthesis import _should_run_direction_correlation
+from backend.workflow.synthesis import (
+    _multi_direction_analysis_completed,
+    _should_force_next_round,
+    _should_run_direction_correlation,
+)
 
 
 def _state_with_two_directions():
@@ -80,3 +84,46 @@ def test_no_trigger_outside_innovation_phase():
     state = _state_with_two_directions()
     state.analysis_phase = AnalysisPhase.EXPLORATION
     assert _should_run_direction_correlation(state) is False
+
+
+def test_multi_direction_completed_when_correlation_exists_despite_stale_queue():
+    """Terminal state: all selected directions are done and correlation exists."""
+    state = _state_with_two_directions()
+    state.multi_direction_correlation = "correlation summary"
+
+    assert _multi_direction_analysis_completed(state) is True
+
+
+def test_multi_direction_not_completed_before_correlation_exists():
+    """All directions may be done, but terminal handling waits for correlation."""
+    state = _state_with_two_directions()
+
+    assert _multi_direction_analysis_completed(state) is False
+
+
+def test_force_next_round_ignores_stale_queue_after_multi_direction_completion():
+    """P1-1 leaves the final direction in the queue on terminal rounds; do not loop."""
+    state = _state_with_two_directions()
+    state.multi_direction_correlation = "correlation summary"
+
+    assert _should_force_next_round(state) is False
+
+
+def test_force_next_round_keeps_pending_queue_before_multi_direction_completion():
+    """Before all selected directions finish, queued directions still force the next round."""
+    dir1 = {"direction": "Direction one", "notes": ""}
+    dir2 = {"direction": "Direction two", "notes": ""}
+    state = AnalysisState(
+        session_id="t",
+        user_id="test",
+        analysis_phase=AnalysisPhase.INNOVATION,
+        user_chosen_directions=[dir1, dir2],
+        directions_queue=[dir2],
+        multi_direction_correlation=None,
+        round_results=[
+            RoundResult(round_number=1, phase="exploration"),
+            RoundResult(round_number=2, phase="innovation", direction="Direction one"),
+        ],
+    )
+
+    assert _should_force_next_round(state) is True

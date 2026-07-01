@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.30.3 · **Last updated**: 2026-06-30
+**Version**: 0.30.4 · **Last updated**: 2026-07-01
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,12 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.30.x — (2026-06-30)**
+**0.30.x — (2026-06-30 → 2026-07-01)**
+
+- `0.30.4` — Multi-direction terminal gate stale-queue fix & snapshot restore direction resume (2026-07-01):
+  - **Stale queue handling in terminal rounds (`backend/workflow/synthesis.py`)**: New `_multi_direction_analysis_completed()` helper detects completion of all selected innovation directions by comparing innovation round count against chosen direction count (not by checking if `directions_queue` is empty). P1-1 peek-commit leaves the final direction in `directions_queue` on terminal rounds because `_initialize_round()` is never called again, so the old empty-queue criterion falsely suppressed further round processing. `_should_force_next_round()` now skips stale queue entries after completion is detected, preventing infinite loops.
+  - **Snapshot restore direction guard (`backend/workflow/initialize.py`)**: Direction queue consumption and `current_round_direction` clear now both guarded by `last_restored_snapshot_id` — on snapshot restore, the direction queue state is preserved exactly as it was when the snapshot was taken, preventing premature consumption of queue entries that would cause direction mismatch during replay.
+  - **New test files**: `test_multi_direction_terminal_gate.py` (terminal round HITL gate test), `test_snapshot_restore_direction_resume.py` (snapshot restore direction state preservation), `test_simplify_refactor.py` (code simplification refactoring validation). Extended `test_multi_direction_correlation_trigger.py` with 5 new terminal-state tests.
 
 - `0.30.3` — PI prompt mechanism program display refactor (2026-06-30):
   - **PI prompt compact display (`backend/agents/pi_agent.py`)**: Replaced verbose inline f-string formatting of `DataDrivenMechanismProgram` fields (label, round_number, evidence_strength, specificity, bulk_support, triggering_observations, supporting_genes/pathways, missing_evidence) with a dedicated `to_prompt_text(style='compact', ...)` method call, reducing code duplication and improving maintainability.

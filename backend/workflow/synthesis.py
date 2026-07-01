@@ -41,7 +41,8 @@ def _should_force_next_round(analysis_state: AnalysisState) -> bool:
     Priority order:
     1. Real human text input (not synthetic continue markers)
     2. Newly uploaded files
-    3. Remaining multi-direction queue entries
+    3. Remaining multi-direction queue entries, except for the stale final
+       queue entry left after completed multi-direction analysis
     """
     has_real_text = bool(
         analysis_state.pending_human_input
@@ -52,11 +53,34 @@ def _should_force_next_round(analysis_state: AnalysisState) -> bool:
         analysis_state.directions_queue
         and any(d.get("direction", "").strip() for d in analysis_state.directions_queue)
     )
+    if has_remaining_directions and _multi_direction_analysis_completed(analysis_state):
+        has_remaining_directions = False
     return has_real_text or has_uploaded_files or has_remaining_directions
 
 
 def _consume_signal_then_clear(event: asyncio.Event) -> None:
     event.clear()
+
+
+def _multi_direction_analysis_completed(analysis_state) -> bool:
+    """Return True once every selected innovation direction has completed.
+
+    P1-1 peek-commit can leave the final direction in `directions_queue` on the
+    terminal round because there is no next `_initialize_round()` call to pop it.
+    Completion is therefore measured from persisted round results plus the
+    presence of the cross-direction correlation output, not from an empty queue.
+    """
+    chosen = analysis_state.user_chosen_directions
+    if len(chosen) <= 1:
+        return False
+    if analysis_state.analysis_phase != AnalysisPhase.INNOVATION:
+        return False
+    if analysis_state.multi_direction_correlation is None:
+        return False
+    innovation_rounds_done = sum(
+        1 for r in analysis_state.round_results if r.phase == "innovation"
+    )
+    return innovation_rounds_done >= len(chosen)
 
 
 def _should_run_direction_correlation(analysis_state) -> bool:
@@ -464,7 +488,7 @@ class SynthesisMixin:
                 await self.state_callback(analysis_state)
             except Exception as e:
                 logger.exception("Failed to save state after round")
-        
+
         # Extract data requests from PI
         try:
             data_requests = await self.pi_agent.identify_data_needs(
@@ -726,4 +750,3 @@ class SynthesisMixin:
             "should_continue": not should_stop,
         }
     
-
