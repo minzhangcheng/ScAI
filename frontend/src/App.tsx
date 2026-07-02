@@ -3,6 +3,7 @@ import { useAppStore } from './stores/appStore'
 import { useConfig, useWebSocket, useUserConfig } from './hooks/useApi'
 import { useTranslation } from './i18n/translations'
 import { devWarn } from './utils/logger'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { ConfigPanel } from './components/ConfigPanel'
 import { Sidebar } from './components/Sidebar'
 import { AnalysisPanel } from './components/AnalysisPanel'
@@ -103,6 +104,7 @@ function App() {
         const s = await checkStatus()
         if (!s.configured) setShowConfig(true)
         setConfigured(s.configured)
+        useAppStore.getState().setApiConfigured(s.configured)
         // Sync admin config from store to backend if store has values
         if (s.configured && !apiConfig.apiKey) {
           // Admin has config on server but store is empty (e.g. cleared cache)
@@ -112,6 +114,7 @@ function App() {
         const s = await getUserConfigStatus()
         if (!s.configured) setShowConfig(true)
         setConfigured(s.configured)
+        useAppStore.getState().setApiConfigured(s.configured)
         // Sync non-admin user's llmBaseUrl from backend if store has defaults
         if (s.configured && !apiConfig.apiKey) {
           try {
@@ -162,6 +165,7 @@ function App() {
   ] as const
 
   return (
+    <ErrorBoundary>
     <div className="min-h-screen bg-surface-50">
       {/* Session loading overlay — shown while loadSession fetches, auto-closes on completion */}
       {sessionLoading && (
@@ -355,6 +359,7 @@ function App() {
         </div>
       </div>
     </div>
+    </ErrorBoundary>
   )
 }
 

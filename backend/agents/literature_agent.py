@@ -1053,7 +1053,7 @@ Return ONLY the PubMed query string, nothing else."""
             try:
                 resp = await self.fallback_llm_client.chat(
                     model=self.fallback_model,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "system", "content": self.system_prompt}, {"role": "user", "content": prompt}],
                     temperature=temperature,
                 )
                 if not resp.content:

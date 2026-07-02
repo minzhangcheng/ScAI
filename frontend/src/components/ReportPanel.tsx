@@ -352,7 +352,14 @@ export function ReportPanel() {
       let validation: { valid: boolean; message?: string; uncertain?: boolean }
 
       if (isAdmin) {
-        validation = await adminConfig.validateApiKey()
+        const { apiConfig, apiConfigured } = useAppStore.getState()
+        if (!apiConfig.apiKey && apiConfigured) {
+          // No local key but server is configured: validate the saved global key
+          // instead of sending an empty key.
+          validation = await adminConfig.validateSavedConfig()
+        } else {
+          validation = await adminConfig.validateApiKey()
+        }
       } else {
         validation = await userConfig.validateSavedConfig()
       }

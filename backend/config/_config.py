@@ -1,7 +1,7 @@
 """
 Configuration for the Multi-Agent Single-Cell Analysis System
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Dict
 from pathlib import Path
 import os
@@ -48,7 +48,7 @@ UPLOAD_TEMP_DIR = DATA_BASE_DIR / "upload_temp"
 
 def _ensure_directories() -> None:
     """Create data directory structure (idempotent, called once at import time)."""
-    DATA_BASE_DIR.mkdir(exist_ok=True)
+    DATA_BASE_DIR.mkdir(parents=True, exist_ok=True)
     for d in [UPLOAD_DIR, STATE_DIR, WORKSPACE_DIR, SESSION_DIR, REPORTS_DIR, LOG_DIR]:
         d.mkdir(exist_ok=True)
     UPLOAD_TEMP_DIR.mkdir(exist_ok=True)
@@ -180,6 +180,19 @@ class APIConfig(BaseModel):
     llm_base_url: str = "https://openrouter.ai/api/v1"  # OpenAI-compatible endpoint
     proxy_url: Optional[str] = None  # HTTP/HTTPS proxy for API requests
     # Note: google_api_key moved to literature_config (per-session, in AnalysisState)
+
+    @field_validator("proxy_url")
+    @classmethod
+    def _check_proxy(cls, v):
+        if v is None or v == "":
+            return v
+        if not (v.startswith("http://") or v.startswith("https://") or v.startswith("socks5://")):
+            raise ValueError("proxy_url must start with http://, https:// or socks5://")
+        return v
+
+    def require_key(self) -> None:
+        if not self.api_key:
+            raise ValueError("LLM api_key is not configured; set it in Config")
     
 class ModelConfig(BaseModel):
     """Model configuration for each agent"""

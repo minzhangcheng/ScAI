@@ -108,6 +108,40 @@ def _build_chat_context(state: Any) -> tuple:
     return "\n".join(parts), figure_inventory
 
 
+def _build_figure_setup_code(fig_dir, ts="test_ts", code="pass") -> str:
+    dir_literal = repr(str(fig_dir))
+    return (
+        "import matplotlib\n"
+        "import matplotlib.pyplot as plt\n"
+        "import io as _io\n"
+        "from IPython.display import display as _display, Image as _Image\n"
+        + _TPL_NOOP_INSTALL +
+        "_code_error = None\n"
+        "try:\n"
+        f"    {code.replace(chr(10), chr(10) + '    ')}\n"
+        "except Exception as _e:\n"
+        "    _code_error = str(_e)\n"
+        "    print(f'CODE_ERROR: {_e}')\n"
+        "    import traceback; traceback.print_exc()\n"
+        "finally:\n"
+        "    plt.show = _orig_show\n"
+        "    plt.close = _orig_close\n"
+        "# Capture all open figures as PNG + save PDF for download\n"
+        "_fignums = plt.get_fignums()\n"
+        "for _fn in _fignums:\n"
+        "    _f = plt.figure(_fn)\n"
+        "    # Save high-res PDF\n"
+        f"    _f.savefig({dir_literal} + '/chat_{ts}_' + str(_fn) + '.pdf', "
+        "format='pdf', dpi=300, bbox_inches='tight', facecolor='white')\n"
+        "    # Capture PNG for display\n"
+        "    _buf = _io.BytesIO()\n"
+        "    _f.savefig(_buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')\n"
+        "    _buf.seek(0)\n"
+        "    _display(_Image(data=_buf.getvalue()))\n"
+        "plt.close('all')\n"
+    )
+
+
 async def _generate_figures_in_chat(
     session_id: str, state: Any, descriptions: List[str]
 ) -> List[Dict[str, str]]:
@@ -144,7 +178,13 @@ async def _generate_figures_in_chat(
             )
 
             llm_client = get_agent_llm_client(state, config, "bioinformatics", session_id)
-            bio_model = (state.custom_models or {}).get("bioinformatics") or getattr(config.models, "bioinformatics_model", "") or "google/gemini-3.1-pro-preview"
+            provider = AgentSettingsProvider(state, config, None, session_id)
+            bio_model = provider.get_model("bioinformatics")
+            if not bio_model:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Bioinformatics model not configured for this session.",
+                )
             code_resp = await llm_client.chat(
                 model=bio_model,
                 messages=[{"role": "user", "content": code_prompt}],
@@ -163,39 +203,7 @@ async def _generate_figures_in_chat(
             fig_dir = get_session_workspace(session_id) / "figures"
             fig_dir.mkdir(parents=True, exist_ok=True)
 
-            # Wrap code: neutralize plt.show/plt.close, capture figures as PNG via IPython.display
-            # Also save high-res PDF for download
-            escaped_dir = str(fig_dir).replace("\\", "\\\\")
-            wrapped = (
-                "import matplotlib\n"
-                "import matplotlib.pyplot as plt\n"
-                "import io as _io\n"
-                "from IPython.display import display as _display, Image as _Image\n"
-                + _TPL_NOOP_INSTALL +
-                "_code_error = None\n"
-                "try:\n"
-                f"    {code.replace(chr(10), chr(10) + '    ')}\n"
-                "except Exception as _e:\n"
-                "    _code_error = str(_e)\n"
-                "    print(f'CODE_ERROR: {_e}')\n"
-                "    import traceback; traceback.print_exc()\n"
-                "finally:\n"
-                "    plt.show = _orig_show\n"
-                "    plt.close = _orig_close\n"
-                "# Capture all open figures as PNG + save PDF for download\n"
-                "_fignums = plt.get_fignums()\n"
-                "for _fn in _fignums:\n"
-                "    _f = plt.figure(_fn)\n"
-                "    # Save high-res PDF\n"
-                f"    _f.savefig(r\"{escaped_dir}/chat_{ts}_\" + str(_fn) + \".pdf\", "
-                "format='pdf', dpi=300, bbox_inches='tight', facecolor='white')\n"
-                "    # Capture PNG for display\n"
-                "    _buf = _io.BytesIO()\n"
-                "    _f.savefig(_buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')\n"
-                "    _buf.seek(0)\n"
-                "    _display(_Image(data=_buf.getvalue()))\n"
-                "plt.close('all')\n"
-            )
+            wrapped = _build_figure_setup_code(fig_dir, ts, code)
 
             result = await sandbox.execute(wrapped, save_to_history=False)
             logger.info(f"Chat sandbox execute: success={result.success}, "

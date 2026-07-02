@@ -3,8 +3,9 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
 
+from backend.middleware.auth import invalidate_admin_initialized_cache
 from backend.utils.auth import get_db, hash_password, check_user_uniqueness
-from backend.models.user import UsernameStr
+from backend.models.user import UsernameStr, PasswordStr
 
 router = APIRouter(prefix="/api/auth/setup", tags=["setup"])
 
@@ -15,7 +16,7 @@ class SetupStatusResponse(BaseModel):
 
 class SetupAdminRequest(BaseModel):
     username: UsernameStr
-    password: str = Field(min_length=8, max_length=128)
+    password: PasswordStr
     email: Optional[EmailStr] = None
 
 
@@ -49,4 +50,5 @@ async def setup_admin(req: SetupAdminRequest):
     if not created:
         await db.update_user_password(admin_id, pw_hash)
     await db.set_meta("admin_initialized", "1")
+    invalidate_admin_initialized_cache()
     return SetupAdminResponse(message="Admin account created successfully")

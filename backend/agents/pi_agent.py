@@ -19,7 +19,7 @@ from ..models.schemas import (
     DATA_TYPE_SCRNASEQ,
     CrossModalSynthesis, CrossModalMechanismCandidate, CrossModalEvidenceItem,
 )
-from ..utils.llm_client import OpenAICompatibleClient
+from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..constants import (
     CONTINUE_SIGNAL,
     PI_DECIDE_SIGNAL,
@@ -430,6 +430,8 @@ Return JSON: {{"action": "change_species"|"keep"|"custom", "new_species": "scien
                 "action": result.get("action", "keep"),
                 "new_species": result.get("new_species", ""),
             }
+        except UpstreamExhaustedError:
+            raise
         except Exception:
             return {"action": "keep", "new_species": ""}
 
@@ -1830,6 +1832,10 @@ Return a complete structured report JSON:
             flags.append(flag)
         candidate["risk_flags"] = flags
 
+    @staticmethod
+    def _select_directions(candidates: list) -> list:
+        return [d.get("direction", "") for d in candidates if isinstance(d, dict) and d.get("direction")]
+
     @classmethod
     def _apply_direction_guardrails(
         cls,
@@ -2236,7 +2242,7 @@ Return JSON:
                 for c in candidates[:2]
             ]
             # Build rejected list from remaining candidates
-            selected_dirs_set = {d["direction"] for d in selected}
+            selected_dirs_set = {d.get("direction", "") for d in selected}
             rejected = [
                 {"direction": c.get("direction", ""), "reason_not_selected": "Not selected in fallback",
                  "follow_up_value": "low", "dependency_note": ""}
@@ -2281,7 +2287,7 @@ Return JSON:
         rejected = [r for r in rejected
                     if isinstance(r, dict) and r.get("direction", "") not in selected_texts]
 
-        logger.info(f"[PI] Selected {len(selected)} directions: {[d['direction'][:50] for d in selected]}")
+        logger.info(f"[PI] Selected {len(selected)} directions: {[d.get('direction', '')[:50] for d in selected]}")
         return {
             "selected_directions": selected,
             "rejected_directions": rejected,

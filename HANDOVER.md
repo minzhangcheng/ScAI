@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.30.6 · **Last updated**: 2026-07-01
+**Version**: 0.31.1 · **Last updated**: 2026-07-02
 
 ## 1. Runtime Architecture
 
@@ -193,6 +193,23 @@ scai/
 ## 12. Version History (condensed)
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
+
+**0.31.x — (2026-07-02)**
+
+- `0.31.1` — LLM failure per-node HITL, sandbox PKL integrity, upload concurrency hardening, API key security, frontend ErrorBoundary & WS reliability (2026-07-02):
+  - **LLM failure generation per-node (`backend/workflow/core.py`, `backend/workflow/state.py`)**: Changed from a single global generation counter to per-node counters (`_llm_failure_generations: Dict[str, int]`), preventing stale/overlapping generation checks when multiple nodes fail concurrently. Added `_next_generation(node)` and `_generation_for(node)` helpers.
+  - **WebSocket race condition fixes (`frontend/src/hooks/useApi.ts`, `frontend/src/stores/appStore.ts`)**: Added stale connection guard (`wsRef.current !== ws`) in both `onopen` and `onclose` handlers. Changed reconnect strategy to close existing connections before opening new ones. Switched message handlers from closure-captured `setMessages`/`addMessage`/`updateSession` to `useAppStore.getState()` direct calls, eliminating stale-state bugs on reconnect.
+  - **Upload concurrency & bounds hardening (`backend/services/upload.py`)**: Added reference-counted `complete_lock` registry to prevent memory leaks from abandoned upload sessions. Added `total_size` validation at upload init (rejects >10 GB) and `chunk_index` bounds checking. Added `_stream_generic_upload()` with 100 MB size cap and chunked streaming for non-sequencing files.
+  - **Sandbox PKL integrity & per-session temp dirs (`backend/utils/sandbox.py`)**: HMAC-SHA256 signatures for session pickle files, stored outside the session directory. `_verify_pkl_integrity` prevents restore of tampered payloads. Per-session temp directories (`scai-{session_id}`) replace shared `/tmp` access. Added `await_pending_saves()` before kernel shutdown to prevent save races.
+  - **API key security (`frontend/src/stores/appStore.ts`, `backend/routes/config.py`, `backend/services/config_io.py`, `backend/utils/settings_provider.py`)**: `deepResearchApiKey` and `googleApiKey` stripped from localStorage persistence. `apiConfig.apiKey` always stored as empty string in persisted state, with server-side validation via new `/api/config/validate-saved`. Literature config and agent-server-config GET endpoints now mask API keys (`***`). New `AgentSettingsProvider.mask_literature_config()` method. Password `hash_password` raises `ValueError` for >72 bytes (bcrypt limit).
+  - **LLM client hardening (`backend/utils/llm_client.py`, `backend/utils/llm_logger.py`)**: Both `OpenAICompatibleClient` and `GoogleDeepResearchClient` have `_closed` guards preventing double-free of HTTP connection pools. `__del__` warns on leaked clients. Async LLM logging via `log_response_async()` with serialized thread-pool offloading under `asyncio.Lock()`. API key validated non-empty on construction. Idempotent close guards prevent double-free.
+  - **Workflow runner & report atomicity (`backend/services/workflow_runner.py`, `backend/services/report/regenerator.py`)**: Extracted `_build_workflow_for_session()` for shared workflow construction. Report generation tracked with `_report_tasks` dict and `done_callback` cleanup. Added `report_ws_lock` (`asyncio.Lock`) around `report_websockets` read/write. `_try_begin_generation()` with `_pending_lock` for atomic check-and-set on report generation. NaN-safe JSON parsing via `_load_report_json()` helper.
+  - **Session config & mutation safety (`backend/services/config_io.py`, `backend/workflow/direction_coverage.py`)**: Temperature stored as `float` instead of `str`. `normalize_legacy_round_result` returns deep copy, preventing mutation of original `RoundResult` objects. Added `count_innovation_rounds_done()` for accurate innovation-round counting; synthesis phase transition uses it instead of naive round counting.
+  - **Docker & infrastructure hardening (`Dockerfile`, `docker-entrypoint.sh`, `.dockerignore`, `stop.sh`)**: Non-root user (`scai:scai`, UID 10001) with `gosu` privilege drop. `HEALTHCHECK` added. More restrictive `.dockerignore`. `stop.sh` uses `grep`/`cut` instead of `source` for PID file parsing.
+  - **Security hardening (`backend/middleware/auth.py`, `backend/models/user.py`, `backend/routes/sessions.py`, `scripts/fetch_markers.py`)**: File path traversal prevention in session file operations. Session ID validation in lifecycle endpoints. Password `PasswordStr` model enforces 72-byte limit. CellMarker2 download uses `https://` with SHA-256 signature pinning. Stale lock reclaim uses atomic `os.replace()`.
+  - **Frontend reliability (`frontend/src/components/ErrorBoundary.tsx`, `frontend/src/components/Sidebar.tsx`, `frontend/src/stores/appStore.ts`, `frontend/src/types.ts`)**: New `ErrorBoundary` component wraps full app. Sidebar defaults moved to i18n keys. `Message.content` typed as `string | ContentBlock`. Chat message `id` made required with `crypto.randomUUID()` auto-generation. New `apiConfigured` store flag for API key state checks.
+  - **Admin & lifecycle fixes (`backend/routes/admin.py`, `backend/routes/lifecycle.py`, `backend/routes/reports.py`)**: `invalidate_admin_initialized_cache()` on setup to prevent stale admin state. `demote_admin_if_not_last()` prevents removing the last admin. Pause preserves plan review state across pause/resume. Auto-snapshot `WorkflowTerminatedError` now properly re-raised. Session loading `pop("report_blocked", None)` to avoid stale blocked-report state.
+  - **50+ new test files**: Coverage for blob store digests, config masking/validation, fetch_markers lock atomicity, HITL generation per-node, innovation rounds counting, sandbox dangerous patterns/write-boundary/PKL integrity, upload chunk/generic bounds, normalization immutability, password bounds, report blocked/NaN/pending-lock/subdir-files/WS-registry/partial-recovery, save state task ref, session ID validation, technique agent escaping, tool dispatch resilience, version consistency, and more.
 
 **0.30.x — (2026-06-30 → 2026-07-01)**
 

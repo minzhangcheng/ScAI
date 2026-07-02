@@ -186,7 +186,7 @@ fi
 # Optional: fetch marker databases for ORA priors (off by default; never blocks startup)
 if [ "${SCAI_AUTO_FETCH_MARKERS:-0}" = "1" ] && [ ! -f backend/data/markers/panglaodb.tsv ]; then
     echo "Fetching marker databases (SCAI_AUTO_FETCH_MARKERS=1)..."
-    python scripts/fetch_markers.py || echo "WARNING: marker DB fetch failed; DB priors will be skipped"
+    "$VENV_DIR/bin/python" scripts/fetch_markers.py || echo "WARNING: marker DB fetch failed; DB priors will be skipped"
 fi
 
 echo ""

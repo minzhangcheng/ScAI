@@ -12,7 +12,7 @@ from typing import Dict, Callable, Awaitable, Optional
 
 from fastapi import HTTPException, Request
 
-from backend.config import UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR, get_session_uploads
+from backend.config import UPLOAD_CHUNK_SIZE, UPLOAD_TEMP_DIR, MAX_UPLOAD_SIZE, get_session_uploads
 from backend.utils.auth import get_db
 from backend.utils.files import safe_filename, validate_path_within
 from backend.utils.upload import ChunkedUploadManager
@@ -25,6 +25,24 @@ logger = logging.getLogger(__name__)
 
 # Per-upload locks to prevent concurrent complete calls
 _complete_locks: Dict[str, asyncio.Lock] = {}
+_complete_lock_refs: Dict[str, int] = {}
+_registry_lock = asyncio.Lock()
+
+
+async def _acquire_complete_lock(upload_id: str):
+    async with _registry_lock:
+        lock = _complete_locks.setdefault(upload_id, asyncio.Lock())
+        _complete_lock_refs[upload_id] = _complete_lock_refs.get(upload_id, 0) + 1
+    return lock, upload_id
+
+
+def _release_complete_lock(upload_id: str) -> None:
+    n = _complete_lock_refs.get(upload_id, 0) - 1
+    if n <= 0:
+        _complete_lock_refs.pop(upload_id, None)
+        _complete_locks.pop(upload_id, None)
+    else:
+        _complete_lock_refs[upload_id] = n
 
 # Callbacks injected by the route layer at startup
 _on_session_update: Optional[Callable[[str, object], Awaitable[None]]] = None
@@ -52,6 +70,10 @@ async def init_upload(session_id: str, request: Request) -> dict:
     expected_sha256 = body.get("expected_sha256", "")
     total_chunks = body.get("total_chunks", 0)
     chunk_size = body.get("chunk_size", UPLOAD_CHUNK_SIZE)
+    total_size = body.get("total_size", 0) or 0
+
+    if total_size <= 0 or total_size > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="total_size out of allowed range")
 
     filename = safe_filename(raw_filename)
     if not filename or not expected_sha256:
@@ -112,6 +134,13 @@ async def upload_chunk(
     if len(chunk_data) > upload["chunk_size"] * 2:
         raise HTTPException(status_code=400, detail="Chunk too large")
 
+    total_chunks = upload.get("total_chunks", 0) or 0
+    if chunk_index < 0 or chunk_index >= total_chunks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"chunk_index {chunk_index} out of range [0,{total_chunks})",
+        )
+
     chunk_path = UPLOAD_TEMP_DIR / f"{upload_id}.chunk.{chunk_index}"
     tmp_path = chunk_path.with_suffix(".tmp")
     tmp_path.write_bytes(chunk_data)
@@ -132,110 +161,113 @@ async def complete_upload(session_id: str, upload_id: str) -> dict:
     Returns: {"success": True, "filename": str, "path": str}
     Raises: HTTPException on missing chunks, integrity failure, or assembly error.
     """
-    lock = _complete_locks.setdefault(upload_id, asyncio.Lock())
+    lock, _ = await _acquire_complete_lock(upload_id)
     async with lock:
-        db = await get_db()
-        upload = await db.get_upload_session(upload_id)
-
-        if upload is None or upload["session_id"] != session_id:
-            raise HTTPException(status_code=404, detail="Upload session not found")
-
-        # Idempotent: already completed — return the actual stored path
-        if upload["completed"]:
-            stored_path = ""
-            state = sessions.get(session_id)
-            if state:
-                placeholder_id = upload.get("placeholder_file_id")
-                target = next(
-                    (df for df in state.data_files if df.id == placeholder_id), None
-                ) if placeholder_id else None
-                if target and target.file_path:
-                    stored_path = target.file_path
-            return {"success": True, "filename": upload["filename"], "path": stored_path}
-
-        if upload["received_chunks"] != upload["total_chunks"]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing chunks: {upload['received_chunks']}/{upload['total_chunks']}",
-            )
-
-        upload_dir = get_session_uploads(session_id)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = safe_filename(upload["filename"])
-        if not safe_name:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-        final_path = upload_dir / safe_name
-        final_path = validate_path_within(final_path, upload_dir)
-        sha256 = hashlib.sha256()
-
-        # Assembly with rollback on failure
         try:
-            with open(final_path, "wb") as f:
+            db = await get_db()
+            upload = await db.get_upload_session(upload_id)
+
+            if upload is None or upload["session_id"] != session_id:
+                raise HTTPException(status_code=404, detail="Upload session not found")
+
+            # Idempotent: already completed — return the actual stored path
+            if upload["completed"]:
+                stored_path = ""
+                state = sessions.get(session_id)
+                if state:
+                    placeholder_id = upload.get("placeholder_file_id")
+                    target = next(
+                        (df for df in state.data_files if df.id == placeholder_id), None
+                    ) if placeholder_id else None
+                    if target and target.file_path:
+                        stored_path = target.file_path
+                return {"success": True, "filename": upload["filename"], "path": stored_path}
+
+            if upload["received_chunks"] != upload["total_chunks"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Missing chunks: {upload['received_chunks']}/{upload['total_chunks']}",
+                )
+
+            upload_dir = get_session_uploads(session_id)
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = safe_filename(upload["filename"])
+            if not safe_name:
+                raise HTTPException(status_code=400, detail="Invalid filename")
+            final_path = upload_dir / safe_name
+            final_path = validate_path_within(final_path, upload_dir)
+            sha256 = hashlib.sha256()
+
+            # Assembly with rollback on failure
+            try:
+                with open(final_path, "wb") as f:
+                    for i in range(upload["total_chunks"]):
+                        chunk_path = UPLOAD_TEMP_DIR / f"{upload_id}.chunk.{i}"
+                        try:
+                            data = chunk_path.read_bytes()
+                        except FileNotFoundError:
+                            raise HTTPException(status_code=400, detail=f"Chunk {i} missing")
+                        f.write(data)
+                        sha256.update(data)
+            except HTTPException:
+                try:
+                    final_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+            except Exception as e:
+                try:
+                    final_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise HTTPException(status_code=500, detail=f"Assembly failed: {e}")
+
+            # SHA256 integrity check with consistent rollback
+            actual_sha256 = sha256.hexdigest()
+            if actual_sha256 != upload["expected_sha256"]:
+                try:
+                    final_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Failed to unlink %s on integrity failure", final_path)
                 for i in range(upload["total_chunks"]):
                     chunk_path = UPLOAD_TEMP_DIR / f"{upload_id}.chunk.{i}"
                     try:
-                        data = chunk_path.read_bytes()
-                    except FileNotFoundError:
-                        raise HTTPException(status_code=400, detail=f"Chunk {i} missing")
-                    f.write(data)
-                    sha256.update(data)
-        except HTTPException:
-            try:
-                final_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
-        except Exception as e:
-            try:
-                final_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise HTTPException(status_code=500, detail=f"Assembly failed: {e}")
+                        chunk_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"File integrity check failed for {upload['filename']}: "
+                           f"expected {upload['expected_sha256']}, got {actual_sha256}",
+                )
 
-        # SHA256 integrity check with consistent rollback
-        actual_sha256 = sha256.hexdigest()
-        if actual_sha256 != upload["expected_sha256"]:
-            try:
-                final_path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("Failed to unlink %s on integrity failure", final_path)
+            # Cleanup chunks after successful assembly
             for i in range(upload["total_chunks"]):
                 chunk_path = UPLOAD_TEMP_DIR / f"{upload_id}.chunk.{i}"
                 try:
                     chunk_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-            raise HTTPException(
-                status_code=400,
-                detail=f"File integrity check failed for {upload['filename']}: "
-                       f"expected {upload['expected_sha256']}, got {actual_sha256}",
-            )
 
-        # Cleanup chunks after successful assembly
-        for i in range(upload["total_chunks"]):
-            chunk_path = UPLOAD_TEMP_DIR / f"{upload_id}.chunk.{i}"
-            try:
-                chunk_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            await db.complete_upload_session(upload_id)
 
-        await db.complete_upload_session(upload_id)
+            # Update session state via callbacks
+            state = sessions.get(session_id)
+            if state:
+                placeholder_id = upload.get("placeholder_file_id")
+                target = next(
+                    (df for df in state.data_files if df.id == placeholder_id), None
+                ) if placeholder_id else None
+                if target:
+                    target.file_path = str(final_path)
+                if _on_session_update:
+                    await _on_session_update(session_id, state)
+                if _on_session_save:
+                    await _on_session_save(session_id, state)
 
-        # Update session state via callbacks
-        state = sessions.get(session_id)
-        if state:
-            placeholder_id = upload.get("placeholder_file_id")
-            target = next(
-                (df for df in state.data_files if df.id == placeholder_id), None
-            ) if placeholder_id else None
-            if target:
-                target.file_path = str(final_path)
-            if _on_session_update:
-                await _on_session_update(session_id, state)
-            if _on_session_save:
-                await _on_session_save(session_id, state)
-
-        return {"success": True, "filename": upload["filename"], "path": str(final_path)}
+            return {"success": True, "filename": upload["filename"], "path": str(final_path)}
+        finally:
+            _release_complete_lock(upload_id)
 
 
 async def cleanup_session_uploads(session_id: str) -> None:

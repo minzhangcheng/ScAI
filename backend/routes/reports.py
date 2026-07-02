@@ -9,7 +9,6 @@ import json
 import logging
 import math
 import os
-import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -78,6 +77,20 @@ router = APIRouter(prefix="/api/session", tags=["reports"])
 # consistent with the existing chat_task_lock pattern in chat.py. For multi-worker
 # production, a Redis-based lock would be needed — out of scope for this fix.
 _report_generation_pending: set = set()
+_pending_lock = asyncio.Lock()
+
+
+async def _try_begin_generation(session_id: str) -> bool:
+    """Atomically check-and-set _report_generation_pending.
+
+    Returns True if generation was started (session_id was not already
+    pending), False if generation is already in progress.
+    """
+    async with _pending_lock:
+        if session_id in _report_generation_pending:
+            return False
+        _report_generation_pending.add(session_id)
+        return True
 
 
 def clear_generation_pending(session_id: str) -> None:
@@ -110,6 +123,14 @@ def _sanitize_nan(obj):
     if isinstance(obj, list):
         return [_sanitize_nan(v) for v in obj]
     return obj
+
+
+def _load_report_json(path: Path) -> dict:
+    """Load a JSON report, handling NaN/Infinity via parse_constant (not regex on raw text)."""
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    data = json.loads(content, parse_constant=lambda c: None)
+    return _sanitize_nan(data)
 
 
 def _next_archive_version(reports_dir: Path) -> int:
@@ -245,14 +266,7 @@ async def get_detailed_report(session_id: str, request: Request, branch_id: Opti
     report_path = report_dir / "report.json"
     if report_path.exists():
         try:
-            # Use parse_float to handle NaN/Infinity in JSON text
-            with open(report_path, "r", encoding="utf-8") as f:
-                raw = f.read()
-            # Replace bare NaN/Infinity tokens with null before parsing
-            raw = re.sub(r'\bNaN\b', 'null', raw)
-            raw = re.sub(r'\b-?Infinity\b', 'null', raw)
-            report = json.loads(raw)
-            report = _sanitize_nan(report)
+            report = _load_report_json(report_path)
             detailed_reports[cache_key] = report
             return {"report": report}
         except Exception as e:
@@ -270,16 +284,16 @@ async def get_detailed_report(session_id: str, request: Request, branch_id: Opti
 @router.post("/{session_id}/generate-detailed-report")
 async def generate_detailed_report(session_id: str, background_tasks: BackgroundTasks, request: Request):
     """Start generating a detailed report"""
-    if session_id in _report_generation_pending:
+    if not await _try_begin_generation(session_id):
         raise HTTPException(status_code=409, detail="Report generation already in progress for this session")
     
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
     
     if state.status.value != "completed":
+        _report_generation_pending.discard(session_id)
         raise HTTPException(status_code=400, detail="Analysis must be completed before generating report")
     
-    _report_generation_pending.add(session_id)
     try:
         background_tasks.add_task(
             _generate_report_task,
@@ -834,6 +848,12 @@ async def get_report_table_alt(
     return await get_report_table(session_id, filename, branch_id=branch_id, state=state)
 
 
+def _resolve_report_file(report_dir: Path, filename: str) -> Path:
+    """Resolve a report file path, preserving subdirectories while blocking traversal."""
+    file_path = report_dir / filename
+    return validate_path_within(file_path, report_dir)
+
+
 @router.get("/{session_id}/report/{filename:path}")
 async def get_report_file(
     session_id: str,
@@ -843,12 +863,10 @@ async def get_report_file(
 ):
     """Catch-all: serve any file from the report directory (notebook, sub-reports, etc.)"""
     validate_session_id(session_id)
-    safe_name = safe_filename(filename)
     target_lineage_id = resolve_report_target_lineage(branch_id)
     branch_id_resolved = None if target_lineage_id == "main" else target_lineage_id
     report_dir = resolve_report_output_dir(session_id, branch_id_resolved)
-    file_path = report_dir / safe_name
-    validate_path_within(file_path, report_dir)
+    file_path = _resolve_report_file(report_dir, filename)
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -1141,6 +1159,8 @@ async def approve_partial_report(session_id: str, request: Request):
     state.status = TaskStatus.RUNNING
     await _update_session_cache(session_id, state)
     await async_save_session(session_id, state, force=True)
+    from backend.services.workflow_runner import start_report_generation
+    await start_report_generation(session_id)
     return APIResponse(
         success=True,
         message="Partial report approved",

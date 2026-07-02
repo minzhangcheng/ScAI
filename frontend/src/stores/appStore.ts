@@ -19,12 +19,14 @@ export interface AuthUser {
 }
 
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ContentBlock = Record<string, any>
+
 export interface Message {
   id: string
   type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report' | 'exploration_failed' | 'direction_correlation' | 'plan_review' | 'plan_approved' | 'modality_warning' | 'report_blocked'
   agent?: AgentType
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  content: any  // Message content varies significantly by type (string | object | figure | findings etc.)
+  content: string | ContentBlock
   timestamp: string
 }
 
@@ -327,8 +329,8 @@ export interface AppState {
   setLiteratureMaxSearchRounds: (rounds: number) => void
 
   // Chat messages (PI Agent free-form chat)
-  chatMessages: { id?: string; role: 'user' | 'assistant'; content: string; timestamp: string; files?: { filename: string; type: string }[]; figures?: { name: string; path?: string; base64?: string; pdfPath?: string }[] }[]
-  addChatMessage: (msg: AppState['chatMessages'][0]) => void
+  chatMessages: { id: string; role: 'user' | 'assistant'; content: string; timestamp: string; files?: { filename: string; type: string }[]; figures?: { name: string; path?: string; base64?: string; pdfPath?: string }[] }[]
+  addChatMessage: (msg: Omit<AppState['chatMessages'][0], 'id'> & { id?: string }) => void
   setChatMessages: (msgs: AppState['chatMessages']) => void
   chatLoading: boolean
   setChatLoading: (loading: boolean) => void
@@ -396,6 +398,10 @@ export interface AppState {
   // Session browser callback (set by Sidebar, invoked by ConfigPanel's Read Mode)
   openSessionBrowser: (() => void) | null
   setOpenSessionBrowserCallback: (callback: (() => void) | null) => void
+
+  // Server-side API configuration flag (set when backend confirms a key is configured)
+  apiConfigured: boolean
+  setApiConfigured: (v: boolean) => void
 
   // Auth state
   authReady: boolean
@@ -563,8 +569,20 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
 
       // Chat messages
       chatMessages: [],
-      addChatMessage: (msg) => set((state) => ({ chatMessages: [...state.chatMessages, msg] })),
-      setChatMessages: (msgs) => set({ chatMessages: msgs }),
+      addChatMessage: (msg) => set((state) => {
+        const id = msg.id || (typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`)
+        return { chatMessages: [...state.chatMessages, { ...msg, id }] }
+      }),
+      setChatMessages: (msgs) => set({
+        chatMessages: msgs.map((m) => ({
+          ...m,
+          id: m.id || (typeof crypto !== 'undefined' && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`)
+        }))
+      }),
       chatLoading: false,
       setChatLoading: (loading) => set({ chatLoading: loading }),
       chatDelegationActive: false,
@@ -673,6 +691,10 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
         showSpeciesInputDialog: false,
       }),
 
+      // Server-side API configuration flag (start as false, set by App.tsx on load)
+      apiConfigured: false,
+      setApiConfigured: (v) => set({ apiConfigured: v }),
+
       // Exploration failed user intervention
       explorationFailedInfo: null,
       showExplorationFailedDialog: false,
@@ -768,6 +790,64 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       },
 })
 
+export function partialize(state: AppState) {
+  return {
+    _persistedAt: Date.now(),
+    language: state.language,
+    apiConfig: { ...state.apiConfig, apiKey: '' },
+    prompts: state.prompts,
+    models: state.models,
+    temperatures: state.temperatures,
+    maxRounds: state.maxRounds,
+    roundWaitSeconds: state.roundWaitSeconds,
+    agentServerConfigs: state.agentServerConfigs,
+    agentVisionSettings: state.agentVisionSettings,
+    literatureMode: state.literatureMode,
+    deepResearchModel: state.deepResearchModel,
+    deepResearchLlmBaseUrl: state.deepResearchLlmBaseUrl,
+    pubmedEmail: state.pubmedEmail,
+    literatureMaxSearchRounds: state.literatureMaxSearchRounds,
+    messagePanelWidth: state.messagePanelWidth,
+    // Persist session with base64 stripped
+    currentSession: state.currentSession ? {
+      ...state.currentSession,
+      publicationFigures: state.currentSession.publicationFigures?.map(
+        (f: PublicationFigure) => ({ ...f, pngBase64: undefined })
+      ),
+      graphicAbstract: state.currentSession.graphicAbstract
+        ? { ...state.currentSession.graphicAbstract, imageBase64: undefined, image_base64: undefined }
+        : undefined,
+    } : null,
+    // Limit persisted messages and strip ALL base64 content
+    chatMessages: state.chatMessages.slice(-100).map(msg => ({
+      ...msg,
+      figures: msg.figures?.map((f) => f ? { ...f, base64: undefined } : f)
+    })),
+    messages: state.messages.slice(-200).map(msg => {
+      if (msg.type === 'figure') {
+        return { ...msg, content: '[image]' }
+      }
+      if (msg.type === 'graphic_abstract' && msg.content != null && typeof msg.content === 'object') {
+        return { ...msg, content: { ...msg.content, image_base64: undefined, imageBase64: undefined } }
+      }
+      if ((msg.type === 'figure_review' || msg.type === 'figure_approved' || msg.type === 'figure_revision') && msg.content != null && typeof msg.content === 'object') {
+        return { ...msg, content: { ...msg.content, png_base64: undefined, pngBase64: undefined } }
+      }
+      const c = msg.content as unknown as Record<string, unknown> | undefined
+      if (c?.figures && Array.isArray(c.figures) && (c.figures as unknown[]).length > 0) {
+        return {
+          ...msg,
+          content: {
+            ...c,
+            figures: (c.figures as Record<string, unknown>[]).map((f) => f ? { ...f, data: undefined, pngBase64: undefined, png_base64: undefined } : f)
+          }
+        }
+      }
+      return msg
+    }),
+  }
+}
+
 export const useAppStore = create<AppState>()(
   persist(
     createAppState,
@@ -810,69 +890,15 @@ export const useAppStore = create<AppState>()(
             delete ps.chatMessages
           }
         }
-        return { ...currentState, ...ps }
+        if (ps.apiConfig) {
+          ps.apiConfig = { ...ps.apiConfig, apiKey: '' }
+        }
+        delete ps.deepResearchApiKey
+        delete ps.googleApiKey
+        const merged = { ...currentState, ...ps }
+        return merged
       },
-      partialize: (state) => ({
-        _persistedAt: Date.now(),
-        language: state.language,
-        apiConfig: state.apiConfig,
-        prompts: state.prompts,
-        models: state.models,
-        temperatures: state.temperatures,
-        maxRounds: state.maxRounds,
-        roundWaitSeconds: state.roundWaitSeconds,
-        agentServerConfigs: state.agentServerConfigs,
-        agentVisionSettings: state.agentVisionSettings,
-        literatureMode: state.literatureMode,
-        deepResearchModel: state.deepResearchModel,
-        deepResearchLlmBaseUrl: state.deepResearchLlmBaseUrl,
-        deepResearchApiKey: state.deepResearchApiKey,
-        googleApiKey: state.googleApiKey,
-        pubmedEmail: state.pubmedEmail,
-        literatureMaxSearchRounds: state.literatureMaxSearchRounds,
-        messagePanelWidth: state.messagePanelWidth,
-        // Persist session with base64 stripped to prevent localStorage overflow
-        currentSession: state.currentSession ? {
-          ...state.currentSession,
-          publicationFigures: state.currentSession.publicationFigures?.map(
-            (f: PublicationFigure) => ({ ...f, pngBase64: undefined })
-          ),
-          graphicAbstract: state.currentSession.graphicAbstract
-            ? { ...state.currentSession.graphicAbstract, imageBase64: undefined, image_base64: undefined }
-            : undefined,
-        } : null,
-        // Limit persisted messages and strip ALL base64 content to prevent localStorage overflow
-        // Persist chat messages (limit to 100, strip base64 from figures)
-        chatMessages: state.chatMessages.slice(-100).map(msg => ({
-          ...msg,
-          figures: msg.figures?.map((f) => f ? { ...f, base64: undefined } : f)
-        })),
-        messages: state.messages.slice(-200).map(msg => {
-          // figure type: content is raw base64 string
-          if (msg.type === 'figure') {
-            return { ...msg, content: '[image]' }
-          }
-          // graphic_abstract type: content has image_base64/imageBase64 (strip); keep text_diagram (small)
-          if (msg.type === 'graphic_abstract' && msg.content != null && typeof msg.content === 'object') {
-            return { ...msg, content: { ...msg.content, image_base64: undefined, imageBase64: undefined } }
-          }
-          // figure_review / figure_approved / figure_revision: content has png_base64
-          if ((msg.type === 'figure_review' || msg.type === 'figure_approved' || msg.type === 'figure_revision') && msg.content != null && typeof msg.content === 'object') {
-            return { ...msg, content: { ...msg.content, png_base64: undefined, pngBase64: undefined } }
-          }
-          // Strip base64 from figures arrays in result/integrated_report messages
-          if (msg.content?.figures && Array.isArray(msg.content.figures) && msg.content.figures.length > 0) {
-            return {
-              ...msg,
-              content: {
-                ...msg.content,
-                figures: msg.content.figures.map((f: Record<string, unknown>) => f ? { ...f, data: undefined, pngBase64: undefined, png_base64: undefined } : f)
-              }
-            }
-          }
-          return msg
-        }),
-      })
+      partialize,
     }
   )
 )

@@ -30,7 +30,8 @@ kill_tree() {
 # Method 1: Use PID file
 if [ -f "$PID_FILE" ]; then
     echo "Reading PID file..."
-    source "$PID_FILE"
+    BACKEND_PID="$(grep -E '^BACKEND_PID=' "$PID_FILE" | head -1 | cut -d= -f2 | tr -dc '0-9')"
+    FRONTEND_PID="$(grep -E '^FRONTEND_PID=' "$PID_FILE" | head -1 | cut -d= -f2 | tr -dc '0-9')"
 
     if [ -n "$BACKEND_PID" ]; then
         echo "   Stopping backend (PID: $BACKEND_PID)..."

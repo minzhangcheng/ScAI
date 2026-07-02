@@ -89,6 +89,10 @@ def get_agent_llm_client(
     agent_key = agent_cfg.get("api_key", "")
     effective_url = agent_url if (agent_url and agent_url != cfg.api.llm_base_url) else cfg.api.llm_base_url
     effective_key = agent_key if (agent_key and agent_key != cfg.api.api_key) else cfg.api.api_key
+
+    if not effective_key:
+        cfg.api.require_key()
+
     return OpenAICompatibleClient(
         api_key=effective_key,
         base_url=effective_url,

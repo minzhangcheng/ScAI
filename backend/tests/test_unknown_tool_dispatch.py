@@ -35,8 +35,8 @@ def test_dispatch_chain_has_unknown_tool_else():
     chain = src[start:end_marker]
     # Must contain an `else:` at the same dedent depth as the elif branches
     # (16 spaces) and write a role=tool response inside it.
-    assert re.search(r"\n {16}else:\s*\n", chain), \
-        "dispatch chain missing else branch for unknown tool names"
+    assert re.search(r"\n {20}else:\s*\n", chain), \
+        "dispatch chain missing else branch for unknown tool names (expected 20-space indent)"
     # The else branch must append a tool-role message so the conversation
     # stays well-formed.
     assert 'KNOWN_TOOL_NAMES' in chain, "else branch should reference KNOWN_TOOL_NAMES"

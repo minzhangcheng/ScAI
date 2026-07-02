@@ -16,6 +16,7 @@ from ..utils.direction_evidence import build_fallback_direction_evidence
 from ..utils.llm_client import UpstreamExhaustedError
 from .direction_coverage import (
     build_result_identity_key,
+    count_innovation_rounds_done,
     current_lineage_id,
     direction_coverage_status,
     has_substantive_findings,
@@ -173,7 +174,7 @@ def _upsert_round_result(
         result.round_number,
         result.direction_key,
     )
-    normalize_legacy_round_result(result)
+    result = normalize_legacy_round_result(result)
     for idx, existing in enumerate(results):
         if getattr(existing, "result_identity_key", "") == result.result_identity_key:
             results[idx] = result
@@ -869,9 +870,7 @@ class SynthesisMixin:
             # Don't extend if multi-direction mode has completed all directions
             # AND the user didn't provide real new input/files (only synthetic signals).
             # If the user explicitly typed instructions or uploaded files, honor their intent.
-            innovation_rounds_done = sum(
-                1 for r in analysis_state.round_results if r.phase == "innovation"
-            )
+            innovation_rounds_done = count_innovation_rounds_done(analysis_state)
             multi_dir_completed = (
                 len(analysis_state.user_chosen_directions) > 1
                 and innovation_rounds_done >= len(analysis_state.user_chosen_directions)

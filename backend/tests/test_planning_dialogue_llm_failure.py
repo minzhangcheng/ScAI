@@ -26,7 +26,7 @@ def _make_workflow():
     wf._llm_failure_lock.__aexit__ = AsyncMock()
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
-    wf._llm_failure_generation = 0
+    wf._llm_failure_generations = {}
     wf._settings_provider = None
     return wf
 

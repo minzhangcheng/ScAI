@@ -1,8 +1,10 @@
 """Session and group management routes."""
 import asyncio
+import logging
 import os
 import shutil
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -25,9 +27,11 @@ from backend.state import (
     session_access_times, last_save_times,
 )
 from backend.utils.auth import require_session_ownership
-from backend.utils.files import validate_session_id
+from backend.utils.files import validate_path_within, validate_session_id
 
 router = APIRouter(prefix="/api", tags=["sessions"])
+
+logger = logging.getLogger(__name__)
 
 
 def _serialize_realtime_messages(messages: list, limit: int = 500) -> list:
@@ -141,6 +145,7 @@ async def load_session(session_id: str, request: Request):
 @router.delete("/session/{session_id}")
 async def delete_session(session_id: str, request: Request):
     """Delete a session completely"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     await require_session_ownership(session_id=session_id, user_id=user_id)
 
@@ -329,6 +334,16 @@ async def update_group(session_id: str, group_id: str, request: Request, body: G
     )
 
 
+def _safe_remove_session_file(file_path: str, session_dir: Path) -> None:
+    try:
+        candidate = Path(file_path)
+        validate_path_within(candidate, session_dir)
+        if candidate.exists():
+            candidate.unlink()
+    except Exception as e:
+        logger.warning(f"Skipped removing out-of-session or missing file {file_path}: {e}")
+
+
 @router.delete("/session/{session_id}/groups/{group_id}")
 async def delete_group(session_id: str, group_id: str, request: Request):
     """Delete a treatment group and all associated data files"""
@@ -340,14 +355,9 @@ async def delete_group(session_id: str, group_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Group not found")
 
     files_to_remove = [f for f in state.data_files if f.group_id == group_id]
+    session_dir = get_session_dir(session_id)
     for df in files_to_remove:
-        try:
-            if os.path.exists(df.file_path):
-                os.remove(df.file_path)
-        except OSError as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"Failed to delete file {df.file_path}: {e}")
+        _safe_remove_session_file(df.file_path, session_dir)
 
     state.data_files = [f for f in state.data_files if f.group_id != group_id]
     state.biochemistry_indicators = [i for i in state.biochemistry_indicators if i.group_id != group_id]

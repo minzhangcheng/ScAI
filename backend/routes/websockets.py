@@ -11,7 +11,7 @@ from backend.models.schemas import WebSocketMessage, AnalysisState, TaskStatus
 from backend.state import (
     websockets, workflows, _monitor_tasks,
     _run_tasks, state_lock, initializing_sessions,
-    report_websockets, detailed_reports,
+    report_websockets, report_ws_lock, detailed_reports,
     sessions as _sessions,
     get_session_lock,
 )
@@ -626,7 +626,8 @@ async def report_websocket(websocket: WebSocket, session_id: str):
     if result is None:
         return
 
-    report_websockets[session_id] = websocket
+    async with report_ws_lock:
+        report_websockets[session_id] = websocket
 
     try:
         while True:
@@ -635,5 +636,6 @@ async def report_websocket(websocket: WebSocket, session_id: str):
     except WebSocketDisconnect:
         pass
     finally:
-        if session_id in report_websockets:
-            del report_websockets[session_id]
+        async with report_ws_lock:
+            if report_websockets.get(session_id) is websocket:
+                del report_websockets[session_id]

@@ -4,6 +4,7 @@ from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 
 from backend.models.user import UsernameStr, PasswordStr
+from backend.models.schemas import APIResponse
 from backend.utils.db import AppDB
 from backend.utils.auth import (
     get_db,
@@ -75,7 +76,7 @@ class CreateApiKeyResponse(ApiKeyResponse):
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
-    new_password: str = Field(min_length=8, max_length=128)
+    new_password: PasswordStr
 
 
 class ChangeEmailRequest(BaseModel):
@@ -89,7 +90,7 @@ class LogoutResponse(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────
 
-@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register", response_model=APIResponse, status_code=status.HTTP_201_CREATED)
 async def register(req: RegisterRequest):
     db: AppDB = await get_db()
     meta = await db.get_meta("admin_initialized")
@@ -98,13 +99,10 @@ async def register(req: RegisterRequest):
     await check_user_uniqueness(db, req.username, req.email)
     pw_hash = hash_password(req.password)
     uid = await db.create_user(username=req.username, password_hash=pw_hash, email=req.email, status="pending")
-    return TokenResponse(
-        access_token="",
-        id=uid,
-        username=req.username,
-        email=req.email,
-        role="user",
-        status="pending",
+    return APIResponse(
+        success=True,
+        message="Registration submitted; awaiting admin approval.",
+        data={"id": uid, "username": req.username, "email": req.email, "status": "pending"},
     )
 
 

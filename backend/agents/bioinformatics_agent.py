@@ -824,6 +824,7 @@ class BioinformaticsAgent(BaseAgent):
         # Current AnalysisState reference for modality inference in system prompt.
         # Set at the start of each run; used by _infer_modality / _static_system_prompt.
         self._current_analysis_state: Optional[AnalysisState] = None
+        self._last_findings: List[str] = []
 
         # Cooperative pause gate, populated by the workflow before each run.
         # When CLEAR, the autonomous loop blocks between steps until SET.
@@ -2450,6 +2451,11 @@ Return the FULL revised plan as JSON (include ALL steps, both completed and revi
             return False
         return True
 
+    async def _handle_report_findings(self, args: dict) -> list:
+        findings = _ensure_list(args.get("findings"))
+        self._last_findings = findings
+        return findings
+
     async def run_autonomous_analysis(
         self,
         state: AnalysisState,
@@ -3069,1035 +3075,1055 @@ If results significantly deviate from plan expectations, report via consult_pi i
                     })
                     continue
 
-                if tool_name == "execute_code":
-                    has_substantive_work = True
-                    code = args.get("code", "")
-                    description = args.get("description", "")
-                    step_type = args.get("step_type", "technical")
+                try:
+                    if tool_name == "execute_code":
+                        has_substantive_work = True
+                        code = args.get("code", "")
+                        description = args.get("description", "")
+                        step_type = args.get("step_type", "technical")
 
-                    # Validate code for security before execution
-                    is_safe, security_error = self._validate_code(code)
-                    if not is_safe:
-                        error_msg = f"Code validation failed: {security_error}"
-                        logger.warning(f"[Bioinformatics] {error_msg}")
-                        await self._notify("error", error_msg)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": f"Execution blocked: {error_msg}. Please rewrite the code without using dangerous operations."
-                        })
-                        # Record blocked execution in analysis log
-                        analysis_log.append(AnalysisStep(
-                            step_number=step_count, step_type="execute_code",
-                            agent_reasoning=agent_reasoning,
-                            code=code, code_error=error_msg,
-                            code_description=description, code_step_type=step_type,
-                        ))
-                        continue
-
-                    # Guard: block manual cell_type assignment when annotation
-                    # has not been completed through the annotate_clusters workflow
-                    if (
-                        state.analysis_phase == AnalysisPhase.EXPLORATION
-                        and not annotation_completed
-                        and _CELL_TYPE_ASSIGN_RE.search(code)
-                    ):
-                        guard_msg = (
-                            "Manual assignment to cell-type-like adata.obs columns "
-                            "(cell_type, celltype, cluster_identity, cell_identity, cell_annotation, annotation) "
-                            "is not allowed before cell type annotations have been confirmed through "
-                            "the annotate_clusters workflow. Please call annotate_clusters first."
-                        )
-                        logger.warning(f"[Bioinformatics] Blocked manual cell-type-like assignment: annotation not confirmed")
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": f"Execution blocked: {guard_msg}"
-                        })
-                        analysis_log.append(AnalysisStep(
-                            step_number=step_count, step_type="execute_code",
-                            agent_reasoning=agent_reasoning,
-                            code=code, code_error=guard_msg,
-                            code_description=description, code_step_type=step_type,
-                        ))
-                        continue
-
-                    await self._notify("status", f"[{step_type.upper()}] {description}")
-                    await self._notify("code", code)
-
-                    # === Wrap code to auto-save figures in PNG + PDF ===
-                    figures_dir = Path(self.sandbox.working_dir) / "figures"
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    wrapped_code = _build_exec_autosave_wrapper(
-                        code, str(figures_dir), timestamp
-                    )
-
-                    result = await self.sandbox.execute(wrapped_code)
-
-                    # Auto-fix: ensure obs/var names are unique after every execution
-                    await self.sandbox.execute(
-                        "import anndata as _ad\n"
-                        "for _name, _obj in list(globals().items()):\n"
-                        "    if isinstance(_obj, _ad.AnnData):\n"
-                        "        _obj.obs_names_make_unique()\n"
-                        "        _obj.var_names_make_unique()\n"
-                        "del _ad\n",
-                        save_to_history=False, skip_safety_check=True
-                    )
-
-                    # Strip ANSI escape codes from Jupyter traceback
-                    if result.error:
-                        result.error = strip_ansi(result.error)
-
-                    # Cap output/error at source so all downstream consumers
-                    # (code_history, LLM tool message, analysis_log, notify)
-                    # share one truncated string — prevents prompt-too-long errors.
-                    if result.output:
-                        result.output = truncate_for_llm(result.output)
-                    if result.error:
-                        result.error = truncate_for_llm(result.error)
-
-                    code_exec = CodeExecution(
-                        code=code,
-                        output=result.output,
-                        error=result.error,
-                        figures=result.figures,
-                        execution_time=0.0
-                    )
-                    self.code_history.append(code_exec)
-                    self.last_result = result
-
-                    # Record execute_code step in analysis log
-                    _saved_figs = []
-                    if result.output:
-                        _saved_figs = [Path(p).name for p in re.findall(r'\[Auto-saved\] (?:JPG|PNG): (.+\.(?:jpe?g|png))', result.output)]
-                    analysis_log.append(AnalysisStep(
-                        step_number=step_count, step_type="execute_code",
-                        agent_reasoning=agent_reasoning,
-                        code=code, code_output=(result.output or "")[-3000:],
-                        code_error=(result.error or "")[:3000] if result.error else None,
-                        code_description=description,
-                        code_step_type=step_type, saved_figure_filenames=_saved_figs,
-                    ))
-                    if result.output:
-                        await self._notify("result", result.output[:2000])
-                    for fig in result.figures:
-                        await self._notify("figure", fig)
-                        all_figures.append(fig)
-                        _step_figures.append(fig)
-                    # Catch technical errors the agent swallowed in-code (try/except)
-                    # and then skipped. Computed unconditionally (returns (None, "")
-                    # on the hard-error path) so the consumer below always has a value
-                    # — no UnboundLocalError and no stale carry-over across iterations.
-                    swallowed_type, swallowed_doc_hint = (
-                        await self._detect_and_lookup_swallowed_error(result, code)
-                    )
-                    if result.error:
-                        await self._notify("error", result.error)
-                        consecutive_errors += 1
-                        total_errors += 1
-                    else:
-                        consecutive_errors = 0
-                        self._force_skip_counter = 0
-                        self._force_skip_error_type = None
-
-                        # Auto-validate species-gene match after data loading (Round 1 only).
-                        # _auto_validate_species_genes is self-guarded: it scans the sandbox
-                        # for any object with `var_names` and returns early if none is found,
-                        # so we do not need _discover_adata_in_sandbox (which requires a
-                        # clustering column that doesn't exist yet at load time).
-                        if (self._current_analysis_state
-                                and self._current_analysis_state.species
-                                and not self._current_analysis_state.species_genes_validated
-                                and self._current_analysis_state.current_round == 1):
-                            validated = await self._auto_validate_species_genes()
-                            if validated:
-                                self._current_analysis_state.species_genes_validated = True
-
-                    tool_result = f"Execution {'successful' if not result.error else 'failed'}.\n"
-                    if result.output:
-                        tool_result += f"Output:\n{result.output}\n"
-                    if result.error:
-                        tool_result += f"Error: {result.error}\n"
-                        # Hint: if a module is missing, tell the agent to report it
-                        if "ModuleNotFoundError" in result.error:
-                            tool_result += (
-                                "\nHint: A required package is not installed. "
-                                "Report the missing dependency, explain which analysis step is limited, "
-                                "and use an already-installed alternative only when the substitution is scientifically valid.\n"
-                            )
-                    if result.figures:
-                        tool_result += f"Generated {len(result.figures)} figure(s).\n"
-
-                    if swallowed_type:
-                        tool_result += _build_swallowed_error_feedback(
-                            swallowed_type, swallowed_doc_hint
-                        )
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_result
-                    })
-
-                    # Circuit breaker: too many consecutive errors → force report or redirect
-                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        if state.analysis_phase == AnalysisPhase.EXPLORATION and not annotation_completed:
-                            logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive errors, redirecting to mandatory steps")
+                        # Validate code for security before execution
+                        is_safe, security_error = self._validate_code(code)
+                        if not is_safe:
+                            error_msg = f"Code validation failed: {security_error}"
+                            logger.warning(f"[Bioinformatics] {error_msg}")
+                            await self._notify("error", error_msg)
                             messages.append({
-                                "role": "user",
-                                "content": (
-                                    "[System] Too many consecutive code execution errors. "
-                                    "However, mandatory steps are not yet complete. "
-                                    "Try a simpler approach: run sc.tl.rank_genes_groups(adata_hvg, 'leiden', method='wilcoxon') "
-                                    "then call annotate_clusters."
-                                )
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"Execution blocked: {error_msg}. Please rewrite the code without using dangerous operations."
                             })
+                            # Record blocked execution in analysis log
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="execute_code",
+                                agent_reasoning=agent_reasoning,
+                                code=code, code_error=error_msg,
+                                code_description=description, code_step_type=step_type,
+                            ))
+                            continue
+
+                        # Guard: block manual cell_type assignment when annotation
+                        # has not been completed through the annotate_clusters workflow
+                        if (
+                            state.analysis_phase == AnalysisPhase.EXPLORATION
+                            and not annotation_completed
+                            and _CELL_TYPE_ASSIGN_RE.search(code)
+                        ):
+                            guard_msg = (
+                                "Manual assignment to cell-type-like adata.obs columns "
+                                "(cell_type, celltype, cluster_identity, cell_identity, cell_annotation, annotation) "
+                                "is not allowed before cell type annotations have been confirmed through "
+                                "the annotate_clusters workflow. Please call annotate_clusters first."
+                            )
+                            logger.warning(f"[Bioinformatics] Blocked manual cell-type-like assignment: annotation not confirmed")
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"Execution blocked: {guard_msg}"
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="execute_code",
+                                agent_reasoning=agent_reasoning,
+                                code=code, code_error=guard_msg,
+                                code_description=description, code_step_type=step_type,
+                            ))
+                            continue
+
+                        await self._notify("status", f"[{step_type.upper()}] {description}")
+                        await self._notify("code", code)
+
+                        # === Wrap code to auto-save figures in PNG + PDF ===
+                        figures_dir = Path(self.sandbox.working_dir) / "figures"
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        wrapped_code = _build_exec_autosave_wrapper(
+                            code, str(figures_dir), timestamp
+                        )
+
+                        result = await self.sandbox.execute(wrapped_code)
+
+                        # Auto-fix: ensure obs/var names are unique after every execution
+                        await self.sandbox.execute(
+                            "import anndata as _ad\n"
+                            "for _name, _obj in list(globals().items()):\n"
+                            "    if isinstance(_obj, _ad.AnnData):\n"
+                            "        _obj.obs_names_make_unique()\n"
+                            "        _obj.var_names_make_unique()\n"
+                            "del _ad\n",
+                            save_to_history=False, skip_safety_check=True
+                        )
+
+                        # Strip ANSI escape codes from Jupyter traceback
+                        if result.error:
+                            result.error = strip_ansi(result.error)
+
+                        # Cap output/error at source so all downstream consumers
+                        # (code_history, LLM tool message, analysis_log, notify)
+                        # share one truncated string — prevents prompt-too-long errors.
+                        if result.output:
+                            result.output = truncate_for_llm(result.output)
+                        if result.error:
+                            result.error = truncate_for_llm(result.error)
+
+                        code_exec = CodeExecution(
+                            code=code,
+                            output=result.output,
+                            error=result.error,
+                            figures=result.figures,
+                            execution_time=0.0
+                        )
+                        self.code_history.append(code_exec)
+                        self.last_result = result
+
+                        # Record execute_code step in analysis log
+                        _saved_figs = []
+                        if result.output:
+                            _saved_figs = [Path(p).name for p in re.findall(r'\[Auto-saved\] (?:JPG|PNG): (.+\.(?:jpe?g|png))', result.output)]
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="execute_code",
+                            agent_reasoning=agent_reasoning,
+                            code=code, code_output=(result.output or "")[-3000:],
+                            code_error=(result.error or "")[:3000] if result.error else None,
+                            code_description=description,
+                            code_step_type=step_type, saved_figure_filenames=_saved_figs,
+                        ))
+                        if result.output:
+                            await self._notify("result", result.output[:2000])
+                        for fig in result.figures:
+                            await self._notify("figure", fig)
+                            all_figures.append(fig)
+                            _step_figures.append(fig)
+                        # Catch technical errors the agent swallowed in-code (try/except)
+                        # and then skipped. Computed unconditionally (returns (None, "")
+                        # on the hard-error path) so the consumer below always has a value
+                        # — no UnboundLocalError and no stale carry-over across iterations.
+                        swallowed_type, swallowed_doc_hint = (
+                            await self._detect_and_lookup_swallowed_error(result, code)
+                        )
+                        if result.error:
+                            await self._notify("error", result.error)
+                            consecutive_errors += 1
+                            total_errors += 1
                         else:
-                            logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive code errors, last-chance attempt")
-                            messages.append({
-                                "role": "user",
-                                "content": (
-                                    "[System] You have had several consecutive code execution errors. "
-                                    "This is your last chance to fix the code. Take a completely different "
-                                    "approach: simplify the code, use a different library function, or "
-                                    "write a minimal version first. If this attempt also fails, you MUST "
-                                    "call report_findings with whatever results you have so far."
+                            consecutive_errors = 0
+                            self._force_skip_counter = 0
+                            self._force_skip_error_type = None
+
+                            # Auto-validate species-gene match after data loading (Round 1 only).
+                            # _auto_validate_species_genes is self-guarded: it scans the sandbox
+                            # for any object with `var_names` and returns early if none is found,
+                            # so we do not need _discover_adata_in_sandbox (which requires a
+                            # clustering column that doesn't exist yet at load time).
+                            if (self._current_analysis_state
+                                    and self._current_analysis_state.species
+                                    and not self._current_analysis_state.species_genes_validated
+                                    and self._current_analysis_state.current_round == 1):
+                                validated = await self._auto_validate_species_genes()
+                                if validated:
+                                    self._current_analysis_state.species_genes_validated = True
+
+                        tool_result = f"Execution {'successful' if not result.error else 'failed'}.\n"
+                        if result.output:
+                            tool_result += f"Output:\n{result.output}\n"
+                        if result.error:
+                            tool_result += f"Error: {result.error}\n"
+                            # Hint: if a module is missing, tell the agent to report it
+                            if "ModuleNotFoundError" in result.error:
+                                tool_result += (
+                                    "\nHint: A required package is not installed. "
+                                    "Report the missing dependency, explain which analysis step is limited, "
+                                    "and use an already-installed alternative only when the substitution is scientifically valid.\n"
                                 )
-                            })
-                        consecutive_errors = 0  # Reset after circuit breaker triggers
+                        if result.figures:
+                            tool_result += f"Generated {len(result.figures)} figure(s).\n"
 
-                    # Hard limit: too many total errors → force report without giving more chances
-                    elif total_errors >= MAX_TOTAL_ERRORS:
-                        logger.warning(f"[Bioinformatics] {total_errors} total errors reached hard limit, forcing report")
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "[System] Too many code execution errors overall. "
-                                "Stop trying to fix the code. Report your findings so far "
-                                "using the report_findings tool and move on."
+                        if swallowed_type:
+                            tool_result += _build_swallowed_error_feedback(
+                                swallowed_type, swallowed_doc_hint
                             )
-                        })
 
-                elif tool_name == "consult_pi":
-                    has_substantive_work = True
-                    question = args.get("question", "")
-                    context = args.get("context", "")
-                    options = args.get("options", [])
-                    
-                    await self._notify("status", f"Consulting PI: {question[:100]}...")
-                    await self._notify("pi_question", json.dumps({
-                        "question": question,
-                        "context": context,
-                        "options": options
-                    }))
-                    
-                    pi_response = ""
-                    if self.pi_callback:
-                        pi_response = await self.pi_callback(question, context)
-                        await self._notify("pi_response", pi_response)
-                    else:
-                        pi_response = "PI guidance not available. Proceed with standard practices."
-                    
-                    # Check for plan revision signal
-                    if PLAN_REVISION_NEEDED_TAG in pi_response:
-                        clean_response = pi_response.replace(PLAN_REVISION_NEEDED_TAG, "").strip()
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": f"PI Response: {clean_response}\n\n[System: A plan revision has been triggered. Pause and wait for updated plan.]"
+                            "content": tool_result
                         })
-                        _plan_revision_needed = True
-                        _plan_revision_context = {
+
+                        # Circuit breaker: too many consecutive errors → force report or redirect
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                            if state.analysis_phase == AnalysisPhase.EXPLORATION and not annotation_completed:
+                                logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive errors, redirecting to mandatory steps")
+                                messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        "[System] Too many consecutive code execution errors. "
+                                        "However, mandatory steps are not yet complete. "
+                                        "Try a simpler approach: run sc.tl.rank_genes_groups(adata_hvg, 'leiden', method='wilcoxon') "
+                                        "then call annotate_clusters."
+                                    )
+                                })
+                            else:
+                                logger.warning(f"[Bioinformatics] {consecutive_errors} consecutive code errors, last-chance attempt")
+                                messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        "[System] You have had several consecutive code execution errors. "
+                                        "This is your last chance to fix the code. Take a completely different "
+                                        "approach: simplify the code, use a different library function, or "
+                                        "write a minimal version first. If this attempt also fails, you MUST "
+                                        "call report_findings with whatever results you have so far."
+                                    )
+                                })
+                            consecutive_errors = 0  # Reset after circuit breaker triggers
+
+                        # Hard limit: too many total errors → force report without giving more chances
+                        elif total_errors >= MAX_TOTAL_ERRORS:
+                            logger.warning(f"[Bioinformatics] {total_errors} total errors reached hard limit, forcing report")
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[System] Too many code execution errors overall. "
+                                    "Stop trying to fix the code. Report your findings so far "
+                                    "using the report_findings tool and move on."
+                                )
+                            })
+
+                    elif tool_name == "consult_pi":
+                        has_substantive_work = True
+                        question = args.get("question", "")
+                        context = args.get("context", "")
+                        options = args.get("options", [])
+                    
+                        await self._notify("status", f"Consulting PI: {question[:100]}...")
+                        await self._notify("pi_question", json.dumps({
                             "question": question,
                             "context": context,
-                        }
-                        break
-                    else:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": f"PI Response: {pi_response}"
-                        })
-
-                    # Record consult_pi step in analysis log
-                    analysis_log.append(AnalysisStep(
-                        step_number=step_count, step_type="consult_pi",
-                        agent_reasoning=agent_reasoning,
-                        pi_question=question, pi_context=context[:1000],
-                        pi_options=options or [], pi_response=(pi_response or "")[:2000],
-                    ))
-
-                elif tool_name == "search_literature":
-                    has_substantive_work = True
-                    topic = args.get("topic", "")
+                            "options": options
+                        }))
                     
-                    await self._notify("status", f"Searching literature: {topic[:50]}...")
-                    
-                    lit_result = ""
-                    if self.literature_callback:
-                        lit_result = await self.literature_callback(topic)
-                        await self._notify("literature", lit_result[:1000])
-                    else:
-                        lit_result = "Literature search not available."
-                    
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": f"Literature findings: {lit_result}"
-                    })
-
-                    # Record search_literature step in analysis log
-                    analysis_log.append(AnalysisStep(
-                        step_number=step_count, step_type="search_literature",
-                        agent_reasoning=agent_reasoning,
-                        literature_topic=topic, literature_result=(lit_result or "")[:2000],
-                    ))
-
-                elif tool_name == "annotate_clusters":
-                    has_substantive_work = True
-                    cluster_markers = args.get("cluster_markers", {})
-                    tissue = args.get("tissue", "")
-                    organism = args.get("organism", "mouse")
-                    # Override with session species if available
-                    if self._current_analysis_state and self._current_analysis_state.species:
-                        llm_organism = organism
-                        organism = self._current_analysis_state.species
-                        if llm_organism != organism:
-                            logger.info(f"[Bioinformatics] organism overridden: {llm_organism} -> {organism}")
-                    cluster_key_hint = args.get("cluster_key") or None
-                    rank_key_hint = args.get("rank_key") or "rank_genes_groups"
-
-                    # Sanitize LLM-provided cluster_markers (handles malformed dict/string formats)
-                    cluster_markers = self._sanitize_cluster_markers(cluster_markers)
-
-                    n_clusters = len(cluster_markers)
-
-                    # Discover the active AnnData variable and clustering key in sandbox
-                    adata_var, cluster_key = await self._discover_adata_in_sandbox(cluster_key_hint)
-
-                    if adata_var is None:
-                        tool_result = (
-                            "Error: Could not find an AnnData object with a clustering column "
-                            "(leiden/louvain/cluster, or any column starting with 'leiden'/'louvain') "
-                            "in the sandbox. Before calling annotate_clusters, "
-                            "you must: (1) load data into an AnnData variable, (2) run clustering "
-                            "(e.g., sc.tl.leiden(adata)), and (3) run differential expression "
-                            "(sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')). "
-                            "If using non-default column names (e.g., 'leiden_broad'), pass "
-                            "cluster_key explicitly."
-                        )
-                        logger.warning("[Bioinformatics] annotate_clusters called but no AnnData with clustering found")
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": tool_result
-                        })
-                        annotation_retry_required = True
-                        annotation_retry_attempts += 1
-                        continue
-
-                    # Auto-extract markers from kernel adata if LLM didn't provide them
-                    if n_clusters == 0 and self.sandbox:
-                        logger.info(f"[Bioinformatics] cluster_markers empty, auto-extracting from {adata_var}.uns[{rank_key_hint!r}]")
-                        # P2-11: Read padj cutoff from session-configurable deg_thresholds.
-                        _deg_thresholds = getattr(self._current_analysis_state, "deg_thresholds", None) or {}
-                        _padj_cutoff = float(_deg_thresholds.get("padj", 0.05))
-                        extract_code = (
-                            "import json as _json\n"
-                            "_markers = {}\n"
-                            "try:\n"
-                            "    import scanpy as sc\n"
-                            f"    for _cl in {adata_var}.obs['{cluster_key}'].cat.categories:\n"
-                            f"        _df = sc.get.rank_genes_groups_df({adata_var}, group=str(_cl), key={rank_key_hint!r})\n"
-                            f"        _df = _df[_df['pvals_adj'] < {_padj_cutoff}]\n"
-                            "        _markers[str(_cl)] = _df.head(15)['names'].tolist()\n"
-                            "except Exception as _e:\n"
-                            "    _markers = {'__error__': str(_e)}\n"
-                            "print(_json.dumps(_markers))\n"
-                        )
-                        try:
-                            extract_result = await self.sandbox.execute(extract_code)
-                            if extract_result.success and extract_result.output.strip():
-                                try:
-                                    extracted = json.loads(extract_result.output.strip())
-                                except json.JSONDecodeError as je:
-                                    logger.warning(f"[Bioinformatics] Auto-extract markers JSON parse failed: {je}")
-                                    extracted = {}
-                                if "__error__" not in extracted and len(extracted) > 0:
-                                    cluster_markers = extracted
-                                    n_clusters = len(cluster_markers)
-                                    logger.info(f"[Bioinformatics] Auto-extracted markers for {n_clusters} clusters from adata")
-                                else:
-                                    err_msg = extracted.get("__error__", "unknown")
-                                    logger.warning(f"[Bioinformatics] Auto-extract failed: {err_msg}")
-                        except Exception as e:
-                            logger.warning(f"[Bioinformatics] Auto-extract markers exception: {e}")
-
-                    if n_clusters == 0:
-                        tool_result = (
-                            f"Error: cluster_markers is empty and auto-extraction from "
-                            f"{adata_var}.uns[{rank_key_hint!r}] failed. You must first run "
-                            f"sc.tl.rank_genes_groups({adata_var}, '{cluster_key}', method='wilcoxon', "
-                            f"key={rank_key_hint!r}) and ensure it completes successfully before "
-                            f"calling annotate_clusters."
-                        )
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": tool_result
-                        })
-                        annotation_retry_required = True
-                        annotation_retry_attempts += 1
-                        continue
-
-                    await self._notify("status", f"Annotating {n_clusters} clusters using literature evidence ({organism} {tissue})...")
-
-                    # 缺文件 HITL 门控（必须在算 priors 之前）
-                    if not _get_marker_db().present() and self.marker_db_intervention_callback:
-                        from backend.constants import LlmFailureAction as _LFA
-                        from backend.workflow.helpers import WorkflowTerminatedError
-                        action = await self.marker_db_intervention_callback()
-                        if action == _LFA.TERMINATE:
-                            raise WorkflowTerminatedError("Analysis terminated by user at marker DB gate")
-                        if action == _LFA.RETRY:
-                            _get_marker_db().reload()  # clear stale empty cache after fetch
-                    workspace_dir = getattr(self.sandbox, "working_dir", None)
-                    database_priors = {}
-                    if workspace_dir is not None:
-                        database_priors = await self._compute_database_priors(
-                            adata_var, cluster_key, rank_key_hint, organism, workspace_dir)
-
-                    annotation_result: Dict[str, Any] = {}
-                    if self.annotate_clusters_callback:
-                        annotation_result = await self.annotate_clusters_callback(
-                            cluster_markers, tissue, organism,
-                            analysis_log=analysis_log,
-                            database_priors=database_priors,
-                        )
-                    else:
-                        annotation_result = {
-                            "status": "unavailable",
-                            "annotations": {},
-                            "error": "Cluster annotation service not available. Use consult_pi instead."
-                        }
-
-                    # If annotation service returned an error, inform the agent
-                    # and do NOT set annotation_completed (so report_findings gate blocks)
-                    if annotation_result.get("status") == "error":
-                        error_detail = annotation_result.get("error", "Unknown annotation error")
-                        # Check if there's raw_response for debugging
-                        raw_response = annotation_result.get("raw_response", "")
-                        tool_result = (
-                            f"[ANNOTATION FAILED] {error_detail}\n"
-                            f"Raw response preview: {raw_response[:500] if raw_response else 'N/A'}\n"
-                            "Do NOT manually assign cell types via execute_code. "
-                            "Cell type annotation MUST go through annotate_clusters for user review. "
-                            "You may retry annotate_clusters or consult_pi for guidance."
-                        )
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": tool_result
-                        })
-                        analysis_log.append(AnalysisStep(
-                            step_number=step_count, step_type="annotate_clusters",
-                            agent_reasoning=agent_reasoning,
-                            annotation_result_summary=tool_result,
-                        ))
-                        continue
-
-                    # Format result for the agent to use in code
-                    annotations = annotation_result.get("annotations", {})
-                    tissue_summary = annotation_result.get("tissue_summary", "")
-
-                    # Build a code-friendly response
-                    result_lines = []
-                    if annotation_result.get("already_confirmed"):
-                        if planning_stage == "stage1":
-                            result_lines.append(
-                                "[NOTE: These annotations were already confirmed by the user. "
-                                "No re-annotation needed. Stage 1 is complete — call report_findings now.]\n"
-                            )
+                        pi_response = ""
+                        if self.pi_callback:
+                            pi_response = await self.pi_callback(question, context)
+                            await self._notify("pi_response", pi_response)
                         else:
-                            result_lines.append(
-                                "[NOTE: These annotations were already confirmed by the user. "
-                                "No re-annotation needed. Proceed to downstream analysis.]\n"
-                            )
-                    if tissue_summary:
-                        result_lines.append(f"Tissue context: {tissue_summary}\n")
-                    result_lines.append("Cluster annotations:")
-                    for cid, info in annotations.items():
-                        if isinstance(info, dict):
-                            cell_type = info.get("cell_type", "Unknown")
-                            confidence = info.get("confidence", "low")
-                            key_markers = info.get("key_markers", [])
-                            evidence = info.get("evidence", "")
-                            result_lines.append(
-                                f"  Cluster {cid}: {cell_type} (confidence: {confidence})"
-                            )
-                            if key_markers:
-                                result_lines.append(f"    Key markers: {', '.join(key_markers[:5])}")
-                            if evidence:
-                                result_lines.append(f"    Evidence: {evidence[:200]}")
+                            pi_response = "PI guidance not available. Proceed with standard practices."
+                    
+                        # Check for plan revision signal
+                        if PLAN_REVISION_NEEDED_TAG in pi_response:
+                            clean_response = pi_response.replace(PLAN_REVISION_NEEDED_TAG, "").strip()
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"PI Response: {clean_response}\n\n[System: A plan revision has been triggered. Pause and wait for updated plan.]"
+                            })
+                            _plan_revision_needed = True
+                            _plan_revision_context = {
+                                "question": question,
+                                "context": context,
+                            }
+                            break
+                        else:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"PI Response: {pi_response}"
+                            })
 
-                    result_lines.append(f"\nTotal clusters annotated: {len(annotations)}")
+                        # Record consult_pi step in analysis log
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="consult_pi",
+                            agent_reasoning=agent_reasoning,
+                            pi_question=question, pi_context=context[:1000],
+                            pi_options=options or [], pi_response=(pi_response or "")[:2000],
+                        ))
 
-                    # Provide ready-to-use Python code snippet
-                    # Use json.dumps for safe serialization (prevents code injection via cell type names)
-                    cell_type_dict = {
-                        str(cid): (info.get("cell_type", "Unknown") if isinstance(info, dict) else "Unknown")
-                        for cid, info in annotations.items()
-                    }
-                    dict_str = json.dumps(cell_type_dict, ensure_ascii=False)
-                    result_lines.append(
-                        f"\nYou can now assign these annotations to {adata_var}.obs['cell_type'] using:\n"
-                        f"cluster_to_celltype = {dict_str}\n"
-                        f"{adata_var}.obs['cell_type'] = {adata_var}.obs['{cluster_key}'].astype(str).map(cluster_to_celltype).fillna('Unknown')"
-                    )
-
-                    tool_result = "\n".join(result_lines)
-
-                    # Auto-apply annotations to adata.obs['cell_type'] in sandbox
-                    # so the agent doesn't need to manually execute the mapping code
-                    if annotations and self.sandbox:
-                        cell_type_dict = {
-                            str(cid): (info.get("cell_type", "Unknown") if isinstance(info, dict) else "Unknown")
-                            for cid, info in annotations.items()
-                        }
-                        inject_code = (
-                            "import json as _json\n"
-                            f"_ct_map = _json.loads({json.dumps(json.dumps(cell_type_dict, ensure_ascii=False))})\n"
-                            f"{adata_var}.obs['cell_type'] = {adata_var}.obs['{cluster_key}'].astype(str).map(_ct_map).fillna('Unknown')\n"
-                            f"print(f'cell_type applied: {{{adata_var}.obs[\"cell_type\"].value_counts().to_dict()}}')\n"
-                        )
-                        try:
-                            inject_result = await self.sandbox.execute(inject_code)
-                            if inject_result.success:
-                                logger.info(f"[Bioinformatics] Auto-applied cell_type annotations to adata.obs")
-                            else:
-                                logger.warning(f"[Bioinformatics] Failed to auto-apply annotations: {inject_result.error}")
-                        except Exception as e:
-                            logger.warning(f"[Bioinformatics] Exception auto-applying annotations: {e}")
-
-                    await self._notify("annotation_result", json.dumps(
-                        annotation_result, ensure_ascii=False, default=str
-                    )[:2000])
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_result
-                    })
-
-                    # Record annotate_clusters step in analysis log
-                    markers_summary = ", ".join(
-                        f"Cluster {k}: {', '.join(str(x) for x in v[:3]) if isinstance(v, list) else str(v)[:50]}"
-                        for k, v in list(cluster_markers.items())[:5]
-                    )
-                    if len(cluster_markers) > 5:
-                        markers_summary += f" ... ({len(cluster_markers)} clusters total)"
-                    analysis_log.append(AnalysisStep(
-                        step_number=step_count, step_type="annotate_clusters",
-                        agent_reasoning=agent_reasoning,
-                        cluster_markers_summary=markers_summary, annotation_tissue=tissue,
-                        annotation_organism=organism, annotation_result_summary=(tool_result or ""),
-                        annotation_database_priors_summary=summarize_database_priors(
-                            database_priors, len(cluster_markers)),
-                    ))
-                    annotation_completed = True
-                    annotation_retry_required = False
-                    annotation_retry_attempts = 0
-                    # In stage1, explicitly instruct agent that stage is complete
-                    if planning_stage == "stage1":
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "STAGE 1 COMPLETE. Cell annotation is done and confirmed by the user. "
-                                "You MUST now call report_findings immediately. "
-                                "Do NOT run differential expression, pathway enrichment, "
-                                "cell communication, trajectory analysis, or any other downstream analysis. "
-                                "These will be done in Stage 2 after PI reviews your Stage 1 results "
-                                "and creates a new analysis plan."
-                            )
-                        })
-
-                elif tool_name == "report_findings":
-                    # Enforce mandatory pipeline in exploration phase
-                    if state.analysis_phase == AnalysisPhase.EXPLORATION and not annotation_completed:
-                        logger.warning(
-                            f"[Bioinformatics] report_findings rejected: annotate_clusters not yet called"
-                        )
+                    elif tool_name == "search_literature":
+                        has_substantive_work = True
+                        topic = args.get("topic", "")
+                    
+                        await self._notify("status", f"Searching literature: {topic[:50]}...")
+                    
+                        lit_result = ""
+                        if self.literature_callback:
+                            lit_result = await self.literature_callback(topic)
+                            await self._notify("literature", lit_result[:1000])
+                        else:
+                            lit_result = "Literature search not available."
+                    
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": (
-                                "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                                "cell type annotation via annotate_clusters. "
-                                "You MUST first run sc.tl.rank_genes_groups(), then call annotate_clusters, "
-                                "before reporting findings."
-                            )
+                            "content": f"Literature findings: {lit_result}"
                         })
+
+                        # Record search_literature step in analysis log
                         analysis_log.append(AnalysisStep(
-                            step_number=step_count, step_type="report_findings",
+                            step_number=step_count, step_type="search_literature",
                             agent_reasoning=agent_reasoning,
-                            findings=[], findings_summary="REJECTED: annotate_clusters not completed",
+                            literature_topic=topic, literature_result=(lit_result or "")[:2000],
                         ))
-                        continue
 
-                    has_scrna_data = state.has_scrnaseq()
-                    has_bulk_data = state.has_bulk_rnaseq()
-                    lowered_codes = [ce.code.lower() for ce in self.code_history if ce.code]
+                    elif tool_name == "annotate_clusters":
+                        has_substantive_work = True
+                        cluster_markers = args.get("cluster_markers", {})
+                        tissue = args.get("tissue", "")
+                        organism = args.get("organism", "mouse")
+                        # Override with session species if available
+                        if self._current_analysis_state and self._current_analysis_state.species:
+                            llm_organism = organism
+                            organism = self._current_analysis_state.species
+                            if llm_organism != organism:
+                                logger.info(f"[Bioinformatics] organism overridden: {llm_organism} -> {organism}")
+                        cluster_key_hint = args.get("cluster_key") or None
+                        rank_key_hint = args.get("rank_key") or "rank_genes_groups"
 
-                    # Notes appended when a mandatory gate is released after max
-                    # rejections. Initialized in the common scope so every branch
-                    # (exploration / stage1 / innovation) can read it post-gate.
-                    _escaped_notes = []
+                        # Sanitize LLM-provided cluster_markers (handles malformed dict/string formats)
+                        cluster_markers = self._sanitize_cluster_markers(cluster_markers)
 
-                    # Gate M (mandatory data-driven mechanism program capture) — Stage 2
-                    # downstream exploration only. Flag + bounded counter (NOT keyword gate):
-                    # a legitimate empty-programs call with no_program_reason sets the flag.
-                    if (state.analysis_phase == AnalysisPhase.EXPLORATION
-                            and planning_stage != "stage1"
-                            and not mechanism_programs_registered):
-                        if mechanism_gate_reject_count < MAX_MECHANISM_REJECTIONS:
-                            mechanism_gate_reject_count += 1
-                            logger.warning(
-                                f"[Bioinformatics] report_findings rejected: "
-                                f"register_mechanism_programs not called "
-                                f"({mechanism_gate_reject_count}/{MAX_MECHANISM_REJECTIONS})"
+                        n_clusters = len(cluster_markers)
+
+                        # Discover the active AnnData variable and clustering key in sandbox
+                        adata_var, cluster_key = await self._discover_adata_in_sandbox(cluster_key_hint)
+
+                        if adata_var is None:
+                            tool_result = (
+                                "Error: Could not find an AnnData object with a clustering column "
+                                "(leiden/louvain/cluster, or any column starting with 'leiden'/'louvain') "
+                                "in the sandbox. Before calling annotate_clusters, "
+                                "you must: (1) load data into an AnnData variable, (2) run clustering "
+                                "(e.g., sc.tl.leiden(adata)), and (3) run differential expression "
+                                "(sc.tl.rank_genes_groups(adata, 'leiden', method='wilcoxon')). "
+                                "If using non-default column names (e.g., 'leiden_broad'), pass "
+                                "cluster_key explicitly."
+                            )
+                            logger.warning("[Bioinformatics] annotate_clusters called but no AnnData with clustering found")
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": tool_result
+                            })
+                            annotation_retry_required = True
+                            annotation_retry_attempts += 1
+                            continue
+
+                        # Auto-extract markers from kernel adata if LLM didn't provide them
+                        if n_clusters == 0 and self.sandbox:
+                            logger.info(f"[Bioinformatics] cluster_markers empty, auto-extracting from {adata_var}.uns[{rank_key_hint!r}]")
+                            # P2-11: Read padj cutoff from session-configurable deg_thresholds.
+                            _deg_thresholds = getattr(self._current_analysis_state, "deg_thresholds", None) or {}
+                            _padj_cutoff = float(_deg_thresholds.get("padj", 0.05))
+                            extract_code = (
+                                "import json as _json\n"
+                                "_markers = {}\n"
+                                "try:\n"
+                                "    import scanpy as sc\n"
+                                f"    for _cl in {adata_var}.obs['{cluster_key}'].cat.categories:\n"
+                                f"        _df = sc.get.rank_genes_groups_df({adata_var}, group=str(_cl), key={rank_key_hint!r})\n"
+                                f"        _df = _df[_df['pvals_adj'] < {_padj_cutoff}]\n"
+                                "        _markers[str(_cl)] = _df.head(15)['names'].tolist()\n"
+                                "except Exception as _e:\n"
+                                "    _markers = {'__error__': str(_e)}\n"
+                                "print(_json.dumps(_markers))\n"
+                            )
+                            try:
+                                extract_result = await self.sandbox.execute(extract_code)
+                                if extract_result.success and extract_result.output.strip():
+                                    try:
+                                        extracted = json.loads(extract_result.output.strip())
+                                    except json.JSONDecodeError as je:
+                                        logger.warning(f"[Bioinformatics] Auto-extract markers JSON parse failed: {je}")
+                                        extracted = {}
+                                    if "__error__" not in extracted and len(extracted) > 0:
+                                        cluster_markers = extracted
+                                        n_clusters = len(cluster_markers)
+                                        logger.info(f"[Bioinformatics] Auto-extracted markers for {n_clusters} clusters from adata")
+                                    else:
+                                        err_msg = extracted.get("__error__", "unknown")
+                                        logger.warning(f"[Bioinformatics] Auto-extract failed: {err_msg}")
+                            except Exception as e:
+                                logger.warning(f"[Bioinformatics] Auto-extract markers exception: {e}")
+
+                        if n_clusters == 0:
+                            tool_result = (
+                                f"Error: cluster_markers is empty and auto-extraction from "
+                                f"{adata_var}.uns[{rank_key_hint!r}] failed. You must first run "
+                                f"sc.tl.rank_genes_groups({adata_var}, '{cluster_key}', method='wilcoxon', "
+                                f"key={rank_key_hint!r}) and ensure it completes successfully before "
+                                f"calling annotate_clusters."
                             )
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
-                                "content": (
-                                    "[REJECTED] Before reporting findings you must call "
-                                    "register_mechanism_programs. After completing downstream "
-                                    "analysis, identify up to 8 data-driven mechanism programs that "
-                                    "are genuinely supported by observed genes, pathways, scores, "
-                                    "enrichment terms, or cross-validated patterns (do NOT invent "
-                                    "weak programs to reach a count). Derive labels from the data "
-                                    "only — do NOT search for any preset mechanism. If none are "
-                                    "supportable, call register_mechanism_programs with an empty "
-                                    "programs list and explain why in no_program_reason."
-                                ),
+                                "content": tool_result
+                            })
+                            annotation_retry_required = True
+                            annotation_retry_attempts += 1
+                            continue
+
+                        await self._notify("status", f"Annotating {n_clusters} clusters using literature evidence ({organism} {tissue})...")
+
+                        # 缺文件 HITL 门控（必须在算 priors 之前）
+                        if not _get_marker_db().present() and self.marker_db_intervention_callback:
+                            from backend.constants import LlmFailureAction as _LFA
+                            from backend.workflow.helpers import WorkflowTerminatedError
+                            action = await self.marker_db_intervention_callback()
+                            if action == _LFA.TERMINATE:
+                                raise WorkflowTerminatedError("Analysis terminated by user at marker DB gate")
+                            if action == _LFA.RETRY:
+                                _get_marker_db().reload()  # clear stale empty cache after fetch
+                        workspace_dir = getattr(self.sandbox, "working_dir", None)
+                        database_priors = {}
+                        if workspace_dir is not None:
+                            database_priors = await self._compute_database_priors(
+                                adata_var, cluster_key, rank_key_hint, organism, workspace_dir)
+
+                        annotation_result: Dict[str, Any] = {}
+                        if self.annotate_clusters_callback:
+                            annotation_result = await self.annotate_clusters_callback(
+                                cluster_markers, tissue, organism,
+                                analysis_log=analysis_log,
+                                database_priors=database_priors,
+                            )
+                        else:
+                            annotation_result = {
+                                "status": "unavailable",
+                                "annotations": {},
+                                "error": "Cluster annotation service not available. Use consult_pi instead."
+                            }
+
+                        # If annotation service returned an error, inform the agent
+                        # and do NOT set annotation_completed (so report_findings gate blocks)
+                        if annotation_result.get("status") == "error":
+                            error_detail = annotation_result.get("error", "Unknown annotation error")
+                            # Check if there's raw_response for debugging
+                            raw_response = annotation_result.get("raw_response", "")
+                            tool_result = (
+                                f"[ANNOTATION FAILED] {error_detail}\n"
+                                f"Raw response preview: {raw_response[:500] if raw_response else 'N/A'}\n"
+                                "Do NOT manually assign cell types via execute_code. "
+                                "Cell type annotation MUST go through annotate_clusters for user review. "
+                                "You may retry annotate_clusters or consult_pi for guidance."
+                            )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": tool_result
                             })
                             analysis_log.append(AnalysisStep(
-                                step_number=step_count, step_type="report_findings",
+                                step_number=step_count, step_type="annotate_clusters",
                                 agent_reasoning=agent_reasoning,
-                                findings=[], findings_summary="REJECTED: register_mechanism_programs not called",
+                                annotation_result_summary=tool_result,
                             ))
                             continue
-                        else:
-                            _escaped_notes.append(build_gate_skip_note("data-driven mechanism program capture"))
 
-                    # Gate 0 (mandatory annotate_clusters) always applies in exploration;
-                    # Gates 1-3 are Stage 2 tasks, skip in stage1.
-                    if state.analysis_phase == AnalysisPhase.EXPLORATION and planning_stage != "stage1":
+                        # Format result for the agent to use in code
+                        annotations = annotation_result.get("annotations", {})
+                        tissue_summary = annotation_result.get("tissue_summary", "")
 
-                        # Gate 1: Bulk RNA-seq analysis
-                        if has_bulk_data:
-                            code_mentions_bulk = any(
-                                "bulk" in lc or "merged_counts" in lc
-                                or "pydeseq" in lc or "deseqdataset" in lc
-                                for lc in lowered_codes
-                            )
-                            if not code_mentions_bulk:
-                                logger.warning(
-                                    "[Bioinformatics] report_findings rejected: bulk RNA-seq data exists but was not analyzed"
+                        # Build a code-friendly response
+                        result_lines = []
+                        if annotation_result.get("already_confirmed"):
+                            if planning_stage == "stage1":
+                                result_lines.append(
+                                    "[NOTE: These annotations were already confirmed by the user. "
+                                    "No re-annotation needed. Stage 1 is complete — call report_findings now.]\n"
                                 )
-                                bulk_paths = ", ".join(
-                                    f.file_path for f in state.get_files_by_section("sequencing")
-                                    if f.data_type == DATA_TYPE_BULK_RNASEQ
+                            else:
+                                result_lines.append(
+                                    "[NOTE: These annotations were already confirmed by the user. "
+                                    "No re-annotation needed. Proceed to downstream analysis.]\n"
                                 )
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "content": (
-                                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                                        "bulk RNA-seq analysis. Bulk RNA-seq data is available and MUST be analyzed. "
-                                        f"Bulk data files: {bulk_paths}. "
-                                        "You MUST: (1) Load bulk count matrix with pd.read_csv(), "
-                                        "(2) Perform DEG analysis using pydeseq2 (if ImportError, fallback to scipy.stats.ttest_ind + statsmodels FDR correction), "
-                                        "(3) Compare bulk DEGs with scRNA-seq pseudobulk DEGs (Venn diagram), "
-                                        "THEN call report_findings."
-                                    )
-                                })
-                                analysis_log.append(AnalysisStep(
-                                    step_number=step_count, step_type="report_findings",
-                                    agent_reasoning=agent_reasoning,
-                                    findings=[], findings_summary="REJECTED: bulk RNA-seq not analyzed",
-                                ))
-                                continue
+                        if tissue_summary:
+                            result_lines.append(f"Tissue context: {tissue_summary}\n")
+                        result_lines.append("Cluster annotations:")
+                        for cid, info in annotations.items():
+                            if isinstance(info, dict):
+                                cell_type = info.get("cell_type", "Unknown")
+                                confidence = info.get("confidence", "low")
+                                key_markers = info.get("key_markers", [])
+                                evidence = info.get("evidence", "")
+                                result_lines.append(
+                                    f"  Cluster {cid}: {cell_type} (confidence: {confidence})"
+                                )
+                                if key_markers:
+                                    result_lines.append(f"    Key markers: {', '.join(key_markers[:5])}")
+                                if evidence:
+                                    result_lines.append(f"    Evidence: {evidence[:200]}")
 
-                        # Gate 2: Bulk/scRNA-seq cross-validation
-                        if has_scrna_data and has_bulk_data:
-                            integration_reject_count, rejected, escaped = self._check_gate_keyword(
-                                lowered_codes,
-                                ["venn", "pseudobulk", "overlap", "intersect",
-                                 "matplotlib_venn", "venn2", "venn3"],
-                                integration_reject_count, MAX_INTEGRATION_REJECTIONS,
-                                "bulk/scRNA-seq cross-validation not performed",
-                            )
-                            if rejected:
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "content": (
-                                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                                        "bulk/scRNA-seq cross-validation. "
-                                        "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
-                                        "compare their DEG results before reporting. Specifically:\n"
-                                        "(1) Aggregate scRNA-seq to pseudobulk DEGs (or use your existing "
-                                        "condition-level DEG results across all cells)\n"
-                                        "(2) Find overlapping DEGs between bulk and scRNA-seq using set intersection\n"
-                                        "(3) Visualize overlap with a Venn diagram (from matplotlib_venn import venn2)\n"
-                                        "(4) For overlapping DEGs, show cell-type-specific expression patterns\n"
-                                        "THEN call report_findings."
-                                    )
-                                })
-                                analysis_log.append(AnalysisStep(
-                                    step_number=step_count, step_type="report_findings",
-                                    agent_reasoning=agent_reasoning,
-                                    findings=[], findings_summary="REJECTED: bulk/scRNA-seq cross-validation not performed",
-                                ))
-                                continue
-                            if escaped:
-                                _escaped_notes.append(build_gate_skip_note("bulk/scRNA-seq cross-validation"))
+                        result_lines.append(f"\nTotal clusters annotated: {len(annotations)}")
 
-                        # Gate 3: Cell-type deconvolution
-                        if has_scrna_data and has_bulk_data:
-                            deconv_reject_count, rejected, escaped = self._check_gate_keyword(
-                                lowered_codes,
-                                ["deconvolution", "nnls", "scaden", "least_squares"],
-                                deconv_reject_count, MAX_DECONV_REJECTIONS,
-                                "cell-type deconvolution not performed",
-                            )
-                            if rejected:
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "content": (
-                                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                                        "cell-type deconvolution. "
-                                        "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
-                                        "perform deconvolution to estimate cell-type proportions in the bulk samples.\n"
-                                        "(1) Use scRNA-seq as a reference profile\n"
-                                        "(2) Prioritize pure Python methods like scipy.optimize.nnls or sklearn Non-negative Least Squares\n"
-                                        "(3) Visualize inferred cell-type proportions across bulk conditions\n"
-                                        "THEN call report_findings."
-                                    )
-                                })
-                                analysis_log.append(AnalysisStep(
-                                    step_number=step_count, step_type="report_findings",
-                                    agent_reasoning=agent_reasoning,
-                                    findings=[], findings_summary="REJECTED: cell-type deconvolution not performed",
-                                ))
-                                continue
-                            if escaped:
-                                _escaped_notes.append(build_gate_skip_note("cell-type deconvolution"))
-
-                    # Gate 4: INNOVATION-phase bulk direction validation
-                    elif state.analysis_phase == AnalysisPhase.INNOVATION and has_bulk_data and has_scrna_data:
-                        innovation_bulk_reject_count, rejected, escaped = self._check_gate_keyword(
-                            lowered_codes,
-                            ["bulk_", "merged_counts"],
-                            innovation_bulk_reject_count, MAX_INNOVATION_BULK_REJECTIONS,
-                            "innovation-phase bulk direction validation missing",
+                        # Provide ready-to-use Python code snippet
+                        # Use json.dumps for safe serialization (prevents code injection via cell type names)
+                        cell_type_dict = {
+                            str(cid): (info.get("cell_type", "Unknown") if isinstance(info, dict) else "Unknown")
+                            for cid, info in annotations.items()
+                        }
+                        dict_str = json.dumps(cell_type_dict, ensure_ascii=False)
+                        result_lines.append(
+                            f"\nYou can now assign these annotations to {adata_var}.obs['cell_type'] using:\n"
+                            f"cluster_to_celltype = {dict_str}\n"
+                            f"{adata_var}.obs['cell_type'] = {adata_var}.obs['{cluster_key}'].astype(str).map(cluster_to_celltype).fillna('Unknown')"
                         )
-                        if rejected:
+
+                        tool_result = "\n".join(result_lines)
+
+                        # Auto-apply annotations to adata.obs['cell_type'] in sandbox
+                        # so the agent doesn't need to manually execute the mapping code
+                        if annotations and self.sandbox:
+                            cell_type_dict = {
+                                str(cid): (info.get("cell_type", "Unknown") if isinstance(info, dict) else "Unknown")
+                                for cid, info in annotations.items()
+                            }
+                            inject_code = (
+                                "import json as _json\n"
+                                f"_ct_map = _json.loads({json.dumps(json.dumps(cell_type_dict, ensure_ascii=False))})\n"
+                                f"{adata_var}.obs['cell_type'] = {adata_var}.obs['{cluster_key}'].astype(str).map(_ct_map).fillna('Unknown')\n"
+                                f"print(f'cell_type applied: {{{adata_var}.obs[\"cell_type\"].value_counts().to_dict()}}')\n"
+                            )
+                            try:
+                                inject_result = await self.sandbox.execute(inject_code)
+                                if inject_result.success:
+                                    logger.info(f"[Bioinformatics] Auto-applied cell_type annotations to adata.obs")
+                                else:
+                                    logger.warning(f"[Bioinformatics] Failed to auto-apply annotations: {inject_result.error}")
+                            except Exception as e:
+                                logger.warning(f"[Bioinformatics] Exception auto-applying annotations: {e}")
+
+                        await self._notify("annotation_result", json.dumps(
+                            annotation_result, ensure_ascii=False, default=str
+                        )[:2000])
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_result
+                        })
+
+                        # Record annotate_clusters step in analysis log
+                        markers_summary = ", ".join(
+                            f"Cluster {k}: {', '.join(str(x) for x in v[:3]) if isinstance(v, list) else str(v)[:50]}"
+                            for k, v in list(cluster_markers.items())[:5]
+                        )
+                        if len(cluster_markers) > 5:
+                            markers_summary += f" ... ({len(cluster_markers)} clusters total)"
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="annotate_clusters",
+                            agent_reasoning=agent_reasoning,
+                            cluster_markers_summary=markers_summary, annotation_tissue=tissue,
+                            annotation_organism=organism, annotation_result_summary=(tool_result or ""),
+                            annotation_database_priors_summary=summarize_database_priors(
+                                database_priors, len(cluster_markers)),
+                        ))
+                        annotation_completed = True
+                        annotation_retry_required = False
+                        annotation_retry_attempts = 0
+                        # In stage1, explicitly instruct agent that stage is complete
+                        if planning_stage == "stage1":
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "STAGE 1 COMPLETE. Cell annotation is done and confirmed by the user. "
+                                    "You MUST now call report_findings immediately. "
+                                    "Do NOT run differential expression, pathway enrichment, "
+                                    "cell communication, trajectory analysis, or any other downstream analysis. "
+                                    "These will be done in Stage 2 after PI reviews your Stage 1 results "
+                                    "and creates a new analysis plan."
+                                )
+                            })
+
+                    elif tool_name == "report_findings":
+                        # Enforce mandatory pipeline in exploration phase
+                        if state.analysis_phase == AnalysisPhase.EXPLORATION and not annotation_completed:
+                            logger.warning(
+                                f"[Bioinformatics] report_findings rejected: annotate_clusters not yet called"
+                            )
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
                                 "content": (
                                     "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
-                                    "bulk RNA-seq direction validation. Both bulk and scRNA-seq data are "
-                                    "available — you MUST validate this direction's findings on the bulk data. "
-                                    "Reuse the bulk variables already loaded in Round 1 (see the data context "
-                                    "section for their exact names); do NOT re-run the bulk DEG pipeline from "
-                                    "scratch. Use bulk data as an independent validation layer for your new "
-                                    "findings, choosing methods appropriate to your specific results and the "
-                                    "bulk sample design. THEN call report_findings."
+                                    "cell type annotation via annotate_clusters. "
+                                    "You MUST first run sc.tl.rank_genes_groups(), then call annotate_clusters, "
+                                    "before reporting findings."
                                 )
                             })
                             analysis_log.append(AnalysisStep(
                                 step_number=step_count, step_type="report_findings",
                                 agent_reasoning=agent_reasoning,
-                                findings=[],
-                                findings_summary="REJECTED: innovation-phase bulk direction validation missing",
+                                findings=[], findings_summary="REJECTED: annotate_clusters not completed",
                             ))
                             continue
-                        if escaped:
-                            _escaped_notes.append(build_gate_skip_note("innovation-phase bulk direction validation"))
 
-                    has_substantive_work = True
-                    findings = args.get("findings", [])
-                    summary = args.get("summary", "")
-                    suggestions = args.get("suggestions", [])
+                        has_scrna_data = state.has_scrnaseq()
+                        has_bulk_data = state.has_bulk_rnaseq()
+                        lowered_codes = [ce.code.lower() for ce in self.code_history if ce.code]
 
-                    for note in _escaped_notes:
-                        if note not in findings:
-                            findings.append(note)
+                        # Notes appended when a mandatory gate is released after max
+                        # rejections. Initialized in the common scope so every branch
+                        # (exploration / stage1 / innovation) can read it post-gate.
+                        _escaped_notes = []
 
-                    all_findings.extend(findings)
+                        # Gate M (mandatory data-driven mechanism program capture) — Stage 2
+                        # downstream exploration only. Flag + bounded counter (NOT keyword gate):
+                        # a legitimate empty-programs call with no_program_reason sets the flag.
+                        if (state.analysis_phase == AnalysisPhase.EXPLORATION
+                                and planning_stage != "stage1"
+                                and not mechanism_programs_registered):
+                            if mechanism_gate_reject_count < MAX_MECHANISM_REJECTIONS:
+                                mechanism_gate_reject_count += 1
+                                logger.warning(
+                                    f"[Bioinformatics] report_findings rejected: "
+                                    f"register_mechanism_programs not called "
+                                    f"({mechanism_gate_reject_count}/{MAX_MECHANISM_REJECTIONS})"
+                                )
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": (
+                                        "[REJECTED] Before reporting findings you must call "
+                                        "register_mechanism_programs. After completing downstream "
+                                        "analysis, identify up to 8 data-driven mechanism programs that "
+                                        "are genuinely supported by observed genes, pathways, scores, "
+                                        "enrichment terms, or cross-validated patterns (do NOT invent "
+                                        "weak programs to reach a count). Derive labels from the data "
+                                        "only — do NOT search for any preset mechanism. If none are "
+                                        "supportable, call register_mechanism_programs with an empty "
+                                        "programs list and explain why in no_program_reason."
+                                    ),
+                                })
+                                analysis_log.append(AnalysisStep(
+                                    step_number=step_count, step_type="report_findings",
+                                    agent_reasoning=agent_reasoning,
+                                    findings=[], findings_summary="REJECTED: register_mechanism_programs not called",
+                                ))
+                                continue
+                            else:
+                                _escaped_notes.append(build_gate_skip_note("data-driven mechanism program capture"))
 
-                    await self._notify("findings", json.dumps({
-                        "findings": findings,
-                        "summary": summary,
-                        "suggestions": suggestions
-                    }))
+                        # Gate 0 (mandatory annotate_clusters) always applies in exploration;
+                        # Gates 1-3 are Stage 2 tasks, skip in stage1.
+                        if state.analysis_phase == AnalysisPhase.EXPLORATION and planning_stage != "stage1":
 
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": "Findings recorded. Continue or wait for instructions."
-                    })
+                            # Gate 1: Bulk RNA-seq analysis
+                            if has_bulk_data:
+                                code_mentions_bulk = any(
+                                    "bulk" in lc or "merged_counts" in lc
+                                    or "pydeseq" in lc or "deseqdataset" in lc
+                                    for lc in lowered_codes
+                                )
+                                if not code_mentions_bulk:
+                                    logger.warning(
+                                        "[Bioinformatics] report_findings rejected: bulk RNA-seq data exists but was not analyzed"
+                                    )
+                                    bulk_paths = ", ".join(
+                                        f.file_path for f in state.get_files_by_section("sequencing")
+                                        if f.data_type == DATA_TYPE_BULK_RNASEQ
+                                    )
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": (
+                                            "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                            "bulk RNA-seq analysis. Bulk RNA-seq data is available and MUST be analyzed. "
+                                            f"Bulk data files: {bulk_paths}. "
+                                            "You MUST: (1) Load bulk count matrix with pd.read_csv(), "
+                                            "(2) Perform DEG analysis using pydeseq2 (if ImportError, fallback to scipy.stats.ttest_ind + statsmodels FDR correction), "
+                                            "(3) Compare bulk DEGs with scRNA-seq pseudobulk DEGs (Venn diagram), "
+                                            "THEN call report_findings."
+                                        )
+                                    })
+                                    analysis_log.append(AnalysisStep(
+                                        step_number=step_count, step_type="report_findings",
+                                        agent_reasoning=agent_reasoning,
+                                        findings=[], findings_summary="REJECTED: bulk RNA-seq not analyzed",
+                                    ))
+                                    continue
 
-                    # Record report_findings step in analysis log
-                    analysis_log.append(AnalysisStep(
-                        step_number=step_count, step_type="report_findings",
-                        agent_reasoning=agent_reasoning,
-                        findings=findings, findings_summary=summary,
-                        findings_suggestions=suggestions or [],
-                    ))
+                            # Gate 2: Bulk/scRNA-seq cross-validation
+                            if has_scrna_data and has_bulk_data:
+                                integration_reject_count, rejected, escaped = self._check_gate_keyword(
+                                    lowered_codes,
+                                    ["venn", "pseudobulk", "overlap", "intersect",
+                                     "matplotlib_venn", "venn2", "venn3"],
+                                    integration_reject_count, MAX_INTEGRATION_REJECTIONS,
+                                    "bulk/scRNA-seq cross-validation not performed",
+                                )
+                                if rejected:
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": (
+                                            "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                            "bulk/scRNA-seq cross-validation. "
+                                            "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
+                                            "compare their DEG results before reporting. Specifically:\n"
+                                            "(1) Aggregate scRNA-seq to pseudobulk DEGs (or use your existing "
+                                            "condition-level DEG results across all cells)\n"
+                                            "(2) Find overlapping DEGs between bulk and scRNA-seq using set intersection\n"
+                                            "(3) Visualize overlap with a Venn diagram (from matplotlib_venn import venn2)\n"
+                                            "(4) For overlapping DEGs, show cell-type-specific expression patterns\n"
+                                            "THEN call report_findings."
+                                        )
+                                    })
+                                    analysis_log.append(AnalysisStep(
+                                        step_number=step_count, step_type="report_findings",
+                                        agent_reasoning=agent_reasoning,
+                                        findings=[], findings_summary="REJECTED: bulk/scRNA-seq cross-validation not performed",
+                                    ))
+                                    continue
+                                if escaped:
+                                    _escaped_notes.append(build_gate_skip_note("bulk/scRNA-seq cross-validation"))
 
-                    completed = True
-                    break
+                            # Gate 3: Cell-type deconvolution
+                            if has_scrna_data and has_bulk_data:
+                                deconv_reject_count, rejected, escaped = self._check_gate_keyword(
+                                    lowered_codes,
+                                    ["deconvolution", "nnls", "scaden", "least_squares"],
+                                    deconv_reject_count, MAX_DECONV_REJECTIONS,
+                                    "cell-type deconvolution not performed",
+                                )
+                                if rejected:
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": (
+                                            "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                            "cell-type deconvolution. "
+                                            "Both bulk RNA-seq and scRNA-seq data are available — you MUST "
+                                            "perform deconvolution to estimate cell-type proportions in the bulk samples.\n"
+                                            "(1) Use scRNA-seq as a reference profile\n"
+                                            "(2) Prioritize pure Python methods like scipy.optimize.nnls or sklearn Non-negative Least Squares\n"
+                                            "(3) Visualize inferred cell-type proportions across bulk conditions\n"
+                                            "THEN call report_findings."
+                                        )
+                                    })
+                                    analysis_log.append(AnalysisStep(
+                                        step_number=step_count, step_type="report_findings",
+                                        agent_reasoning=agent_reasoning,
+                                        findings=[], findings_summary="REJECTED: cell-type deconvolution not performed",
+                                    ))
+                                    continue
+                                if escaped:
+                                    _escaped_notes.append(build_gate_skip_note("cell-type deconvolution"))
 
-                elif tool_name == "register_score":
-                    has_register_score = True
-                    from ..models.schemas import ScoreDefinition
-                    score_def = ScoreDefinition(
-                        score_name=args.get("score_name", ""),
-                        method=args.get("method", ""),
-                        description=args.get("description", ""),
-                        parameters=args.get("parameters", {}),
-                        gene_list=args.get("gene_list", []),
-                        gene_list_source=args.get("gene_list_source", ""),
-                        round_number=state.current_round,
-                    )
-                    # Deduplicate: update existing score with same name, or append new
-                    existing_idx = next(
-                        (i for i, sd in enumerate(state.score_definitions) if sd.score_name == score_def.score_name),
-                        None
-                    )
-                    if existing_idx is not None:
-                        state.score_definitions[existing_idx] = score_def
-                        await self._notify("status", f"Updated score: {score_def.score_name} ({score_def.method})")
-                    else:
-                        state.score_definitions.append(score_def)
-                        await self._notify("status", f"Registered score: {score_def.score_name} ({score_def.method})")
+                        # Gate 4: INNOVATION-phase bulk direction validation
+                        elif state.analysis_phase == AnalysisPhase.INNOVATION and has_bulk_data and has_scrna_data:
+                            innovation_bulk_reject_count, rejected, escaped = self._check_gate_keyword(
+                                lowered_codes,
+                                ["bulk_", "merged_counts"],
+                                innovation_bulk_reject_count, MAX_INNOVATION_BULK_REJECTIONS,
+                                "innovation-phase bulk direction validation missing",
+                            )
+                            if rejected:
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": (
+                                        "[REJECTED] Cannot report findings yet. Mandatory step not completed: "
+                                        "bulk RNA-seq direction validation. Both bulk and scRNA-seq data are "
+                                        "available — you MUST validate this direction's findings on the bulk data. "
+                                        "Reuse the bulk variables already loaded in Round 1 (see the data context "
+                                        "section for their exact names); do NOT re-run the bulk DEG pipeline from "
+                                        "scratch. Use bulk data as an independent validation layer for your new "
+                                        "findings, choosing methods appropriate to your specific results and the "
+                                        "bulk sample design. THEN call report_findings."
+                                    )
+                                })
+                                analysis_log.append(AnalysisStep(
+                                    step_number=step_count, step_type="report_findings",
+                                    agent_reasoning=agent_reasoning,
+                                    findings=[],
+                                    findings_summary="REJECTED: innovation-phase bulk direction validation missing",
+                                ))
+                                continue
+                            if escaped:
+                                _escaped_notes.append(build_gate_skip_note("innovation-phase bulk direction validation"))
 
-                    action_word = "updated" if existing_idx is not None else "registered"
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": f"Score '{score_def.score_name}' {action_word}. Method: {score_def.method}. This will appear in the report methodology."
-                    })
+                        has_substantive_work = True
+                        findings = await self._handle_report_findings(args)
+                        summary = args.get("summary", "")
+                        suggestions = args.get("suggestions", [])
 
-                    analysis_log.append(AnalysisStep(
-                        step_number=step_count, step_type="register_score",
-                        agent_reasoning=agent_reasoning,
-                        code_description=f"Score: {score_def.score_name} via {score_def.method}",
-                    ))
+                        for note in _escaped_notes:
+                            if note not in findings:
+                                findings.append(note)
 
-                elif tool_name == "register_mechanism_programs":
-                    progs, err = validate_mechanism_program_payload(
-                        args,
-                        round_number=state.current_round,
-                        phase=str(getattr(state.analysis_phase, "value", state.analysis_phase)),
-                        stage=planning_stage,
-                    )
-                    if err:
+                        all_findings.extend(findings)
+
+                        await self._notify("findings", json.dumps({
+                            "findings": findings,
+                            "summary": summary,
+                            "suggestions": suggestions
+                        }))
+
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": f"[REJECTED] {err} Please correct and call register_mechanism_programs again.",
+                            "content": "Findings recorded. Continue or wait for instructions."
+                        })
+
+                        # Record report_findings step in analysis log
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="report_findings",
+                            agent_reasoning=agent_reasoning,
+                            findings=findings, findings_summary=summary,
+                            findings_suggestions=suggestions or [],
+                        ))
+
+                        completed = True
+                        break
+
+                    elif tool_name == "register_score":
+                        has_register_score = True
+                        from ..models.schemas import ScoreDefinition
+                        score_def = ScoreDefinition(
+                            score_name=args.get("score_name", ""),
+                            method=args.get("method", ""),
+                            description=args.get("description", ""),
+                            parameters=args.get("parameters", {}),
+                            gene_list=args.get("gene_list", []),
+                            gene_list_source=args.get("gene_list_source", ""),
+                            round_number=state.current_round,
+                        )
+                        # Deduplicate: update existing score with same name, or append new
+                        existing_idx = next(
+                            (i for i, sd in enumerate(state.score_definitions) if sd.score_name == score_def.score_name),
+                            None
+                        )
+                        if existing_idx is not None:
+                            state.score_definitions[existing_idx] = score_def
+                            await self._notify("status", f"Updated score: {score_def.score_name} ({score_def.method})")
+                        else:
+                            state.score_definitions.append(score_def)
+                            await self._notify("status", f"Registered score: {score_def.score_name} ({score_def.method})")
+
+                        action_word = "updated" if existing_idx is not None else "registered"
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": f"Score '{score_def.score_name}' {action_word}. Method: {score_def.method}. This will appear in the report methodology."
+                        })
+
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="register_score",
+                            agent_reasoning=agent_reasoning,
+                            code_description=f"Score: {score_def.score_name} via {score_def.method}",
+                        ))
+
+                    elif tool_name == "register_mechanism_programs":
+                        progs, err = validate_mechanism_program_payload(
+                            args,
+                            round_number=state.current_round,
+                            phase=str(getattr(state.analysis_phase, "value", state.analysis_phase)),
+                            stage=planning_stage,
+                        )
+                        if err:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"[REJECTED] {err} Please correct and call register_mechanism_programs again.",
+                            })
+                            analysis_log.append(AnalysisStep(
+                                step_number=step_count, step_type="register_mechanism_programs",
+                                agent_reasoning=agent_reasoning,
+                                findings=[], findings_summary=f"REJECTED: {err}",
+                            ))
+                            continue
+                        mechanism_programs_registered = True
+                        mechanism_programs.extend(progs)
+                        # Handler is the single writer to AnalysisState (see plan decision 1).
+                        state.data_driven_mechanism_programs.extend(progs)
+                        if progs:
+                            await self._notify("status", f"Registered {len(progs)} data-driven mechanism program(s)")
+                            content = (
+                                f"Registered {len(progs)} data-driven mechanism program(s). They will be "
+                                "reviewed by the PI, mapped against literature, and may appear as CANDIDATE "
+                                "mechanisms (not confirmed) in the report. You may now call report_findings."
+                            )
+                        else:
+                            await self._notify("status", "No data-driven mechanism program registered (reason recorded)")
+                            content = "Recorded that no data-driven mechanism program was registered. You may now call report_findings."
+                        messages.append({
+                            "role": "tool", "tool_call_id": tool_call.id, "content": content,
                         })
                         analysis_log.append(AnalysisStep(
                             step_number=step_count, step_type="register_mechanism_programs",
                             agent_reasoning=agent_reasoning,
-                            findings=[], findings_summary=f"REJECTED: {err}",
+                            code_description=f"{len(progs)} mechanism program(s)",
                         ))
-                        continue
-                    mechanism_programs_registered = True
-                    mechanism_programs.extend(progs)
-                    # Handler is the single writer to AnalysisState (see plan decision 1).
-                    state.data_driven_mechanism_programs.extend(progs)
-                    if progs:
-                        await self._notify("status", f"Registered {len(progs)} data-driven mechanism program(s)")
-                        content = (
-                            f"Registered {len(progs)} data-driven mechanism program(s). They will be "
-                            "reviewed by the PI, mapped against literature, and may appear as CANDIDATE "
-                            "mechanisms (not confirmed) in the report. You may now call report_findings."
-                        )
-                    else:
-                        await self._notify("status", "No data-driven mechanism program registered (reason recorded)")
-                        content = "Recorded that no data-driven mechanism program was registered. You may now call report_findings."
-                    messages.append({
-                        "role": "tool", "tool_call_id": tool_call.id, "content": content,
-                    })
-                    analysis_log.append(AnalysisStep(
-                        step_number=step_count, step_type="register_mechanism_programs",
-                        agent_reasoning=agent_reasoning,
-                        code_description=f"{len(progs)} mechanism program(s)",
-                    ))
 
-                elif tool_name == "validate_species_genes":
-                    gene_names = args.get("gene_names", [])
-                    state = self._current_analysis_state
-                    if not state or not state.species:
-                        tool_result = "No species set in session. Skipping validation."
-                    else:
-                        assessment = await self._assess_gene_species_match(gene_names, state.species)
-                        if assessment.get("match", True):
-                            tool_result = f"Gene names are consistent with {state.species}. Proceed with analysis."
+                    elif tool_name == "validate_species_genes":
+                        gene_names = args.get("gene_names", [])
+                        state = self._current_analysis_state
+                        if not state or not state.species:
+                            tool_result = "No species set in session. Skipping validation."
                         else:
-                            if self.species_validation_callback:
-                                action = await self.species_validation_callback(
-                                    gene_names, state.species, assessment
-                                )
-                                if action.get("action") == "change_species":
-                                    tool_result = f"Species updated to {action.get('new_species', '')}. Proceed."
-                                elif action.get("action") == "custom":
-                                    self.analysis_context["species_user_directive"] = action.get("user_input", "")
-                                    tool_result = f"User instruction received. Proceed with analysis."
-                                else:
-                                    tool_result = f"Keeping species as {state.species}. Proceed with caution."
+                            assessment = await self._assess_gene_species_match(gene_names, state.species)
+                            if assessment.get("match", True):
+                                tool_result = f"Gene names are consistent with {state.species}. Proceed with analysis."
                             else:
-                                tool_result = (
-                                    f"Warning: gene names may not match {state.species}. "
-                                    f"{assessment.get('reasoning', '')}. Proceeding anyway."
+                                if self.species_validation_callback:
+                                    action = await self.species_validation_callback(
+                                        gene_names, state.species, assessment
+                                    )
+                                    if action.get("action") == "change_species":
+                                        tool_result = f"Species updated to {action.get('new_species', '')}. Proceed."
+                                    elif action.get("action") == "custom":
+                                        self.analysis_context["species_user_directive"] = action.get("user_input", "")
+                                        tool_result = f"User instruction received. Proceed with analysis."
+                                    else:
+                                        tool_result = f"Keeping species as {state.species}. Proceed with caution."
+                                else:
+                                    tool_result = (
+                                        f"Warning: gene names may not match {state.species}. "
+                                        f"{assessment.get('reasoning', '')}. Proceeding anyway."
+                                    )
+                            # Validation actually ran here (_assess_gene_species_match completed
+                            # above); unlike the auto-validation hook, every branch in this tool
+                            # call executes the assessment, so the flag can be set unconditionally.
+                            if self._current_analysis_state:
+                                self._current_analysis_state.species_genes_validated = True
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_result,
+                        })
+                        continue
+
+                    elif tool_name == "lookup_documentation":
+                        function_path = args.get("function_path", "")
+                        question = args.get("question", "")
+
+                        if self.technique_agent:
+                            await self._notify("status", f"Looking up docs: {function_path}...")
+                            try:
+                                doc_result = await self.technique_agent.lookup_docs(
+                                    self.sandbox, function_path, question=question
                                 )
-                        # Validation actually ran here (_assess_gene_species_match completed
-                        # above); unlike the auto-validation hook, every branch in this tool
-                        # call executes the assessment, so the flag can be set unconditionally.
-                        if self._current_analysis_state:
-                            self._current_analysis_state.species_genes_validated = True
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_result,
-                    })
-                    continue
+                            except Exception as e:
+                                logger.warning(f"[Bioinformatics] lookup_documentation failed: {e}")
+                                doc_result = f"Documentation lookup failed: {e}"
+                        else:
+                            doc_result = "Documentation lookup not available."
 
-                elif tool_name == "lookup_documentation":
-                    function_path = args.get("function_path", "")
-                    question = args.get("question", "")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": doc_result
+                        })
 
-                    if self.technique_agent:
-                        await self._notify("status", f"Looking up docs: {function_path}...")
-                        try:
-                            doc_result = await self.technique_agent.lookup_docs(
-                                self.sandbox, function_path, question=question
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count,
+                            step_type="lookup_documentation",
+                            agent_reasoning=agent_reasoning,
+                            code_description=f"Docs lookup: {function_path}",
+                        ))
+
+                    elif tool_name == "generate_publication_figure":
+                        has_figure_work = True
+                        code = args.get("code", "")
+                        figure_name = args.get("figure_name", f"figure_{len(state.publication_figures) + 1}")
+                        description = args.get("description", "")
+                        figure_type = args.get("figure_type", "other")
+
+                        # Track figure generation attempts to prevent infinite retry loops
+                        if "_figure_attempts" not in self.analysis_context:
+                            self.analysis_context["_figure_attempts"] = {}
+                        fig_attempts = self.analysis_context["_figure_attempts"]
+                        fig_attempts[figure_name] = fig_attempts.get(figure_name, 0) + 1
+
+                        if fig_attempts[figure_name] > 3:
+                            logger.warning(f"[Bioinformatics] Skipping figure {figure_name}: exceeded 3 attempts")
+                            tool_result = (
+                                f"Figure {figure_name} has been skipped after {fig_attempts[figure_name]-1} failed attempts. "
+                                "Please move on to the next analysis step or generate a different figure."
                             )
-                        except Exception as e:
-                            logger.warning(f"[Bioinformatics] lookup_documentation failed: {e}")
-                            doc_result = f"Documentation lookup failed: {e}"
-                    else:
-                        doc_result = "Documentation lookup not available."
+                        elif figure_iteration_count >= MAX_FIGURE_ITERATIONS:
+                            # Budget exhausted: refuse figure generation, redirect to analysis
+                            logger.warning(f"[Bioinformatics] Figure budget exhausted, rejecting {figure_name}")
+                            tool_result = (
+                                f"Figure generation budget exhausted ({MAX_FIGURE_ITERATIONS} figures already generated). "
+                                "Do NOT generate any more figures. Focus on completing the remaining analysis steps "
+                                "(differential expression, pathway enrichment, etc.) and then call report_findings."
+                            )
+                        else:
+                            await self._notify("status", f"Generating publication figure: {figure_name} (attempt {fig_attempts[figure_name]})")
 
+                            # Generate the figure with PI review
+                            tool_result = await self._handle_generate_publication_figure(
+                                code=code,
+                                figure_name=figure_name,
+                                description=description,
+                                figure_type=figure_type,
+                                state=state,
+                                review_callback=review_callback
+                            )
+
+                        # Pass publication figure to supervisor for vision review
+                        safe_fig_name = "".join(c if c.isalnum() or c == '_' else '_' for c in figure_name)
+                        for pub_fig in state.publication_figures:
+                            if pub_fig.name == safe_fig_name and pub_fig.png_base64:
+                                _step_figures.append(pub_fig.png_base64)
+                                break
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_result
+                        })
+
+                        # Record generate_publication_figure step in analysis log
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="generate_publication_figure",
+                            agent_reasoning=agent_reasoning,
+                            pub_figure_name=figure_name, pub_figure_description=description,
+                            pub_figure_type=figure_type, pub_figure_code=code,
+                            pub_figure_result=(tool_result or "")[:2000],
+                        ))
+
+                    else:
+                        # Unknown tool name — most commonly an LLM hallucination
+                        # or a recovered stringified tool_call with a bogus name.
+                        # We MUST emit a role=tool response message so the
+                        # assistant tool_call does not become orphan; otherwise
+                        # the next request fails with a 400 from the upstream.
+                        known = ", ".join(sorted(KNOWN_TOOL_NAMES))
+                        err_msg = (
+                            f"ERROR: Unknown tool '{tool_name}'. "
+                            f"This tool does not exist. Available tools: {known}. "
+                            f"Please retry using one of the available tools."
+                        )
+                        logger.warning(
+                            f"[Bioinformatics] Unknown tool '{tool_name}' called "
+                            f"(tool_call_id={tool_call.id}); responding with error to keep "
+                            f"conversation well-formed"
+                        )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": err_msg,
+                        })
+                        analysis_log.append(AnalysisStep(
+                            step_number=step_count, step_type="unknown_tool",
+                            agent_reasoning=agent_reasoning,
+                            text_content=err_msg[:2000],
+                        ))
+
+                except UpstreamExhaustedError:
+                    raise
+                except Exception as _exc_tool:
+                    logger.exception(
+                        "[Bioinformatics] Tool '%s' failed on args=%r; continuing",
+                        tool_call.name, tool_call.arguments,
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": doc_result
+                        "content": f"Error processing tool '{tool_call.name}': {_exc_tool}",
                     })
-
                     analysis_log.append(AnalysisStep(
                         step_number=step_count,
-                        step_type="lookup_documentation",
+                        step_type="tool_error",
                         agent_reasoning=agent_reasoning,
-                        code_description=f"Docs lookup: {function_path}",
-                    ))
-
-                elif tool_name == "generate_publication_figure":
-                    has_figure_work = True
-                    code = args.get("code", "")
-                    figure_name = args.get("figure_name", f"figure_{len(state.publication_figures) + 1}")
-                    description = args.get("description", "")
-                    figure_type = args.get("figure_type", "other")
-
-                    # Track figure generation attempts to prevent infinite retry loops
-                    if "_figure_attempts" not in self.analysis_context:
-                        self.analysis_context["_figure_attempts"] = {}
-                    fig_attempts = self.analysis_context["_figure_attempts"]
-                    fig_attempts[figure_name] = fig_attempts.get(figure_name, 0) + 1
-
-                    if fig_attempts[figure_name] > 3:
-                        logger.warning(f"[Bioinformatics] Skipping figure {figure_name}: exceeded 3 attempts")
-                        tool_result = (
-                            f"Figure {figure_name} has been skipped after {fig_attempts[figure_name]-1} failed attempts. "
-                            "Please move on to the next analysis step or generate a different figure."
-                        )
-                    elif figure_iteration_count >= MAX_FIGURE_ITERATIONS:
-                        # Budget exhausted: refuse figure generation, redirect to analysis
-                        logger.warning(f"[Bioinformatics] Figure budget exhausted, rejecting {figure_name}")
-                        tool_result = (
-                            f"Figure generation budget exhausted ({MAX_FIGURE_ITERATIONS} figures already generated). "
-                            "Do NOT generate any more figures. Focus on completing the remaining analysis steps "
-                            "(differential expression, pathway enrichment, etc.) and then call report_findings."
-                        )
-                    else:
-                        await self._notify("status", f"Generating publication figure: {figure_name} (attempt {fig_attempts[figure_name]})")
-
-                        # Generate the figure with PI review
-                        tool_result = await self._handle_generate_publication_figure(
-                            code=code,
-                            figure_name=figure_name,
-                            description=description,
-                            figure_type=figure_type,
-                            state=state,
-                            review_callback=review_callback
-                        )
-
-                    # Pass publication figure to supervisor for vision review
-                    safe_fig_name = "".join(c if c.isalnum() or c == '_' else '_' for c in figure_name)
-                    for pub_fig in state.publication_figures:
-                        if pub_fig.name == safe_fig_name and pub_fig.png_base64:
-                            _step_figures.append(pub_fig.png_base64)
-                            break
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_result
-                    })
-
-                    # Record generate_publication_figure step in analysis log
-                    analysis_log.append(AnalysisStep(
-                        step_number=step_count, step_type="generate_publication_figure",
-                        agent_reasoning=agent_reasoning,
-                        pub_figure_name=figure_name, pub_figure_description=description,
-                        pub_figure_type=figure_type, pub_figure_code=code,
-                        pub_figure_result=(tool_result or "")[:2000],
-                    ))
-
-                else:
-                    # Unknown tool name — most commonly an LLM hallucination
-                    # or a recovered stringified tool_call with a bogus name.
-                    # We MUST emit a role=tool response message so the
-                    # assistant tool_call does not become orphan; otherwise
-                    # the next request fails with a 400 from the upstream.
-                    known = ", ".join(sorted(KNOWN_TOOL_NAMES))
-                    err_msg = (
-                        f"ERROR: Unknown tool '{tool_name}'. "
-                        f"This tool does not exist. Available tools: {known}. "
-                        f"Please retry using one of the available tools."
-                    )
-                    logger.warning(
-                        f"[Bioinformatics] Unknown tool '{tool_name}' called "
-                        f"(tool_call_id={tool_call.id}); responding with error to keep "
-                        f"conversation well-formed"
-                    )
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": err_msg,
-                    })
-                    analysis_log.append(AnalysisStep(
-                        step_number=step_count, step_type="unknown_tool",
-                        agent_reasoning=agent_reasoning,
-                        text_content=err_msg[:2000],
+                        text_content=f"Tool '{tool_call.name}' failed: {_exc_tool}",
                     ))
 
             # Clear reasoning after all tool calls in this iteration are processed

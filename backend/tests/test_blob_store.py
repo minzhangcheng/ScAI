@@ -41,9 +41,10 @@ def test_short_strings_not_externalized(tmp_path):
 
 def test_inline_tolerates_missing_blob_file(tmp_path):
     blob_dir = tmp_path / "blobs"
-    obj = {"k": f"{BLOB_REF_PREFIX}deadbeef"}  # reference with no file
+    digest = "d" * 64  # valid SHA-256 hex length
+    obj = {"k": f"{BLOB_REF_PREFIX}{digest}"}  # reference with no file
     # Missing blob must not crash load; reference is left as-is.
-    assert inline_blobs(obj, blob_dir) == {"k": f"{BLOB_REF_PREFIX}deadbeef"}
+    assert inline_blobs(obj, blob_dir) == {"k": f"{BLOB_REF_PREFIX}{digest}"}
 
 
 def test_session_roundtrip_strips_base64_from_json(tmp_path, monkeypatch):

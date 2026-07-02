@@ -97,14 +97,13 @@ from .utils.agent_llm import (
     get_agent_llm_client as _get_agent_llm_client,
 )
 
-# Configure logging - must be called before any logging
-setup_logging()
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
+    setup_logging()
     from backend.utils.auth import get_db
     db = await get_db()
     logger.info(f"Auth database initialized at {db.path}")
@@ -138,8 +137,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        cleanup_task.cancel()
-        ttl_task.cancel()
+        await _cancel_and_await(cleanup_task, ttl_task)
+
+
+async def _cancel_and_await(*tasks: asyncio.Task) -> None:
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # FastAPI app

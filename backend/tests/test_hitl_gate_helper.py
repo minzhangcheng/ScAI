@@ -10,7 +10,7 @@ def _bare_workflow():
     wf._llm_failure_lock = asyncio.Lock()
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
-    wf._llm_failure_generation = 0
+    wf._llm_failure_generations = {}
     wf._settings_provider = None
     async def _noop(*a, **k): pass
     wf._send_message = _noop

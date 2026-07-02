@@ -51,12 +51,8 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   const [savedSessions, setSavedSessions] = useState<any[]>([])
   const [loadingSessions, setLoadingSessions] = useState(false)
   
-  // Default project - pre-filled for convenience, users can modify
-  const DEFAULT_PROJECT_NAME = 'Ctr1/ZnT1 DKO mouse liver'
-  const DEFAULT_PROJECT_DESCRIPTION = `Our research group focuses on copper metabolism. We mainly investigate the impact of copper on cellular metabolism and cell death. Previously, we identified ZnT1 as a copper transporter. In physiological function studies, liver-specific ZnT1 knockout mice (via Alb-cre) exhibited no discernible phenotype, whereas ZnT1/CTR1 double knockout (DKO) mice displayed severe hepatic abnormalities. This stark contrast suggests a functional redundancy between ZnT1 and CTR1 in mediating copper uptake. To dissect this, we performed histological analysis (H&E) and single-nucleus RNA sequencing (snRNA-seq) on the DKO livers. For the following analysis, please operate under the strict premise that ZnT1 is functioning as a copper transporter. Specifically, interpret the severe DKO phenotype and any downregulation of metabolic pathways in the snRNA-seq data as a consequence of intracellular copper deficiency (due to blocked uptake), rather than zinc toxicity.`
-  
-  const [instruction, setInstruction] = useState(DEFAULT_PROJECT_DESCRIPTION)
-  const [sessionName, setSessionName] = useState(DEFAULT_PROJECT_NAME)
+  const [instruction, setInstruction] = useState(t('defaultProjectDescription'))
+  const [sessionName, setSessionName] = useState(t('defaultProjectName'))
   const [editingSession, setEditingSession] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -261,8 +257,8 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       }
       setShowNewSession(false)
       // Reset to defaults for next time
-      setInstruction(DEFAULT_PROJECT_DESCRIPTION)
-      setSessionName(DEFAULT_PROJECT_NAME)
+      setInstruction(t('defaultProjectDescription'))
+      setSessionName(t('defaultProjectName'))
     } catch (e) {
       console.error('Failed to create session:', e)
       const msg = e instanceof Error ? e.message : String(e)

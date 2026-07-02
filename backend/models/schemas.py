@@ -881,7 +881,7 @@ class AnalysisState(BaseModel):
     custom_temperatures: Dict[str, float] = Field(default_factory=dict)
 
     # Per-agent LLM server overrides (agent_name -> {"llm_base_url": ..., "api_key": ...})
-    agent_server_configs: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+    agent_server_configs: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
     # P2-11: Session-configurable DEG significance thresholds.
     # Different research domains use different cutoffs (e.g. tumor heterogeneity uses |logFC|>0.5).

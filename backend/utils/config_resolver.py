@@ -156,15 +156,22 @@ async def resolve_config_for_user(user_id: str) -> Optional[SystemConfig]:
         base = SystemConfig()
 
     if not user_api or not user_api.get("api_key"):
-        return base.model_copy(update={"api": base.api.model_copy()})
+        result = base.model_copy(update={"api": base.api.model_copy()})
+        try:
+            result.api.require_key()
+        except ValueError:
+            return None
+        return result
 
     return _overlay_user_api(base, user_api)
 
 
 def _overlay_user_api(base: SystemConfig, user_api: dict) -> SystemConfig:
     """Return a copy of *base* with per-user API credentials overlaid."""
-    return base.model_copy(update={"api": base.api.model_copy(update={
+    result = base.model_copy(update={"api": base.api.model_copy(update={
         "api_key": user_api["api_key"],
         "llm_base_url": user_api.get("llm_base_url") or base.api.llm_base_url,
         "proxy_url": user_api.get("proxy_url") or base.api.proxy_url,
     })})
+    result.api.require_key()
+    return result

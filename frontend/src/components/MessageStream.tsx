@@ -517,12 +517,13 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
         }
 
         if (message.type === 'supervisor_summary') {
-          let stats = message.content
+          let stats: Record<string, any> | string = message.content
           try {
             if (typeof message.content === 'string') {
               stats = JSON.parse(message.content)
             }
           } catch { console.debug('Failed to parse supervisor_summary'); stats = {} }
+          const s = typeof stats === 'string' ? {} : stats
 
           return (
             <div className="space-y-2">
@@ -532,10 +533,10 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
               </div>
               <div className="bg-cyan-50 border border-cyan-200 rounded-lg p-3">
                 <div className="flex flex-wrap gap-3 text-sm">
-                  <span className="text-cyan-700">{language === 'zh' ? '监控步骤' : 'Steps'}: <strong>{stats.total_steps_monitored ?? '-'}</strong></span>
-                  <span className="text-cyan-700">{language === 'zh' ? '技术问题' : 'Issues'}: <strong>{stats.steps_with_technical_issues ?? '-'}</strong></span>
-                  <span className="text-cyan-700">{language === 'zh' ? 'PI介入' : 'PI Escalations'}: <strong>{stats.pi_escalations ?? '-'}</strong></span>
-                  <span className="text-cyan-700">{language === 'zh' ? '严重问题' : 'Critical'}: <strong>{stats.critical_issues ?? '-'}</strong></span>
+                  <span className="text-cyan-700">{language === 'zh' ? '监控步骤' : 'Steps'}: <strong>{s.total_steps_monitored ?? '-'}</strong></span>
+                  <span className="text-cyan-700">{language === 'zh' ? '技术问题' : 'Issues'}: <strong>{s.steps_with_technical_issues ?? '-'}</strong></span>
+                  <span className="text-cyan-700">{language === 'zh' ? 'PI介入' : 'PI Escalations'}: <strong>{s.pi_escalations ?? '-'}</strong></span>
+                  <span className="text-cyan-700">{language === 'zh' ? '严重问题' : 'Critical'}: <strong>{s.critical_issues ?? '-'}</strong></span>
                 </div>
               </div>
             </div>
@@ -557,12 +558,13 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
         }
 
         if (message.type === 'pi_question') {
-          let questionData = message.content
+          let questionData: Record<string, any> | string = message.content
           try {
             if (typeof message.content === 'string') {
               questionData = JSON.parse(message.content)
             }
           } catch { questionData = { question: message.content } }
+          const qd = typeof questionData === 'string' ? {} : questionData
           
           return (
             <div className="space-y-2">
@@ -571,13 +573,13 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                 <span>{language === 'zh' ? '咨询 PI Agent' : 'Consulting PI Agent'}</span>
               </div>
               <div className="bg-violet-50 border border-violet-200 rounded-lg p-3">
-                <p className="text-sm text-violet-800 font-medium">{questionData.question || (typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2))}</p>
-                {questionData.context && (
-                  <pre className="mt-2 text-xs text-violet-600 whitespace-pre-wrap">{questionData.context}</pre>
+                <p className="text-sm text-violet-800 font-medium">{qd.question || (typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2))}</p>
+                {qd.context && (
+                  <pre className="mt-2 text-xs text-violet-600 whitespace-pre-wrap">{qd.context}</pre>
                 )}
-                {questionData.options && questionData.options.length > 0 && (
+                {qd.options && qd.options.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1">
-                    {questionData.options.map((opt: string, i: number) => (
+                    {qd.options.map((opt: string, i: number) => (
                       <span key={i} className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded">{opt}</span>
                     ))}
                   </div>
@@ -604,12 +606,13 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
         }
         
         if (message.type === 'findings') {
-          let findingsData = message.content
+          let findingsData: Record<string, any> | string = message.content
           try {
             if (typeof message.content === 'string') {
               findingsData = JSON.parse(message.content)
             }
           } catch { findingsData = { findings: [message.content] } }
+          const fd = typeof findingsData === 'string' ? {} : findingsData
           
           return (
             <div className="space-y-2">
@@ -618,12 +621,12 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                 <span>{language === 'zh' ? '分析发现' : 'Analysis Findings'}</span>
               </div>
               <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                {findingsData.summary && (
-                  <p className="text-sm text-green-800 font-medium mb-2">{findingsData.summary}</p>
+                {fd.summary && (
+                  <p className="text-sm text-green-800 font-medium mb-2">{fd.summary}</p>
                 )}
-                {findingsData.findings && findingsData.findings.length > 0 && (
+                {fd.findings && fd.findings.length > 0 && (
                   <ul className="space-y-1">
-                    {findingsData.findings.map((f: unknown, i: number) => (
+                    {fd.findings.map((f: unknown, i: number) => (
                       <li key={i} className="flex items-start gap-2 text-xs text-green-700">
                         <span className="text-green-500">•</span>
                         {typeof f === 'string' ? f : JSON.stringify(f, null, 2)}
@@ -631,11 +634,11 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                     ))}
                   </ul>
                 )}
-                {findingsData.suggestions && findingsData.suggestions.length > 0 && (
+                {fd.suggestions && fd.suggestions.length > 0 && (
                   <div className="mt-2 pt-2 border-t border-green-200">
                     <span className="text-xs text-green-600 font-medium">{language === 'zh' ? '建议:' : 'Suggestions:'}</span>
                     <ul className="mt-1 space-y-1">
-                      {findingsData.suggestions.map((s: unknown, i: number) => (
+                      {fd.suggestions.map((s: unknown, i: number) => (
                         <li key={i} className="text-xs text-green-600">→ {typeof s === 'string' ? s : JSON.stringify(s, null, 2)}</li>
                       ))}
                     </ul>

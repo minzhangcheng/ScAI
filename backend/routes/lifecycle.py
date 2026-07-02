@@ -18,6 +18,7 @@ from backend.models.schemas import (
 )
 from backend.services.session_store import async_save_session, ensure_session_loaded, pause_and_restart_ws as _pause_and_restart_ws_impl
 from backend.utils.auth import require_session_ownership
+from backend.utils.files import validate_session_id
 from backend.state import (
     _run_tasks,
     state_lock as _state_lock,
@@ -88,6 +89,7 @@ router = APIRouter(prefix="/api/session", tags=["lifecycle"])
 @router.post("/{session_id}/run")
 async def run_analysis(session_id: str, request: Request):
     """Start running analysis (use WebSocket for real-time updates)"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
@@ -107,6 +109,7 @@ async def run_analysis(session_id: str, request: Request):
 @router.post("/{session_id}/pause")
 async def pause_analysis(session_id: str, request: Request):
     """Pause running analysis"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     # P1-9: serialize with concurrent resume/stop/llm-failure mutators.
     sess_lock = get_session_lock(session_id)
@@ -153,6 +156,7 @@ async def _pause_analysis_locked(session_id: str, user_id: str):
 @router.post("/{session_id}/resume")
 async def resume_analysis(session_id: str, request: Request):
     """Resume paused or completed analysis (for re-analysis)"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     # P1-9: serialize with concurrent pause/stop/llm-failure mutators.
     sess_lock = get_session_lock(session_id)
@@ -321,6 +325,7 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
 @router.post("/{session_id}/stop")
 async def stop_analysis(session_id: str, request: Request, req: StopAnalysisRequest):
     """Stop a running analysis - either immediately or with summary report"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     # P1-9: serialize with concurrent pause/resume/llm-failure mutators.
     sess_lock = get_session_lock(session_id)
@@ -453,6 +458,7 @@ async def llm_failure_action(session_id: str, request: Request, req: LlmFailureA
     current `_llm_failure_generation`. Duplicate or stale requests
     (e.g. double-click) are rejected with 409.
     """
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     # P1-9: serialize with concurrent pause/resume/stop mutators.
     sess_lock = get_session_lock(session_id)
@@ -499,6 +505,7 @@ async def _llm_failure_action_locked(session_id: str, user_id: str, req: LlmFail
 @router.post("/{session_id}/retry-node")
 async def retry_node(session_id: str, request: Request, body: RetryNodeRequest):
     """Retry or skip a failed node"""
+    validate_session_id(session_id)
     node_name = body.node_name
     skip = body.skip
 
@@ -537,6 +544,7 @@ async def retry_node(session_id: str, request: Request, body: RetryNodeRequest):
 @router.get("/{session_id}/failed-node")
 async def get_failed_node(session_id: str, request: Request):
     """Get information about the failed node"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
@@ -569,6 +577,7 @@ async def get_failed_node(session_id: str, request: Request):
 @router.post("/{session_id}/resume-bioinformatics")
 async def resume_bioinformatics(session_id: str, request: Request):
     """Resume bioinformatics analysis from last checkpoint"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 

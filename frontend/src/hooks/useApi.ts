@@ -187,11 +187,29 @@ export function useConfig() {
     }
   }, [apiConfig])
 
+  const validateSavedConfig = useCallback(async () => {
+    // Validate the key already saved in the global config (admin has no local key,
+    // e.g. after localStorage was cleared). No key is sent in the request body.
+    try {
+      return await apiFetch<{
+        valid: boolean
+        message: string
+        uncertain?: boolean
+      }>('/config/validate-saved', { method: 'POST' })
+    } catch {
+      return {
+        valid: false,
+        message: 'Failed to reach validation endpoint',
+        uncertain: true,
+      }
+    }
+  }, [])
+
   const clearError = useCallback(() => {
     setError(null)
   }, [])
 
-  return { apiConfig, setApiConfig, saveConfig, checkStatus, validateApiKey, loading, error, clearError }
+  return { apiConfig, setApiConfig, saveConfig, checkStatus, validateApiKey, validateSavedConfig, loading, error, clearError }
 }
 
 // Session hook
@@ -681,14 +699,13 @@ export function useWebSocket() {
       return
     }
 
-    // Check all connection states
+    // Close existing connection before opening a new one
     if (wsRef.current) {
       const state = wsRef.current.readyState
       if (state === WebSocket.CONNECTING || state === WebSocket.OPEN) {
-        devLog('WebSocket: Already connected or connecting, skipping')
-        return
+        devLog('WebSocket: Closing existing connection before reconnecting')
+        wsRef.current.close()
       }
-      // If CLOSING or CLOSED, clear the ref
       wsRef.current = null
     }
 
@@ -720,6 +737,7 @@ export function useWebSocket() {
     }, WS_CONNECT_TIMEOUT_MS)
 
     ws.onopen = async () => {
+      if (wsRef.current !== ws) return
       clearTimeout(connectTimeout)
       connectingRef.current = false
       setConnected(true)
@@ -848,7 +866,7 @@ export function useWebSocket() {
             }
           } else {
             // Update state version and session status
-            setStateVersion(syncContent.version)
+            useAppStore.getState().setStateVersion(syncContent.version)
 
             // Handle LLM failure state (single source of truth — state_sync only)
             if (syncContent.change_type === 'llm_failure' && syncContent.llm_failure_info) {
@@ -909,7 +927,7 @@ export function useWebSocket() {
               useAppStore.getState().clearSpeciesInputState()
             }
 
-            updateSession({
+            useAppStore.getState().updateSession({
               status: syncContent.status,
               currentRound: syncContent.current_round,
               ...(syncContent.analysis_phase ? { analysisPhase: syncContent.analysis_phase } : {}),
@@ -922,7 +940,7 @@ export function useWebSocket() {
         if (data.type === 'message_history') {
           if (data.content?.messages && Array.isArray(data.content.messages)) {
             const serverMessages = data.content.messages.map(transformRawMessage)
-            setMessages(serverMessages)
+            useAppStore.getState().setMessages(serverMessages)
             devLog(`WebSocket: Restored ${serverMessages.length} messages from history`)
           }
           return  // Don't add message_history itself to the message stream
@@ -933,7 +951,7 @@ export function useWebSocket() {
           const errorContent = data.content
           if (errorContent.errors && Array.isArray(errorContent.errors)) {
             for (const err of errorContent.errors) {
-              addAgentError({
+              useAppStore.getState().addAgentError({
                 id: err.id,
                 agent: err.agent as AgentType,
                 errorType: err.error_type || 'execution_error',
@@ -1031,7 +1049,7 @@ export function useWebSocket() {
           timestamp: data.timestamp || new Date().toISOString(),
         }
 
-        addMessage(message)
+        useAppStore.getState().addMessage(message)
         
         // Update session status based on message
         if (data.type === 'completed') {
@@ -1044,10 +1062,10 @@ export function useWebSocket() {
           if (roundResults && Array.isArray(roundResults)) {
             updates.roundResults = transformRoundResults(roundResults)
           }
-          updateSession(updates)
+          useAppStore.getState().updateSession(updates)
         } else if (data.type === 'error' && !data.agent) {
           // Only mark as failed if it's a system error, not an agent error
-          updateSession({ status: 'failed' })
+          useAppStore.getState().updateSession({ status: 'failed' })
         }
         
         // Update currentRound from status messages
@@ -1060,14 +1078,14 @@ export function useWebSocket() {
           if (roundMatch) {
             const round = parseInt(roundMatch[1], 10)
             if (!isNaN(round)) {
-              updateSession({ currentRound: round })
+              useAppStore.getState().updateSession({ currentRound: round })
             }
           }
         }
         
         // Update from result messages that contain round info
         if (data.type === 'result' && data.content?.round) {
-          updateSession({ currentRound: data.content.round })
+          useAppStore.getState().updateSession({ currentRound: data.content.round })
         }
 
         // Handle round_summary messages to update roundResults
@@ -1099,7 +1117,7 @@ export function useWebSocket() {
               updatedRounds = [...existingRounds, newRoundResult]
             }
 
-            updateSession({
+            useAppStore.getState().updateSession({
               roundResults: updatedRounds,
               currentRound: roundData.round,
               status: roundData.status === 'waiting_input' ? 'waiting_input' : latestSession.status,
@@ -1118,6 +1136,7 @@ export function useWebSocket() {
     }
 
     ws.onclose = (event) => {
+      if (wsRef.current !== ws) return
       clearTimeout(connectTimeout)
       connectingRef.current = false
       setConnected(false)

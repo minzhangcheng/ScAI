@@ -76,6 +76,7 @@ class TestChatWithToolsFallback:
         class _NullLogger:
             def log_request(self, **kw): return None
             def log_response(self, **kw): return None
+            async def log_response_async(self, **kw): return None
         client.llm_logger = _NullLogger()
 
         # Successful chat completion shape: response.choices[0].message
@@ -128,6 +129,7 @@ class TestChatWithToolsFallback:
         class _NullLogger:
             def log_request(self, **kw): return None
             def log_response(self, **kw): return None
+            async def log_response_async(self, **kw): return None
         client.llm_logger = _NullLogger()
 
         good_message = MagicMock()
@@ -170,6 +172,7 @@ class TestChatWithToolsFallback:
         class _NullLogger:
             def log_request(self, **kw): return None
             def log_response(self, **kw): return None
+            async def log_response_async(self, **kw): return None
         client.llm_logger = _NullLogger()
 
         # BadRequest that is NOT tool_choice and NOT an adaptation signal: under

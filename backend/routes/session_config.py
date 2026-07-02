@@ -232,10 +232,11 @@ async def update_literature_config(session_id: str, request: Request, body: Lite
 
 @router.get("/session/{session_id}/literature-config")
 async def get_literature_config(session_id: str, request: Request):
-    """Get current literature agent configuration"""
+    """Get current literature agent configuration (API keys masked)"""
+    validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
-    return state.literature_config
+    return AgentSettingsProvider.mask_literature_config(state.literature_config)
 
 
 @router.post("/session/{session_id}/agent-server-config")
@@ -258,8 +259,14 @@ async def update_agent_server_config(session_id: str, request: Request, body: Ag
 
 @router.get("/session/{session_id}/agent-server-config")
 async def get_agent_server_configs(session_id: str, request: Request):
-    """Get per-agent LLM server configurations"""
+    """Get per-agent LLM server configurations (API keys masked)"""
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
-    return state.agent_server_configs
+    masked = {}
+    for agent, cfg in (state.agent_server_configs or {}).items():
+        c = dict(cfg) if cfg else {}
+        if c.get("api_key"):
+            c["api_key"] = "***"
+        masked[agent] = c
+    return masked

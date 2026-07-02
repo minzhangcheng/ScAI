@@ -210,6 +210,17 @@ class AppDB:
             await db.execute("DELETE FROM api_keys WHERE user_id=?", (uid,))
             await db.commit()
 
+    async def demote_admin_if_not_last(self, uid: str, new_role: str) -> bool:
+        async with aiosqlite.connect(self.path, timeout=30) as db:
+            cur = await db.execute(
+                "UPDATE users SET role=? "
+                "WHERE id=? AND role='admin' "
+                "AND (SELECT COUNT(*) FROM users WHERE role='admin') > 1",
+                (new_role, uid),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
     async def count_admins(self) -> int:
         async with aiosqlite.connect(self.path, timeout=30) as db:
             db.row_factory = aiosqlite.Row

@@ -93,11 +93,14 @@ class TechniqueAgent(BaseAgent):
             return f"""
 import inspect
 import importlib
+_module_path = {repr(module_path)}
+_attr_name = {repr(attr_name)}
+_function_path = {repr(function_path)}
 try:
-    mod = importlib.import_module("{module_path}")
-    obj = getattr(mod, "{attr_name}", None)
+    mod = importlib.import_module(_module_path)
+    obj = getattr(mod, _attr_name, None)
     if obj is None:
-        print(f"'{attr_name}' not found in {module_path}.")
+        print(f"'{{_attr_name}}' not found in {{_module_path}}.")
         print(f"Available attributes: {{[a for a in dir(mod) if not a.startswith('_')]}}")
     else:
         sig = ""
@@ -106,7 +109,7 @@ try:
         except (ValueError, TypeError):
             pass
         doc = inspect.getdoc(obj) or "No docstring available."
-        print(f"Signature: {function_path}{{sig}}")
+        print(f"Signature: {{_function_path}}{{sig}}")
         print(f"\\nDocstring:\\n{{doc[:3000]}}")
 except ImportError as e:
     print(f"Cannot import: {{e}}")
@@ -118,10 +121,11 @@ except Exception as e:
             return f"""
 import inspect
 import importlib
+_module_path = {repr(function_path)}
 try:
-    mod = importlib.import_module("{function_path}")
+    mod = importlib.import_module(_module_path)
     doc = inspect.getdoc(mod) or "No docstring available."
-    print(f"Module: {function_path}")
+    print(f"Module: {{_module_path}}")
     print(f"\\nDocstring:\\n{{doc[:2000]}}")
     print(f"\\nPublic API: {{[a for a in dir(mod) if not a.startswith('_')][:50]}}")
 except ImportError as e:
@@ -133,10 +137,11 @@ except ImportError as e:
         """Build code to list available attributes of a module."""
         return f"""
 import importlib
+_module_path = {repr(module_path)}
 try:
-    mod = importlib.import_module("{module_path}")
+    mod = importlib.import_module(_module_path)
     attrs = [a for a in dir(mod) if not a.startswith('_')]
-    print(f"Available in {module_path}: {{attrs}}")
+    print(f"Available in {{_module_path}}: {{attrs}}")
 except ImportError as e:
     print(f"Cannot import: {{e}}")
 """

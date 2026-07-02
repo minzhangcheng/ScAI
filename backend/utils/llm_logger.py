@@ -6,6 +6,7 @@ Records all LLM prompts, responses, and tool calls to files for debugging and an
 import os
 import json
 import logging
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -79,6 +80,9 @@ class LLMLogger:
         # Legacy session log directory (no longer used for new writes)
         self.session_log_dir = LLM_LOG_DIR / "sessions"
         
+        # Async I/O lock for offloading blocking file writes to a thread pool
+        self._async_lock = asyncio.Lock()
+        
         logger.info(f"LLM Logger initialized. Logs at: {LLM_LOG_DIR.absolute()}")
     
     def _get_daily_log_path(self) -> Path:
@@ -122,6 +126,33 @@ class LLMLogger:
                 
         except Exception as e:
             logger.exception("Failed to log LLM interaction")
+    
+    async def log_interaction_async(self, interaction: LLMInteraction):
+        """Async version of log_interaction — offloads blocking file I/O
+        to a thread pool, serialized under an asyncio.Lock."""
+        if not self.enabled:
+            return
+        async with self._async_lock:
+            await asyncio.to_thread(self.log_interaction, interaction)
+    
+    async def log_response_async(
+        self,
+        interaction: LLMInteraction,
+        response_content: Optional[str] = None,
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
+        usage: Optional[Dict[str, int]] = None,
+        error: Optional[str] = None,
+        duration_ms: Optional[float] = None
+    ):
+        """Async version of log_response — updates interaction and logs via
+        log_interaction_async."""
+        interaction.response_content = response_content
+        interaction.tool_calls = tool_calls
+        interaction.usage = usage
+        interaction.error = error
+        interaction.duration_ms = duration_ms
+        
+        await self.log_interaction_async(interaction)
     
     def _log_to_console(self, interaction: LLMInteraction):
         """Log a summarized version to console"""

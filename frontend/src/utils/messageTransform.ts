@@ -30,7 +30,7 @@ export function transformRawMessage(msg: RawMessage): Message {
     id: msg.id || generateId(),
     type: (msg.type || 'message') as Message['type'],
     agent: msg.agent as AgentType | undefined,
-    content: msg.content,
+    content: msg.content as Message['content'],
     timestamp: msg.timestamp || new Date().toISOString(),
   }
 }

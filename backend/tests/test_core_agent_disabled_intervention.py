@@ -14,7 +14,7 @@ async def test_wait_for_disabled_agent_returns_retry_on_signal():
     wf._llm_failure_lock = asyncio.Lock()
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
-    wf._llm_failure_generation = 0
+    wf._llm_failure_generations = {}
     wf._settings_provider = MagicMock()
     wf._send_message = AsyncMock()
     wf._send_state_sync = AsyncMock()
@@ -23,7 +23,7 @@ async def test_wait_for_disabled_agent_returns_retry_on_signal():
 
     async def signaller():
         await asyncio.sleep(0.02)
-        gen = wf._llm_failure_generation
+        gen = wf._generation_for("pi_planning")
         wf.signal_llm_failure_action("pi_planning", "retry", gen)
 
     waiter = asyncio.create_task(
@@ -41,7 +41,7 @@ async def test_wait_for_disabled_agent_returns_skip_on_signal():
     wf._llm_failure_lock = asyncio.Lock()
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
-    wf._llm_failure_generation = 0
+    wf._llm_failure_generations = {}
     wf._settings_provider = MagicMock()
     wf._send_message = AsyncMock()
     wf._send_state_sync = AsyncMock()
@@ -50,7 +50,7 @@ async def test_wait_for_disabled_agent_returns_skip_on_signal():
 
     async def signaller():
         await asyncio.sleep(0.02)
-        gen = wf._llm_failure_generation
+        gen = wf._generation_for("pi_planning")
         wf.signal_llm_failure_action("pi_planning", "skip", gen)
 
     waiter = asyncio.create_task(

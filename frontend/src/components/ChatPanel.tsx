@@ -351,9 +351,9 @@ export function ChatPanel() {
             </div>
           </div>
         ) : (
-          chatMessages.map((msg, i) => (
+          chatMessages.map((msg) => (
             <div
-              key={i}
+              key={msg.id}
               className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
               {msg.role === 'assistant' && (

@@ -560,11 +560,15 @@ Please reply in structured format.
                     "image_id": image_info.id
                 }
 
-            result = await self.llm_client.chat_with_vision(
-                model=self.model,
-                text_prompt=prompt,
-                images=tiles,
-                temperature=0.3
+            result = await self._call_llm_with_hitl(
+                lambda: self.llm_client.chat_with_vision(
+                    model=self.model,
+                    text_prompt=prompt,
+                    images=tiles,
+                    temperature=0.3
+                ),
+                image_label=image_info.id,
+                step_label="targeted",
             )
 
             return {

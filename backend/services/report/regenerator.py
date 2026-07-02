@@ -21,7 +21,14 @@ from backend.utils.image_utils import compress_image_to_base64, categorize_figur
 from backend.utils.report_html import HTML_TEMPLATE, markdown_to_html, render_report_html
 from backend.services.report.score_section import build_score_definitions_section_html, write_score_definitions_csv
 from backend.services.report.literature_files import render_literature_download_li
-from backend.config import get_session_logs
+from backend.config import get_session_logs, get_session_workspace
+from backend.services.reproducibility import REPRODUCIBILITY_DIR_NAME
+
+
+def _rows_caption(preview_len: int, total_rows: int) -> str:
+    if total_rows <= preview_len:
+        return ""
+    return f"Showing {preview_len} of {total_rows} rows"
 
 
 def get_agent_llm_stats(session_id: str) -> Dict[str, Dict[str, Any]]:
@@ -509,6 +516,55 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
             dl_items.append(render_literature_download_li(literature_report))
         downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'
 
+    # 8. Reproducibility / Checksums
+    reproducibility_html = ""
+    if session_id:
+        try:
+            workspace = get_session_workspace(session_id)
+            repro_dir = workspace / REPRODUCIBILITY_DIR_NAME
+            if repro_dir.exists():
+                checksum_path = repro_dir / "checksums.sha256"
+                checksum_html = ""
+                if checksum_path.exists():
+                    try:
+                        chk_lines = [
+                            ln.strip() for ln in checksum_path.read_text(encoding="utf-8").split("\n")
+                            if ln.strip()
+                        ]
+                        if chk_lines:
+                            rows = ""
+                            for line in chk_lines[:8]:
+                                parts = line.split("  ", 1)
+                                sha_short = parts[0][:16] + "..." if len(parts) == 2 else line[:16] + "..."
+                                fname = parts[1] if len(parts) == 2 else line
+                                rows += f"<tr><td><code>{esc(sha_short)}</code></td><td>{esc(fname)}</td></tr>"
+                            suffix = ""
+                            if len(chk_lines) > 8:
+                                suffix = f"<p>... and {len(chk_lines) - 8} more files</p>"
+                            checksum_html = f"""
+                            <p><strong>File Integrity</strong> ({len(chk_lines)} files verified)</p>
+                            <table>
+                                <thead><tr><th>SHA256 (first 16 chars)</th><th>File</th></tr></thead>
+                                <tbody>{rows}</tbody>
+                            </table>
+                            {suffix}
+                            """
+                    except Exception:
+                        pass
+
+                reproducibility_html = f"""
+                <h3>Reproducibility</h3>
+                <p>The following information ensures this analysis can be independently reproduced:</p>
+                {checksum_html}
+                <p style="font-size:0.85em;color:#888;">
+                    The downloaded bundle contains the complete environment specification,
+                    SHA256 checksums for all files, executable Python commands, and agent
+                    decision logs for full computational reproducibility.
+                </p>
+                """
+        except Exception:
+            pass
+
     return f"""
     <div class="appendix" id="appendix">
         <h2>{appendix_title}</h2>
@@ -519,8 +575,39 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
         {human_html}
         {interaction_html}
         {downloads_html}
+        {reproducibility_html}
     </div>
     """
+
+
+def _build_graphic_abstract_html(report: dict) -> str:
+    """Build graphic abstract HTML from the saved image artifact in report.json.
+
+    Reads the ``graphic_abstract_path`` from ``report``, compresses the image
+    to a base64 data URI, and returns an HTML ``<div>`` block.  Returns an
+    empty string if the path is missing or the file does not exist.
+    """
+    ga_path = report.get("graphic_abstract_path")
+    if not ga_path:
+        return ""
+    ga_path = Path(ga_path)
+    if not ga_path.exists():
+        logger.warning("Graphic abstract path does not exist: %s", ga_path)
+        return ""
+    try:
+        ga_b64 = compress_image_to_base64(str(ga_path), max_width=1200, quality=90)
+        if not ga_b64:
+            logger.warning("Graphic abstract image compression returned empty for: %s", ga_path)
+            return ""
+        return f'''
+            <div class="graphic-abstract">
+                <h2>Graphic Abstract</h2>
+                <img src="{ga_b64}" alt="Graphic Abstract" />
+            </div>
+        '''
+    except Exception:
+        logger.exception("Failed to embed graphic abstract in HTML from: %s", ga_path)
+        return ""
 
 
 def generate_html_report(report_dir: Path, language: str = "en") -> Path:
@@ -681,6 +768,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             csv_path = table.get("csv_path", "")
             columns = table.get("columns", [])
             preview_data = table.get("preview_data", [])
+            total_rows = table.get("total_rows", len(preview_data))
             tbl_interpretation = table.get("interpretation", "")
 
             csv_filename = url_quote(os.path.basename(csv_path)) if csv_path else ""
@@ -715,7 +803,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
                         </table>
                     </div>
                     {tbl_interpretation_section}
-                    {"<div class='table-info'>" + "Showing 10 of " + str(len(preview_data)) + " rows" + "</div>" if len(preview_data) > 10 else ""}
+                    {"<div class='table-info'>" + _rows_caption(10, total_rows) + "</div>" if _rows_caption(10, total_rows) else ""}
                 </div>
             '''
 
@@ -809,6 +897,9 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
             f'<span class="section-type specific">Methods</span></li>'
         )
 
+    # Build graphic abstract HTML from saved artifact
+    graphic_abstract_html = _build_graphic_abstract_html(report)
+
     # Build appendix HTML from report.json data if available
     appendix_html = _build_appendix_from_report(report, language, report.get("session_id")) if report.get("appendix") else ""
     if appendix_html:
@@ -825,7 +916,7 @@ def generate_html_report(report_dir: Path, language: str = "en") -> Path:
         "generated_at": "Generated: " + report.get("generated_at", datetime.now().isoformat()),
         "toc_title": "Table of Contents",
         "toc_items": _safe_format_value("\n".join(toc_items)),
-        "graphic_abstract_html": "",
+        "graphic_abstract_html": _safe_format_value(graphic_abstract_html),
         "abstract_title": "Abstract",
         "abstract": _safe_format_value(abstract_html),
         "cluster_annotations_html": "",

@@ -94,5 +94,8 @@ _monitor_tasks: Dict[str, asyncio.Task] = {}
 # WebSocket connections for report generation: session_id -> WebSocket
 report_websockets: Dict[str, Any] = {}
 
+# Lock for protecting concurrent access to report_websockets
+report_ws_lock: asyncio.Lock = asyncio.Lock()
+
 # Detailed report generation state: session_id -> report dict
 detailed_reports: Dict[str, Any] = {}

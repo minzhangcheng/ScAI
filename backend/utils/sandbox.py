@@ -11,6 +11,8 @@ import json
 import base64
 import asyncio
 import time
+import hmac
+import hashlib
 import logging
 from queue import Empty as QueueEmpty
 from typing import Optional, Dict, Any, List, Tuple
@@ -20,9 +22,50 @@ import nbformat
 from nbformat.v4 import new_notebook, new_code_cell, new_output
 from jupyter_client import KernelManager
 
+from backend.utils.crypto import get_integrity_secret
+from backend.config._config import DATA_BASE_DIR
+
 # Cap on a single iopub poll so the wall-clock deadline is re-checked at least
 # this often even while the kernel keeps streaming output (tqdm/scanpy verbose).
 IOPUB_POLL_CAP = 30.0
+
+
+# ---------------------------------------------------------------------------
+# Session pkl HMAC integrity helpers (host-side only)
+# ---------------------------------------------------------------------------
+
+def _sig_path(pkl: Path, integrity_dir: Path) -> Path:
+    return integrity_dir / (pkl.name + ".sig")
+
+
+def _pkl_hmac(data: bytes) -> str:
+    return hmac.new(
+        get_integrity_secret().encode(), data, hashlib.sha256
+    ).hexdigest()
+
+
+def _write_pkl_signature(pkl: Path, integrity_dir: Path) -> None:
+    integrity_dir.mkdir(parents=True, exist_ok=True)
+    _sig_path(pkl, integrity_dir).write_text(_pkl_hmac(pkl.read_bytes()))
+
+
+def _verify_pkl_integrity(pkl: Path, integrity_dir: Path) -> bool:
+    sig = _sig_path(pkl, integrity_dir)
+    if not pkl.exists() or not sig.exists():
+        return False
+    return hmac.compare_digest(
+        sig.read_text().strip(), _pkl_hmac(pkl.read_bytes())
+    )
+
+
+def _integrity_dir(sid: str) -> Path:
+    return DATA_BASE_DIR / "integrity" / sid
+
+
+def _path_is_within(path: str, root: str) -> bool:
+    resolved = str(Path(path).resolve())
+    root_resolved = str(Path(root).resolve()).rstrip(os.sep)
+    return resolved == root_resolved or resolved.startswith(root_resolved + os.sep)
 
 
 def compute_remaining_timeout(deadline: float, now: float) -> float:
@@ -49,6 +92,8 @@ def _is_kernel_protocol_error(exc: Exception) -> bool:
 # Dangerous code patterns that should not be executed in the sandbox.
 # Enforced at the sandbox level so ALL callers (BioinformaticsAgent,
 # report_generator, chat sandbox, etc.) are protected.
+# NOTE: regex is defense-in-depth only; runtime _sandboxed_open + write
+# allowlist are the real boundary.
 DANGEROUS_PATTERNS = [
     # System command execution
     (r'\bos\.system\b', 'os.system calls'),
@@ -65,6 +110,7 @@ DANGEROUS_PATTERNS = [
     (r'\b__import__\b', '__import__ function'),
     (r'\bcompile\s*\(', 'compile() function'),
     (r'\bimportlib\b', 'importlib module'),
+    (r'''['"](eval|exec|__import__)['"]''', 'string-referenced dangerous builtin'),
 
     # Dangerous attribute access
     (r'\b__builtins__\b', '__builtins__ access'),
@@ -664,6 +710,9 @@ class LocalJupyterSandbox:
         timeout: int = 1200
     ):
         self.session_id = session_id
+        import tempfile as _tmpfile_mod
+        self._session_tmp = Path(_tmpfile_mod.gettempdir()) / f"scai-{self.session_id}"
+        self._session_tmp.mkdir(parents=True, exist_ok=True)
         self.state_dir = state_dir
         # Caller passes session-specific working dir (e.g. sessions/{id}/workspace)
         self.working_dir = Path(working_dir).absolute()
@@ -678,6 +727,7 @@ class LocalJupyterSandbox:
         self._session_restore_failed = False  # Track if session restore failed
         self._kernel_dead = False  # Set when kernel restart fails
         self._restarting = False  # reentrancy guard for _restart_kernel
+        self._pending_save_tasks: set = set()
         self._init_exec_lock()
 
     def _init_exec_lock(self):
@@ -685,6 +735,12 @@ class LocalJupyterSandbox:
         sockets (execute + save_session). Two coroutines reading the same ZMQ
         socket concurrently triggers libzmq abort (see src/msg.cpp warning)."""
         self._exec_lock = asyncio.Lock()
+
+    def _allowed_write_roots(self) -> List[str]:
+        """Return the list of write-root paths rendered into the kernel init code,
+        so host-side tests can assert that a path is NOT writable by the sandbox."""
+        session_root_abs = str(self.working_dir.absolute().parent)
+        return [session_root_abs, str(self._session_tmp)]
 
     async def start(self) -> dict:
         """Start the Jupyter kernel
@@ -1015,6 +1071,11 @@ print("Helper functions available: get_seed(), check_and_fix_nan(adata)")
 import os
 from pathlib import Path
 
+# Redirect tempfile to per-session subdir
+os.environ['TMPDIR'] = {repr(str(self._session_tmp))}
+os.environ['TEMP'] = {repr(str(self._session_tmp))}
+os.environ['TMP'] = {repr(str(self._session_tmp))}
+
 _WORKSPACE_DIR = Path({repr(working_dir_abs)})
 os.chdir(_WORKSPACE_DIR)
 
@@ -1039,7 +1100,7 @@ _ORIGINAL_MKDIR = _pathlib.Path.mkdir
 # Directories where write operations are allowed
 _ALLOWED_WRITE_ROOTS = [
     {repr(session_root_abs)},   # Session root (workspace/, states/, uploads/, reports/)
-    '/tmp',                     # Temporary files
+    {repr(str(self._session_tmp))},   # Per-session temporary files
 ]
 
 # System paths (pip installs, font cache, etc.) — always allowed
@@ -1059,11 +1120,13 @@ def _is_write_allowed(filepath):
         return False  # Can't resolve -> deny by default for safety
     # Check allowed roots
     for root in _ALLOWED_WRITE_ROOTS:
-        if resolved.startswith(root):
+        r = root.rstrip('/')
+        if resolved == r or resolved.startswith(r + '/'):
             return True
     # Check system paths
     for prefix in _SYSTEM_WRITE_PREFIXES:
-        if resolved.startswith(prefix):
+        p = prefix.rstrip('/')
+        if resolved == p or resolved.startswith(p + '/'):
             return True
     return False
 
@@ -1201,6 +1264,22 @@ print(f"I/O sandbox active: writes restricted to session directory")
 
         if not self.notebook_state.has_session_dump():
             logger.info("No session dump to restore")
+            return
+
+        # Verify pkl integrity before restoring (host-side check prevents
+        # sandbox-forged payloads — the signature lives outside the session root).
+        try:
+            pkl_path = Path(self.notebook_state.session_path)
+            if pkl_path.exists() and not _verify_pkl_integrity(
+                pkl_path, _integrity_dir(self.session_id)
+            ):
+                logger.error(
+                    "PKL integrity check failed for %s - skipping restore",
+                    self.session_id,
+                )
+                return
+        except Exception:
+            logger.exception("PKL integrity check error - skipping restore")
             return
 
         session_path = str(self.notebook_state.session_path.absolute())
@@ -1363,6 +1442,16 @@ if _skipped_vars:
                 else:
                     self._last_save_skipped = []
                 logger.info("Session saved successfully")
+
+                # Write HMAC signature (host-side, outside sandbox-writable roots)
+                try:
+                    pkl_path = Path(self.notebook_state.session_path)
+                    if pkl_path.exists():
+                        _write_pkl_signature(
+                            pkl_path, _integrity_dir(self.session_id)
+                        )
+                except Exception:
+                    logger.exception("Failed to write pkl integrity signature")
             else:
                 logger.warning(f"Failed to save session: {result.error}")
 
@@ -1702,7 +1791,9 @@ if _skipped_vars:
             # We're in an async context - cannot safely run async code
             # Log warning and skip session save (notebook is already saved)
             # 在已有事件循环中调度异步保存
-            loop.create_task(self.save_session())
+            task = loop.create_task(self.save_session())
+            self._pending_save_tasks.add(task)
+            task.add_done_callback(self._pending_save_tasks.discard)
         except RuntimeError:
             # No running loop - safe to create a new one
             try:
@@ -1719,6 +1810,7 @@ if _skipped_vars:
         """Stop the kernel and save state. Always shuts down kernel even if save fails."""
         # Try to save session before stopping, but don't let failure prevent kernel cleanup
         try:
+            await self.await_pending_saves()
             await self.save_session()
             self.notebook_state.save()
         except Exception as e:
@@ -1741,6 +1833,12 @@ if _skipped_vars:
 
             logger.info(f"Kernel stopped for session {self.session_id}")
     
+    async def await_pending_saves(self):
+        """Wait for all pending save tasks to complete."""
+        while self._pending_save_tasks:
+            tasks = list(self._pending_save_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def restart(self):
         """Restart kernel and restore state"""
         await self.stop()

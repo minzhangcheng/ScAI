@@ -2,6 +2,14 @@
 set -e
 trap 'echo "Error on line $LINENO"; exit 1' ERR
 
+# ── Privilege drop: if running as root, fix volume ownership and re-exec as scai ──
+if [ "$(id -u)" = "0" ]; then
+    mkdir -p /dep /data
+    chown -R scai:scai /dep /data
+    exec gosu scai "$0" "$@"
+fi
+# ---- from here on, we are always running as `scai` ----
+
 # Default to production mode
 MODE="${SCAI_MODE:-prod}"
 

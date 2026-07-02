@@ -5,9 +5,12 @@
 CLI: python scripts/fetch_markers.py
 """
 from __future__ import annotations
+import hashlib
 import os
 import logging
+from io import BytesIO
 from pathlib import Path
+import httpx
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -19,7 +22,15 @@ _SPECIES_MAP = {"Mm": "mouse", "mouse": "mouse", "Mus musculus": "mouse",
 
 # 上游来源（如失效需在此更新）
 PANGLAODB_URL = "https://panglaodb.se/markers/PanglaoDB_markers_27_Mar_2020.tsv.gz"
-CELLMARKER2_URL = "http://117.50.127.228/CellMarker/CellMarker_download_files/file/Cell_marker_All.xlsx"
+CELLMARKER2_URL = "https://117.50.127.228/CellMarker/CellMarker_download_files/file/Cell_marker_All.xlsx"
+# Integrity pin for Cell_marker_All.xlsx.
+#   - Set to a real SHA-256 to fetch over the raw-IP endpoint (verify=False) with
+#     content verified by the checksum (available AND integrity-checked).
+#   - Leave None to fail-secure: the download requires a valid TLS chain
+#     (verify=True); a raw IP without a valid cert will fail and CellMarker2 is
+#     skipped rather than trusted unverified. Compute a digest once via:
+#       curl -sk <CELLMARKER2_URL> | sha256sum
+CELLMARKER2_SHA256 = None
 
 
 def project_to_schema(raw: pd.DataFrame, source: str, gene_col: str,
@@ -54,8 +65,29 @@ def _download_panglaodb() -> pd.DataFrame:
                              celltype_col="cell type", species_col="species")
 
 
+def _http_get_bytes(url: str, verify: bool = True) -> bytes:
+    with httpx.Client(verify=verify, timeout=120, follow_redirects=True) as c:
+        r = c.get(url)
+        r.raise_for_status()
+        return r.content
+
+
 def _download_cellmarker2() -> pd.DataFrame:
-    raw = pd.read_excel(CELLMARKER2_URL)
+    # Security posture: never accept unverified data over the unauthenticated
+    # raw-IP endpoint. Two safe modes:
+    #   1. A SHA-256 is pinned  -> integrity is guaranteed by the checksum, so
+    #      the untrusted transport (verify=False) is acceptable.
+    #   2. No SHA-256 pinned    -> require a valid TLS chain (verify=True); if the
+    #      endpoint has no valid certificate the fetch fails and CellMarker2 is
+    #      skipped (fail-secure). Pin CELLMARKER2_SHA256 to enable it over raw IP.
+    if CELLMARKER2_SHA256:
+        content = _http_get_bytes(CELLMARKER2_URL, verify=False)
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != CELLMARKER2_SHA256:
+            raise ValueError(f"CellMarker2 checksum mismatch: {digest}")
+    else:
+        content = _http_get_bytes(CELLMARKER2_URL, verify=True)
+    raw = pd.read_excel(BytesIO(content))
     return project_to_schema(raw, "CellMarker2", gene_col="Symbol",
                              celltype_col="cell_name", species_col="species",
                              tissue_col="tissue_type")
@@ -74,8 +106,10 @@ def _acquire_lock(lock: Path):
             age = time.time() - lock.stat().st_mtime
             if age > _STALE_LOCK_SECONDS:
                 logger.warning(f"stale marker fetch lock ({age:.0f}s); reclaiming")
-                os.unlink(lock)
-                return os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                lock_tmp = lock.with_suffix(lock.suffix + ".tmp")
+                fd = os.open(lock_tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.replace(lock_tmp, lock)
+                return fd
         except OSError:
             pass
         return None

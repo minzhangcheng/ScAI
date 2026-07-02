@@ -138,6 +138,12 @@
     ]
   ],
   [
+    "/api/config/validate-saved",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/download",
     [
       "GET"

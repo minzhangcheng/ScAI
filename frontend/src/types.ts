@@ -265,7 +265,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   timestamp: string
-  id?: string
+  id: string
   delegation_active?: boolean
   files?: { filename: string; type: string; target_agent?: string }[]
   figures?: { name: string; path?: string; base64?: string; pdfPath?: string }[]

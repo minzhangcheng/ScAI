@@ -177,7 +177,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self._llm_failure_lock = asyncio.Lock()
         self._llm_failure_events: Dict[str, asyncio.Event] = {}
         self._llm_failure_actions: Dict[str, Optional[str]] = {}
-        self._llm_failure_generation: int = 0  # monotonic counter for idempotency
+        self._llm_failure_generations: Dict[str, int] = {}  # monotonic counter per node for idempotency
 
         # Supplementary analysis requests queue (set by API, consumed by HITL loop).
         # Each item is (request_text, target) where target is "annotation" | "direction" | "round".
@@ -189,6 +189,15 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
         # Technique agent (optional, created in initialize())
         self.technique_agent: Optional[TechniqueAgent] = None
+
+    def _next_generation(self, node: str) -> int:
+        """Increment and return the generation counter for a given node."""
+        self._llm_failure_generations[node] = self._llm_failure_generations.get(node, 0) + 1
+        return self._llm_failure_generations[node]
+
+    def _generation_for(self, node: str) -> int:
+        """Return the current generation for a given node, or 0 if never set."""
+        return self._llm_failure_generations.get(node, 0)
 
     async def _drive_hitl_gate(
         self,
@@ -208,8 +217,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         across LLM-failure, disabled-agent, and marker-db gates.
         """
         async with self._llm_failure_lock:
-            self._llm_failure_generation += 1
-            gen = self._llm_failure_generation
+            gen = self._next_generation(node_name)
             if node_name not in self._llm_failure_events:
                 self._llm_failure_events[node_name] = asyncio.Event()
             event = self._llm_failure_events[node_name]
@@ -436,7 +444,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             True if the signal was delivered, False if the generation
             doesn't match (stale/duplicate request).
         """
-        current_gen = self._llm_failure_generation
+        current_gen = self._generation_for(node_name)
         if generation != current_gen or current_gen == 0:
             logger.warning(
                 f"[{self.session_id}] Rejected LLM failure action '{action}' "
@@ -743,6 +751,8 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             await SnapshotManager.create_and_register_snapshot(
                 self.session_id, state, phase, notify_fn=notify,
             )
+        except WorkflowTerminatedError:
+            raise
         except Exception as e:
             logger.warning(f"[{self.session_id}] Auto-snapshot failed: {e}")
 
@@ -945,6 +955,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             if snapshot and snapshot.values:
                 workflow_state = snapshot.values
                 workflow_state["analysis_state"] = initial_state
+                workflow_state.pop("report_blocked", None)
                 if initial_state.current_round > len(initial_state.round_results):
                     logger.info(f"[{self.session_id}] Found incomplete round {initial_state.current_round}, running pi_synthesis before report")
                     workflow_state = await self._pi_synthesis(workflow_state)
@@ -1122,7 +1133,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         self._continue_event.clear()
         self._annotation_event.clear()
         self._plan_review_event.clear()
-        self._plan_review_action = None
         self._species_event.clear()
         self._species_user_response = None
 

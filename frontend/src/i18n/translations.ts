@@ -20,6 +20,8 @@ export const translations = {
     
     // Sidebar
     newAnalysis: '新建分析',
+    defaultProjectName: '新分析项目',
+    defaultProjectDescription: '请描述您的研究目标和实验设计...',
     exportState: '导出状态',
     importState: '导入状态',
     exportSession: '导出会话',
@@ -523,6 +525,8 @@ Please provide a detailed literature review report with specific citation inform
 
     // Sidebar
     newAnalysis: 'New Analysis',
+    defaultProjectName: 'New Analysis Project',
+    defaultProjectDescription: 'Describe your research goals and experimental design...',
     exportState: 'Export State',
     importState: 'Import State',
     exportSession: 'Export Session',

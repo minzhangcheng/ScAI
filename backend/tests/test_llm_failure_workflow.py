@@ -52,7 +52,7 @@ class TestWithRetryLlmFailure:
         mock._llm_failure_lock = asyncio.Lock()
         mock._llm_failure_events = {}
         mock._llm_failure_actions = {}
-        mock._llm_failure_generation = 0
+        mock._llm_failure_generations = {}
         mock._send_message = AsyncMock()
         mock._send_state_sync = AsyncMock()
         mock._set_status = MagicMock()
@@ -62,6 +62,8 @@ class TestWithRetryLlmFailure:
         # Bind real async methods — MagicMock auto-creates a non-awaitable stub
         mock._wait_for_llm_intervention = SingleCellAnalysisWorkflow._wait_for_llm_intervention.__get__(mock, type(mock))
         mock._drive_hitl_gate = SingleCellAnalysisWorkflow._drive_hitl_gate.__get__(mock, type(mock))
+        mock._next_generation = SingleCellAnalysisWorkflow._next_generation.__get__(mock, type(mock))
+        mock._generation_for = SingleCellAnalysisWorkflow._generation_for.__get__(mock, type(mock))
         return mock
 
     @pytest.fixture
@@ -148,7 +150,7 @@ class TestWithRetryLlmFailure:
         await task
 
         # Generation should have been incremented at least once
-        assert mock_self._llm_failure_generation >= 1
+        assert mock_self._generation_for("pi_planning") >= 1
 
     @pytest.mark.asyncio
     async def test_non_llm_error_unchanged(self, mock_self, base_state):
@@ -242,29 +244,30 @@ class TestSignalLlmFailureAction:
         from backend.workflow import SingleCellAnalysisWorkflow
         mock = MagicMock(spec=SingleCellAnalysisWorkflow)
         mock.session_id = "test-session"
-        mock._llm_failure_generation = 0
+        mock._llm_failure_generations = {}
         mock._llm_failure_events = {}
         mock._llm_failure_actions = {}
 
         # Bind the actual method
         mock.signal_llm_failure_action = SingleCellAnalysisWorkflow.signal_llm_failure_action.__get__(mock, type(mock))
+        mock._generation_for = SingleCellAnalysisWorkflow._generation_for.__get__(mock, type(mock))
         return mock
 
     def test_rejects_wrong_generation(self, workflow):
         """signal returns False when generation doesn't match."""
-        workflow._llm_failure_generation = 5
+        workflow._llm_failure_generations = {"pathology_analysis": 5}
         result = workflow.signal_llm_failure_action("pathology_analysis", "skip", 3)
         assert result is False
 
     def test_rejects_zero_generation(self, workflow):
         """signal returns False when current generation is 0 (no failure in progress)."""
-        workflow._llm_failure_generation = 0
+        workflow._llm_failure_generations = {}
         result = workflow.signal_llm_failure_action("pathology_analysis", "skip", 0)
         assert result is False
 
     def test_accepts_matching_generation(self, workflow):
         """signal returns True and sets event when generation matches."""
-        workflow._llm_failure_generation = 5
+        workflow._llm_failure_generations = {"pathology_analysis": 5}
         event = asyncio.Event()
         workflow._llm_failure_events["pathology_analysis"] = event
 
@@ -276,7 +279,7 @@ class TestSignalLlmFailureAction:
 
     def test_rejects_missing_event(self, workflow):
         """signal returns False when no event exists for the node."""
-        workflow._llm_failure_generation = 5
+        workflow._llm_failure_generations = {"pathology_analysis": 5}
         # No event registered for this node
 
         result = workflow.signal_llm_failure_action("pathology_analysis", "skip", 5)
@@ -338,7 +341,7 @@ class TestBioinformaticsNodeUpstreamPropagation:
         mock._llm_failure_lock = asyncio.Lock()
         mock._llm_failure_events = {}
         mock._llm_failure_actions = {}
-        mock._llm_failure_generation = 0
+        mock._llm_failure_generations = {}
         mock._send_message = AsyncMock()
         mock._send_state_sync = AsyncMock()
         mock._set_status = MagicMock()
@@ -378,6 +381,8 @@ class TestBioinformaticsNodeUpstreamPropagation:
         mock._wait_for_llm_intervention = SingleCellAnalysisWorkflow._wait_for_llm_intervention.__get__(mock, type(mock))
         mock._drive_hitl_gate = SingleCellAnalysisWorkflow._drive_hitl_gate.__get__(mock, type(mock))
         mock._require_core_agent = SingleCellAnalysisWorkflow._require_core_agent.__get__(mock, type(mock))
+        mock._next_generation = SingleCellAnalysisWorkflow._next_generation.__get__(mock, type(mock))
+        mock._generation_for = SingleCellAnalysisWorkflow._generation_for.__get__(mock, type(mock))
 
         # Bind the real method
         mock._bioinformatics_analysis = SingleCellAnalysisWorkflow._bioinformatics_analysis.__get__(mock, type(mock))
@@ -425,7 +430,7 @@ class TestBioinformaticsNodeUpstreamPropagation:
         # If the error was swallowed (old behavior), @with_retry would NOT
         # have been triggered and these assertions would fail:
         # 1. generation incremented => @with_retry handled the error
-        assert mock_workflow._llm_failure_generation >= 1
+        assert mock_workflow._generation_for("bioinformatics_analysis") >= 1
         # 2. _send_state_sync called with LLM_FAILURE => popup triggered
         # Note: decorator sends LLM_FAILURE first (line 164), then LLM_RETRY
         # after the user action is processed (line 180). call_args references

@@ -69,6 +69,18 @@ _admin_initialized_cache: dict = {"value": None, "expires": 0}
 _ADMIN_INITIALIZED_CACHE_TTL = 60  # seconds
 
 
+def _set_admin_cache(value: bool) -> None:
+    """Set the admin-initialized cache to a known state with a long expiry."""
+    _admin_initialized_cache["value"] = value
+    _admin_initialized_cache["expires"] = time.time() + 3600
+
+
+def invalidate_admin_initialized_cache() -> None:
+    """Reset the admin-initialized cache to force a fresh DB query."""
+    _admin_initialized_cache["value"] = None
+    _admin_initialized_cache["expires"] = 0
+
+
 def _is_auth_optional(path: str) -> bool:
     """Check if a path is auth-optional (auth delegated to route layer).
 

@@ -36,6 +36,15 @@ def test_build_analysis_log_from_report_missing_log():
     assert html == ""
 
 
+def test_showing_uses_total_rows():
+    from backend.services.report.regenerator import _rows_caption
+    caption = _rows_caption(preview_len=10, total_rows=5000)
+    assert "5000" in caption and "10" in caption
+
+    caption_small = _rows_caption(preview_len=10, total_rows=5)
+    assert caption_small == ""
+
+
 def test_build_analysis_log_from_report_multiple_step_types():
     report = {
         "analysis_log": [

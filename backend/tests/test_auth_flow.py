@@ -59,10 +59,10 @@ class TestAuthFlow:
         # 3. Register a user with username only (no email)
         resp = client.post("/api/auth/register", json={"username": "testuser", "password": "userpass123"})
         assert resp.status_code == 201
-        data = resp.json()
+        data = resp.json()["data"]
         assert data["username"] == "testuser"
         assert data["status"] == "pending"
-        assert data["access_token"] == ""  # Pending users don't get tokens
+        assert "access_token" not in resp.json()
 
         # 4. Duplicate username should fail
         resp = client.post("/api/auth/register", json={"username": "testuser", "password": "otherpass123"})
@@ -96,7 +96,7 @@ class TestAuthFlow:
             "email": "user2@example.com",
         })
         assert resp.status_code == 201
-        assert resp.json()["email"] == "user2@example.com"
+        assert resp.json()["data"]["email"] == "user2@example.com"
 
     def test_username_validation(self, client):
         """Username must be 3-64 chars, alphanumeric/underscore/hyphen only."""

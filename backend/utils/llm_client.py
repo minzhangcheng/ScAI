@@ -5,6 +5,7 @@ Supports OpenRouter, OpenAI, and other compatible endpoints
 import base64
 import html
 import httpx
+import inspect
 import asyncio
 import json
 import logging
@@ -1441,6 +1442,8 @@ class OpenAICompatibleClient:
         agent_name: str = "unknown",
     ):
         self.api_key = api_key
+        if not self.api_key:
+            raise ValueError("LLM api_key is not configured; set it in Config")
         self.base_url = base_url or self.DEFAULT_BASE_URL
         self.session_id = session_id
         self.agent_name = agent_name
@@ -1497,11 +1500,30 @@ class OpenAICompatibleClient:
         # Protocol adapters (lazily built). None until first use.
         self._responses_adapter: Optional[_ResponsesAdapter] = None
         self._anthropic_adapter: Optional[_AnthropicAdapter] = None
-    
+
+        # H20: Idempotent-close guard. Set True on first close(); prevents
+        # double-free of the httpx.AsyncClient and its underlying connection pool.
+        self._closed: bool = False
+
+    def __del__(self):
+        if not getattr(self, '_closed', True):
+            logger.warning(
+                f"[{self.agent_name}] OpenAICompatibleClient leaked without close() "
+                f"(session={self.session_id})"
+            )
+
     def set_context(self, session_id: str, agent_name: str):
         """Set session and agent context for logging"""
         self.session_id = session_id
         self.agent_name = agent_name
+
+    async def _emit_log_response(self, **kwargs) -> None:
+        # Call sync log_response for backward compat (tests check it).
+        self.llm_logger.log_response(**kwargs)
+        # Also call async version if available (production path).
+        result = self.llm_logger.log_response_async(**kwargs)
+        if inspect.iscoroutine(result):
+            await result
 
     def _ensure_cache_locks(self) -> None:
         # Lazy-init guard for objects constructed via __new__ or fixtures that
@@ -1512,6 +1534,9 @@ class OpenAICompatibleClient:
             self._toolchoice_cache_lock = asyncio.Lock()
         
     async def close(self):
+        if self._closed:
+            return
+        self._closed = True
         try:
             await self.client.close()
         finally:
@@ -1879,7 +1904,7 @@ class OpenAICompatibleClient:
                 make_coro, make_coro_no_temp, model_key, retry_kwargs
             )
         except Exception as e:
-            self.llm_logger.log_response(
+            await self._emit_log_response(
                 interaction=interaction, error=str(e),
                 duration_ms=(time.time() - start_time) * 1000,
             )
@@ -1892,7 +1917,7 @@ class OpenAICompatibleClient:
                  "parse_error": tc.parse_error}
                 for tc in tcs
             ]
-        self.llm_logger.log_response(
+        await self._emit_log_response(
             interaction=interaction,
             response_content=getattr(result, "content", None),
             tool_calls=tool_calls_log,
@@ -2156,7 +2181,7 @@ class OpenAICompatibleClient:
                     f"[{self.agent_name}] Empty content from a length-truncated response "
                     f"(max_tokens={max_tokens}); retrying once with max_tokens={bumped}"
                 )
-                self.llm_logger.log_response(
+                await self._emit_log_response(
                     interaction=interaction,
                     response_content=content,
                     usage=self._extract_usage(response),
@@ -2177,7 +2202,7 @@ class OpenAICompatibleClient:
             )
 
             # Log response
-            self.llm_logger.log_response(
+            await self._emit_log_response(
                 interaction=interaction,
                 response_content=result.content,
                 usage=result.usage,
@@ -2191,7 +2216,7 @@ class OpenAICompatibleClient:
             logger.exception(f"[{self.agent_name}] Chat error")
 
             # Log error
-            self.llm_logger.log_response(
+            await self._emit_log_response(
                 interaction=interaction,
                 error=error_msg,
                 duration_ms=(time.time() - start_time) * 1000
@@ -2416,7 +2441,7 @@ class OpenAICompatibleClient:
                 raw_assistant_message=raw_assistant_message
             )
 
-            self.llm_logger.log_response(
+            await self._emit_log_response(
                 interaction=interaction,
                 response_content=content,
                 tool_calls=tool_calls_log if tool_calls_log else None,
@@ -2431,7 +2456,7 @@ class OpenAICompatibleClient:
                 f"[{self.agent_name}] Chat with tools BadRequestError"
                 f" (may be handled upstream): {e}"
             )
-            self.llm_logger.log_response(
+            await self._emit_log_response(
                 interaction=interaction,
                 error=str(e),
                 duration_ms=(time.time() - start_time) * 1000
@@ -2439,7 +2464,7 @@ class OpenAICompatibleClient:
             raise
         except Exception as e:
             logger.exception(f"[{self.agent_name}] Chat with tools error")
-            self.llm_logger.log_response(
+            await self._emit_log_response(
                 interaction=interaction,
                 error=str(e),
                 duration_ms=(time.time() - start_time) * 1000
@@ -2664,7 +2689,7 @@ class OpenAICompatibleClient:
                 raw_response=response
             )
 
-            self.llm_logger.log_response(
+            await self._emit_log_response(
                 interaction=interaction,
                 response_content=result.content,
                 usage=result.usage,
@@ -2676,7 +2701,7 @@ class OpenAICompatibleClient:
         except Exception as e:
             logger.exception(f"[{self.agent_name}] Vision error")
 
-            self.llm_logger.log_response(
+            await self._emit_log_response(
                 interaction=interaction,
                 error=str(e),
                 duration_ms=(time.time() - start_time) * 1000
@@ -2756,8 +2781,18 @@ class GoogleDeepResearchClient:
             )
         else:
             self.client = httpx.AsyncClient(timeout=300.0)  # Long timeout for research
+        self._closed: bool = False
+
+    def __del__(self):
+        if not getattr(self, '_closed', True):
+            logger.warning(
+                f"[DeepResearch] GoogleDeepResearchClient leaked without close()"
+            )
 
     async def close(self):
+        if self._closed:
+            return
+        self._closed = True
         await self.client.aclose()
 
     def _check_response(self, response: httpx.Response, context: str) -> None:

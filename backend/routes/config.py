@@ -72,3 +72,22 @@ async def validate_api_key(request: ValidateKeyRequest, _: str = Depends(require
     if result.get("uncertain"):
         return {"valid": False, "message": result["message"], "uncertain": True}
     return {"valid": False, "message": result["message"]}
+
+
+@router.post("/config/validate-saved")
+async def validate_saved_config(_: str = Depends(require_admin)):
+    """Validate the LLM key already saved in the global config.
+
+    Used when an admin has no local api_key in the browser (e.g. after the key
+    stopped being persisted to localStorage). Validates the server-side saved
+    key instead of one sent in the request body.
+    """
+    cfg = system_config["current"]
+    if cfg is None or not cfg.api.api_key:
+        return {"valid": False, "message": "No global API key configured"}
+    result = await validate_llm_credentials(cfg.api.api_key, cfg.api.llm_base_url, cfg.api.proxy_url)
+    if result["valid"]:
+        return {"valid": True, "message": "Saved API key is valid"}
+    if result.get("uncertain"):
+        return {"valid": False, "message": result["message"], "uncertain": True}
+    return {"valid": False, "message": result["message"]}

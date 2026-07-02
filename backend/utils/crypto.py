@@ -110,6 +110,21 @@ _fernet: Optional[Fernet] = _build_fernet(_SECRET) if _SECRET else None
 # Public API
 # ---------------------------------------------------------------------------
 
+def get_integrity_secret() -> str:
+    """Return the shared secret for HMAC-integrity checks (e.g. session pkl).
+
+    Uses the same secret store as :func:`encrypt_value`. Raises
+    :exc:`ConfigEncryptionUnavailable` if no secret is available.
+
+    The returned value is the raw secret string — callers should feed it into
+    ``hmac.new(..., digestmod=hashlib.sha256)``.
+    """
+    s = _get_or_create_secret()
+    if not s:
+        raise ConfigEncryptionUnavailable("No integrity secret available")
+    return s
+
+
 def encrypt_value(plaintext: str) -> str:
     """Encrypt *plaintext* and return a URL-safe base64 ciphertext string.
 

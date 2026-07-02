@@ -12,6 +12,21 @@ from backend.models.config_schema import ConfigV1, AgentOverride, FileEntry, Gro
 from backend.models.schemas import AnalysisState, TaskStatus, TreatmentGroup, DataFile, BiochemistryIndicator
 
 
+def build_agent_server_configs(config: ConfigV1) -> Dict[str, Dict[str, Any]]:
+    """Build per-agent LLM server config dict (base_url, api_key, model, temperature)."""
+    default_llm = config.api_config.default_llm
+    result: Dict[str, Dict[str, Any]] = {}
+    for name in AGENT_NAMES:
+        ov = (config.agents or {}).get(name) or AgentOverride()
+        result[name] = {
+            "base_url": ov.llm_base_url or default_llm.llm_base_url,
+            "api_key": ov.api_key or default_llm.api_key,
+            "model": ov.model or default_llm.model,
+            "temperature": float(ov.temperature if ov.temperature is not None else 0.7),
+        }
+    return result
+
+
 def apply_config_to_session(config: ConfigV1, user_id: str = "") -> AnalysisState:
     """Create a new pending AnalysisState from a ConfigV1 configuration.
 
@@ -75,30 +90,20 @@ def apply_config_to_session(config: ConfigV1, user_id: str = "") -> AnalysisStat
     }
 
     # Apply fallback server_config for ALL agents
-    default_llm = config.api_config.default_llm
-    agent_server_configs: Dict[str, Dict[str, str]] = {}
+    agent_server_configs = build_agent_server_configs(config)
     custom_models: Dict[str, str] = {}
     custom_prompts: Dict[str, str] = {}
     custom_temperatures: Dict[str, float] = {}
-    # agent_vision_settings
     agent_vision_settings: Dict[str, bool] = {}
 
     for name in AGENT_NAMES:
         ov = (config.agents or {}).get(name) or AgentOverride()
-        agent_server_configs[name] = {
-            "base_url": ov.llm_base_url or default_llm.llm_base_url,
-            "api_key": ov.api_key or default_llm.api_key,
-            "model": ov.model or default_llm.model,
-            "temperature": str(ov.temperature if ov.temperature is not None else 0.7),
-        }
         if ov.model:
             custom_models[name] = ov.model
-        # custom_prompt
         if ov.custom_prompt:
             custom_prompts[name] = ov.custom_prompt
         if ov.temperature is not None:
             custom_temperatures[name] = ov.temperature
-        # vision
         if ov.vision is not None:
             agent_vision_settings[name] = ov.vision
 

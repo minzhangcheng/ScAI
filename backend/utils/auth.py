@@ -33,10 +33,14 @@ _BCRYPT_MAX_PW_BYTES = 72
 
 
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode()[:_BCRYPT_MAX_PW_BYTES], bcrypt.gensalt()).decode()
+    if len(password.encode("utf-8")) > _BCRYPT_MAX_PW_BYTES:
+        raise ValueError(f"Password exceeds {_BCRYPT_MAX_PW_BYTES} bytes")
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
+    # Truncate on verify only, to remain compatible with hashes created
+    # before byte-length validation existed.
     return bcrypt.checkpw(plain.encode()[:_BCRYPT_MAX_PW_BYTES], hashed.encode())
 
 

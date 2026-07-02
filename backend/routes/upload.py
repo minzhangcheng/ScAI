@@ -1,5 +1,6 @@
 """Upload routes for session files (data, generic files, and chunked uploads)."""
 import logging
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -17,6 +18,30 @@ from backend.utils.upload import stream_save_file
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["upload"])
+
+
+async def _stream_generic_upload(
+    upload_file, dest: Path, max_bytes: int = 100 * 1024 * 1024, chunk_size: int = 1024 * 1024
+) -> Path:
+    """Stream an UploadFile to disk with a size cap (default 100MB).
+    Raises HTTPException(413) if content exceeds max_bytes."""
+    total = 0
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "wb") as f:
+        while True:
+            chunk = await upload_file.read(chunk_size)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                dest.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File size exceeds maximum allowed ({max_bytes // (1024 * 1024)}MB)"
+                )
+            f.write(chunk)
+    return dest
 
 
 class InitChunkedUploadRequest(BaseModel):
@@ -86,9 +111,7 @@ async def upload_data(
         if section == "sequencing":
             await stream_save_file(file, file_path)
         else:
-            content = await file.read()
-            with open(file_path, "wb") as f:
-                f.write(content)
+            await _stream_generic_upload(file, file_path)
     except OSError as e:
         logger.warning(f"Failed to save uploaded file {file_path}: {e}")
         # Clean up partial file on failure

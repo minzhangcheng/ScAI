@@ -19,7 +19,7 @@ async def test_disabled_pi_raises_dialog_and_resumes_on_retry():
     wf._llm_failure_lock = asyncio.Lock()
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
-    wf._llm_failure_generation = 0
+    wf._llm_failure_generations = {}
     wf._send_message = AsyncMock()
     wf._send_state_sync = AsyncMock()
     wf._set_status = lambda s, st: setattr(s, 'status', st)
@@ -77,7 +77,7 @@ async def test_disabled_pi_skip_adds_to_skip_nodes():
     wf._llm_failure_lock = asyncio.Lock()
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
-    wf._llm_failure_generation = 0
+    wf._llm_failure_generations = {}
     wf._send_message = AsyncMock()
     wf._send_state_sync = AsyncMock()
     wf._set_status = lambda s, st: setattr(s, 'status', st)
@@ -124,7 +124,7 @@ async def test_disabled_pi_terminate_raises_error():
     wf._llm_failure_lock = asyncio.Lock()
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
-    wf._llm_failure_generation = 0
+    wf._llm_failure_generations = {}
     wf._send_message = AsyncMock()
     wf._send_state_sync = AsyncMock()
     wf._set_status = lambda s, st: setattr(s, 'status', st)
@@ -170,7 +170,7 @@ async def test_planning_dialogue_blocks_when_bioinformatics_disabled():
     wf._llm_failure_lock = asyncio.Lock()
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
-    wf._llm_failure_generation = 0
+    wf._llm_failure_generations = {}
     wf._send_message = AsyncMock()
     wf._send_state_sync = AsyncMock()
     wf._set_status = lambda s, st: setattr(s, 'status', st)

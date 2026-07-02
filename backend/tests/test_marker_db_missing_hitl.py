@@ -22,7 +22,7 @@ def _bare_workflow():
     wf._llm_failure_lock = asyncio.Lock()
     wf._llm_failure_events = {}
     wf._llm_failure_actions = {}
-    wf._llm_failure_generation = 0
+    wf._llm_failure_generations = {}
     wf._settings_provider = None
     async def _noop(*a, **k): pass
     wf._send_message = _noop
@@ -45,7 +45,7 @@ async def test_wait_for_marker_db_released_via_signal():
 
     async def _drive():
         await asyncio.sleep(0.01)
-        gen = wf._llm_failure_generation
+        gen = wf._generation_for("bioinformatics_analysis")
         ok = wf.signal_llm_failure_action("bioinformatics_analysis", "skip", gen)
         assert ok is True
 

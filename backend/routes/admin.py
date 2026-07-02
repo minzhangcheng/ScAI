@@ -37,7 +37,7 @@ class SetRoleRequest(BaseModel):
 
 
 class SetPasswordRequest(BaseModel):
-    new_password: str  # min 8 chars expected by caller
+    new_password: PasswordStr
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
@@ -117,17 +117,18 @@ async def set_user_role(
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
     if req.role != "admin" and target.role == "admin":
-        if await db.count_admins() <= 1:
+        if not await db.demote_admin_if_not_last(uid, req.role):
             raise HTTPException(
                 status_code=409,
                 detail="Cannot demote the last remaining admin",
             )
-    new_status = None
-    if req.role == "admin" and target.status == "pending":
-        new_status = "active"
-    success = await db.set_user_role(uid, req.role, status=new_status)
-    if not success:
-        raise HTTPException(status_code=404, detail="User not found")
+    else:
+        new_status = None
+        if req.role == "admin" and target.status == "pending":
+            new_status = "active"
+        success = await db.set_user_role(uid, req.role, status=new_status)
+        if not success:
+            raise HTTPException(status_code=404, detail="User not found")
     return {"message": f"User role updated to {req.role}"}
 
 

@@ -94,7 +94,7 @@ interface RoundSummaryContent {
 export function AnalysisPanel() {
   const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors, readMode, addMessage, authUser } = useAppStore()
   const { startAnalysis, resumeAnalysis, continueRound, pauseAnalysis, stopAnalysis } = useSession()
-  const { checkStatus, validateApiKey, saveConfig } = useConfig()
+  const { checkStatus, validateApiKey, validateSavedConfig, saveConfig } = useConfig()
   const userConfig = useUserConfig()
   const { t } = useTranslation(language)
 
@@ -431,17 +431,24 @@ export function AnalysisPanel() {
 
       if (isAdmin) {
         // Admin: ensure frontend config is synced to backend first
-        const { apiConfig } = useAppStore.getState()
-        if (!apiConfig.apiKey) {
+        const { apiConfig, apiConfigured } = useAppStore.getState()
+        if (!apiConfig.apiKey && !apiConfigured) {
           setValidating(false)
           if (showConfigPanel) showConfigPanel()
           return
         }
-        let status = await checkStatus()
-        if (!status.configured) {
-          await saveConfig()
+        if (apiConfig.apiKey) {
+          // Local key present: sync to backend, then validate it.
+          const status = await checkStatus()
+          if (!status.configured) {
+            await saveConfig()
+          }
+          validation = await validateApiKey()
+        } else {
+          // No local key but server is configured: validate the saved global
+          // key instead of sending an empty key.
+          validation = await validateSavedConfig()
         }
-        validation = await validateApiKey()
       } else {
         // Non-admin: validate credentials saved on the server
         validation = await userConfig.validateSavedConfig()
@@ -800,7 +807,7 @@ export function AnalysisPanel() {
     for (let i = messages.length - 1; i >= 0; i--) { if (messages[i].type === 'annotation_confirmation') { annMsg = messages[i]; break } }
     if (annMsg && annMsg.id !== lastAnnotationMsgRef.current) {
       lastAnnotationMsgRef.current = annMsg.id
-      setAnnotationData(annMsg.content)
+      setAnnotationData(annMsg.content as AnnotationData)
       setIsSupplementaryRunning(false)
       if (!showAnnotationDialog) {
         setShowAnnotationDialog(true)
@@ -815,7 +822,7 @@ export function AnalysisPanel() {
     for (let i = messages.length - 1; i >= 0; i--) { if (messages[i].type === 'plan_review') { planMsg = messages[i]; break } }
     if (planMsg && planMsg.id !== lastPlanReviewMsgRef.current) {
       lastPlanReviewMsgRef.current = planMsg.id
-      setPlanReviewData(planMsg.content)
+      setPlanReviewData(planMsg.content as PlanReviewData)
       if (!showPlanReviewDialog) {
         setShowPlanReviewDialog(true)
       }
@@ -855,7 +862,7 @@ export function AnalysisPanel() {
         return
       }
       lastExplorationMsgRef.current = expMsg.id
-      setExplorationReportData(expMsg.content)
+      setExplorationReportData(expMsg.content as ExplorationReportData)
       setIsSupplementaryRunning(false)
       if (!showExplorationDialog) {
         setShowExplorationDialog(true)

@@ -38,6 +38,7 @@ def has_substantive_findings(result: RoundResult) -> bool:
 
 
 def normalize_legacy_round_result(result: RoundResult) -> RoundResult:
+    result = result.model_copy(deep=True)
     if not result.lineage_id:
         result.lineage_id = "main"
     if not result.direction_key:
@@ -97,6 +98,35 @@ def direction_coverage_status(state: AnalysisState, lineage_id: Optional[str] = 
         missing_keys=missing,
         complete=bool(selected) and not missing,
     )
+
+
+def count_innovation_rounds_done(state: AnalysisState, lineage_id: Optional[str] = None) -> int:
+    """Count innovation rounds with substantive direction coverage.
+
+    Uses the same predicate as completed_innovation_direction_keys but
+    counts individual matching rounds (not deduplicated by direction key),
+    so one direction with multiple substantive rounds contributes >1.
+    """
+    target_lineage = lineage_id or current_lineage_id(state)
+    count = 0
+    for raw in state.round_results:
+        result = normalize_legacy_round_result(raw)
+        if result.lineage_id != target_lineage:
+            continue
+        if result.phase != "innovation":
+            continue
+        if not result.direction_key:
+            continue
+        if not result.pi_summary.strip():
+            continue
+        if result.round_status != "completed":
+            continue
+        if result.evidence_status != "substantive":
+            continue
+        if not has_substantive_findings(result):
+            continue
+        count += 1
+    return count
 
 
 def clone_round_results_for_branch(
