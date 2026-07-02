@@ -8,11 +8,6 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Build-time pip layer: install dependencies first so PyPI issues at boot
-# don't break startup (the /dep first-boot install remains as overlay).
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-
 COPY . .
 
 # Build frontend for production

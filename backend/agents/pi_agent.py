@@ -10,6 +10,7 @@ import logging
 from .base import BaseAgent
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.direction_evidence import build_fallback_direction_evidence
+from ..utils.formatting import safe_parse_json_array
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -34,6 +35,47 @@ _CONTROL_SIGNAL_RESULTS = {
     CONTINUE_SIGNAL: ("Continuing to next round of analysis.", "User requested to continue"),
     PI_DECIDE_SIGNAL: ("Proceeding with PI-selected research directions.", "PI to autonomously select directions"),
 }
+
+# Generic heuristics for the brief-gallery selection fallback. No dataset-,
+# disease-, tissue-, or species-specific names.
+_BRIEF_PREFERRED_TYPES = ("umap", "volcano", "dotplot", "heatmap", "barplot")
+_BRIEF_QC_MARKERS = (
+    "qc", "pca", "elbow", "hvg", "doublet", "silhouette", "variance", "metrics",
+)
+
+
+def _bounded_brief_fallback(
+    all_figures: list[dict], limit: int = 20
+) -> list[str]:
+    """Deterministic, bounded fallback when PI curation fails.
+
+    Never returns the full candidate list. Returns only confident "good"
+    candidates: publication figures, then likely result figures whose inferred
+    type is a known result type (umap/volcano/dotplot/heatmap/barplot), dropping
+    generic QC/technical diagnostics. Ambiguous ``type == "other"`` figures are
+    NOT included -- per the design, when no good candidates exist this returns an
+    empty list and the reporting layer keeps its own publication-figure
+    fallback. Preserves input order within each priority bucket.
+    """
+    def _is_qc(name: str) -> bool:
+        s = name.lower()
+        return any(marker in s for marker in _BRIEF_QC_MARKERS)
+
+    pub = [f["name"] for f in all_figures if f.get("is_publication")]
+    preferred = [
+        f["name"] for f in all_figures
+        if not f.get("is_publication")
+        and f.get("type") in _BRIEF_PREFERRED_TYPES
+        and not _is_qc(f["name"])
+    ]
+
+    ordered: list[str] = []
+    for name in pub + preferred:
+        if name not in ordered:
+            ordered.append(name)
+        if len(ordered) >= limit:
+            break
+    return ordered
 
 
 def _format_database_priors_block(database_priors) -> str:
@@ -4492,14 +4534,24 @@ Example: ["umap_cell_types", "cell_type_proportions", "volcano_<celltype>_<condi
                 max_tokens=REASONING_MODEL_MIN_TOKENS  # reasoning models need headroom or content comes back empty
             )
             text = (response.content or "").strip()
-            match = re.search(r'\[.*?\]', text, re.DOTALL)
-            if match:
-                return json.loads(match.group())
+            parsed = safe_parse_json_array(text)
+            if isinstance(parsed, list):
+                # Only keep names that are real candidates. A hallucinated or
+                # json-repaired name would otherwise suppress the reporting
+                # publication fallback and empty the Results gallery.
+                valid_names = {f["name"] for f in all_figures}
+                names = [
+                    x for x in parsed
+                    if isinstance(x, str) and x in valid_names
+                ]
+                if names:
+                    return names
+            logger.warning("[PI] select_brief_figures returned no usable names; using bounded fallback")
         except Exception as e:
             logger.warning(f"[PI] select_brief_figures failed: {e}")
 
-        # Fallback: include all figures
-        return [f["name"] for f in all_figures]
+        # Bounded, deterministic fallback -- never dump every candidate.
+        return _bounded_brief_fallback(all_figures)
 
     # ============================================
     # Graphic Abstract Prompt Generation

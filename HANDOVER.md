@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.31.3 · **Last updated**: 2026-07-02
+**Version**: 0.31.4 · **Last updated**: 2026-07-02
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,19 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.31.x — (2026-07-02)**
+
+- `0.31.4` — Docker image size reduction, Results figure discovery extraction & bounded brief-gallery fallback (2026-07-02):
+  - **Docker image size reduction (`Dockerfile`, `.dockerignore`)**: Removed build-time `pip install -r requirements.txt` layer (previously added ~7 GB). `dep/` added to `.dockerignore`. The runtime entrypoint continues to install dependencies into `/dep/venv` at startup, restoring the pre-0.31.1 small-image contract (~1 GB).
+  - **New `figure_discovery.py` helper (`backend/services/report/figure_discovery.py`)**: Workspace figure scanning extracted into a standalone, testable module. Deduplicates by stem with source priority ordering (`figures/` > workspace root > `*_outputs/figures`). Path traversal protection via `validate_path_within`; symlink PDFs outside workspace dropped. Generic type inference only — no hardcoded species/tissue/disease names.
+  - **`_assemble_brief_figures` extracted (`backend/workflow/reporting.py`)**: Inlined figure assembly logic refactored into `_assemble_brief_figures()` method. Uses `discover_workspace_figures()` with 200-candidate cap for PI selection. Defensive name validation strips hallucinated PI selections, preventing empty Results gallery — falls back to publication figures when all names are invalid. `is_publication` flag added to selection input for fallback priority.
+  - **Bounded LLM-failure fallback (`backend/agents/pi_agent.py`)**: `select_brief_figures` no longer dumps every candidate on failure. New `_bounded_brief_fallback()` returns only confident "good" candidates: publication figures, then result-type figures (umap/volcano/dotplot/heatmap/barplot) excluding QC diagnostics. Returns empty list when only QC/ambiguous figures exist, letting the reporting layer publication fallback take over. `safe_parse_json_array` replaces raw `json.loads` for robustness.
+  - **New test files (3 files, 425+ lines)**: `test_figure_discovery.py` (13 unit tests), `test_reporting_figure_discovery.py` (3 integration tests: cap, LLM-failure bounding, invalid-name self-heal), `test_select_brief_figures_fallback.py` (10 tests: fallback logic + PI-agent integration).
+
+- `0.31.3` — Empty report content validation, empty-response retry & report model re-resolution on retry (2026-07-02):
+  - **Empty report content validation (`backend/agents/supervisor_agent.py`)**: `_validate_report_content()` prevents saving empty/placeholder content as a completed report. Raises `UpstreamExhaustedError` when the model returns zero-token empty content after retries, driving the workflow HITL loop for Retry / change-model / Skip.
+  - **Empty zero-token response retry (`backend/utils/llm_client.py`)**: Both `_chat_inline` and `_invoke_adapter` now detect empty responses with `completion_tokens == 0` and retry up to 3× with backoff instead of surfacing a bare `""`. New `EmptyResponseError` for the protocol-probe path (classified transient so the probe retries the same protocol). `UpstreamExhaustedError` raised on exhaustion. `EMPTY_RESPONSE_MAX_RETRIES = 3`.
+  - **Report model re-resolution per retry attempt (`backend/routes/reports.py`, `backend/workflow/reporting.py`)**: `pi_model` and `bio_model` resolved inside the retry loop so changing the report model in session settings takes effect on retry. TERMINATE action in detailed report generation now properly raises `WorkflowTerminatedError`.
+  - **New test files**: `test_report_empty_validation.py` (2 tests), expanded `test_truncation_retry.py` (+120 lines, 8 new tests for zero-token retry, adapter empty retry, probe path).
 
 - `0.31.2` — Pathology modality-boundary warning precision, alignment with modality data model (2026-07-02):
   - **Pathology boundary warning precision (`backend/workflow/synthesis.py`)**: `build_disabled_pathology_warning` now checks for `section == "pathology"` (data_files) or `type == "pathology"` (pending uploads) instead of broadly matching image extensions and data types. This eliminates false-positive warnings when non-pathology images (e.g., biochemistry panel PNGs, generic PI-chat uploads) are present while pathology is disabled.

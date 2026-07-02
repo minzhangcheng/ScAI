@@ -9,3 +9,4 @@ data/
 *.log
 CODE_REVIEW*.md
 docs/
+dep/

@@ -17,6 +17,7 @@ from ..utils.llm_client import UpstreamExhaustedError
 from ..constants import LlmFailureAction
 from ..config import get_session_reports, get_session_workspace
 from ..services.report import DetailedReportGenerator, compress_image_to_base64
+from ..services.report.figure_discovery import discover_workspace_figures
 from .direction_coverage import current_lineage_id, direction_coverage_status
 from ..services.report.paths import resolve_report_output_dir
 from ..services.report.lineage import build_lineage_report_state
@@ -162,119 +163,7 @@ class ReportingMixin:
         if integrated_report is not None:
             try:
                 analysis_state.integrated_report = integrated_report
-
-                # --- Collect all workspace figures (figures/ subdir + workspace root) ---
-                workspace_dir = get_session_workspace(self.session_id)
-                pub_figure_names = {fig.name for fig in analysis_state.publication_figures}
-                all_workspace_figs: List[Dict[str, Any]] = []
-                seen_stems: set = set()
-
-                def _infer_fig_type(stem: str) -> str:
-                    s = stem.lower()
-                    if "umap" in s: return "umap"
-                    if "volcano" in s: return "volcano"
-                    if "violin" in s: return "violin"
-                    if "dotplot" in s or "dot_plot" in s: return "dotplot"
-                    if "heatmap" in s: return "heatmap"
-                    if "barplot" in s or "bar_plot" in s or "composition" in s or "proportion" in s: return "barplot"
-                    return "other"
-
-                for scan_dir in [workspace_dir / "figures", workspace_dir]:
-                    if not scan_dir.exists():
-                        continue
-                    for img in sorted(
-                        list(scan_dir.glob("*.png")) + list(scan_dir.glob("*.jpg")),
-                        key=lambda p: p.stat().st_mtime,
-                    ):
-                        if img.stem in seen_stems:
-                            continue
-                        seen_stems.add(img.stem)
-                        pdf = img.with_suffix(".pdf")
-                        all_workspace_figs.append({
-                            "name": img.stem,
-                            "type": _infer_fig_type(img.stem),
-                            "path": str(img),
-                            "pdf_path": str(pdf) if pdf.exists() else None,
-                        })
-
-                # Build full figure list for AI selection (workspace + existing pub figures)
-                all_figs_for_ai = [{"name": f["name"], "type": f["type"]} for f in all_workspace_figs]
-                for fig in analysis_state.publication_figures:
-                    if fig.name not in seen_stems:
-                        all_figs_for_ai.append({"name": fig.name, "type": fig.figure_type})
-
-                # Ask AI to curate the brief report figure set
-                selected_names = set(
-                    await self.pi_agent.select_brief_figures(analysis_state, all_figs_for_ai)
-                )
-                # Fallback: if AI returned nothing, show all publication figures
-                if not selected_names:
-                    selected_names = pub_figure_names
-
-                # Build figures_data: publication figures first (already have pngBase64),
-                # then AI-selected workspace figures not covered by publication figures
-                figures_data: List[Dict[str, Any]] = []
-                for fig in analysis_state.publication_figures:
-                    if fig.name in selected_names:
-                        figures_data.append({
-                            "id": fig.id,
-                            "name": fig.name,
-                            "description": fig.description,
-                            "figure_type": fig.figure_type,
-                            "png_base64": fig.png_base64,
-                            "pdf_path": fig.pdf_path,
-                            "review_status": fig.review_status.value,
-                            "revision_count": fig.revision_count
-                        })
-
-                for wf in all_workspace_figs:
-                    if wf["name"] in selected_names and wf["name"] not in pub_figure_names:
-                        try:
-                            b64 = compress_image_to_base64(wf["path"], max_width=800)
-                        except Exception:
-                            logger.warning("Failed to compress image", exc_info=True)
-                            b64 = None
-                        figures_data.append({
-                            "id": str(uuid.uuid4()),
-                            "name": wf["name"],
-                            "description": "",
-                            "figure_type": wf["type"],
-                            "png_base64": b64,
-                            "png_path": wf["path"],
-                            "pdf_path": wf["pdf_path"],
-                            "review_status": "pending",
-                            "revision_count": 0
-                        })
-
-                logger.info(
-                    f"[{self.session_id}] Brief figures: {len(figures_data)} selected "
-                    f"({len(pub_figure_names)} pub + {len(all_workspace_figs)} workspace scanned)"
-                )
-
-                tables_data = [
-                    {
-                        "id": tbl.id,
-                        "name": tbl.name,
-                        "description": tbl.description,
-                        "csv_path": tbl.csv_path,
-                        "review_status": tbl.review_status.value
-                    }
-                    for tbl in analysis_state.publication_tables
-                ]
-
-                await self._send_message(
-                    "integrated_report",
-                    {
-                        "report": integrated_report,
-                        "figures": figures_data,
-                        "tables": tables_data,
-                        "total_figures": len(figures_data),
-                        "approved_figures": sum(1 for f in figures_data if f.get("review_status") == "approved")
-                    },
-                    AgentType.PI
-                )
-
-                logger.info(f"[{self.session_id}] Integrated report generated with {len(figures_data)} brief figures")
+                await self._assemble_brief_figures(analysis_state, integrated_report)
             except Exception as e:
                 logger.exception(f"[{self.session_id}] Failed to assemble integrated report figures")
                 await self._send_message(
@@ -289,6 +178,113 @@ class ReportingMixin:
             **state,
             "analysis_state": analysis_state
         }
+
+    async def _assemble_brief_figures(
+        self, analysis_state, integrated_report
+    ) -> None:
+        """Discover, curate, and emit the brief Results figure gallery."""
+        DISCOVERY_CAP = 200
+        pub_figure_names = {fig.name for fig in analysis_state.publication_figures}
+
+        discovered = discover_workspace_figures(self.session_id)
+        all_workspace_figs = discovered[:DISCOVERY_CAP]
+        if len(discovered) > DISCOVERY_CAP:
+            logger.info(
+                f"[{self.session_id}] Figure discovery: {len(discovered)} found, "
+                f"passing first {DISCOVERY_CAP} to PI selection"
+            )
+        seen_stems = {f["name"] for f in all_workspace_figs}
+
+        # Build the selection input: workspace candidates + publication figures
+        # not already discovered. ``is_publication`` drives the bounded fallback.
+        all_figs_for_ai = [
+            {"name": f["name"], "type": f["type"], "is_publication": f["name"] in pub_figure_names}
+            for f in all_workspace_figs
+        ]
+        for fig in analysis_state.publication_figures:
+            if fig.name not in seen_stems:
+                all_figs_for_ai.append(
+                    {"name": fig.name, "type": fig.figure_type, "is_publication": True}
+                )
+
+        selected_names = set(
+            await self.pi_agent.select_brief_figures(analysis_state, all_figs_for_ai)
+        )
+        # Defensive filter: drop any selected name that is not a real candidate,
+        # so a bogus non-empty selection cannot suppress the publication fallback
+        # below and silently empty the Results gallery.
+        known_names = pub_figure_names | {f["name"] for f in all_workspace_figs}
+        selected_names = {n for n in selected_names if n in known_names}
+        # Fallback: if selection is empty, show all publication figures.
+        if not selected_names:
+            selected_names = pub_figure_names
+
+        figures_data: List[Dict[str, Any]] = []
+        for fig in analysis_state.publication_figures:
+            if fig.name in selected_names:
+                figures_data.append({
+                    "id": fig.id,
+                    "name": fig.name,
+                    "description": fig.description,
+                    "figure_type": fig.figure_type,
+                    "png_base64": fig.png_base64,
+                    "pdf_path": fig.pdf_path,
+                    "review_status": fig.review_status.value,
+                    "revision_count": fig.revision_count,
+                })
+
+        for wf in all_workspace_figs:
+            if wf["name"] in selected_names and wf["name"] not in pub_figure_names:
+                try:
+                    b64 = compress_image_to_base64(wf["path"], max_width=800)
+                except Exception:
+                    logger.warning("Failed to compress image", exc_info=True)
+                    b64 = None
+                figures_data.append({
+                    "id": str(uuid.uuid4()),
+                    "name": wf["name"],
+                    "description": "",
+                    "figure_type": wf["type"],
+                    "png_base64": b64,
+                    "png_path": wf["path"],
+                    "pdf_path": wf["pdf_path"],
+                    "review_status": "pending",
+                    "revision_count": 0,
+                })
+
+        logger.info(
+            f"[{self.session_id}] Brief figures: {len(figures_data)} selected "
+            f"({len(pub_figure_names)} pub + {len(all_workspace_figs)} workspace scanned)"
+        )
+
+        tables_data = [
+            {
+                "id": tbl.id,
+                "name": tbl.name,
+                "description": tbl.description,
+                "csv_path": tbl.csv_path,
+                "review_status": tbl.review_status.value,
+            }
+            for tbl in analysis_state.publication_tables
+        ]
+
+        await self._send_message(
+            "integrated_report",
+            {
+                "report": integrated_report,
+                "figures": figures_data,
+                "tables": tables_data,
+                "total_figures": len(figures_data),
+                "approved_figures": sum(
+                    1 for f in figures_data if f.get("review_status") == "approved"
+                ),
+            },
+            AgentType.PI,
+        )
+        logger.info(
+            f"[{self.session_id}] Integrated report generated with "
+            f"{len(figures_data)} brief figures"
+        )
 
     # ------------------------------------------------------------------
     # Node: generate_graphic_abstract (dispatcher)
