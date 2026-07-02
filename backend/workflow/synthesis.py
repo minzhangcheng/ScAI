@@ -37,16 +37,20 @@ def build_disabled_pathology_warning(files: list[dict], pathology_enabled: bool)
     """Return a modality-boundary warning when image files exist but pathology is disabled."""
     if pathology_enabled:
         return ""
-    has_image_input = any(
-        (f.get("data_type", "").lower() in {"image", "user_upload", "png", "jpg", "jpeg", "tiff"})
-        or str(f.get("filename", "")).lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff"))
+    # Only genuine pathology-modality inputs matter here. Images belonging to
+    # other modalities (e.g. a biochemistry panel PNG) or generic PI-chat
+    # uploads are not pathology data and must not trigger this warning. The
+    # canonical modality signal is the section: data_files carry it under
+    # "section", section-based pending uploads under "type".
+    has_pathology_input = any(
+        (f.get("section") or f.get("type") or "").lower() == "pathology"
         for f in files
     )
-    if not has_image_input:
+    if not has_pathology_input:
         return ""
     return (
-        "Image inputs are present while the pathology agent is disabled. "
-        "Image-derived observations will be treated as non-pathology descriptive evidence unless pathology analysis is enabled."
+        "Pathology image inputs are present while the pathology agent is disabled. "
+        "These images will be treated as non-pathology descriptive evidence unless pathology analysis is enabled."
     )
 
 

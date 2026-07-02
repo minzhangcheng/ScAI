@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.31.1 · **Last updated**: 2026-07-02
+**Version**: 0.31.2 · **Last updated**: 2026-07-02
 
 ## 1. Runtime Architecture
 
@@ -196,6 +196,9 @@ Detailed release notes for every version are available through `git log` and rel
 
 **0.31.x — (2026-07-02)**
 
+- `0.31.2` — Pathology modality-boundary warning precision, alignment with modality data model (2026-07-02):
+  - **Pathology boundary warning precision (`backend/workflow/synthesis.py`)**: `build_disabled_pathology_warning` now checks for `section == "pathology"` (data_files) or `type == "pathology"` (pending uploads) instead of broadly matching image extensions and data types. This eliminates false-positive warnings when non-pathology images (e.g., biochemistry panel PNGs, generic PI-chat uploads) are present while pathology is disabled.
+  - **Tests refined (`backend/tests/test_agent_modality_boundaries.py`)**: Restructured the test suite to add dedicated cases for pathology-section images, pending pathology uploads, pending chat images, and non-pathology inputs, aligning with the modality data model.
 - `0.31.1` — LLM failure per-node HITL, sandbox PKL integrity, upload concurrency hardening, API key security, frontend ErrorBoundary & WS reliability (2026-07-02):
   - **LLM failure generation per-node (`backend/workflow/core.py`, `backend/workflow/state.py`)**: Changed from a single global generation counter to per-node counters (`_llm_failure_generations: Dict[str, int]`), preventing stale/overlapping generation checks when multiple nodes fail concurrently. Added `_next_generation(node)` and `_generation_for(node)` helpers.
   - **WebSocket race condition fixes (`frontend/src/hooks/useApi.ts`, `frontend/src/stores/appStore.ts`)**: Added stale connection guard (`wsRef.current !== ws`) in both `onopen` and `onclose` handlers. Changed reconnect strategy to close existing connections before opening new ones. Switched message handlers from closure-captured `setMessages`/`addMessage`/`updateSession` to `useAppStore.getState()` direct calls, eliminating stale-state bugs on reconnect.
