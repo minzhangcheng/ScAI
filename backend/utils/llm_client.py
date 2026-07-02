@@ -164,6 +164,14 @@ _TRUNCATION_RETRY_FLOOR = 4096
 # Ceiling so an already-large budget that truncates empty doesn't balloon into an
 # oversized request the endpoint may reject.
 _TRUNCATION_RETRY_CEILING = 32768
+# A provider/proxy that replies HTTP 200 with an empty answer AND
+# completion_tokens == 0 generated nothing at all — a transient upstream blip
+# (silent proxy failure, dropped stream). Retry the same request with backoff
+# before handing the empty result to callers, which otherwise treat "" as a
+# valid answer (e.g. the supervisor report path saved a 0-byte "completed"
+# report). Distinct from the reasoning-truncation guard, which fires only when
+# finish_reason == "length".
+EMPTY_RESPONSE_MAX_RETRIES = 3
 
 
 def compute_rate_limit_delay(rate_limit_attempt: int, max_retries: int) -> Optional[float]:
@@ -196,6 +204,16 @@ class UpstreamExhaustedError(RuntimeError):
         self.agent_name = agent_name
         self.model = model
         self.llm_server = llm_server
+
+
+class EmptyResponseError(RuntimeError):
+    """A zero-token empty answer from the provider, raised on the protocol-probe
+    path where the probe loop owns retry policy. Deliberately NOT a subclass of
+    UpstreamExhaustedError: is_transient_probe_error() treats UpstreamExhaustedError
+    as a wrong-protocol signal (switch protocol), whereas this must be classified
+    transient so the probe retries the SAME protocol. Probe exhaustion then
+    surfaces as UpstreamExhaustedError from _probe_in_order."""
+
 
 # OpenAI reasoning models that do NOT support the temperature parameter at all.
 # Matched by exact model name segment (e.g., "openai/o4-mini" -> "o4-mini").
@@ -1804,6 +1822,34 @@ class OpenAICompatibleClient:
             return False
         return not getattr(message, "content", None)
 
+    @staticmethod
+    def _answer_empty_no_output(response) -> bool:
+        """True when the assistant answer is empty, no tool call was made, AND
+        the provider generated zero completion tokens. This is the 'produced
+        nothing' failure — separate from a legitimate empty answer that still
+        consumed tokens (which we do not retry, to avoid looping on a model that
+        deliberately returned nothing)."""
+        if not OpenAICompatibleClient._answer_content_empty(response):
+            return False
+        try:
+            return (response.usage.completion_tokens or 0) == 0
+        except (AttributeError, TypeError):
+            return False
+
+    @staticmethod
+    def _llm_response_empty_no_output(result) -> bool:
+        """True when an adapter-backed LLMResponse/LLMToolResponse returned no
+        text, made no tool call, and reported zero generated tokens."""
+        if not result or getattr(result, "content", None):
+            return False
+        if getattr(result, "tool_calls", None):
+            return False
+        usage = getattr(result, "usage", None) or {}
+        if not isinstance(usage, dict):
+            return False
+        completion = usage.get("completion_tokens", usage.get("output_tokens"))
+        return completion == 0
+
     def _log_empty_content_diagnostic(self, message, response) -> tuple:
         """Log diagnostic info when content extraction yielded empty string.
 
@@ -1873,7 +1919,9 @@ class OpenAICompatibleClient:
                               make_coro, make_coro_no_temp,
                               tools=None, tool_choice=None, temperature=None,
                               max_tokens=None, request_timeout=None,
-                              non_retryable_predicate=None, max_retries_override=None):
+                              non_retryable_predicate=None, max_retries_override=None,
+                              _empty_retry_count: int = 0,
+                              _allow_empty_retry: bool = True):
         """Wrap an adapter call (Responses/Anthropic) with the same cross-cutting
         machinery the inline chat path uses: LLM logging + retry_with_backoff
         (via _call_with_temp_fallback, which also gives on_retry, temperature
@@ -1909,6 +1957,58 @@ class OpenAICompatibleClient:
                 duration_ms=(time.time() - start_time) * 1000,
             )
             raise
+
+        if self._llm_response_empty_no_output(result):
+            if not _allow_empty_retry:
+                raise EmptyResponseError(
+                    f"[{self.agent_name}] Adapter empty answer, zero completion "
+                    f"tokens (model={model}) during protocol probe"
+                )
+            if _empty_retry_count < EMPTY_RESPONSE_MAX_RETRIES:
+                delay = RETRY_DELAY_BASE * (_empty_retry_count + 1)
+                logger.warning(
+                    f"[{self.agent_name}] Adapter returned empty answer, zero "
+                    f"completion tokens (model={model}); retry "
+                    f"{_empty_retry_count + 1}/{EMPTY_RESPONSE_MAX_RETRIES} "
+                    f"after {delay:.0f}s"
+                )
+                await self._emit_log_response(
+                    interaction=interaction,
+                    response_content=getattr(result, "content", None),
+                    usage=getattr(result, "usage", {}) or {},
+                    duration_ms=(time.time() - start_time) * 1000,
+                )
+                await asyncio.sleep(delay)
+                return await self._invoke_adapter(
+                    interaction_type=interaction_type,
+                    model=model,
+                    log_messages=log_messages,
+                    make_coro=make_coro,
+                    make_coro_no_temp=make_coro_no_temp,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    request_timeout=request_timeout,
+                    non_retryable_predicate=non_retryable_predicate,
+                    max_retries_override=max_retries_override,
+                    _empty_retry_count=_empty_retry_count + 1,
+                    _allow_empty_retry=_allow_empty_retry,
+                )
+            error = UpstreamExhaustedError(
+                "LLM adapter returned empty content (zero completion tokens) "
+                f"after {EMPTY_RESPONSE_MAX_RETRIES} retries",
+                agent_name=self.agent_name,
+                model=model,
+                llm_server=self.base_url,
+            )
+            await self._emit_log_response(
+                interaction=interaction,
+                error=str(error),
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+            raise error
+
         tool_calls_log = None
         tcs = getattr(result, "tool_calls", None)
         if tcs:
@@ -2039,7 +2139,7 @@ class OpenAICompatibleClient:
         make_probe_fallback_call: Optional[Callable[[], Awaitable[Any]]] = None,
     ):
         def invoke(adapter, adapter_call, max_retries_override=None,
-                   non_retryable_predicate=None):
+                   non_retryable_predicate=None, allow_empty_retry=True):
             if non_retryable_predicate is None:
                 non_retryable_predicate = lambda e: not is_transient_probe_error(e)
             make_coro, make_coro_no_temp = self._adapter_temp_call_pair(
@@ -2051,7 +2151,8 @@ class OpenAICompatibleClient:
                 tools=tools, tool_choice=tool_choice, temperature=temperature,
                 max_tokens=max_tokens, request_timeout=request_timeout,
                 non_retryable_predicate=non_retryable_predicate,
-                max_retries_override=max_retries_override)
+                max_retries_override=max_retries_override,
+                _allow_empty_retry=allow_empty_retry)
 
         def invoke_inline(inline_call, max_retries_override=None, non_retryable_predicate=None):
             return inline_call(
@@ -2068,13 +2169,13 @@ class OpenAICompatibleClient:
             if protocol == "responses":
                 return lambda: invoke(self._get_responses_adapter(),
                                       make_responses_adapter_call, max_retries_override=mr,
-                                      non_retryable_predicate=np)
+                                      non_retryable_predicate=np, allow_empty_retry=not probe)
             if protocol == "anthropic":
                 if make_anthropic_adapter_call is None:
                     return None
                 return lambda: invoke(self._get_anthropic_adapter(),
                                       make_anthropic_adapter_call, max_retries_override=mr,
-                                      non_retryable_predicate=np)
+                                      non_retryable_predicate=np, allow_empty_retry=not probe)
             if protocol == "chat":
                 target = (make_probe_fallback_call or make_inline_call) if probe else make_inline_call
                 return lambda: invoke_inline(
@@ -2121,6 +2222,8 @@ class OpenAICompatibleClient:
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         _truncation_retried: bool = False,
+        _empty_retry_count: int = 0,
+        _allow_empty_retry: bool = True,
         non_retryable_predicate: Optional[Callable[[Exception], bool]] = None,
         max_retries_override: Optional[int] = None,
     ) -> LLMResponse:
@@ -2192,6 +2295,55 @@ class OpenAICompatibleClient:
                     _truncation_retried=True,
                     non_retryable_predicate=non_retryable_predicate,
                     max_retries_override=max_retries_override,
+                )
+
+            # Empty-response guard: a 200 reply with an empty answer, no tool
+            # call, and zero generated tokens is a transient upstream blip
+            # (proxy hiccup, dropped stream). Unlike the truncation guard above
+            # we keep max_tokens unchanged and just retry with backoff. Gated on
+            # completion_tokens == 0 so a model that deliberately returned an
+            # empty (but token-consuming) answer is NOT looped on. On exhaustion
+            # RAISE — the extractor leaves a zero-token empty as "" (it only
+            # emits EMPTY_CONTENT_PLACEHOLDER when completion_tokens > 0), so
+            # returning would hand callers a bare "". Raising routes affected
+            # workflow calls into existing HITL failure handling. Never
+            # returns "" on this signature.
+            if self._answer_empty_no_output(response):
+                if not _allow_empty_retry:
+                    raise EmptyResponseError(
+                        f"[{self.agent_name}] Empty answer, zero completion "
+                        f"tokens (model={model}) during protocol probe"
+                    )
+                if _empty_retry_count < EMPTY_RESPONSE_MAX_RETRIES:
+                    delay = RETRY_DELAY_BASE * (_empty_retry_count + 1)
+                    logger.warning(
+                        f"[{self.agent_name}] Empty answer, zero completion tokens "
+                        f"(model={model}); retry "
+                        f"{_empty_retry_count + 1}/{EMPTY_RESPONSE_MAX_RETRIES} "
+                        f"after {delay:.0f}s"
+                    )
+                    await self._emit_log_response(
+                        interaction=interaction,
+                        response_content=content,
+                        usage=self._extract_usage(response),
+                        duration_ms=(time.time() - start_time) * 1000,
+                    )
+                    await asyncio.sleep(delay)
+                    return await self._chat_inline(
+                        model, messages, temperature, max_tokens, stream, timeout,
+                        max_retries,
+                        _truncation_retried=_truncation_retried,
+                        _empty_retry_count=_empty_retry_count + 1,
+                        _allow_empty_retry=_allow_empty_retry,
+                        non_retryable_predicate=non_retryable_predicate,
+                        max_retries_override=max_retries_override,
+                    )
+                raise UpstreamExhaustedError(
+                    "LLM returned empty content (zero completion tokens) after "
+                    f"{EMPTY_RESPONSE_MAX_RETRIES} retries",
+                    agent_name=self.agent_name,
+                    model=model,
+                    llm_server=self.base_url,
                 )
 
             result = LLMResponse(
@@ -2272,6 +2424,7 @@ class OpenAICompatibleClient:
                 max_retries_override=max_retries_override),
             make_probe_fallback_call=lambda max_retries_override=None, non_retryable_predicate=None: self._chat_inline(
                 model, enforced, temperature, max_tokens, False, probe_timeout, max_retries=0,
+                _allow_empty_retry=False,
                 non_retryable_predicate=non_retryable_predicate,
                 max_retries_override=max_retries_override),
             temperature=temperature,

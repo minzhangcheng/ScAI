@@ -766,6 +766,25 @@ class SupervisorAgent:
 
         await _progress(60, "Parsing report structure...")
 
+        # Do not persist an empty/placeholder body as a completed report. The
+        # client layer already retries transient zero-token empties and raises
+        # UpstreamExhaustedError on exhaustion; this validator is the remaining
+        # net for the cases that do NOT raise there — a token-consuming empty
+        # (returned as EMPTY_CONTENT_PLACEHOLDER) or content that parses to
+        # nothing. Raise so the workflow HITL loop can Retry (optionally after
+        # the user changes the report model) or Skip.
+        if not self._validate_report_content(report_content):
+            logger.error(
+                f"[{self.session_id}] Report model returned empty/placeholder "
+                f"content; refusing to save an empty completed report"
+            )
+            raise UpstreamExhaustedError(
+                "Report generation returned empty content after retries",
+                agent_name="report_generator",
+                model=report_model,
+                llm_server=getattr(client, "base_url", ""),
+            )
+
         # Parse the LLM output into sections
         sections = self._parse_report_sections(report_content, language)
 
@@ -1503,6 +1522,20 @@ Respond in JSON:
         if tables:
             logger.info(f"Collected {len(tables)} tables from workspace")
         return tables
+
+    @staticmethod
+    def _validate_report_content(report_content: str) -> bool:
+        """True when the model returned a usable report body. Rejects empty /
+        whitespace-only content and the client's EMPTY_CONTENT_PLACEHOLDER. A
+        substantive body needs a meaningful amount of non-whitespace text."""
+        from backend.utils.llm_client import EMPTY_CONTENT_PLACEHOLDER
+        if not report_content:
+            return False
+        stripped = report_content.strip()
+        if not stripped or stripped == EMPTY_CONTENT_PLACEHOLDER:
+            return False
+        prose = stripped.lstrip("#-*> \n\t")
+        return len(prose) >= 20
 
     def _build_report_prompt(
         self,

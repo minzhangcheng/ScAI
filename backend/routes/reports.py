@@ -358,10 +358,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
     # Create provider for resolving per-agent settings
     provider = AgentSettingsProvider(state, config, global_client=llm_client, session_id=session_id)
 
-    # Get models via provider (respects session-level overrides)
-    pi_model = provider.get_model(PI_AGENT_NAME)
-    bio_model = provider.get_model("bioinformatics")
-
+    # Resolve pi_model inside the retry loop so report retries pick up changes.
     try:
         workspace_dir = str(_get_session_workspace(session_id))
         from backend.agents.supervisor_agent import SupervisorAgent
@@ -434,6 +431,7 @@ async def _generate_report_task(session_id: str, state: AnalysisState):
                     provider._client_cache.clear()
                     await asyncio.sleep(_retry_backoff_delay(attempt))
 
+                pi_model = provider.get_model(PI_AGENT_NAME)
                 report = await supervisor.generate_detailed_report(
                     analysis_state=report_state,
                     report_model=pi_model,

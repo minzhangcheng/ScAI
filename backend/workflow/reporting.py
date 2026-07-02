@@ -786,14 +786,16 @@ class ReportingMixin:
                 AgentType.PI,
             )
 
-        llm_client = self._settings_provider.get_llm_client('pi')
-        pi_model = self._settings_provider.get_model("pi")
-        bio_model = self._settings_provider.get_model("bioinformatics")
         workspace_dir = str(get_session_workspace(self.session_id))
 
         # === LLM call with retry + user intervention ===
         while True:
             try:
+                # Resolve per attempt so a Retry after the user changes the
+                # report model in settings picks up the new model/client.
+                llm_client = self._settings_provider.get_llm_client('pi')
+                pi_model = self._settings_provider.get_model("pi")
+                bio_model = self._settings_provider.get_model("bioinformatics")
                 self.ensure_agent_ready("supervisor")
                 if self.supervisor_agent:
                     report = await self.supervisor_agent.generate_detailed_report(
@@ -843,6 +845,11 @@ class ReportingMixin:
                 )
                 if action == LlmFailureAction.RETRY:
                     continue
+                if action == LlmFailureAction.TERMINATE:
+                    from .core import WorkflowTerminatedError
+                    raise WorkflowTerminatedError(
+                        "User terminated workflow during detailed report generation"
+                    )
                 # Skip: send error and fall through to post-processing
                 await self._send_message(
                     "error",
