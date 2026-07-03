@@ -118,6 +118,25 @@ def ensure_session_dirs(session_id: str) -> Path:
     return root
 
 
+class _HealthProbeAccessFilter(logging.Filter):
+    """Suppress uvicorn access-log records for the unauthenticated health probe.
+
+    uvicorn.access emits one record per request with
+    ``record.args == (client_addr, method, path, http_version, status)``.
+    We drop records whose path is the health endpoint; everything else passes.
+    """
+
+    _SILENCED_PATHS = ("/api/health",)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3:
+            path = args[2]
+            if isinstance(path, str) and path.split("?", 1)[0] in self._SILENCED_PATHS:
+                return False
+        return True
+
+
 def setup_logging(log_level: int = logging.INFO) -> None:
     """
     Setup comprehensive logging for the application.
@@ -163,6 +182,10 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     _add_file_handler("app",   logging.INFO,   10*1024*1024, 5)
     _add_file_handler("error", logging.ERROR,  10*1024*1024, 5)
     _add_file_handler("debug", logging.DEBUG,  50*1024*1024, 3)
+
+    # Drop uvicorn access-log lines for the health probe so container/orchestrator
+    # health checks (every ~30s, one per line) don't drown out the real request log.
+    logging.getLogger("uvicorn.access").addFilter(_HealthProbeAccessFilter())
 
     # Log startup message
     logging.info(f"Logging initialized. Log directory: {LOG_DIR}")
