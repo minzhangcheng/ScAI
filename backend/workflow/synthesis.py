@@ -12,6 +12,7 @@ from ..constants import (
     WaitInputReason,
 )
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisState, RoundResult, TaskStatus
+from ..services.interaction_record_capture import get_or_open_direction_record
 from ..utils.direction_evidence import build_fallback_direction_evidence
 from ..utils.llm_client import UpstreamExhaustedError
 from .direction_coverage import (
@@ -808,6 +809,13 @@ class SynthesisMixin:
 
                 if self._supplementary_queue and self._supplementary_queue[0][1] == "direction":
                     req, _target = self._supplementary_queue.popleft()
+                    _phase = "integration" if analysis_state.analysis_phase == AnalysisPhase.INTEGRATION else "exploration"
+                    _rec = get_or_open_direction_record(
+                        analysis_state, round_number=analysis_state.current_round,
+                        phase=_phase,
+                        integration_cycle=analysis_state.integration_cycle if _phase == "integration" else None,
+                    )
+                    _rec.supplementary_requests.append(req)
                     self._set_status(analysis_state, TaskStatus.RUNNING)
                     await self._send_state_sync(analysis_state, "supplementary_running")
 

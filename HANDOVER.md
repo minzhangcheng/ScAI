@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.32.1 · **Last updated**: 2026-07-03
+**Version**: 0.32.2 · **Last updated**: 2026-07-04
 
 ## 1. Runtime Architecture
 
@@ -256,7 +256,22 @@ Detailed release notes for every version are available through `git log` and rel
   - **Complete report gate (`backend/workflow/reporting.py`)**: `validate_complete_report_allowed` checks uncovered integration batch; blocks complete report until batch is done.
   - **PI + Literature agent methods (`backend/agents/pi_agent.py`, `backend/agents/literature_agent.py`)**: `generate_integration_direction_candidates`, `score_integration_directions_with_evidence`, `integration_literature_search`, `evaluate_direction_novelty_candidates`. Supervisor detailed report includes integration_reports.
   - **Frontend integration gate panel (`frontend/src/components/IntegrationGatePanel.tsx`)**: Minimal candidate checklist + submit/finalize actions. `AnalysisPanel.tsx` listens for `integration_gate` messages, wires `apiFetch` to `/choose-direction` and `/finalize-from-integration`. New `integration_gate`/`integration_complete` message types in `appStore.ts`.
-  - **17 new test files** covering batch coverage, convergence routing, direction candidates, endpoints, gate wait, graph wiring, literature search, report gate, restore target, resume gate, round state, routing, snapshot route, synthesis node, WS guard, pending integration flag, and PI-decide batch setting. Removed obsolete `test_multi_direction_correlation_trigger.py`.
+   - **17 new test files** covering batch coverage, convergence routing, direction candidates, endpoints, gate wait, graph wiring, literature search, report gate, restore target, resume gate, round state, routing, snapshot route, synthesis node, WS guard, pending integration flag, and PI-decide batch setting. Removed obsolete `test_multi_direction_correlation_trigger.py`.
+
+- `0.32.2` — User-interaction capture records & report integration (2026-07-04):
+  - **New models `SelectionEntry`, `DirectionSelectionRecord`, `AnnotationClusterEntry`, `AnnotationRecord` (`backend/models/schemas.py`)**: Immutable snapshot models for direction-selection events (exploration, integration-gate, PI-decide, finalize) and annotation-confirmation events. State fields: `direction_selection_records`, `annotation_record`, `annotation_supplementary_requests`, `integration_gate_literature_evidence`.
+  - **New capture service (`backend/services/interaction_record_capture.py`)**: Pure helper functions `get_or_open_direction_record()`, `find_open_pi_decide_record()`, `map_selections()` (with `is_custom` inference), `build_annotation_record()`. No I/O or LLM calls.
+  - **Direction record wiring (`backend/routes/interaction.py`)**: `_choose_direction_locked()` captures candidates, literature evidence, and selections (including `is_custom` flag) into `DirectionSelectionRecord`. Integration-gate finalize via `finalize_from_integration()` captures the same with `event_type = "finalize"`. Early validation rejects missing direction choice before opening a record.
+  - **Annotation record wiring (`backend/routes/interaction.py`, `backend/workflow/annotation.py`)**: Both manual confirmation and auto-confirm/timeout paths call `build_annotation_record()`. Auto-confirm path also captures supplementary requests.
+  - **PI-decide record wiring (`backend/workflow/planning.py`)**: PI autonomous direction selection (`select_best_directions` path) creates `DirectionSelectionRecord` with `event_type = "pi_decide"` via `get_or_open_direction_record()`.
+  - **Supplementary request capture (`backend/workflow/synthesis.py`, `backend/workflow/annotation.py`)**: Supplementary requests during direction selection and annotation gates appended to the open record.
+  - **Integration gate literature evidence persistence (`backend/workflow/integration.py`, `backend/routes/interaction.py`)**: `integration_gate_literature_evidence` state field preserves literature evidence across integration cycles. Cleared on direction selection or finalize alongside `integration_gate_candidates`.
+  - **Standalone HTML renderers (`backend/services/report/interaction_records.py`)**: `render_direction_record_html()` and `render_annotation_record_html()` produce standalone HTML files (embedded CSS, no JS). `write_interaction_record_files()` writes them to the reports directory. Renders: selected/unselected candidate cards, literature evidence, custom direction tags, PI-decide banner, supporting data, annotation tables with proportion columns, original-vs-final cell type display, supplementary requests.
+  - **Supervisor appendix migration (`backend/agents/supervisor_agent.py`)**: `_build_appendix()` calls `write_interaction_record_files()` and replaces hardcoded `"exploration_report.html"` / `"annotation_context_report.html"` links with dynamically generated records.
+  - **Generator, regenerator & sections sync (`backend/services/report/generator.py`, `backend/services/report/regenerator.py`, `backend/services/report/sections.py`)**: All three updated to use new record files instead of hardcoded exploration/annotation report links. Sections downloads use conditional existence checks.
+  - **Frontend `is_custom` plumbing (`frontend/src/components/AnalysisPanel.tsx`)**: New `buildDirectionsPayload()` helper maps direction objects (including `isCustom`) to API format. Integration-gate and exploration direction selection both use it. New test in `AnalysisPanel.isCustom.test.tsx`.
+  - **API model update (`backend/models/api_requests.py`)**: `DirectionChoice.directions` type relaxed from `List[Dict[str, str]]` to `List[Dict[str, Any]]` to support the `is_custom` field.
+  - **12 new test files**: 7 capture unit tests, 7 wiring tests (including supervisor appendix integration, record writer output dir isolation), 4 model default tests, 8 render tests, 2 integration endpoint tests (literature evidence clearing), 1 frontend test, and `test_to_api_dict_coverage.py` exclusion updates.
 
 **0.30.x — (2026-06-30 → 2026-07-01)**
 

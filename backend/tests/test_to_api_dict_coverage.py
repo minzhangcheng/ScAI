@@ -65,6 +65,10 @@ _EXCLUDED_FIELDS = {
     "active_direction_batch",
     "last_integrated_round",
     "integration_gate_candidates",
+    "direction_selection_records",
+    "annotation_record",
+    "annotation_supplementary_requests",
+    "integration_gate_literature_evidence",
     "integration_reports",
     "final_report_requested",
 }

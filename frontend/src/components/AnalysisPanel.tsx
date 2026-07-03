@@ -94,6 +94,16 @@ interface RoundSummaryContent {
   literature_findings?: string[]
 }
 
+export function buildDirectionsPayload(
+  directions: Array<{ direction: string; notes: string; isCustom?: boolean }>,
+) {
+  return directions.map(d => ({
+    direction: d.direction,
+    notes: d.notes ?? '',
+    is_custom: !!d.isCustom,
+  }))
+}
+
 export function AnalysisPanel() {
   const { currentSession, messages, language, showConfigPanel, wsConnected, wsConnect, agentErrors, readMode, addMessage, authUser } = useAppStore()
   const { startAnalysis, resumeAnalysis, continueRound, pauseAnalysis, stopAnalysis } = useSession()
@@ -375,10 +385,7 @@ export function AnalysisPanel() {
       await apiFetch(`/session/${currentSession.id}/choose-direction`, {
         method: 'POST',
         body: JSON.stringify({
-          directions: directions.map(d => ({
-            direction: d.direction,
-            notes: d.notes
-          }))
+          directions: buildDirectionsPayload(directions)
         }),
       })
       setShowExplorationDialog(false)
@@ -411,7 +418,9 @@ export function AnalysisPanel() {
     if (!currentSession) return
     await apiFetch(`/session/${currentSession.id}/choose-direction`, {
       method: 'POST',
-      body: JSON.stringify({ directions: selected.map((c: any) => ({ direction: c.direction, notes: '' })) }),
+      body: JSON.stringify({ directions: buildDirectionsPayload(
+        selected.map((s: any) => ({ direction: s.direction, notes: s.notes ?? '', isCustom: !!s.isCustom }))
+      ) }),
     })
     setIntegrationGateData(null)
   }

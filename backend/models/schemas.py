@@ -438,6 +438,57 @@ class AnnotationConfirmationState(BaseModel):
     validation_text_summary: Optional[str] = None
     reclustering_recommendations: Optional[List[Dict[str, Any]]] = None
 
+
+class SelectionEntry(BaseModel):
+    """One direction the user selected at a direction gate."""
+    direction: str = ""
+    notes: str = ""
+    is_custom: bool = False
+    candidate_index: Optional[int] = None
+
+
+class DirectionSelectionRecord(BaseModel):
+    """Immutable snapshot of one direction-selection gate event."""
+    record_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    round_number: int = 0
+    integration_cycle: Optional[int] = None
+    phase: str = "exploration"
+    event_type: str = "open"
+    timestamp: datetime = Field(default_factory=datetime.now)
+    let_pi_decide: bool = False
+    candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    literature_evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    selections: List[SelectionEntry] = Field(default_factory=list)
+    pi_selected: List[Dict[str, str]] = Field(default_factory=list)
+    supplementary_requests: List[str] = Field(default_factory=list)
+
+
+class AnnotationClusterEntry(BaseModel):
+    """One cluster's final annotation state at confirm time."""
+    cluster_id: str = ""
+    original_cell_type: str = ""
+    final_cell_type: str = ""
+    user_override: bool = False
+    confidence: str = "low"
+    key_markers: List[str] = Field(default_factory=list)
+    group_proportions: Dict[str, float] = Field(default_factory=dict)
+    alternative_cell_types: List[str] = Field(default_factory=list)
+    low_confidence_reason: str = ""
+
+
+class AnnotationRecord(BaseModel):
+    """Immutable snapshot of the annotation gate at confirm/auto-confirm time."""
+    timestamp: datetime = Field(default_factory=datetime.now)
+    organism: str = ""
+    tissue: str = ""
+    tissue_summary: str = ""
+    proportion_dimension: str = "group"
+    proportion_group_labels: List[str] = Field(default_factory=list)
+    clusters: List[AnnotationClusterEntry] = Field(default_factory=list)
+    supplementary_requests: List[str] = Field(default_factory=list)
+    auto_confirmed: bool = False
+
+
 class AgentRoundCache(BaseModel):
     """Per-round agent-result cache for snapshot-restore idempotency.
 
@@ -806,6 +857,10 @@ class AnalysisState(BaseModel):
     active_direction_batch: List[Dict[str, str]] = Field(default_factory=list)
     last_integrated_round: int = 0
     integration_gate_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    direction_selection_records: List[DirectionSelectionRecord] = Field(default_factory=list)
+    annotation_record: Optional[AnnotationRecord] = None
+    annotation_supplementary_requests: List[str] = Field(default_factory=list)
+    integration_gate_literature_evidence: List[Dict[str, Any]] = Field(default_factory=list)
     integration_reports: List[str] = Field(default_factory=list)
     final_report_requested: bool = False
     # Correlation analysis result for multi-direction mode

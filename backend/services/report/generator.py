@@ -40,6 +40,7 @@ from .pi_review import PIReviewMixin
 from .planning import PlanningMixin
 from .sections import SectionsMixin
 from backend.services.report.lineage import build_lineage_report_state
+from backend.services.report.interaction_records import write_interaction_record_files
 from backend.workflow.direction_coverage import normalize_legacy_round_result
 
 logger = logging.getLogger(__name__)
@@ -386,6 +387,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 logger.exception("Failed to save graphic abstract")
 
         # Build appendix data for report.json (so regenerate can use it)
+        record_files = write_interaction_record_files(report_state, reports_dir=self.output_dir)
         appendix_data = {
             "project_name": report_state.name,
             "project_description": report_state.initial_instruction,
@@ -442,8 +444,8 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 "direction_selection": report_state.user_chosen_directions or [],
             },
             "related_reports": {
-                "exploration_report": "exploration_report.html",
-                "annotation_report": "annotation_context_report.html",
+                "annotation_record": record_files.get("annotation_record"),
+                "direction_records": record_files.get("direction_records", []),
             },
             "notebook_filename": f"{report_state.id}.ipynb",
             "literature_report": LITERATURE_REPORT_FILENAME if report_state.literature_reports else "",
@@ -960,5 +962,4 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 logger.info(f"Score definitions CSV saved to: {csv_path}")
 
         return html_path
-
 

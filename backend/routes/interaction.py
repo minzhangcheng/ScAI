@@ -29,6 +29,7 @@ from backend.state import (
 )
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
+from backend.services.interaction_record_capture import get_or_open_direction_record, map_selections, build_annotation_record
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,7 @@ async def confirm_annotations(session_id: str, request: Request, body: Annotatio
                         break
             state.annotation_state.confirmed = True
             state.annotation_state.pending = False
+            state.annotation_record = build_annotation_record(state, auto_confirmed=False)
 
         await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
@@ -218,6 +220,34 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
             detail="At the integration gate, select explicit new directions (or call /finalize-from-integration).",
         )
 
+    has_direction_choice = bool(body.let_pi_decide or body.direction or body.directions)
+    if not has_direction_choice:
+        raise HTTPException(
+            status_code=400,
+            detail="No direction provided: specify direction, directions list, or let_pi_decide",
+        )
+
+    _phase = "integration" if integration_gate else "exploration"
+    rec = get_or_open_direction_record(
+        state, round_number=state.current_round, phase=_phase,
+        integration_cycle=state.integration_cycle if integration_gate else None,
+    )
+    if integration_gate:
+        rec.candidates = list(state.integration_gate_candidates)
+        rec.literature_evidence = list(state.integration_gate_literature_evidence)
+    elif state.exploration_report:
+        rec.candidates = list(state.exploration_report.research_direction_candidates)
+        rec.literature_evidence = list(state.exploration_report.direction_literature_evidence)
+    if body.let_pi_decide:
+        rec.let_pi_decide = True
+    elif body.directions:
+        rec.selections = map_selections(list(body.directions), rec.candidates)
+        rec.event_type = "select"
+    elif body.direction:
+        rec.selections = map_selections(
+            [{"direction": body.direction, "notes": ""}], rec.candidates)
+        rec.event_type = "select"
+
     if body.let_pi_decide:
         state.user_chosen_direction = PI_DECIDE_SIGNAL
         state.pending_human_input = PI_DECIDE_SIGNAL
@@ -226,6 +256,7 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
             state.user_chosen_directions = (state.user_chosen_directions or []) + list(body.directions)
             state.analysis_phase = AnalysisPhase.INNOVATION
             state.integration_gate_candidates = []
+            state.integration_gate_literature_evidence = []
             state.max_rounds = state.current_round + len(body.directions)
         else:
             state.user_chosen_directions = list(body.directions)
@@ -246,8 +277,6 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
         state.max_rounds = 2
         state.user_chosen_direction = body.direction
         state.pending_human_input = body.direction
-    else:
-        raise HTTPException(status_code=400, detail="No direction provided: specify direction, directions list, or let_pi_decide")
 
     await _update_session_cache(session_id, state)
     await async_save_session(session_id, state)
@@ -280,6 +309,15 @@ async def finalize_from_integration(session_id: str, request: Request):
                 detail="finalize-from-integration is only valid at the integration gate.",
             )
         state.final_report_requested = True
+        rec = get_or_open_direction_record(
+            state, round_number=state.current_round, phase="integration",
+            integration_cycle=state.integration_cycle,
+        )
+        rec.candidates = list(state.integration_gate_candidates)
+        rec.literature_evidence = list(state.integration_gate_literature_evidence)
+        rec.event_type = "finalize"
+        state.integration_gate_candidates = []
+        state.integration_gate_literature_evidence = []
         await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
         async with _state_lock:

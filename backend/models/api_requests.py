@@ -148,8 +148,8 @@ class DirectionChoice(BaseModel):
     direction: str = ""  # backward compat: single direction
     let_pi_decide: bool = False
     # Multi-direction support
-    directions: List[Dict[str, str]] = Field(default_factory=list)
-    # Each dict: {"direction": str, "notes": str}
+    directions: List[Dict[str, Any]] = Field(default_factory=list)
+    # Each dict: {"direction": str, "notes": str, "is_custom": bool}
 
 
 class LlmFailureActionRequest(BaseModel):

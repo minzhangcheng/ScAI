@@ -84,6 +84,7 @@ class IntegrationMixin:
                       if cap_reached else
                       "No sufficiently novel research direction was found; proceeding to the final report.")
             analysis_state.integration_gate_candidates = []
+            analysis_state.integration_gate_literature_evidence = []
             await self._send_message("integration_complete", {
                 "cycle": analysis_state.integration_cycle, "reason": reason,
             }, AgentType.PI)
@@ -91,6 +92,7 @@ class IntegrationMixin:
                     "integration_next": "stop", "should_continue": False}
 
         analysis_state.integration_gate_candidates = scored_candidates
+        analysis_state.integration_gate_literature_evidence = list(literature_evidence or [])
         analysis_state.analysis_phase = AnalysisPhase.INTEGRATION
         self._continue_event.clear()
         self._set_status(analysis_state, TaskStatus.WAITING_INPUT)

@@ -503,12 +503,11 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
     if related or notebook or literature_report:
         dl_title = "Related Reports & Downloads"
         dl_items = []
-        if related.get("exploration_report"):
-            label = "Exploration Report"
-            dl_items.append(f'<li><a href="{esc(related["exploration_report"])}" download style="color:#4f46e5;">{label}</a></li>')
-        if related.get("annotation_report"):
-            label = "Annotation Context Report"
-            dl_items.append(f'<li><a href="{esc(related["annotation_report"])}" download style="color:#4f46e5;">{label}</a></li>')
+        if related.get("annotation_record"):
+            dl_items.append(f'<li><a href="{esc(related["annotation_record"])}" download style="color:#4f46e5;">Cell Annotation Record</a></li>')
+        for dr in related.get("direction_records", []):
+            dl_items.append(f'<li><a href="{esc(dr["filename"])}" download style="color:#4f46e5;">'
+                            f'Direction Selection Record — {esc(dr["label"])}</a></li>')
         if notebook:
             label = "Analysis Notebook (.ipynb)"
             dl_items.append(f'<li><a href="{esc(notebook)}" download style="color:#4f46e5;">{label}</a></li>')

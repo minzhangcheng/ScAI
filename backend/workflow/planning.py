@@ -8,6 +8,10 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..constants import LlmFailureAction, PI_DECIDE_SIGNAL, WaitInputReason, StateSyncChangeType
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisPlan, AnalysisState, PlanStep, TaskStatus
+from ..services.interaction_record_capture import (
+    find_open_pi_decide_record,
+    get_or_open_direction_record,
+)
 from ..utils.llm_client import UpstreamExhaustedError
 from .direction_coverage import current_lineage_id, normalize_direction_key
 from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
@@ -306,6 +310,21 @@ class PlanningMixin:
                     logger.info(f"[{self.session_id}] Innovation phase: PI selecting best directions")
                     selection_decision = await self.pi_agent.select_best_directions(analysis_state)
                     selected_dirs = _selected_directions_from_decision(selection_decision)
+                    rec = find_open_pi_decide_record(analysis_state)
+                    if rec is None:
+                        rec = get_or_open_direction_record(
+                            analysis_state, round_number=analysis_state.current_round,
+                            phase="exploration",
+                        )
+                    if analysis_state.exploration_report:
+                        rec.candidates = list(analysis_state.exploration_report.research_direction_candidates)
+                        rec.literature_evidence = list(analysis_state.exploration_report.direction_literature_evidence)
+                    rec.let_pi_decide = True
+                    rec.pi_selected = [
+                        {"direction": d.get("direction", ""), "notes": d.get("notes", "")}
+                        for d in selected_dirs
+                    ]
+                    rec.event_type = "pi_decide"
                     if analysis_state.exploration_report and isinstance(selection_decision, dict):
                         analysis_state.exploration_report.direction_selection_summary = selection_decision
                     # Set up multi-direction queue

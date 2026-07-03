@@ -38,3 +38,60 @@ def test_integration_gate_rejects_let_pi_decide(monkeypatch):
         asyncio.run(ix._choose_direction_locked("sess", "u", DirectionChoice(let_pi_decide=True)))
     assert ei.value.status_code == 400
     assert s.active_direction_batch == []
+
+
+def test_integration_direction_selection_clears_literature_evidence(monkeypatch):
+    s = AnalysisState(name="t", user_id="u", initial_instruction="o")
+    s.status = TaskStatus.WAITING_INPUT
+    s.analysis_phase = AnalysisPhase.INTEGRATION
+    s.current_round = 4
+    s.integration_cycle = 2
+    s.integration_gate_candidates = [{"direction": "X"}]
+    s.integration_gate_literature_evidence = [{"direction_id": "x"}]
+
+    async def fake_owner(session_id, user_id): return s
+    async def fake_update(session_id, state): return None
+    async def fake_save(session_id, state): return None
+
+    monkeypatch.setattr(ix, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(ix, "_update_session_cache", fake_update)
+    monkeypatch.setattr(ix, "async_save_session", fake_save)
+    monkeypatch.setitem(ix.workflows, "sess", None)
+    monkeypatch.setattr(ix, "_pause_and_restart_ws", fake_update)
+
+    asyncio.run(ix._choose_direction_locked(
+        "sess",
+        "u",
+        DirectionChoice(directions=[{"direction": "X", "notes": "", "is_custom": False}]),
+    ))
+
+    assert s.direction_selection_records[0].literature_evidence == [{"direction_id": "x"}]
+    assert s.integration_gate_literature_evidence == []
+
+
+def test_integration_finalize_clears_literature_evidence(monkeypatch):
+    s = AnalysisState(name="t", user_id="u", initial_instruction="o")
+    s.status = TaskStatus.WAITING_INPUT
+    s.analysis_phase = AnalysisPhase.INTEGRATION
+    s.current_round = 4
+    s.integration_cycle = 2
+    s.integration_gate_candidates = [{"direction": "X"}]
+    s.integration_gate_literature_evidence = [{"direction_id": "x"}]
+
+    async def fake_owner(session_id, user_id): return s
+    async def fake_update(session_id, state): return None
+    async def fake_save(session_id, state): return None
+
+    monkeypatch.setattr(ix, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(ix, "_update_session_cache", fake_update)
+    monkeypatch.setattr(ix, "async_save_session", fake_save)
+    monkeypatch.setitem(ix.workflows, "sess", None)
+
+    response = asyncio.run(ix.finalize_from_integration(
+        "sess",
+        types.SimpleNamespace(state=types.SimpleNamespace(user_id="u")),
+    ))
+
+    assert response.success is True
+    assert s.direction_selection_records[0].literature_evidence == [{"direction_id": "x"}]
+    assert s.integration_gate_literature_evidence == []

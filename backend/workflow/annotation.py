@@ -6,6 +6,7 @@ from ..models.schemas import (
     AgentType, AnalysisState, AnnotationConfirmationState,
     ClusterAnnotation, TaskStatus,
 )
+from ..services.interaction_record_capture import build_annotation_record
 from .helpers import safe_pi_brief, wait_with_skip_time
 from .annotation_validation import compute_validation_attempt_id, should_run_validation
 
@@ -478,12 +479,14 @@ class AnnotationMixin:
                     if state.annotation_state:
                         state.annotation_state.confirmed = True
                         state.annotation_state.pending = False
+                        state.annotation_record = build_annotation_record(state, auto_confirmed=True)
                     state.status = original_status
                     await self._send_state_sync(state, "annotation_auto_skipped")
                     break
 
                 if self._supplementary_queue and self._supplementary_queue[0][1] == "annotation":
                     req, _target = self._supplementary_queue.popleft()
+                    state.annotation_supplementary_requests.append(req)
                     state.status = TaskStatus.RUNNING
                     await self._send_state_sync(state, "supplementary_running")
 

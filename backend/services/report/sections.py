@@ -498,12 +498,17 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
         # ── 7. Related Reports & Downloads ─────────────────────────
         downloads_html = ""
         dl_items = []
-        # Exploration report
-        exploration_label = "Exploration Report"
-        dl_items.append(f'<li><a href="exploration_report.html" download style="color:#4f46e5;">{exploration_label}</a></li>')
-        # Annotation context report
-        annotation_label = "Annotation Context Report"
-        dl_items.append(f'<li><a href="annotation_context_report.html" download style="color:#4f46e5;">{annotation_label}</a></li>')
+        if getattr(state, "annotation_record", None) is not None:
+            dl_items.append('<li><a href="annotation_record.html" download '
+                            'style="color:#4f46e5;">Cell Annotation Record</a></li>')
+        for i, rec in enumerate(getattr(state, "direction_selection_records", [])):
+            if rec.event_type == "open":
+                continue
+            fname = f"direction_record_{i:02d}_round{rec.round_number}.html"
+            label = (f"Integration Cycle {rec.integration_cycle}"
+                     if rec.phase == "integration" else f"Round {rec.round_number} · {rec.phase}")
+            dl_items.append(f'<li><a href="{fname}" download style="color:#4f46e5;">'
+                            f'Direction Selection Record — {label}</a></li>')
         # Notebook
         notebook_label = "Analysis Notebook (.ipynb)"
         dl_items.append(f'<li><a href="{esc(state.id)}.ipynb" download style="color:#4f46e5;">{notebook_label}</a></li>')

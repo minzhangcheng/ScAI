@@ -34,6 +34,7 @@ from ..utils.error_parsing import API_ERROR_TYPES, CODE_GEN_ERROR_TYPES, extract
 from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.image_utils import save_graphic_abstract_image
+from ..services.report.interaction_records import write_interaction_record_files
 
 # Section IDs that represent specific/targeted analysis
 _SPECIFIC_SECTION_IDS = frozenset({
@@ -838,7 +839,8 @@ class SupervisorAgent:
         await _progress(80, "Building report...")
 
         report_id = str(uuid.uuid4())
-        appendix_data = self._build_appendix(analysis_state, stats)
+        record_files = write_interaction_record_files(analysis_state, reports_dir=output_path)
+        appendix_data = self._build_appendix(analysis_state, stats, record_files)
 
         # Persist graphic abstract for downloadable zip. Wrapped so a
         # malformed/unopenable image degrades gracefully (ga_path stays None;
@@ -1853,7 +1855,7 @@ Report generation model call failed due to API connection error. Please refer to
             return "trajectory"
         return "other"
 
-    def _build_appendix(self, state: AnalysisState, stats: Dict) -> Dict:
+    def _build_appendix(self, state: AnalysisState, stats: Dict, record_files=None) -> Dict:
         """Build appendix metadata for the report."""
         # Build user interaction records
         cluster_annotations_data = []
@@ -1913,8 +1915,8 @@ Report generation model call failed due to API connection error. Please refer to
                 "direction_selection": direction_selection_data,
             },
             "related_reports": {
-                "exploration_report": "exploration_report.html",
-                "annotation_report": "annotation_context_report.html",
+                "annotation_record": (record_files or {}).get("annotation_record"),
+                "direction_records": (record_files or {}).get("direction_records", []),
             },
             "notebook_filename": f"{state.id}.ipynb",
             "literature_report": LITERATURE_REPORT_FILENAME if state.literature_reports else "",
@@ -2531,12 +2533,12 @@ Report generation model call failed due to API connection error. Please refer to
         if related or notebook or literature_report:
             parts.append('<h3>Related Reports &amp; Downloads</h3>')
             parts.append('<ul>')
-            if related.get("exploration_report"):
-                parts.append(f'<li><a href="{esc(related["exploration_report"])}" download>'
-                             f'Exploration Report</a></li>')
-            if related.get("annotation_report"):
-                parts.append(f'<li><a href="{esc(related["annotation_report"])}" download>'
-                             f'Annotation Context Report</a></li>')
+            if related.get("annotation_record"):
+                parts.append(f'<li><a href="{esc(related["annotation_record"])}" download>'
+                             f'Cell Annotation Record</a></li>')
+            for dr in related.get("direction_records", []):
+                parts.append(f'<li><a href="{esc(dr["filename"])}" download>'
+                             f'Direction Selection Record — {esc(dr["label"])}</a></li>')
             if literature_report:
                 from ..services.report.literature_files import render_literature_download_li
                 parts.append(render_literature_download_li(literature_report))
