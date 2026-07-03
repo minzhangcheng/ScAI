@@ -51,11 +51,19 @@ def test_real_payload_builder_includes_validation_fields():
 
     state = SimpleNamespace(
         annotation_state=AnnotationConfirmationState(
-            tissue="liver", organism="mouse", **_meta()
+            tissue="liver",
+            organism="mouse",
+            proportion_group_labels=["Control", "NASH"],
+            proportion_dimension="group",
+            **_meta(),
         )
     )
     cluster_anns = [
-        ClusterAnnotation(cluster_id="7", cell_type="Technical/Contamination")
+        ClusterAnnotation(
+            cluster_id="7",
+            cell_type="Technical/Contamination",
+            group_proportions={"Control": 12.5, "NASH": 8.0},
+        )
     ]
     payload = AnnotationMixin._build_annotation_confirmation_payload(
         state, cluster_anns, "liver", "mouse", "tsum", "asum", None, None
@@ -67,11 +75,16 @@ def test_real_payload_builder_includes_validation_fields():
         "validation_plan",
         "validation_result",
         "reclustering_recommendations",
+        "proportion_group_labels",
+        "proportion_dimension",
     ):
         assert key in payload, f"payload missing {key}"
     assert payload["validation_summary"] == "Cluster 7 reclassified."
     assert payload["validation_result"]["artifacts"][0]["type"] == "figure"
     assert payload["reclustering_recommendations"][0]["cluster_id"] == "7"
+    assert payload["proportion_group_labels"] == ["Control", "NASH"]
+    assert payload["proportion_dimension"] == "group"
+    assert payload["annotations"][0]["group_proportions"] == {"Control": 12.5, "NASH": 8.0}
 
 
 def test_callback_wires_validation_round_and_payload_builder():
@@ -95,3 +108,18 @@ def test_callback_wires_validation_round_and_payload_builder():
 
     # payload built via the real (tested) helper
     assert "_build_annotation_confirmation_payload" in src
+
+
+def test_callback_wires_group_proportion_computation_before_confirmation_state():
+    import inspect
+
+    from backend.workflow.annotation import AnnotationMixin
+
+    src = inspect.getsource(AnnotationMixin._annotate_clusters_callback)
+
+    assert "compute_cluster_group_proportions" in src
+    assert "_apply_group_proportions" in src
+    assert src.index("compute_cluster_group_proportions") < src.index("AnnotationConfirmationState(")
+    assert "proportion_group_labels=proportion_meta.get(\"group_labels\", [])" in src
+    assert "proportion_dimension=proportion_meta.get(\"dimension\", \"group\")" in src
+    assert src.count("compute_cluster_group_proportions") >= 2

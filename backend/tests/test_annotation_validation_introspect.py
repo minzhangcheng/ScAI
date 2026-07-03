@@ -37,6 +37,44 @@ async def test_introspect_parses_enriched_metadata():
     assert ctx["has_raw"] is True
 
 
+class _ExecSandbox:
+    """Actually executes the introspection code against a real AnnData in a
+    private namespace, so the embedded obs-column keyword lists (_cond/_samp/...)
+    are exercised for real rather than mocked."""
+
+    def __init__(self, adata):
+        self._adata = adata
+
+    async def execute(self, code, save_to_history=True, skip_safety_check=False):
+        import io
+        import contextlib
+        ns = {"adata": self._adata}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exec(code, ns)
+        return SimpleNamespace(success=True, output=buf.getvalue(), error=None)
+
+
+@pytest.mark.asyncio
+async def test_introspect_detects_group_named_condition_column():
+    """A column literally named 'group' must be recognized as a condition-like
+    (experimental grouping) column, not missed. Regression for the proportion
+    feature degrading to overall when the group column is named 'group'."""
+    anndata = pytest.importorskip("anndata")
+    import numpy as np
+    import pandas as pd
+
+    obs = pd.DataFrame({
+        "leiden": pd.Categorical(["0", "1", "0", "1"]),
+        "group": pd.Categorical(["Control", "NASH", "Control", "NASH"]),
+    })
+    adata = anndata.AnnData(X=np.zeros((4, 3), dtype="float32"), obs=obs)
+
+    ctx = await _agent(_ExecSandbox(adata)).introspect_validation_metadata("leiden")
+    assert "group" in ctx["condition_like"]
+    assert ctx["obs_summaries"]["group"]["n_categories"] == 2
+
+
 @pytest.mark.asyncio
 async def test_introspect_empty_on_no_anndata():
     assert await _agent(_FakeSandbox("{}")).introspect_validation_metadata(None) == {}

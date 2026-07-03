@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.31.5 · **Last updated**: 2026-07-03
+**Version**: 0.31.6 · **Last updated**: 2026-07-03
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,15 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.31.x — (2026-07-02)**
+
+- `0.31.6` — Annotation confirmation cell proportion column (2026-07-03):
+  - **New proportion computation helper (`backend/agents/bioinformatics_agent.py`)**: `compute_cluster_group_proportions()` computes per-cluster cell proportions per experimental group via sandbox `pd.crosstab`. `_select_proportion_grouping()` picks the `condition_like` column that best maps to `state.treatment_groups` (case/whitespace-insensitive), falling back to overall ("整体") when no column matches. `_ordered_proportion_labels()` sorts labels by treatment group `order` then alphabetically. `_normalize_group_label()`, `_matching_treatment_labels()` extracted for reusable matching logic.
+  - **New schema fields (`backend/models/schemas.py`)**: `ClusterAnnotation.group_proportions: Dict[str, float]` stores per-cluster proportion values. `AnnotationConfirmationState.proportion_group_labels` and `.proportion_dimension` carry the column-level metadata.
+  - **Workflow integration (`backend/workflow/annotation.py`)**: `_annotate_clusters_callback()` calls `compute_cluster_group_proportions()` before building `AnnotationConfirmationState`, both in the initial annotation pass and the supplementary round. New `_apply_group_proportions()` helper maps proportion data onto `ClusterAnnotation` objects. `_build_annotation_confirmation_payload()` includes `proportion_group_labels` and `proportion_dimension` for frontend consumption.
+  - **Frontend proportion column (`frontend/src/components/AnnotationConfirmationDialog.tsx`)**: New proportion table column with dynamic header ("Cell Proportion (Control/NASH)", "细胞比例", etc.) based on `proportionDimension` and labels. `renderProportions()` displays per-cluster values as `"12.5% / 8.0%"` or `"—"` when unavailable. `annotationKey` dependency includes proportion labels/dimension so the table refreshes on proportion data changes.
+  - **Frontend prop plumbing (`frontend/src/components/AnalysisPanel.tsx`)**: Passes `proportion_group_labels` and `proportion_dimension` from `AnnotationData` to the dialog.
+  - **Spec update (`docs/superpowers/specs/2026-07-03-annotation-cell-proportion-column-design.md`)**: Tightened selection rules — partial condition-like matches now fall back to overall instead of using partial labels; `pd.crosstab` result columns not in pre-sorted labels are appended alphabetically to avoid silent drops when experimental groups >5.
+  - **New/updated test files (6 files)**: `test_annotation_validation_schema.py` (5 tests: proportion defaults, mapping, preservation), `test_annotation_validation_introspect.py` (1 test: `group`-named condition column detection), `test_annotation_validation_callback_behavior.py` (1 test: callback wires proportion computation before confirmation state), `AnnotationConfirmationDialog.validation.test.tsx` (4 tests: proportion header/values, overall dimension, empty labels, refresh on proportion change).
 
 - `0.31.5` — Unauthenticated health endpoint, login/register input trimming (2026-07-03):
   - **New `/api/health` endpoint (`backend/routes/root.py`)**: Unauthenticated liveness probe returning `{"status": "ok", "version": VERSION}`. Replaces `/api/config/status` for Docker HEALTHCHECK and entrypoint readiness — unlike the config endpoint, `/api/health` stays public after admin setup.

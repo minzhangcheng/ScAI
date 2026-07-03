@@ -1696,7 +1696,7 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
             f"_hint = {hint_repr}\n"
             "_qc = ('n_genes','n_counts','total_counts','pct_counts','percent','mito','ribo','hb',"
             "'hemoglobin','doublet','scrublet','ambient','cycle','phase','s_score','g2m')\n"
-            "_cond = ('condition','treatment','genotype','disease','status')\n"
+            "_cond = ('condition','treatment','genotype','disease','status','group','arm','cohort')\n"
             "_samp = ('sample','donor','patient','subject')\n"
             "_batch = ('batch','lane','run','library')\n"
             "_out = {}\n"
@@ -1743,6 +1743,152 @@ NEVER filter cells between sc.tl.pca() and hm.run_harmony() — this causes the 
         except Exception as e:
             logger.warning(f"[{getattr(self, 'session_id', '?')}] validation metadata introspection failed: {e}")
             return {}
+
+    @staticmethod
+    def _normalize_group_label(value: Any) -> str:
+        return "".join(str(value).lower().split())
+
+    @classmethod
+    def _matching_treatment_labels(cls, obs_labels: List[str], treatment_groups: Optional[List[Any]]) -> List[str]:
+        labels = [str(label) for label in obs_labels]
+        present = {cls._normalize_group_label(label): label for label in labels}
+        matched: List[str] = []
+        for group in sorted(treatment_groups or [], key=lambda g: getattr(g, "order", 0)):
+            group_name = getattr(group, "name", "")
+            key = cls._normalize_group_label(group_name)
+            if key in present and present[key] not in matched:
+                matched.append(present[key])
+        return matched
+
+    @classmethod
+    def _ordered_proportion_labels(
+        cls,
+        obs_labels: List[str],
+        treatment_groups: Optional[List[Any]],
+    ) -> List[str]:
+        labels = [str(label) for label in obs_labels]
+        matched = cls._matching_treatment_labels(labels, treatment_groups)
+
+        if matched:
+            remaining = sorted(label for label in labels if label not in matched)
+            return matched + remaining
+        return sorted(labels)
+
+    @classmethod
+    def _select_proportion_grouping(
+        cls,
+        meta: Dict[str, Any],
+        treatment_groups: Optional[List[Any]],
+    ) -> Dict[str, Any]:
+        obs_summaries = meta.get("obs_summaries") or {}
+
+        best = None
+        best_count = 0
+        for col in meta.get("condition_like") or []:
+            summary = obs_summaries.get(col) or {}
+            labels = [str(label) for label in summary.get("top") or []]
+            n_categories = int(summary.get("n_categories") or len(labels))
+            if n_categories <= 1 or not labels:
+                continue
+            matched = cls._matching_treatment_labels(labels, treatment_groups)
+            # Require the column to actually be the experimental grouping: every
+            # visible category must map to a treatment group and the total category
+            # count must be compatible with the number of groups. A partial match
+            # (e.g. ["case", "Control"]) is disease/status metadata, not the
+            # user-defined groups, so it falls back to overall per the spec.
+            fully_mapped = (
+                len(matched) == len(labels)
+                and n_categories <= len(treatment_groups or [])
+            )
+            if fully_mapped and len(matched) > best_count:
+                best_count = len(matched)
+                best = {
+                    "column": col,
+                    "dimension": "group",
+                    "labels": cls._ordered_proportion_labels(labels, treatment_groups),
+                }
+
+        if best is not None:
+            return best
+
+        return {
+            "column": None,
+            "dimension": "overall",
+            "labels": ["整体"],
+        }
+
+    @staticmethod
+    def _empty_cluster_group_proportions() -> Dict[str, Any]:
+        return {
+            "group_labels": [],
+            "proportions": {},
+            "column_used": None,
+            "dimension": "group",
+        }
+
+    async def compute_cluster_group_proportions(
+        self,
+        state: AnalysisState,
+        cluster_key_hint: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self.sandbox:
+            return self._empty_cluster_group_proportions()
+
+        try:
+            meta = await self.introspect_validation_metadata(cluster_key_hint)
+            var_name = meta.get("var")
+            cluster_key = meta.get("cluster_key")
+            if not var_name or not cluster_key:
+                return self._empty_cluster_group_proportions()
+
+            grouping = self._select_proportion_grouping(meta, getattr(state, "treatment_groups", []))
+            group_col = grouping["column"]
+            dimension = grouping["dimension"]
+            ordered_labels = grouping["labels"]
+
+            code = (
+                "import json as _json\n"
+                "import pandas as _pd\n"
+                f"_a = {var_name}\n"
+                f"_cluster_key = {cluster_key!r}\n"
+                f"_group_col = {group_col!r}\n"
+                f"_dimension = {dimension!r}\n"
+                f"_ordered_labels = {ordered_labels!r}\n"
+                "_obs = _a.obs.copy()\n"
+                "_clusters = _obs[_cluster_key].astype(str)\n"
+                "if _group_col is not None and _group_col in _obs.columns:\n"
+                "    _groups = _obs[_group_col].astype(str)\n"
+                "    _tab = _pd.crosstab(_clusters, _groups, normalize='columns') * 100\n"
+                "    _tab = _tab.round(1)\n"
+                "    _present = [str(_c) for _c in _tab.columns]\n"
+                "    _labels = [_l for _l in map(str, _ordered_labels) if _l in _present]\n"
+                "    _labels += sorted(_c for _c in _present if _c not in _labels)\n"
+                "    _props = {}\n"
+                "    for _cid, _row in _tab.iterrows():\n"
+                "        _props[str(_cid)] = {str(_label): float(_row.get(_label, 0.0)) for _label in _labels}\n"
+                "    _out = {'group_labels': _labels, 'proportions': _props, 'column_used': _group_col, 'dimension': _dimension}\n"
+                "else:\n"
+                "    _vc = _clusters.value_counts(normalize=True).sort_index() * 100\n"
+                "    _props = {str(_cid): {'整体': float(round(_pct, 1))} for _cid, _pct in _vc.items()}\n"
+                "    _out = {'group_labels': ['整体'], 'proportions': _props, 'column_used': None, 'dimension': 'overall'}\n"
+                "print(_json.dumps(_out, ensure_ascii=False))\n"
+            )
+
+            result = await self.sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+            out = (getattr(result, "output", "") or "").strip()
+            line = next((ln for ln in out.splitlines()[::-1] if ln.strip().startswith("{")), None)
+            parsed = json.loads(line) if line else {}
+            if not isinstance(parsed, dict):
+                return self._empty_cluster_group_proportions()
+            return {
+                "group_labels": list(parsed.get("group_labels") or []),
+                "proportions": dict(parsed.get("proportions") or {}),
+                "column_used": parsed.get("column_used"),
+                "dimension": parsed.get("dimension") or "group",
+            }
+        except Exception as e:
+            logger.warning(f"[{getattr(self, 'session_id', '?')}] cluster group proportion calculation failed: {e}")
+            return self._empty_cluster_group_proportions()
 
     async def capture_main_object_signature(self, var_name: str, cluster_key: Optional[str]) -> Dict[str, Any]:
         """Capture a CONTENT fingerprint of the MAIN AnnData for tamper detection.

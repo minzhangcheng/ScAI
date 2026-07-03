@@ -406,6 +406,7 @@ class ClusterAnnotation(BaseModel):
     confidence: str = "low"  # "high" / "medium" / "low"
     evidence: str = ""
     n_cells: int = 0  # Number of cells in this cluster
+    group_proportions: Dict[str, float] = Field(default_factory=dict)
     alternative_cell_types: List[str] = Field(default_factory=list)  # Other possible cell types
     low_confidence_reason: str = ""  # Why confidence is low/medium
     user_confirmed: bool = False
@@ -424,6 +425,8 @@ class AnnotationConfirmationState(BaseModel):
     analysis_summary: str = ""
     pending: bool = False
     confirmed: bool = False
+    proportion_group_labels: List[str] = Field(default_factory=list)
+    proportion_dimension: str = "group"
     # Annotation validation round (all optional for backward/snapshot compatibility)
     validation_attempt_id: Optional[str] = None
     validation_status: Optional[str] = None  # not_run | completed | failed | partial | skipped

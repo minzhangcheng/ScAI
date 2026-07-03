@@ -94,6 +94,7 @@ class AnnotationMixin:
                 key_markers=info.get("key_markers", []),
                 confidence=info.get("confidence", "low"),
                 evidence=info.get("evidence", ""),
+                group_proportions=info.get("group_proportions", {}) or {},
                 alternative_cell_types=info.get("alternative_cell_types", []),
                 low_confidence_reason=info.get("low_confidence_reason", ""),
                 requires_reclustering=info.get("requires_reclustering", False),
@@ -103,6 +104,15 @@ class AnnotationMixin:
             for cid, info in annotations.items()
             if isinstance(info, dict)
         ]
+
+    @staticmethod
+    def _apply_group_proportions(
+        cluster_anns: List[ClusterAnnotation],
+        proportion_meta: Optional[Dict[str, Any]],
+    ) -> None:
+        proportions = (proportion_meta or {}).get("proportions") or {}
+        for ca in cluster_anns:
+            ca.group_proportions = dict(proportions.get(str(ca.cluster_id), {}) or {})
 
     @staticmethod
     def _annotations_from_cluster_annotations(cluster_annotations) -> Dict[str, Any]:
@@ -116,6 +126,7 @@ class AnnotationMixin:
                 "key_markers": list(ca.key_markers),
                 "confidence": ca.confidence,
                 "evidence": ca.evidence,
+                "group_proportions": dict(ca.group_proportions or {}),
                 "alternative_cell_types": list(ca.alternative_cell_types),
                 "low_confidence_reason": ca.low_confidence_reason,
                 "requires_reclustering": ca.requires_reclustering,
@@ -373,7 +384,14 @@ class AnnotationMixin:
             except Exception as e:
                 logger.warning(f"[{self.session_id}] annotation validation round failed (non-fatal): {e}")
 
+            try:
+                proportion_meta = await self.bioinformatics_agent.compute_cluster_group_proportions(state)
+            except Exception as e:
+                logger.warning(f"[{self.session_id}] cluster group proportion calculation failed (non-fatal): {e}")
+                proportion_meta = {"group_labels": [], "proportions": {}, "column_used": None, "dimension": "group"}
+
             cluster_anns = self._build_cluster_annotations(annotations)
+            self._apply_group_proportions(cluster_anns, proportion_meta)
 
             if state.annotation_state and state.annotation_state.confirmed:
                 logger.info(f"[{self.session_id}] Annotation already confirmed, applying overrides directly")
@@ -424,6 +442,8 @@ class AnnotationMixin:
                 tissue_summary=result.get("tissue_summary", ""),
                 analysis_summary=analysis_summary,
                 pending=True,
+                proportion_group_labels=proportion_meta.get("group_labels", []),
+                proportion_dimension=proportion_meta.get("dimension", "group"),
                 **validation_meta,
             )
             state.annotation_state = ann_state
@@ -497,6 +517,13 @@ class AnnotationMixin:
                         logger.warning(f"[{self.session_id}] post-supplementary re-validation failed: {e}")
 
                     try:
+                        proportion_meta = await self.bioinformatics_agent.compute_cluster_group_proportions(state)
+                    except Exception as e:
+                        logger.warning(f"[{self.session_id}] post-supplementary proportion calculation failed (non-fatal): {e}")
+                        proportion_meta = {"group_labels": [], "proportions": {}, "column_used": None, "dimension": "group"}
+                    self._apply_group_proportions(cluster_anns, proportion_meta)
+
+                    try:
                         html_path = generate_annotation_context_report_html(state, self._current_graph_state, cluster_anns)
                         state.annotation_report_html_path = html_path
                         report_html_url = f"/api/session/{self.session_id}/annotation-report/html"
@@ -512,6 +539,8 @@ class AnnotationMixin:
                         tissue_summary=result.get("tissue_summary", ""),
                         analysis_summary=analysis_summary,
                         pending=True,
+                        proportion_group_labels=proportion_meta.get("group_labels", []),
+                        proportion_dimension=proportion_meta.get("dimension", "group"),
                         **validation_meta,
                     )
                     state.annotation_state = ann_state
@@ -582,8 +611,8 @@ class AnnotationMixin:
         tissue_summary: str, analysis_summary: str,
         report_html_url: Optional[str], detailed_report_url: Optional[str],
     ) -> Dict[str, Any]:
-        """Build the annotation_confirmation payload, including the six optional
-        validation fields read from the (already-built) pending annotation state."""
+        """Build the annotation_confirmation payload, including optional
+        validation and proportion fields read from the pending annotation state."""
         vstate = state.annotation_state
         return {
             "annotations": [a.model_dump(mode="json") for a in cluster_anns],
@@ -593,6 +622,8 @@ class AnnotationMixin:
             "analysis_summary": analysis_summary,
             "report_html_url": report_html_url,
             "detailed_report_url": detailed_report_url,
+            "proportion_group_labels": getattr(vstate, "proportion_group_labels", []),
+            "proportion_dimension": getattr(vstate, "proportion_dimension", "group"),
             "validation_status": getattr(vstate, "validation_status", None),
             "validation_summary": getattr(vstate, "validation_summary", None),
             "validation_text_summary": getattr(vstate, "validation_text_summary", None),

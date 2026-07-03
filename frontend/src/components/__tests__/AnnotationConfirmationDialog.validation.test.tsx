@@ -50,4 +50,73 @@ describe('AnnotationConfirmationDialog validation', () => {
     expect(screen.getByText(/Technical\/Contamination/i)).toBeInTheDocument();
     expect(screen.queryByText(/Hepatic neurons/i)).not.toBeInTheDocument();
   });
+
+  it('renders group proportion header and values in label order', () => {
+    const props = {
+      ...baseProps,
+      annotations: [{
+        ...baseProps.annotations[0],
+        group_proportions: { NASH: 8, Control: 12.5 },
+      }],
+      proportionGroupLabels: ['Control', 'NASH'],
+      proportionDimension: 'group',
+    };
+    render(<AnnotationConfirmationDialog {...props} />);
+
+    expect(screen.getByText('Cell Proportion (Control/NASH)')).toBeInTheDocument();
+    expect(screen.getByText('12.5% / 8.0%')).toBeInTheDocument();
+  });
+
+  it('renders missing proportion values as dash and handles overall dimension', () => {
+    const props = {
+      ...baseProps,
+      annotations: [{
+        ...baseProps.annotations[0],
+        group_proportions: {},
+      }],
+      proportionGroupLabels: ['整体'],
+      proportionDimension: 'overall',
+    };
+    render(<AnnotationConfirmationDialog {...props} />);
+
+    expect(screen.getByText('Cell Proportion (Overall)')).toBeInTheDocument();
+    expect(screen.getByText('—')).toBeInTheDocument();
+  });
+
+  it('renders proportion column without empty parentheses when labels are unavailable', () => {
+    const props = {
+      ...baseProps,
+      annotations: [{
+        ...baseProps.annotations[0],
+        group_proportions: {},
+      }],
+      proportionGroupLabels: [],
+      proportionDimension: 'group',
+    };
+    render(<AnnotationConfirmationDialog {...props} />);
+
+    expect(screen.getByText('Cell Proportion')).toBeInTheDocument();
+    expect(screen.queryByText('Cell Proportion ()')).not.toBeInTheDocument();
+  });
+
+  it('refreshes the table when only group proportions change', () => {
+    const a0 = {
+      ...baseProps.annotations[0],
+      cell_type: 'Hepatocyte',
+      group_proportions: { Control: 12.5, NASH: 8 },
+    };
+    const props1: any = {
+      ...baseProps,
+      annotations: [a0],
+      proportionGroupLabels: ['Control', 'NASH'],
+      proportionDimension: 'group',
+    };
+    const { rerender } = render(<AnnotationConfirmationDialog {...props1} />);
+    expect(screen.getByText('12.5% / 8.0%')).toBeInTheDocument();
+
+    const a1 = { ...a0, group_proportions: { Control: 20, NASH: 5 } };
+    rerender(<AnnotationConfirmationDialog {...{ ...props1, annotations: [a1] }} />);
+    expect(screen.getByText('20.0% / 5.0%')).toBeInTheDocument();
+    expect(screen.queryByText('12.5% / 8.0%')).not.toBeInTheDocument();
+  });
 });

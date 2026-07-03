@@ -58,6 +58,8 @@ interface AnnotationData {
     cluster_id: string; requires_reclustering: boolean;
     reclustering_reason: string; suggested_reclustering_scope?: string | null;
   }>;
+  proportion_group_labels?: string[]
+  proportion_dimension?: string
 }
 
 // Content shape for plan_review HITL message from backend
@@ -1371,6 +1373,8 @@ export function AnalysisPanel() {
           validationTextSummary={annotationData.validation_text_summary}
           validationResult={annotationData.validation_result}
           reclusteringRecommendations={annotationData.reclustering_recommendations}
+          proportionGroupLabels={annotationData.proportion_group_labels || []}
+          proportionDimension={annotationData.proportion_dimension || 'group'}
           language={language}
           countdownSeconds={roundWaitSeconds}
           onConfirm={handleConfirmAnnotations}

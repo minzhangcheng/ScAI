@@ -24,6 +24,7 @@ export interface ClusterAnnotation {
   low_confidence_reason: string
   user_confirmed: boolean
   user_override: string | null
+  group_proportions?: Record<string, number>
   requires_reclustering?: boolean;
   reclustering_reason?: string;
   suggested_reclustering_scope?: string | null;
@@ -44,6 +45,8 @@ interface AnnotationConfirmationDialogProps {
     cluster_id: string; requires_reclustering: boolean;
     reclustering_reason: string; suggested_reclustering_scope?: string | null;
   }>;
+  proportionGroupLabels?: string[]
+  proportionDimension?: string
   language: Language
   countdownSeconds: number  // countdown for high-confidence auto-confirm
   onConfirm: (annotations: Array<{ cluster_id: string; user_override?: string; user_confirmed: boolean }>) => Promise<void>
@@ -63,6 +66,8 @@ export function AnnotationConfirmationDialog({
   validationTextSummary,
   validationResult,
   reclusteringRecommendations,
+  proportionGroupLabels = [],
+  proportionDimension = 'group',
   language,
   countdownSeconds,
   onConfirm,
@@ -81,11 +86,16 @@ export function AnnotationConfirmationDialog({
 
   // Update annotations only when genuinely new data arrives (e.g. after supplementary analysis),
   // not on every parent re-render which would discard user edits
-  const annotationKey = JSON.stringify(initialAnnotations.map(a => [
-    a.cluster_id, a.confidence, a.cell_type, a.user_override ?? null,
-    a.requires_reclustering ?? false, a.reclustering_reason ?? '',
-    a.suggested_reclustering_scope ?? null,
-  ]))
+  const annotationKey = JSON.stringify({
+    labels: proportionGroupLabels,
+    dimension: proportionDimension,
+    annotations: initialAnnotations.map(a => [
+      a.cluster_id, a.confidence, a.cell_type, a.user_override ?? null,
+      a.group_proportions ?? {},
+      a.requires_reclustering ?? false, a.reclustering_reason ?? '',
+      a.suggested_reclustering_scope ?? null,
+    ]),
+  })
   useEffect(() => {
     setAnnotations(initialAnnotations)
   }, [annotationKey])
@@ -199,9 +209,46 @@ export function AnnotationConfirmationDialog({
     (ann.alternative_cell_types && ann.alternative_cell_types.length > 0) ||
     (ann.low_confidence_reason && ann.low_confidence_reason.length > 0)
 
+  const displayProportionLabels = proportionGroupLabels.map(label =>
+    proportionDimension === 'overall' && label === '整体'
+      ? (language === 'zh' ? '整体' : 'Overall')
+      : label
+  )
+
+  const proportionHeaderPrefix = () => {
+    if (language === 'zh') {
+      switch (proportionDimension) {
+        case 'sample': return '样本比例'
+        case 'batch': return '批次比例'
+        case 'overall': return '细胞比例'
+        default: return '细胞比例'
+      }
+    }
+    switch (proportionDimension) {
+      case 'sample': return 'Sample Proportion'
+      case 'batch': return 'Batch Proportion'
+      default: return 'Cell Proportion'
+    }
+  }
+
+  const proportionHeader = () => {
+    const prefix = proportionHeaderPrefix()
+    if (displayProportionLabels.length === 0) return prefix
+    return `${prefix} (${displayProportionLabels.join('/')})`
+  }
+
+  const renderProportions = (ann: ClusterAnnotation) => {
+    if (!proportionGroupLabels.length) return '—'
+    const values = proportionGroupLabels.map(label => {
+      const value = ann.group_proportions?.[label]
+      return typeof value === 'number' ? `${value.toFixed(1)}%` : '—'
+    })
+    return values.join(' / ')
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-modal max-w-[90vw] w-[1000px] mx-4 max-h-[85vh] flex flex-col animate-scale-in">
+      <div className="bg-white rounded-2xl shadow-modal max-w-[95vw] w-[1120px] mx-4 max-h-[85vh] flex flex-col animate-scale-in">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
           <div className="flex items-center gap-4">
@@ -311,6 +358,9 @@ export function AnnotationConfirmationDialog({
                 <th className="py-2 pr-3 w-24">
                   {language === 'zh' ? '置信度' : 'Confidence'}
                 </th>
+                <th className="py-2 pr-3 w-44">
+                  {proportionHeader()}
+                </th>
                 <th className="py-2 pr-3">
                   {language === 'zh' ? '标记基因' : 'Key Markers'}
                 </th>
@@ -398,6 +448,9 @@ export function AnnotationConfirmationDialog({
                       {confidenceIcon(ann.confidence)}
                       {ann.confidence}
                     </span>
+                  </td>
+                  <td className="py-3 pr-3 text-slate-600 text-xs whitespace-nowrap">
+                    {renderProportions(ann)}
                   </td>
                   <td className="py-3 pr-3 text-slate-600 text-xs">
                     {ann.key_markers.slice(0, 10).join(', ')}
