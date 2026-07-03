@@ -48,9 +48,10 @@ class TaskStatus(str, Enum):
     GENERATING_REPORT = "generating_report"
 
 class AnalysisPhase(str, Enum):
-    """Two-phase workflow: exploration (Round 1) then innovation (Round 2+)"""
+    """Multi-phase workflow: exploration (Round 1), innovation (Round 2+), integration (cross-direction round)"""
     EXPLORATION = "exploration"
     INNOVATION = "innovation"
+    INTEGRATION = "integration"
 
 SnapshotPhase = Literal[
     "pre_annotation", "post_annotation", "pre_direction", "post_direction",
@@ -58,9 +59,10 @@ SnapshotPhase = Literal[
     "pre_execution_stage1", "pre_execution_stage2", "pre_execution_full",
     "pre_major_revision", "post_report",
     "manual",
+    "pre_integration_gate",
 ]
 
-AnalysisPhaseType = Literal["exploration", "innovation"]
+AnalysisPhaseType = Literal["exploration", "innovation", "integration"]
 PlanStage = Literal["full", "stage1", "stage2"]
 PlanStatus = Literal["draft", "pi_reviewing", "user_reviewing", "approved", "rejected", "executing", "revised"]
 
@@ -798,6 +800,14 @@ class AnalysisState(BaseModel):
     directions_queue: List[Dict[str, str]] = Field(default_factory=list)
     # Remaining directions to process (popped one by one)
     multi_direction_correlation: Optional[str] = None
+    integration_cycle: int = 0
+    max_integration_cycles: int = 3
+    pending_integration: bool = False
+    active_direction_batch: List[Dict[str, str]] = Field(default_factory=list)
+    last_integrated_round: int = 0
+    integration_gate_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    integration_reports: List[str] = Field(default_factory=list)
+    final_report_requested: bool = False
     # Correlation analysis result for multi-direction mode
     exploration_report_html_path: Optional[str] = None
     # Path to exploration report HTML file

@@ -1626,6 +1626,102 @@ Return a JSON object with a single key "candidates" containing the list of candi
             }]
         return candidates
 
+    async def generate_integration_direction_candidates(
+        self,
+        state: "AnalysisState",
+        cumulative_rounds: List["RoundResult"],
+        integration_report: str,
+        new_literature: str,
+    ) -> List[Dict[str, Any]]:
+        """NEW direction candidates from the CUMULATIVE integration of all
+        innovation rounds (round 2..current). Excludes already-chosen directions
+        (dedup). Output field schema matches generate_raw_direction_candidates."""
+        self.reset_history()
+        already_chosen = [d.get("direction", "") for d in (state.user_chosen_directions or [])]
+        rounds_block = []
+        for rr in cumulative_rounds:
+            rounds_block.append(
+                f"### Round {rr.round_number} — direction: {rr.direction or 'N/A'}\n"
+                f"- Bioinformatics: {json.dumps(rr.bioinformatics_findings[:8], ensure_ascii=False)}\n"
+                f"- Pathology: {json.dumps(rr.pathology_findings[:3], ensure_ascii=False)}\n"
+                f"- Biochemistry: {json.dumps(rr.biochemistry_findings[:3], ensure_ascii=False)}\n"
+                f"- Literature: {json.dumps(rr.literature_findings[:3], ensure_ascii=False)}\n"
+                f"- Summary: {(rr.pi_summary or '')[:600]}"
+            )
+        prompt = f"""Based on the CUMULATIVE integration of ALL innovation rounds so far, propose 3-5 NEW research direction candidates that go BEYOND what has already been investigated.
+
+## Project Context
+- Name: {state.name}
+- Research Objective: {state.initial_instruction}
+- Species: {state.species or "Not specified"}
+{state.build_experimental_design_summary()}
+
+## Cross-Direction Integration Analysis
+{integration_report[:4000]}
+
+## All Innovation Rounds (cumulative, round 2..current)
+{chr(10).join(rounds_block)}
+
+## Newly Retrieved Literature (integration-facing search)
+{new_literature[:3000]}
+
+## Already-Investigated Directions (DO NOT repeat or trivially rephrase)
+{json.dumps(already_chosen, ensure_ascii=False)}
+
+Only propose directions genuinely NEW relative to the already-investigated list and grounded in concrete cumulative observations. If nothing sufficiently novel and evidence-supported exists, return an empty list [].
+
+For each candidate, provide ALL fields:
+- direction_id (like "int_001"), direction, core_observation, main_hypothesis,
+  alternative_hypotheses (>=2), artifact_risks, rationale, supporting_data,
+  key_genes, key_cell_types, key_pathways, key_uncertainties,
+  suggested_literature_topics, suggested_validation_analysis,
+  suggested_wet_lab_validation, decision_criteria,
+  biology_expectedness (expected|partially_expected|unexpected|unknown),
+  functional_impact_hypothesis, prerequisite_dependencies (list of direction_ids),
+  organism ({state.species or "Not specified"}), tissue, experimental_context.
+
+Return a JSON array. Return [] if no sufficiently novel direction exists."""
+        response = await self.chat(prompt, temperature=0.3)
+        data = self._safe_parse_json(response, default=[])
+        return data if isinstance(data, list) else []
+
+    async def score_integration_directions_with_evidence(
+        self,
+        state: "AnalysisState",
+        raw_candidates: List[Dict[str, Any]],
+        literature_evidence: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Score integration-round candidates with literature novelty evidence.
+        Returns a scored candidate LIST (not an ExplorationReport). literature_evidence
+        is the list returned by LiteratureAgent.evaluate_direction_novelty_candidates."""
+        if not raw_candidates:
+            return []
+        self.reset_history()
+        prompt = f"""You are the PI scoring NEW research direction candidates that emerged from cross-direction integration.
+
+## Project Context
+- Name: {state.name}
+- Research Objective: {state.initial_instruction}
+
+## Raw Direction Candidates
+{json.dumps(raw_candidates, ensure_ascii=False)[:8000]}
+
+## Literature Novelty Evidence (per candidate)
+{json.dumps(literature_evidence, ensure_ascii=False)[:6000]}
+
+For each candidate, add:
+- novelty_score: 0-10 (higher = more novel vs existing literature)
+- evidence_strength: "strong" | "moderate" | "weak"
+- confidence: "high" | "medium" | "low"
+- report_recommendation: "headline" | "secondary" | "future_direction" | "do_not_emphasize"
+- priority_rank: integer (1 = highest)
+Keep every original field. Drop candidates that are NOT novel (already established in literature) or lack observed supporting data.
+
+Return the surviving candidates as a JSON array, sorted by priority_rank ascending."""
+        response = await self.chat(prompt, temperature=0.3)
+        data = self._safe_parse_json(response, default=[])
+        return data if isinstance(data, list) else []
+
     async def score_directions_with_evidence(
         self,
         state: AnalysisState,
@@ -3336,6 +3432,20 @@ Current research direction: {current_direction or "N/A"}
                 + "\n".join(mech_lines)
             )
 
+        # Cross-direction integration analyses (spec §13): feed cumulative
+        # integration insights into the final report so they are not lost.
+        integration_block = ""
+        if getattr(state, "integration_reports", None):
+            int_parts = []
+            for i, report in enumerate(state.integration_reports, 1):
+                int_parts.append(f"### Integration Cycle {i}\n{report[:2000]}")
+            integration_block = (
+                "\n## Cross-Direction Integration Analyses\n"
+                "The following cross-direction integration analyses were performed "
+                "between direction batches. Incorporate their insights into the report.\n\n"
+                + "\n\n".join(int_parts)
+            )
+
         prompt = f"""
 Based on all the analysis results below, write a complete analysis report:
 
@@ -3345,7 +3455,7 @@ Research Objective: {state.initial_instruction}
 
 ## Results from All Rounds
 {''.join(rounds_summary)}
-{cross_modal_block}{mechanism_block}
+{cross_modal_block}{mechanism_block}{integration_block}
 
 Please write a well-structured analysis report including:
 1. Research Overview
@@ -4423,6 +4533,19 @@ an earlier version may win.
                 + "\n".join(mech_lines)
             )
 
+        # Cross-direction integration analyses (spec §13)
+        integration_block = ""
+        if getattr(state, "integration_reports", None):
+            int_parts = []
+            for i, report in enumerate(state.integration_reports, 1):
+                int_parts.append(f"### Integration Cycle {i}\n{report[:2000]}")
+            integration_block = (
+                "**Cross-Direction Integration Analyses:**\n"
+                "The following cross-direction integration analyses were performed "
+                "between direction batches. Incorporate their insights.\n\n"
+                + "\n\n".join(int_parts)
+            )
+
         prompt = f"""## Generate Integrated Research Report
 
 **Project Information:**
@@ -4440,6 +4563,8 @@ an earlier version may win.
 {''.join(rounds_summary)}
 
 {mech_block}
+
+{integration_block}
 
 **Task:**
 Generate a comprehensive research report in Markdown format suitable for publication. The report should:

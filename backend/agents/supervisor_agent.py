@@ -1602,6 +1602,14 @@ Respond in JSON:
                     )
         mechanism_text = "\n".join(mech_parts) or "None"
 
+        # Cross-direction integration analyses (spec §13)
+        integration_text = "None"
+        if getattr(state, "integration_reports", None):
+            int_parts = []
+            for i, report in enumerate(state.integration_reports, 1):
+                int_parts.append(f"### Integration Cycle {i}\n{report[:2000]}")
+            integration_text = "\n".join(int_parts)
+
         # Build dynamic section template
         base_sections = [
             "[abstract] - Research summary (background, methods, key findings, conclusions)",
@@ -1669,6 +1677,9 @@ Respond in JSON:
 
 ## Data-Driven Candidate Mechanisms (candidates, NOT confirmed)
 {mechanism_text}
+
+## Cross-Direction Integration Analyses
+{integration_text}
 
 ## Available Figures
 {figure_list}

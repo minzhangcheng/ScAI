@@ -190,11 +190,14 @@ def _should_force_next_round(analysis_state: AnalysisState) -> bool:
     """Return True when workflow must honor pending work instead of stopping on convergence.
 
     Priority order:
-    1. Real human text input (not synthetic continue markers)
-    2. Newly uploaded files
-    3. Remaining multi-direction queue entries, except for the stale final
+    1. Pending integration round
+    2. Real human text input (not synthetic continue markers)
+    3. Newly uploaded files
+    4. Remaining multi-direction queue entries, except for the stale final
        queue entry left after completed multi-direction analysis
     """
+    if getattr(analysis_state, "pending_integration", False):
+        return True
     has_real_text = bool(
         analysis_state.pending_human_input
         and analysis_state.pending_human_input.strip() not in ("", CONTINUE_SIGNAL, PI_DECIDE_SIGNAL)
@@ -214,41 +217,11 @@ def _consume_signal_then_clear(event: asyncio.Event) -> None:
 
 
 def _multi_direction_analysis_completed(analysis_state) -> bool:
-    """Return True once every selected innovation direction has completed.
+    """True once the active direction batch is fully covered (spec §14)."""
+    from .direction_coverage import direction_coverage_status_for_batch
+    batch = analysis_state.active_direction_batch or []
+    return bool(batch) and direction_coverage_status_for_batch(analysis_state, batch).complete
 
-    P1-1 peek-commit can leave the final direction in `directions_queue` on the
-    terminal round because there is no next `_initialize_round()` call to pop it.
-    Completion is therefore measured from persisted round results plus the
-    presence of the cross-direction correlation output, not from an empty queue.
-    """
-    chosen = analysis_state.user_chosen_directions
-    if len(chosen) <= 1:
-        return False
-    if analysis_state.analysis_phase != AnalysisPhase.INNOVATION:
-        return False
-    if analysis_state.multi_direction_correlation is None:
-        return False
-    target_lineage = current_lineage_id(analysis_state)
-    return direction_coverage_status(analysis_state, lineage_id=target_lineage).complete
-
-
-def _should_run_direction_correlation(analysis_state) -> bool:
-    """Whether to run cross-direction correlation analysis.
-
-    Criterion: coverage.complete from direction_coverage_status, which is
-    lineage-aware and checks substantive findings + pi_summary per direction,
-    not a raw round count. Under P1-1 peek-commit the final direction's queue
-    entry is only popped on the next round's init, but the terminal round has
-    no next init, so the old empty-queue criterion would silently skip this.
-    """
-    target_lineage = current_lineage_id(analysis_state)
-    coverage = direction_coverage_status(analysis_state, lineage_id=target_lineage)
-    return (
-        analysis_state.analysis_phase == AnalysisPhase.INNOVATION
-        and len(analysis_state.user_chosen_directions) > 1
-        and coverage.complete
-        and analysis_state.multi_direction_correlation is None
-    )
 
 
 def _should_build_innovation_segment(analysis_state, round_result) -> bool:
@@ -612,31 +585,21 @@ class SynthesisMixin:
             branch_label=analysis_state.restore_branch_label,
             restored_from_snapshot_id=analysis_state.last_restored_snapshot_id,
         )
+        from .direction_coverage import direction_coverage_status_for_batch
+        if (
+            analysis_state.analysis_phase == AnalysisPhase.INNOVATION
+            and analysis_state.active_direction_batch
+            and direction_coverage_status_for_batch(
+                analysis_state, analysis_state.active_direction_batch
+            ).complete
+        ):
+            analysis_state.pending_integration = True
+            logger.info(f"[{self.session_id}] Direction batch complete -> pending_integration=True")
         # Round is now canonical in round_results; clear the per-round cache
         # so a later snapshot-restored round can't replay stale agent outputs.
         analysis_state.current_round_cache = None
 
-        # Multi-direction correlation analysis: trigger once all chosen
-        # directions have completed their innovation rounds. NOTE: do NOT gate
-        # on `directions_queue` being empty — P1-1 peek-commit leaves the final
-        # direction in the queue at the terminal round (no next-round init to
-        # pop it), which silently suppressed this analysis. See
-        # _should_run_direction_correlation.
-        if _should_run_direction_correlation(analysis_state):
-            try:
-                await self._send_message("status", "Analyzing correlations between research directions...", AgentType.PI)
-                directions_with_results = _build_directions_with_results_for_correlation(analysis_state)
-                correlation = await self.pi_agent.analyze_direction_correlations(
-                    analysis_state, directions_with_results
-                )
-                analysis_state.multi_direction_correlation = correlation
-                await self._send_message("direction_correlation", {
-                    "correlation": correlation,
-                    "directions": [d.get("direction", "") for d in analysis_state.user_chosen_directions]
-                }, AgentType.PI)
-                logger.info(f"[{self.session_id}] Multi-direction correlation analysis complete")
-            except Exception as e:
-                logger.exception(f"[{self.session_id}] Direction correlation analysis failed")
+
 
         # P1: innovation rounds also get an incremental detailed-report segment.
         # Exploration round is already covered at the exploration_complete call above.
@@ -764,6 +727,37 @@ class SynthesisMixin:
         equivalent to "let PI decide" (sets user_chosen_direction = [PI_DECIDE]).
         """
         analysis_state = state["analysis_state"]
+
+        # Integration gate (spec §9.4): self-contained; distinct from the round-1
+        # direction gate. Auto-skip / no-wait default = finalize (write report).
+        is_integration_gate = (
+            analysis_state.analysis_phase == AnalysisPhase.INTEGRATION
+            and analysis_state.status == TaskStatus.WAITING_INPUT
+        )
+        if is_integration_gate:
+            wait_seconds = analysis_state.round_wait_seconds
+            if wait_seconds == 0:
+                analysis_state.final_report_requested = True
+            else:
+                signaled = await wait_with_skip_time(
+                    self._continue_event, wait_seconds, self.session_id, "integration_gate",
+                )
+                if not signaled:
+                    analysis_state.final_report_requested = True
+                else:
+                    _consume_signal_then_clear(self._continue_event)
+
+            if analysis_state.final_report_requested:
+                analysis_state.final_report_requested = False
+                self._set_status(analysis_state, TaskStatus.RUNNING)
+                await self._send_state_sync(analysis_state, "integration_finalize")
+                return {**state, "analysis_state": analysis_state, "should_continue": False}
+
+            # User chose new directions (choose-direction already set the batch +
+            # phase=INNOVATION). Continue the loop.
+            self._set_status(analysis_state, TaskStatus.RUNNING)
+            await self._send_state_sync(analysis_state, "integration_continue")
+            return {**state, "analysis_state": analysis_state, "should_continue": True}
 
         # Note: _continue_event is cleared in _pi_synthesis before the waiting
         # status is announced, to prevent a race condition with signal_continue().

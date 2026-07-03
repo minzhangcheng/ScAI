@@ -57,10 +57,14 @@ def normalize_legacy_round_result(result: RoundResult) -> RoundResult:
     return result
 
 
-def selected_direction_keys(state: AnalysisState) -> Set[str]:
+def selected_direction_keys(
+    state: AnalysisState,
+    directions: Optional[Iterable[dict]] = None,
+) -> Set[str]:
+    source = state.user_chosen_directions if directions is None else directions
     return {
         key
-        for key in (normalize_direction_key(d.get("direction", "")) for d in state.user_chosen_directions)
+        for key in (normalize_direction_key(d.get("direction", "")) for d in source)
         if key
     }
 
@@ -90,6 +94,22 @@ def completed_innovation_direction_keys(state: AnalysisState, lineage_id: Option
 
 def direction_coverage_status(state: AnalysisState, lineage_id: Optional[str] = None) -> DirectionCoverageStatus:
     selected = selected_direction_keys(state)
+    completed = completed_innovation_direction_keys(state, lineage_id=lineage_id)
+    missing = selected - completed
+    return DirectionCoverageStatus(
+        selected_keys=selected,
+        completed_keys=completed,
+        missing_keys=missing,
+        complete=bool(selected) and not missing,
+    )
+
+
+def direction_coverage_status_for_batch(
+    state: AnalysisState,
+    batch: Iterable[dict],
+    lineage_id: Optional[str] = None,
+) -> DirectionCoverageStatus:
+    selected = selected_direction_keys(state, directions=list(batch))
     completed = completed_innovation_direction_keys(state, lineage_id=lineage_id)
     missing = selected - completed
     return DirectionCoverageStatus(

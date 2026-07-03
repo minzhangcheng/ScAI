@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 def validate_complete_report_allowed(state: AnalysisState) -> tuple[bool, str]:
     if state.allow_partial_report:
         return True, ""
+    from .direction_coverage import direction_coverage_status_for_batch
+    batch = getattr(state, "active_direction_batch", None) or []
+    if batch and not direction_coverage_status_for_batch(state, batch).complete:
+        return False, (
+            "A new research direction batch was selected at the integration gate "
+            "but has not been analyzed yet; only a partial report can be produced."
+        )
     if len(state.user_chosen_directions) <= 1:
         return True, ""
     coverage = direction_coverage_status(state, lineage_id=current_lineage_id(state))

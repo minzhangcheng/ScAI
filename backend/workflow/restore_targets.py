@@ -9,6 +9,7 @@ SNAPSHOT_RESUME_TARGET = {
     "pre_execution_full": {"kind": "graph_node", "gate": None, "node": "bioinformatics_analysis"},
     "pre_execution_stage1": {"kind": "graph_node", "gate": None, "node": "bioinformatics_analysis"},
     "pre_execution_stage2": {"kind": "graph_node", "gate": None, "node": "bioinformatics_analysis"},
+    "pre_integration_gate": {"kind": "semantic_gate", "gate": "integration_selection", "node": "wait_for_user_input"},
     "post_report": {"kind": "terminal", "gate": None, "node": None},
 }
 

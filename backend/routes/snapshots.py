@@ -127,6 +127,8 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
         restored_state.status = TaskStatus.WAITING_ANNOTATION
     elif phase == "pre_round_wait":
         restored_state.status = TaskStatus.WAITING_INPUT
+    elif phase == "pre_integration_gate":
+        restored_state.status = TaskStatus.WAITING_INPUT
     else:
         restored_state.status = TaskStatus.PAUSED
 
@@ -223,6 +225,23 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
                 agent=AgentType.PI,
                 content=status_msg
             ))
+
+    if phase == "pre_integration_gate" and restored_state.integration_gate_candidates:
+        detailed_report_url = (
+            f"/api/session/{session_id}/detailed-report/html"
+            if getattr(restored_state, "detailed_report_html_path", None) else None
+        )
+        restored_state.realtime_messages.append(WebSocketMessage(
+            type="integration_gate",
+            agent=AgentType.PI,
+            content={
+                "cycle": restored_state.integration_cycle,
+                "integration_analysis": (restored_state.integration_reports[-1]
+                                         if restored_state.integration_reports else ""),
+                "candidates": restored_state.integration_gate_candidates,
+                "detailed_report_url": detailed_report_url,
+            },
+        ))
 
     # Reset annotation confirmed flag so the restored HITL checkpoint works correctly
     if phase == "pre_annotation" and restored_state.annotation_state:

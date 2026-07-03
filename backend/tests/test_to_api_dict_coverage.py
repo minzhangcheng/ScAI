@@ -59,6 +59,14 @@ _EXCLUDED_FIELDS = {
     "restore_resume_gate",
     "restore_branch_id",
     "restore_branch_label",
+    "integration_cycle",
+    "max_integration_cycles",
+    "pending_integration",
+    "active_direction_batch",
+    "last_integrated_round",
+    "integration_gate_candidates",
+    "integration_reports",
+    "final_report_requested",
 }
 
 _COMPUTED_FIELDS = {

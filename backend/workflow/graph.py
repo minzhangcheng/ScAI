@@ -36,6 +36,7 @@ class GraphMixin:
         self.graph.add_node("generate_final_report", self._generate_final_report)
         self.graph.add_node("generate_graphic_abstract", self._generate_graphic_abstract)
         self.graph.add_node("generate_detailed_report", self._generate_detailed_report)
+        self.graph.add_node("integration_synthesis", self._integration_synthesis)
 
         # Add edges - sequential execution (with early-stop check after init)
         self.graph.add_conditional_edges(
@@ -107,7 +108,17 @@ class GraphMixin:
             self._check_convergence_condition,
             {
                 "continue": "initialize_round",
+                "integrate": "integration_synthesis",
                 "stop": "generate_final_report"
+            }
+        )
+
+        self.graph.add_conditional_edges(
+            "integration_synthesis",
+            self._after_integration,
+            {
+                "gate": "wait_for_user_input",
+                "stop": "generate_final_report",
             }
         )
 

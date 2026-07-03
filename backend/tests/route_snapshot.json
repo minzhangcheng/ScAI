@@ -144,6 +144,12 @@
     ]
   ],
   [
+    "/api/health",
+    [
+      "GET"
+    ]
+  ],
+  [
     "/api/download",
     [
       "GET"
@@ -265,6 +271,12 @@
   ],
   [
     "/api/session/{session_id}/ensure",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/finalize-from-integration",
     [
       "POST"
     ]

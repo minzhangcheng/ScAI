@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.31.6"
+VERSION = "0.32.1"
 
 
 # ── Node → Agent mapping ───────────────────────────────────────────
@@ -18,6 +18,7 @@ NODE_TO_AGENT: dict[str, str] = {
     "literature_research": "literature",
     "pi_synthesis": "pi",
     "user_review_gate": "pi",
+    "integration_synthesis": "pi",
 }
 
 # ── Node → WorkflowState result key mapping ─────────────────────────
@@ -35,8 +36,9 @@ NODE_TO_RESULT_KEY: dict[str, str] = {
 # node; otherwise the import-time assertion below will fail and force the
 # author to decide whether the new node needs a result key.
 RESULT_KEYLESS_NODES: frozenset[str] = frozenset({
-    "pi_synthesis",       # writes into round_result, not its own key
-    "user_review_gate",   # gating node, not an analysis step
+    "pi_synthesis",
+    "user_review_gate",
+    "integration_synthesis",
 })
 
 # Drift guard — fires at import time if the two maps go out of sync.

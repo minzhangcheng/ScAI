@@ -310,6 +310,8 @@ class PlanningMixin:
                         analysis_state.exploration_report.direction_selection_summary = selection_decision
                     # Set up multi-direction queue
                     analysis_state.user_chosen_directions = selected_dirs
+                    analysis_state.active_direction_batch = list(selected_dirs)
+                    analysis_state.pending_integration = False
                     # Pop first direction, rest goes to queue
                     first_dir = selected_dirs[0] if selected_dirs else {"direction": "Continue analysis", "notes": ""}
                     analysis_state.directions_queue = selected_dirs[1:] if len(selected_dirs) > 1 else []

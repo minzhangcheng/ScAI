@@ -1,7 +1,7 @@
 """Pure routing functions for the workflow graph. Stateless except for logging."""
 import logging
 
-from ..models.schemas import TaskStatus
+from ..models.schemas import AnalysisPhase, TaskStatus
 from .state import WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,26 @@ class RoutingMixin:
             logger.info(f"[{self.session_id}] Stopping: should_continue flag is False")
             return "stop"
 
+        # Integration-loop guard (spec §9.2): never hard-stop on max_rounds while
+        # an integration round is pending, the active direction batch is not
+        # yet covered, or we are parked at the integration gate awaiting user
+        # direction selection. Loop termination is governed by the integration
+        # gate + max_integration_cycles.
+        from .direction_coverage import direction_coverage_status_for_batch
+        batch = getattr(analysis_state, "active_direction_batch", None) or []
+        batch_incomplete = bool(batch) and not direction_coverage_status_for_batch(
+            analysis_state, batch
+        ).complete
+        at_integration_gate = (
+            getattr(analysis_state, "analysis_phase", None) == AnalysisPhase.INTEGRATION
+            and bool(getattr(analysis_state, "integration_gate_candidates", None))
+        )
+        if (getattr(analysis_state, "pending_integration", False)
+                or batch_incomplete
+                or at_integration_gate):
+            logger.info(f"[{self.session_id}] Integration loop active; bypassing max_rounds stop")
+            return "continue"
+
         # Check max rounds (use state.max_rounds if valid, otherwise config default)
         # max_rounds <= 0 means use config default; max_rounds > 0 is user-specified limit
         max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
@@ -108,12 +128,31 @@ class RoutingMixin:
         return "continue"
 
     def _check_convergence_condition(self, state: "WorkflowState") -> str:
-        """Conditional check for convergence.
-
-        Delegates to the canonical hard-stop router _should_continue when a
-        real workflow state is present. Missing analysis_state is treated as a
-        defensive no-stop fallback for tests and partial states.
-        """
+        """Three-way routing for the integration loop (spec §9.2):
+        integrate | continue | stop. _should_continue only returns continue/stop."""
         if "analysis_state" not in state:
             return "continue"
-        return self._should_continue(state)
+        analysis_state = state["analysis_state"]
+        if state.get("human_stop_requested", False) or state.get("should_continue") is False:
+            return "stop"
+        if analysis_state.status == TaskStatus.PAUSED:
+            return "stop"
+        from .direction_coverage import direction_coverage_status_for_batch
+        batch = getattr(analysis_state, "active_direction_batch", None) or []
+        cap_reached = getattr(analysis_state, "integration_cycle", 0) >= getattr(analysis_state, "max_integration_cycles", 1)
+        batch_complete = bool(batch) and direction_coverage_status_for_batch(
+            analysis_state, batch
+        ).complete
+        if getattr(analysis_state, "pending_integration", False) and not cap_reached:
+            return "integrate"
+        if (getattr(analysis_state, "pending_integration", False) or batch_complete) and cap_reached:
+            return "stop"
+        # Active batch not yet covered: keep analyzing it regardless of max_rounds
+        # (aligns with _should_continue's integration-loop guard).
+        if bool(batch) and not batch_complete:
+            return "continue"
+        max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
+        max_rounds = max(1, max_rounds)
+        if analysis_state.current_round >= max_rounds:
+            return "stop"
+        return "continue"

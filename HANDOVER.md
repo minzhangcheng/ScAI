@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.31.6 · **Last updated**: 2026-07-03
+**Version**: 0.32.1 · **Last updated**: 2026-07-03
 
 ## 1. Runtime Architecture
 
@@ -241,6 +241,22 @@ Detailed release notes for every version are available through `git log` and rel
   - **Frontend reliability (`frontend/src/components/ErrorBoundary.tsx`, `frontend/src/components/Sidebar.tsx`, `frontend/src/stores/appStore.ts`, `frontend/src/types.ts`)**: New `ErrorBoundary` component wraps full app. Sidebar defaults moved to i18n keys. `Message.content` typed as `string | ContentBlock`. Chat message `id` made required with `crypto.randomUUID()` auto-generation. New `apiConfigured` store flag for API key state checks.
   - **Admin & lifecycle fixes (`backend/routes/admin.py`, `backend/routes/lifecycle.py`, `backend/routes/reports.py`)**: `invalidate_admin_initialized_cache()` on setup to prevent stale admin state. `demote_admin_if_not_last()` prevents removing the last admin. Pause preserves plan review state across pause/resume. Auto-snapshot `WorkflowTerminatedError` now properly re-raised. Session loading `pop("report_blocked", None)` to avoid stale blocked-report state.
   - **50+ new test files**: Coverage for blob store digests, config masking/validation, fetch_markers lock atomicity, HITL generation per-node, innovation rounds counting, sandbox dangerous patterns/write-boundary/PKL integrity, upload chunk/generic bounds, normalization immutability, password bounds, report blocked/NaN/pending-lock/subdir-files/WS-registry/partial-recovery, save state task ref, session ID validation, technique agent escaping, tool dispatch resilience, version consistency, and more.
+
+**0.32.x — (2026-07-03)**
+
+- `0.32.1` — Integration round loop (cross-direction synthesis + new-direction gate):
+  - **New graph node `integration_synthesis` (`backend/workflow/integration.py`)**: Independent integration round orchestrating PI cumulative synthesis + Literature open search + PI candidate generation + Literature novelty gate + PI scoring. Skipped bioinformatics/pathology/biochemistry agents. Three-way routing: `gate` → `wait_for_user_input`, `stop` → `generate_final_report`. Integration analysis is cumulative across all innovation rounds (round 2+).
+  - **New `AnalysisPhase.INTEGRATION` + state fields (`backend/models/schemas.py`)**: `integration_cycle`, `max_integration_cycles` (default 3), `pending_integration`, `active_direction_batch`, `last_integrated_round`, `integration_gate_candidates`, `integration_reports`, `final_report_requested`.
+  - **Batch-aware direction coverage (`backend/workflow/direction_coverage.py`)**: `direction_coverage_status_for_batch()` replaces fragile round-count + `directions_queue` completion checks with explicit batch comparison.
+  - **Three-way convergence routing (`backend/workflow/routing.py`)**: `check_convergence` expanded from `{continue, stop}` to `{continue, integrate, stop}`. `_should_continue` hard-stop guard bypassed when `pending_integration` is set, batch is incomplete, or at integration gate.
+  - **Integration gate in synthesis (`backend/workflow/synthesis.py`)**: Removed inline `_should_run_direction_correlation` (moved to integration node). `_pi_synthesis` sets `pending_integration` on batch complete. `_wait_for_user_input` handles integration-gate wait state with finalize/new-direction two-way exit.
+  - **Lifecycle + snapshot restore (`backend/routes/snapshots.py`, `backend/routes/lifecycle.py`, `backend/workflow/restore_targets.py`)**: `pre_integration_gate` snapshot phase with `integration_selection` resume gate. Phase-aware status restored as `WAITING_INPUT`. Realtime `integration_gate` message re-sent on restore.
+  - **`/finalize-from-integration` endpoint (`backend/routes/interaction.py`)**: Dedicated API for user to exit integration gate and request final report. `_choose_direction` integration-gate branch sets batch + phase = INNOVATION.
+  - **WebSocket report-only guard (`backend/routes/websockets.py`)**: `_in_integration_loop()` helper prevents sessions in integration loop from taking the `needs_report_only` shortcut.
+  - **Complete report gate (`backend/workflow/reporting.py`)**: `validate_complete_report_allowed` checks uncovered integration batch; blocks complete report until batch is done.
+  - **PI + Literature agent methods (`backend/agents/pi_agent.py`, `backend/agents/literature_agent.py`)**: `generate_integration_direction_candidates`, `score_integration_directions_with_evidence`, `integration_literature_search`, `evaluate_direction_novelty_candidates`. Supervisor detailed report includes integration_reports.
+  - **Frontend integration gate panel (`frontend/src/components/IntegrationGatePanel.tsx`)**: Minimal candidate checklist + submit/finalize actions. `AnalysisPanel.tsx` listens for `integration_gate` messages, wires `apiFetch` to `/choose-direction` and `/finalize-from-integration`. New `integration_gate`/`integration_complete` message types in `appStore.ts`.
+  - **17 new test files** covering batch coverage, convergence routing, direction candidates, endpoints, gate wait, graph wiring, literature search, report gate, restore target, resume gate, round state, routing, snapshot route, synthesis node, WS guard, pending integration flag, and PI-decide batch setting. Removed obsolete `test_multi_direction_correlation_trigger.py`.
 
 **0.30.x — (2026-06-30 → 2026-07-01)**
 

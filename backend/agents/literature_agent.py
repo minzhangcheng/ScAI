@@ -2485,6 +2485,22 @@ Respond ONLY with valid JSON (no markdown, no code fences):
 
         return results
 
+    async def integration_literature_search(self, state, integration_report: str) -> str:
+        topic = (
+            f"Integrative synthesis for {state.name}: {state.initial_instruction}. "
+            f"Corroborating background literature for the cross-direction findings."
+        )
+        result = await self._do_research(
+            topic=topic,
+            state=state,
+            research_brief=integration_report[:2000],
+        )
+        if isinstance(result, dict):
+            findings = result.get("findings") or []
+            summary = result.get("summary") or ""
+            return (summary + "\n" + "\n".join(str(f) for f in findings)).strip()
+        return str(result)
+
     def _build_empty_direction_result(self, direction_id: str, direction_name: str) -> Dict[str, Any]:
         return {
             "direction_id": direction_id,

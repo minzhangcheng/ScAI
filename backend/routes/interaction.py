@@ -199,30 +199,40 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
 
     if state.status != TaskStatus.WAITING_INPUT:
         raise HTTPException(status_code=400, detail="Session is not waiting for input")
-    # P1-5: choose-direction is only valid at the post-exploration direction gate.
-    # Round-wait HITL (round 2+) also has WAITING_INPUT status; calling here would
-    # overwrite directions_queue / max_rounds and break the in-flight analysis.
-    is_direction_gate = (
+    exploration_gate = (
         state.current_round == 1
         and state.analysis_phase == AnalysisPhase.INNOVATION
         and not state.user_chosen_direction
     )
-    if not is_direction_gate:
+    integration_gate = (state.analysis_phase == AnalysisPhase.INTEGRATION)
+    if not (exploration_gate or integration_gate):
         raise HTTPException(
             status_code=400,
-            detail=(
-                "This endpoint is only valid at the post-exploration direction selection gate. "
-                "For mid-analysis input use /supplementary-analysis or /human-input."
-            ),
+            detail=("This endpoint is only valid at a direction selection gate "
+                    "(post-exploration or integration). For mid-analysis input use "
+                    "/supplementary-analysis or /human-input."),
+        )
+    if integration_gate and (body.let_pi_decide or (body.direction and not body.directions)):
+        raise HTTPException(
+            status_code=400,
+            detail="At the integration gate, select explicit new directions (or call /finalize-from-integration).",
         )
 
     if body.let_pi_decide:
         state.user_chosen_direction = PI_DECIDE_SIGNAL
         state.pending_human_input = PI_DECIDE_SIGNAL
     elif body.directions and len(body.directions) > 0:
-        state.user_chosen_directions = body.directions
+        if integration_gate:
+            state.user_chosen_directions = (state.user_chosen_directions or []) + list(body.directions)
+            state.analysis_phase = AnalysisPhase.INNOVATION
+            state.integration_gate_candidates = []
+            state.max_rounds = state.current_round + len(body.directions)
+        else:
+            state.user_chosen_directions = list(body.directions)
+            state.max_rounds = len(body.directions) + 1
         state.directions_queue = [d.copy() for d in body.directions]
-        state.max_rounds = len(body.directions) + 1
+        state.active_direction_batch = [d.copy() for d in body.directions]
+        state.pending_integration = False
         state.user_chosen_direction = None
         state.pending_human_input = json.dumps(
             [d.get("direction", "") for d in body.directions], ensure_ascii=False
@@ -231,6 +241,8 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
     elif body.direction:
         state.user_chosen_directions = [{"direction": body.direction, "notes": ""}]
         state.directions_queue = [{"direction": body.direction, "notes": ""}]
+        state.active_direction_batch = [{"direction": body.direction, "notes": ""}]
+        state.pending_integration = False
         state.max_rounds = 2
         state.user_chosen_direction = body.direction
         state.pending_human_input = body.direction
@@ -252,6 +264,47 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
         success=True,
         message=f"Direction selected: {'PI decides' if body.let_pi_decide else f'{direction_count} direction(s)'}"
     )
+
+
+@router.post("/{session_id}/finalize-from-integration")
+async def finalize_from_integration(session_id: str, request: Request):
+    """User stops the integration loop and proceeds to the final report."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    async with get_session_lock(session_id):
+        state = await require_session_ownership(session_id=session_id, user_id=user_id)
+        if not (state.analysis_phase == AnalysisPhase.INTEGRATION
+                and state.status == TaskStatus.WAITING_INPUT):
+            raise HTTPException(
+                status_code=400,
+                detail="finalize-from-integration is only valid at the integration gate.",
+            )
+        state.final_report_requested = True
+        await _update_session_cache(session_id, state)
+        await async_save_session(session_id, state)
+        async with _state_lock:
+            workflow = workflows.get(session_id)
+        if workflow:
+            workflow.signal_continue()
+        else:
+            # No active workflow — set GENERATING_REPORT so the WS reconnect
+            # path detects the finalize request via needs_report_only and
+            # runs generate_report directly. Do NOT pause-and-restart
+            # (that sets status=PAUSED, which prevents final_report_requested
+            # from being consumed by the integration-gate wait logic).
+            state.status = TaskStatus.GENERATING_REPORT
+            await _update_session_cache(session_id, state)
+            await async_save_session(session_id, state)
+            # Close any existing WS so the frontend reconnects and triggers
+            # the report-only path.
+            from ..state import websockets as _ws_map
+            old_ws = _ws_map.get(session_id)
+            if old_ws:
+                try:
+                    await old_ws.close(4000, "finalize_from_integration")
+                except Exception:
+                    pass
+        return APIResponse(success=True, message="Finalizing: proceeding to the final report")
 
 
 @router.post("/{session_id}/request-input")

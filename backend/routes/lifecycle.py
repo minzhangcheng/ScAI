@@ -207,7 +207,7 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         else:
             if (
                 state.restore_resume_kind == "semantic_gate"
-                and state.restore_resume_gate == "round_wait"
+                and state.restore_resume_gate in ("round_wait", "integration_selection")
             ):
                 state.status = TaskStatus.RUNNING
                 await _update_session_cache(session_id, state)

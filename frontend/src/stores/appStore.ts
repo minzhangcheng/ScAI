@@ -24,7 +24,7 @@ export type ContentBlock = Record<string, any>
 
 export interface Message {
   id: string
-  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report' | 'exploration_failed' | 'direction_correlation' | 'plan_review' | 'plan_approved' | 'modality_warning' | 'report_blocked'
+  type: 'status' | 'message' | 'code' | 'result' | 'error' | 'figure' | 'step' | 'prompt' | 'response' | 'thinking' | 'tool_call' | 'output' | 'completed' | 'progress' | 'round_summary' | 'data_request' | 'human_input_received' | 'human_input_requested' | 'literature' | 'pi_question' | 'pi_response' | 'findings' | 'figure_review' | 'figure_approved' | 'figure_revision' | 'integrated_report' | 'graphic_abstract' | 'detailed_report' | 'state_sync' | 'parallel_errors' | 'chat_delegation' | 'chat_result' | 'chat_error' | 'supervisor_feedback' | 'supervisor_summary' | 'supervisor_checkpoint' | 'annotation_confirmation' | 'exploration_report' | 'exploration_failed' | 'direction_correlation' | 'plan_review' | 'plan_approved' | 'modality_warning' | 'report_blocked' | 'integration_gate' | 'integration_complete'
   agent?: AgentType
   content: string | ContentBlock
   timestamp: string

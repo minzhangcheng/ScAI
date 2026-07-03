@@ -27,6 +27,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["websockets"])
 
 
+def _in_integration_loop(state) -> bool:
+    from ..models.schemas import AnalysisPhase
+    from ..workflow.direction_coverage import direction_coverage_status_for_batch
+    # User explicitly chose to write the final report — not in the loop.
+    if getattr(state, "final_report_requested", False):
+        return False
+    batch = state.active_direction_batch or []
+    batch_incomplete = bool(batch) and not direction_coverage_status_for_batch(state, batch).complete
+    return bool(
+        state.pending_integration
+        or state.analysis_phase == AnalysisPhase.INTEGRATION
+        or batch_incomplete
+        or state.integration_gate_candidates
+    )
+
+
 async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> None:
     """Re-emit state_sync for pending HITL gates after a reconnect.
 
@@ -502,11 +518,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     # Detect sessions that completed analysis but were interrupted during report generation
     effective_max_rounds = state.max_rounds if state.max_rounds > 0 else config.max_rounds
-    needs_report_only = (
+    in_integration_loop = _in_integration_loop(state)
+    finalize_requested = getattr(state, "final_report_requested", False)
+    needs_report_only = finalize_requested or (
         state.status in (TaskStatus.RUNNING, TaskStatus.WAITING_INPUT,
                          TaskStatus.FAILED, TaskStatus.GENERATING_REPORT)
         and state.current_round >= effective_max_rounds
         and len(state.round_results) >= effective_max_rounds
+        and not in_integration_loop
     )
 
     try:

@@ -33,6 +33,7 @@ from .synthesis import SynthesisMixin
 from .initialize import InitializeMixin
 from .graph import GraphMixin
 from .reporting import ReportingMixin
+from .integration import IntegrationMixin
 
 from ..models.schemas import (
     AnalysisState, AgentType, TaskStatus, RoundResult, AnalysisPhase,
@@ -59,7 +60,7 @@ from ..config import SystemConfig, get_session_workspace, get_session_states
 from .helpers import WorkflowTerminatedError  # noqa: E402,F401
 
 
-class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, CallbacksMixin, AnnotationMixin, PlanningMixin, AgentNodesMixin, SynthesisMixin, InitializeMixin, GraphMixin, ReportingMixin):
+class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, CallbacksMixin, AnnotationMixin, PlanningMixin, AgentNodesMixin, SynthesisMixin, InitializeMixin, GraphMixin, ReportingMixin, IntegrationMixin):
     """
     Multi-agent workflow for single-cell analysis using LangGraph
     """
@@ -103,14 +104,42 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
         self._consume_restore_resume_metadata(analysis_state)
 
-        if self._should_continue(workflow_state) == "stop":
-            final_state = await self._generate_final_report(workflow_state)
-            return final_state["analysis_state"]
+        if (
+            analysis_state.analysis_phase == AnalysisPhase.INTEGRATION
+            and analysis_state.integration_gate_candidates
+            and not analysis_state.final_report_requested
+        ):
+            detailed_report_url = (
+                f"/api/session/{self.session_id}/detailed-report/html"
+                if analysis_state.detailed_report_html_path else None
+            )
+            await self._send_message("integration_gate", {
+                "cycle": analysis_state.integration_cycle,
+                "integration_analysis": (analysis_state.integration_reports[-1]
+                                         if analysis_state.integration_reports else ""),
+                "candidates": analysis_state.integration_gate_candidates,
+                "detailed_report_url": detailed_report_url,
+            }, AgentType.PI)
 
-        workflow_state = await self._check_convergence(workflow_state)
-        if self._check_convergence_condition(workflow_state) == "stop":
-            final_state = await self._generate_final_report(workflow_state)
-            return final_state["analysis_state"]
+        # Integration-gate waiting state: skip the _should_continue /
+        # _check_convergence stop guards — they would route to
+        # generate_final_report on max_rounds, bypassing the
+        # wait_for_user_input checkpoint that lets the user choose new
+        # directions. The graph checkpoint resumes at wait_for_user_input.
+        at_integration_gate = (
+            analysis_state.analysis_phase == AnalysisPhase.INTEGRATION
+            and bool(analysis_state.integration_gate_candidates)
+        )
+
+        if not at_integration_gate:
+            if self._should_continue(workflow_state) == "stop":
+                final_state = await self._generate_final_report(workflow_state)
+                return final_state["analysis_state"]
+
+            workflow_state = await self._check_convergence(workflow_state)
+            if self._check_convergence_condition(workflow_state) == "stop":
+                final_state = await self._generate_final_report(workflow_state)
+                return final_state["analysis_state"]
 
         config = {"configurable": {"thread_id": self.session_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
         final_state = await self.compiled_graph.ainvoke(workflow_state, config)
@@ -873,7 +902,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # Guard: restored wait-state snapshot → continuation, not fresh run.
         if (
             initial_state.restore_resume_kind == "semantic_gate"
-            and initial_state.restore_resume_gate == "round_wait"
+            and initial_state.restore_resume_gate in ("round_wait", "integration_selection")
             and initial_state.status == TaskStatus.RUNNING
         ):
             return await self.resume_restored_wait_state(initial_state)
@@ -933,6 +962,14 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         """
         # Store state for settings provider initialization
         self._state = initial_state
+
+        # Consume any integration-gate finalize request: once we commit to
+        # report-only generation the flag must be cleared, otherwise a later WS
+        # reconnect would see final_report_requested=True and re-trigger report
+        # generation on every reconnect. The live integration-wait path clears
+        # this in _wait_for_user_input, but the no-workflow report-only path
+        # bypasses that node.
+        initial_state.final_report_requested = False
 
         try:
             await self._send_message("status", "Resuming report generation (analysis already complete)...")
@@ -1077,7 +1114,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
         if (
             analysis_state.restore_resume_kind == "semantic_gate"
-            and analysis_state.restore_resume_gate == "round_wait"
+            and analysis_state.restore_resume_gate in ("round_wait", "integration_selection")
             and analysis_state.status == TaskStatus.RUNNING
         ):
             return await self.resume_restored_wait_state(analysis_state)

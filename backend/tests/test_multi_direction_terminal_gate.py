@@ -80,6 +80,7 @@ async def test_terminal_multi_direction_synthesis_shows_round_wait_gate():
         current_round_direction="Direction three",
         user_chosen_directions=[dir1, dir2, dir3],
         directions_queue=[dir3],
+        active_direction_batch=[dir1, dir2, dir3],
         round_results=[
             RoundResult(round_number=1, phase="exploration"),
             RoundResult(round_number=2, phase="innovation", direction="Direction one", pi_summary="One", bioinformatics_findings=["finding"], evidence_status="substantive"),
@@ -99,7 +100,6 @@ async def test_terminal_multi_direction_synthesis_shows_round_wait_gate():
         }
     )
 
-    assert analysis_state.multi_direction_correlation == "Integrated multi-direction synthesis"
     assert analysis_state.status == TaskStatus.WAITING_INPUT
 
     waiting_round_summaries = [
@@ -111,8 +111,4 @@ async def test_terminal_multi_direction_synthesis_shows_round_wait_gate():
     assert waiting_round_summaries[0]["round"] == 4
     assert waiting_round_summaries[0]["summary"] == "Final direction summary"
     assert TaskStatus.WAITING_INPUT in workflow.statuses
-    assert any(message_type == "direction_correlation" for message_type, _content, _agent in workflow.sent_messages)
-    assert any(
-        message_type == "status" and "final round" in str(content)
-        for message_type, content, _agent in workflow.sent_messages
-    )
+    assert analysis_state.pending_integration is True

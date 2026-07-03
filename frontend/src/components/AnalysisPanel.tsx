@@ -7,6 +7,7 @@ import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
 import { AnnotationConfirmationDialog, ClusterAnnotation } from './AnnotationConfirmationDialog'
 import { ExplorationReportDialog, ExplorationReport } from './ExplorationReportDialog'
+import { IntegrationGatePanel } from './IntegrationGatePanel'
 import { PlanReviewDialog, AnalysisPlan } from './PlanReviewDialog'
 import { ValidationDialog } from './ValidationDialog'
 import { StopDialog } from './StopDialog'
@@ -137,6 +138,10 @@ export function AnalysisPanel() {
   const [showExplorationDialog, setShowExplorationDialog] = useState(false)
   const [explorationReportData, setExplorationReportData] = useState<ExplorationReportData | null>(null)
   const lastExplorationMsgRef = useRef<string>('')
+
+  // Integration gate state
+  const [integrationGateData, setIntegrationGateData] = useState<any>(null)
+  const lastIntegrationMsgRef = useRef<string>('')
 
   // Supplementary analysis state
   const [isSupplementaryRunning, setIsSupplementaryRunning] = useState(false)
@@ -401,6 +406,20 @@ export function AnalysisPanel() {
       console.error('Failed to let PI decide:', e)
     }
   }, [currentSession, wsConnected, wsConnect])
+
+  const submitIntegrationDirections = async (selected: any[]) => {
+    if (!currentSession) return
+    await apiFetch(`/session/${currentSession.id}/choose-direction`, {
+      method: 'POST',
+      body: JSON.stringify({ directions: selected.map((c: any) => ({ direction: c.direction, notes: '' })) }),
+    })
+    setIntegrationGateData(null)
+  }
+  const finalizeFromIntegration = async () => {
+    if (!currentSession) return
+    await apiFetch(`/session/${currentSession.id}/finalize-from-integration`, { method: 'POST' })
+    setIntegrationGateData(null)
+  }
 
   const handleSupplementaryAnalysis = useCallback(async (requestText: string, target: 'annotation' | 'direction') => {
     if (!currentSession) return
@@ -872,6 +891,20 @@ export function AnalysisPanel() {
       }
     }
   }, [messages, currentSession?.status, currentSession?.currentRound])
+
+  useEffect(() => {
+    let msg: any = null
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].type === 'integration_gate') { msg = messages[i]; break }
+    }
+    // Dedup: only (re)open the panel for a message we haven't shown yet, so a
+    // submit that clears integrationGateData isn't immediately re-populated from
+    // the same stale message before the backend flips status away from waiting.
+    if (msg && currentSession?.status === 'waiting_input' && lastIntegrationMsgRef.current !== msg.id) {
+      lastIntegrationMsgRef.current = msg.id
+      setIntegrationGateData(msg.content)
+    }
+  }, [messages, currentSession?.status])
 
   // Auto-dismiss annotation/exploration dialogs when analysis resumes
   useEffect(() => {
@@ -1414,6 +1447,15 @@ export function AnalysisPanel() {
           onRequestSupplementary={(text) => handleSupplementaryAnalysis(text, 'direction')}
           isSupplementaryRunning={isSupplementaryRunning}
           onClose={() => setShowExplorationDialog(false)}
+        />
+      )}
+
+      {integrationGateData && (
+        <IntegrationGatePanel
+          cycle={integrationGateData.cycle}
+          candidates={integrationGateData.candidates}
+          onSubmit={submitIntegrationDirections}
+          onFinalize={finalizeFromIntegration}
         />
       )}
 
