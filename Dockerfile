@@ -20,7 +20,7 @@ RUN useradd -m -u 10001 scai \
     && chmod +x docker-entrypoint.sh
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
-  CMD curl -f http://127.0.0.1:8000/api/config/status || exit 1
+  CMD curl -f http://127.0.0.1:8000/api/health || exit 1
 
 EXPOSE 3000
 

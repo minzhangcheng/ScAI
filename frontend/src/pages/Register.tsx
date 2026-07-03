@@ -26,7 +26,7 @@ export function Register() {
     setLoading(true)
     setErr('')
     try {
-      await register(username, password, email || undefined)
+      await register(username.trim(), password, email || undefined)
       nav('/login?registered=pending', { replace: true })
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Registration failed')

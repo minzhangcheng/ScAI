@@ -102,7 +102,7 @@ BACKEND_PID=$!
 # Wait for backend to be ready
 echo "Waiting for backend..."
 for i in $(seq 1 30); do
-    if curl -s -o /dev/null http://127.0.0.1:8000/api/config/status 2>/dev/null; then
+    if curl -sf -o /dev/null http://127.0.0.1:8000/api/health 2>/dev/null; then
         echo "Backend ready."
         break
     fi

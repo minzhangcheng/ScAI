@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.31.4 · **Last updated**: 2026-07-02
+**Version**: 0.31.5 · **Last updated**: 2026-07-03
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.31.x — (2026-07-02)**
+
+- `0.31.5` — Unauthenticated health endpoint, login/register input trimming (2026-07-03):
+  - **New `/api/health` endpoint (`backend/routes/root.py`)**: Unauthenticated liveness probe returning `{"status": "ok", "version": VERSION}`. Replaces `/api/config/status` for Docker HEALTHCHECK and entrypoint readiness — unlike the config endpoint, `/api/health` stays public after admin setup.
+  - **Health endpoint made public (`backend/middleware/auth.py`)**: `/api/health` added to `PUBLIC_EXACT` paths so container orchestrators and entrypoint probes never hit auth.
+  - **Docker HEALTHCHECK & entrypoint probe (`Dockerfile`, `docker-entrypoint.sh`)**: Both changed from `curl ... /api/config/status` to `curl ... /api/health`, ensuring health checks work consistently across all deployment stages.
+  - **Login/Register input trimming (`frontend/src/pages/Login.tsx`, `frontend/src/pages/Register.tsx`)**: Username field trimmed via `username.trim()` before submission, preventing accidental whitespace from causing login/registration failures.
 
 - `0.31.4` — Docker image size reduction, Results figure discovery extraction & bounded brief-gallery fallback (2026-07-02):
   - **Docker image size reduction (`Dockerfile`, `.dockerignore`)**: Removed build-time `pip install -r requirements.txt` layer (previously added ~7 GB). `dep/` added to `.dockerignore`. The runtime entrypoint continues to install dependencies into `/dep/venv` at startup, restoring the pre-0.31.1 small-image contract (~1 GB).

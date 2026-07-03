@@ -31,7 +31,7 @@ export function Login() {
     setLoading(true)
     setErr('')
     try {
-      await login(username, password)
+      await login(username.trim(), password)
       nav('/')
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Invalid credentials')

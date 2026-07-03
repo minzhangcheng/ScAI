@@ -42,7 +42,7 @@ PROTECTED_PREFIXES = (
 )
 
 # Exact public paths
-PUBLIC_EXACT = {"/", "/api"}
+PUBLIC_EXACT = {"/", "/api", "/api/health"}
 
 # Additional protected exact paths
 PROTECTED_EXACT = {"/api/sessions"}
