@@ -496,28 +496,20 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
             interaction_html = f"<h3>{interaction_title}</h3>{annotation_items}{direction_items}"
 
         # ── 7. Related Reports & Downloads ─────────────────────────
-        downloads_html = ""
-        dl_items = []
-        if getattr(state, "annotation_record", None) is not None:
-            dl_items.append('<li><a href="annotation_record.html" download '
-                            'style="color:#4f46e5;">Cell Annotation Record</a></li>')
-        for i, rec in enumerate(getattr(state, "direction_selection_records", [])):
-            if rec.event_type == "open":
-                continue
-            fname = f"direction_record_{i:02d}_round{rec.round_number}.html"
-            label = (f"Integration Cycle {rec.integration_cycle}"
-                     if rec.phase == "integration" else f"Round {rec.round_number} · {rec.phase}")
-            dl_items.append(f'<li><a href="{fname}" download style="color:#4f46e5;">'
-                            f'Direction Selection Record — {label}</a></li>')
-        # Notebook
-        notebook_label = "Analysis Notebook (.ipynb)"
-        dl_items.append(f'<li><a href="{esc(state.id)}.ipynb" download style="color:#4f46e5;">{notebook_label}</a></li>')
-        # Literature research report (deep research / PubMed full reports)
-        if state.literature_reports:
-            dl_items.append(render_literature_download_li())
-
-        dl_title = "Related Reports & Downloads"
-        downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'
+        from .interaction_records import direction_record_entries
+        from .download_section import render_related_reports_downloads_html
+        related_reports = {
+            "annotation_record": (
+                "annotation_record.html"
+                if getattr(state, "annotation_record", None) is not None else None
+            ),
+            "direction_records": direction_record_entries(state),
+        }
+        downloads_html = render_related_reports_downloads_html(
+            related_reports,
+            notebook_filename=f"{state.id}.ipynb",
+            literature_report="literature_report.html" if state.literature_reports else "",
+        )
 
         # ── 8. Reproducibility ────────────────────────────────────────
         repro_html = self._build_reproducibility_section_html(state)

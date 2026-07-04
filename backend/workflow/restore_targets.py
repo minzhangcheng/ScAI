@@ -1,15 +1,22 @@
 from typing import Optional
 
+from ..constants import (
+    GATE_ANNOTATION_CONFIRMATION,
+    GATE_DIRECTION_SELECTION,
+    GATE_INTEGRATION_SELECTION,
+    GATE_ROUND_WAIT,
+)
+
 
 SNAPSHOT_RESUME_TARGET = {
-    "pre_round_wait": {"kind": "semantic_gate", "gate": "round_wait", "node": "wait_for_user_input"},
-    "pre_direction": {"kind": "semantic_gate", "gate": "direction_selection", "node": "wait_for_user_input"},
-    "pre_annotation": {"kind": "semantic_gate", "gate": "annotation_confirmation", "node": None},
+    "pre_round_wait": {"kind": "semantic_gate", "gate": GATE_ROUND_WAIT, "node": "wait_for_user_input"},
+    "pre_direction": {"kind": "semantic_gate", "gate": GATE_DIRECTION_SELECTION, "node": "wait_for_user_input"},
+    "pre_annotation": {"kind": "semantic_gate", "gate": GATE_ANNOTATION_CONFIRMATION, "node": None},
     "pre_plan_review": {"kind": "graph_node", "gate": "plan_review", "node": "user_review_gate"},
     "pre_execution_full": {"kind": "graph_node", "gate": None, "node": "bioinformatics_analysis"},
     "pre_execution_stage1": {"kind": "graph_node", "gate": None, "node": "bioinformatics_analysis"},
     "pre_execution_stage2": {"kind": "graph_node", "gate": None, "node": "bioinformatics_analysis"},
-    "pre_integration_gate": {"kind": "semantic_gate", "gate": "integration_selection", "node": "wait_for_user_input"},
+    "pre_integration_gate": {"kind": "semantic_gate", "gate": GATE_INTEGRATION_SELECTION, "node": "wait_for_user_input"},
     "post_report": {"kind": "terminal", "gate": None, "node": None},
 }
 

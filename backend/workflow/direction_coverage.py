@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Iterable, Optional, Set
 
-from ..models.schemas import AnalysisState, RoundResult
+from ..models.schemas import AnalysisPhase, AnalysisState, RoundResult
 
 
 @dataclass(frozen=True)
@@ -190,3 +190,23 @@ def clone_round_results_for_branch(
             output.append(clone)
             seen_keys.add(clone.result_identity_key)
     return output
+
+
+def at_integration_gate(state: AnalysisState) -> bool:
+    """True when parked at the integration gate awaiting user direction selection."""
+    return (
+        state.analysis_phase == AnalysisPhase.INTEGRATION
+        and bool(state.integration_gate_candidates)
+    )
+
+
+def active_batch_incomplete(state: AnalysisState) -> bool:
+    """True when an active direction batch exists and is not yet fully covered."""
+    batch = getattr(state, "active_direction_batch", None) or []
+    return bool(batch) and not direction_coverage_status_for_batch(state, batch).complete
+
+
+def active_batch_complete(state: AnalysisState) -> bool:
+    """True when an active direction batch exists and every direction is covered."""
+    batch = getattr(state, "active_direction_batch", None) or []
+    return bool(batch) and direction_coverage_status_for_batch(state, batch).complete

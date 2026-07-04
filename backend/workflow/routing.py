@@ -1,7 +1,7 @@
 """Pure routing functions for the workflow graph. Stateless except for logging."""
 import logging
 
-from ..models.schemas import AnalysisPhase, TaskStatus
+from ..models.schemas import TaskStatus
 from .state import WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -95,18 +95,13 @@ class RoutingMixin:
         # yet covered, or we are parked at the integration gate awaiting user
         # direction selection. Loop termination is governed by the integration
         # gate + max_integration_cycles.
-        from .direction_coverage import direction_coverage_status_for_batch
-        batch = getattr(analysis_state, "active_direction_batch", None) or []
-        batch_incomplete = bool(batch) and not direction_coverage_status_for_batch(
-            analysis_state, batch
-        ).complete
-        at_integration_gate = (
-            getattr(analysis_state, "analysis_phase", None) == AnalysisPhase.INTEGRATION
-            and bool(getattr(analysis_state, "integration_gate_candidates", None))
+        from .direction_coverage import (
+            active_batch_incomplete,
+            at_integration_gate,
         )
         if (getattr(analysis_state, "pending_integration", False)
-                or batch_incomplete
-                or at_integration_gate):
+                or active_batch_incomplete(analysis_state)
+                or at_integration_gate(analysis_state)):
             logger.info(f"[{self.session_id}] Integration loop active; bypassing max_rounds stop")
             return "continue"
 
@@ -129,7 +124,9 @@ class RoutingMixin:
 
     def _check_convergence_condition(self, state: "WorkflowState") -> str:
         """Three-way routing for the integration loop (spec §9.2):
-        integrate | continue | stop. _should_continue only returns continue/stop."""
+        integrate | continue | stop. Reuses shared predicates while preserving
+        the capped-integration stop contract that _should_continue cannot express
+        by itself because pending_integration bypasses max_rounds there."""
         if "analysis_state" not in state:
             return "continue"
         analysis_state = state["analysis_state"]
@@ -137,22 +134,25 @@ class RoutingMixin:
             return "stop"
         if analysis_state.status == TaskStatus.PAUSED:
             return "stop"
-        from .direction_coverage import direction_coverage_status_for_batch
-        batch = getattr(analysis_state, "active_direction_batch", None) or []
-        cap_reached = getattr(analysis_state, "integration_cycle", 0) >= getattr(analysis_state, "max_integration_cycles", 1)
-        batch_complete = bool(batch) and direction_coverage_status_for_batch(
-            analysis_state, batch
-        ).complete
+        from .direction_coverage import (
+            active_batch_complete,
+            active_batch_incomplete,
+        )
+        cap_reached = (
+            getattr(analysis_state, "integration_cycle", 0)
+            >= getattr(analysis_state, "max_integration_cycles", 1)
+        )
+        # An integration cycle is pending and we still have budget → integrate.
         if getattr(analysis_state, "pending_integration", False) and not cap_reached:
             return "integrate"
-        if (getattr(analysis_state, "pending_integration", False) or batch_complete) and cap_reached:
+        # Once the integration cycle cap is reached, stop even if
+        # pending_integration remains true; _should_continue would otherwise
+        # return "continue" due to its integration-loop max_rounds bypass.
+        if cap_reached and (
+            getattr(analysis_state, "pending_integration", False)
+            or active_batch_complete(analysis_state)
+        ):
             return "stop"
-        # Active batch not yet covered: keep analyzing it regardless of max_rounds
-        # (aligns with _should_continue's integration-loop guard).
-        if bool(batch) and not batch_complete:
+        if active_batch_incomplete(analysis_state):
             return "continue"
-        max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
-        max_rounds = max(1, max_rounds)
-        if analysis_state.current_round >= max_rounds:
-            return "stop"
-        return "continue"
+        return self._should_continue(state)

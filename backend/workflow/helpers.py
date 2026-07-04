@@ -5,7 +5,7 @@ import logging
 import random
 from typing import Dict, List, Optional, Union
 
-from ..models.schemas import AgentRoundCache, AgentType
+from ..models.schemas import AgentRoundCache, AgentType, AnalysisState
 
 logger = logging.getLogger(__name__)
 
@@ -258,3 +258,22 @@ def cache_invalidate(analysis_state, agent: _AgentKey) -> None:
     if cache is None:
         return
     cache.results.pop(_key(agent), None)
+
+
+def build_integration_gate_payload(state: AnalysisState, session_id: str) -> dict:
+    """Build the `integration_gate` WebSocket message content.
+
+    Single source for the {cycle, integration_analysis, candidates,
+    detailed_report_url} shape emitted at the integration gate.
+    """
+    reports = getattr(state, "integration_reports", None) or []
+    detailed_report_url = (
+        f"/api/session/{session_id}/detailed-report/html"
+        if getattr(state, "detailed_report_html_path", None) else None
+    )
+    return {
+        "cycle": getattr(state, "integration_cycle", 0),
+        "integration_analysis": reports[-1] if reports else "",
+        "candidates": list(getattr(state, "integration_gate_candidates", None) or []),
+        "detailed_report_url": detailed_report_url,
+    }

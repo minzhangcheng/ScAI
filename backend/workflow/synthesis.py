@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ..constants import (
     CONTINUE_SIGNAL,
+    GATE_DIRECTION_SELECTION,
+    GATE_ROUND_WAIT,
     LlmFailureAction,
     PI_DECIDE_SIGNAL,
     StateSyncChangeType,
@@ -219,9 +221,8 @@ def _consume_signal_then_clear(event: asyncio.Event) -> None:
 
 def _multi_direction_analysis_completed(analysis_state) -> bool:
     """True once the active direction batch is fully covered (spec §14)."""
-    from .direction_coverage import direction_coverage_status_for_batch
-    batch = analysis_state.active_direction_batch or []
-    return bool(batch) and direction_coverage_status_for_batch(analysis_state, batch).complete
+    from .direction_coverage import active_batch_complete
+    return active_batch_complete(analysis_state)
 
 
 
@@ -586,13 +587,10 @@ class SynthesisMixin:
             branch_label=analysis_state.restore_branch_label,
             restored_from_snapshot_id=analysis_state.last_restored_snapshot_id,
         )
-        from .direction_coverage import direction_coverage_status_for_batch
+        from .direction_coverage import active_batch_complete
         if (
             analysis_state.analysis_phase == AnalysisPhase.INNOVATION
-            and analysis_state.active_direction_batch
-            and direction_coverage_status_for_batch(
-                analysis_state, analysis_state.active_direction_batch
-            ).complete
+            and active_batch_complete(analysis_state)
         ):
             analysis_state.pending_integration = True
             logger.info(f"[{self.session_id}] Direction batch complete -> pending_integration=True")
@@ -748,8 +746,7 @@ class SynthesisMixin:
                 else:
                     _consume_signal_then_clear(self._continue_event)
 
-            if analysis_state.final_report_requested:
-                analysis_state.final_report_requested = False
+            if analysis_state.consume_final_report_request():
                 self._set_status(analysis_state, TaskStatus.RUNNING)
                 await self._send_state_sync(analysis_state, "integration_finalize")
                 return {**state, "analysis_state": analysis_state, "should_continue": False}
@@ -795,7 +792,7 @@ class SynthesisMixin:
                     self._continue_event,
                     wait_seconds,
                     self.session_id,
-                    "direction_selection" if is_direction_gate else "round_wait",
+                    GATE_DIRECTION_SELECTION if is_direction_gate else GATE_ROUND_WAIT,
                 )
                 if not signaled:
                     # Auto-skip on timeout

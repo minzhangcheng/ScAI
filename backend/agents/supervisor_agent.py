@@ -35,6 +35,7 @@ from ..utils.llm_client import OpenAICompatibleClient, UpstreamExhaustedError
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.image_utils import save_graphic_abstract_image
 from ..services.report.interaction_records import write_interaction_record_files
+from .prompt_blocks import build_integration_block
 
 # Section IDs that represent specific/targeted analysis
 _SPECIFIC_SECTION_IDS = frozenset({
@@ -1605,12 +1606,7 @@ Respond in JSON:
         mechanism_text = "\n".join(mech_parts) or "None"
 
         # Cross-direction integration analyses (spec §13)
-        integration_text = "None"
-        if getattr(state, "integration_reports", None):
-            int_parts = []
-            for i, report in enumerate(state.integration_reports, 1):
-                int_parts.append(f"### Integration Cycle {i}\n{report[:2000]}")
-            integration_text = "\n".join(int_parts)
+        integration_text = build_integration_block(state, style="detailed") or "None"
 
         # Build dynamic section template
         base_sections = [
@@ -2526,26 +2522,14 @@ Report generation model call failed due to API connection error. Please refer to
                 parts.append('</tbody></table>')
 
         # Related Reports & Downloads
-        related = appendix.get("related_reports", {})
-        notebook = appendix.get("notebook_filename", "")
-        literature_report = appendix.get("literature_report", "")
-
-        if related or notebook or literature_report:
-            parts.append('<h3>Related Reports &amp; Downloads</h3>')
-            parts.append('<ul>')
-            if related.get("annotation_record"):
-                parts.append(f'<li><a href="{esc(related["annotation_record"])}" download>'
-                             f'Cell Annotation Record</a></li>')
-            for dr in related.get("direction_records", []):
-                parts.append(f'<li><a href="{esc(dr["filename"])}" download>'
-                             f'Direction Selection Record — {esc(dr["label"])}</a></li>')
-            if literature_report:
-                from ..services.report.literature_files import render_literature_download_li
-                parts.append(render_literature_download_li(literature_report))
-            if notebook:
-                parts.append(f'<li><a href="{esc(notebook)}" download>'
-                             f'Analysis Notebook (.ipynb)</a></li>')
-            parts.append('</ul>')
+        from ..services.report.download_section import render_related_reports_downloads_html
+        downloads_html = render_related_reports_downloads_html(
+            appendix.get("related_reports", {}),
+            notebook_filename=appendix.get("notebook_filename", ""),
+            literature_report=appendix.get("literature_report", ""),
+        )
+        if downloads_html:
+            parts.append(downloads_html)
 
         parts.append('</div>')
         return "\n".join(parts)

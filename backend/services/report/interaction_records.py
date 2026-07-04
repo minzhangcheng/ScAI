@@ -160,10 +160,16 @@ def _candidate_card(c: Dict[str, Any], selected: bool, note: str, is_custom: boo
             f"<div style='flex:1'><div style='font-weight:600'>{title}{tag}</div>{inner}</div></div></div>")
 
 
+def _direction_record_label(rec: DirectionSelectionRecord) -> str:
+    return (
+        f"Integration Cycle {rec.integration_cycle} · integration"
+        if rec.phase == "integration"
+        else f"Round {rec.round_number} · {rec.phase}"
+    )
+
+
 def render_direction_record_html(rec: DirectionSelectionRecord) -> str:
-    label = (f"Integration Cycle {rec.integration_cycle} · integration"
-             if rec.phase == "integration"
-             else f"Round {rec.round_number} · {rec.phase}")
+    label = _direction_record_label(rec)
     head = (f"<div class='hdr'><h1>Direction Selection Record</h1>"
             f"<div class='sub'>{_esc(label)} · {rec.timestamp:%Y-%m-%d %H:%M}</div></div>")
 
@@ -263,15 +269,38 @@ def render_annotation_record_html(rec: AnnotationRecord) -> str:
     return _doc("Cell Annotation Record", body)
 
 
+def _direction_record_entry_pairs(state: AnalysisState) -> list[tuple[DirectionSelectionRecord, Dict[str, str]]]:
+    pairs = []
+    for i, rec in enumerate(state.direction_selection_records):
+        if rec.event_type == "open":
+            continue
+        fname = f"direction_record_{i:02d}_round{rec.round_number}.html"
+        pairs.append((rec, {"filename": fname, "label": _direction_record_label(rec)}))
+    return pairs
+
+
+def direction_record_entries(state: AnalysisState) -> list:
+    """Single source of the direction-record filename + label formula.
+
+    Returns [{"filename": ..., "label": ...}, ...] in record order, skipping
+    'open' events. Both the file writer and the downloads renderer consume this.
+    """
+    return [entry for _, entry in _direction_record_entry_pairs(state)]
+
+
 def write_interaction_record_files(
     state: AnalysisState,
     reports_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     from ...config import get_session_reports
-    reports_dir = Path(reports_dir) if reports_dir is not None else get_session_reports(state.id)
-    reports_dir.mkdir(parents=True, exist_ok=True)
 
     result: Dict[str, Any] = {"annotation_record": None, "direction_records": []}
+    record_entry_pairs = _direction_record_entry_pairs(state)
+    if state.annotation_record is None and not record_entry_pairs:
+        return result
+
+    reports_dir = Path(reports_dir) if reports_dir is not None else get_session_reports(state.id)
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
     if state.annotation_record is not None:
         fname = "annotation_record.html"
@@ -279,13 +308,8 @@ def write_interaction_record_files(
             render_annotation_record_html(state.annotation_record), encoding="utf-8")
         result["annotation_record"] = fname
 
-    for i, rec in enumerate(state.direction_selection_records):
-        if rec.event_type == "open":
-            continue
-        fname = f"direction_record_{i:02d}_round{rec.round_number}.html"
-        (reports_dir / fname).write_text(
+    for rec, entry in record_entry_pairs:
+        (reports_dir / entry["filename"]).write_text(
             render_direction_record_html(rec), encoding="utf-8")
-        label = (f"Integration Cycle {rec.integration_cycle}"
-                 if rec.phase == "integration" else f"Round {rec.round_number} · {rec.phase}")
-        result["direction_records"].append({"filename": fname, "label": label})
+        result["direction_records"].append(entry)
     return result

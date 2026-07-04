@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 GRAPH_RECURSION_LIMIT = 100
 
 
-from .helpers import wait_with_skip_time
+from .direction_coverage import at_integration_gate
+from .helpers import wait_with_skip_time, build_integration_gate_payload
 from .retry import with_retry, MAX_NODE_RETRIES
 from .state import WorkflowState, make_initial_workflow_state
 from .routing import RoutingMixin
@@ -49,7 +50,7 @@ from ..agents.painter_agent import PainterAgent
 from ..agents.supervisor_agent import SupervisorAgent
 from ..agents.technique_agent import TechniqueAgent
 from ..utils.llm_client import LLMManager, UpstreamExhaustedError
-from ..constants import LlmFailureAction, WaitInputReason, StateSyncChangeType
+from ..constants import LlmFailureAction, WaitInputReason, StateSyncChangeType, SEMANTIC_WAIT_GATES
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.sandbox import LocalJupyterSandbox
 from ..config import SystemConfig, get_session_workspace, get_session_states
@@ -104,34 +105,21 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
         self._consume_restore_resume_metadata(analysis_state)
 
-        if (
-            analysis_state.analysis_phase == AnalysisPhase.INTEGRATION
-            and analysis_state.integration_gate_candidates
-            and not analysis_state.final_report_requested
-        ):
-            detailed_report_url = (
-                f"/api/session/{self.session_id}/detailed-report/html"
-                if analysis_state.detailed_report_html_path else None
+        if at_integration_gate(analysis_state) and not analysis_state.final_report_requested:
+            await self._send_message(
+                "integration_gate",
+                build_integration_gate_payload(analysis_state, self.session_id),
+                AgentType.PI,
             )
-            await self._send_message("integration_gate", {
-                "cycle": analysis_state.integration_cycle,
-                "integration_analysis": (analysis_state.integration_reports[-1]
-                                         if analysis_state.integration_reports else ""),
-                "candidates": analysis_state.integration_gate_candidates,
-                "detailed_report_url": detailed_report_url,
-            }, AgentType.PI)
 
         # Integration-gate waiting state: skip the _should_continue /
         # _check_convergence stop guards — they would route to
         # generate_final_report on max_rounds, bypassing the
         # wait_for_user_input checkpoint that lets the user choose new
         # directions. The graph checkpoint resumes at wait_for_user_input.
-        at_integration_gate = (
-            analysis_state.analysis_phase == AnalysisPhase.INTEGRATION
-            and bool(analysis_state.integration_gate_candidates)
-        )
+        is_integration_gate = at_integration_gate(analysis_state)
 
-        if not at_integration_gate:
+        if not is_integration_gate:
             if self._should_continue(workflow_state) == "stop":
                 final_state = await self._generate_final_report(workflow_state)
                 return final_state["analysis_state"]
@@ -902,7 +890,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # Guard: restored wait-state snapshot → continuation, not fresh run.
         if (
             initial_state.restore_resume_kind == "semantic_gate"
-            and initial_state.restore_resume_gate in ("round_wait", "integration_selection")
+            and initial_state.restore_resume_gate in SEMANTIC_WAIT_GATES
             and initial_state.status == TaskStatus.RUNNING
         ):
             return await self.resume_restored_wait_state(initial_state)
@@ -969,7 +957,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         # generation on every reconnect. The live integration-wait path clears
         # this in _wait_for_user_input, but the no-workflow report-only path
         # bypasses that node.
-        initial_state.final_report_requested = False
+        initial_state.consume_final_report_request()
 
         try:
             await self._send_message("status", "Resuming report generation (analysis already complete)...")
@@ -1114,7 +1102,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
         if (
             analysis_state.restore_resume_kind == "semantic_gate"
-            and analysis_state.restore_resume_gate in ("round_wait", "integration_selection")
+            and analysis_state.restore_resume_gate in SEMANTIC_WAIT_GATES
             and analysis_state.status == TaskStatus.RUNNING
         ):
             return await self.resume_restored_wait_state(analysis_state)

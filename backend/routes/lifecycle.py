@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 
 from backend.config import get_session_states
-from backend.constants import WaitInputReason
+from backend.constants import WaitInputReason, SEMANTIC_WAIT_GATES
 from backend.models.api_requests import LlmFailureActionRequest, RetryNodeRequest, StopAnalysisRequest
 from backend.models.schemas import (
     APIResponse, TaskStatus,
@@ -207,7 +207,7 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         else:
             if (
                 state.restore_resume_kind == "semantic_gate"
-                and state.restore_resume_gate in ("round_wait", "integration_selection")
+                and state.restore_resume_gate in SEMANTIC_WAIT_GATES
             ):
                 state.status = TaskStatus.RUNNING
                 await _update_session_cache(session_id, state)

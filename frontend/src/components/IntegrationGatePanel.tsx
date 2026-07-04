@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 export interface IntegrationCandidate {
   direction: string
@@ -15,6 +15,12 @@ export interface IntegrationGatePanelProps {
 
 export function IntegrationGatePanel({ cycle, candidates, onSubmit, onFinalize }: IntegrationGatePanelProps) {
   const [sel, setSel] = useState<Record<string, boolean>>({})
+  const candidateKey = candidates
+    .map((c, i) => `${c.direction_id ?? String(i)}:${c.direction}`)
+    .join('|')
+  useEffect(() => {
+    setSel({})
+  }, [cycle, candidateKey])
   const toggle = (id: string) => setSel((s) => ({ ...s, [id]: !s[id] }))
   const submit = () => onSubmit(candidates.filter((c, i) => sel[c.direction_id ?? String(i)]))
   return (

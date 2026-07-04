@@ -863,6 +863,13 @@ class AnalysisState(BaseModel):
     integration_gate_literature_evidence: List[Dict[str, Any]] = Field(default_factory=list)
     integration_reports: List[str] = Field(default_factory=list)
     final_report_requested: bool = False
+
+    def consume_final_report_request(self) -> bool:
+        """Atomically read-and-clear the one-shot final-report request flag."""
+        requested = bool(self.final_report_requested)
+        self.final_report_requested = False
+        return requested
+
     # Correlation analysis result for multi-direction mode
     exploration_report_html_path: Optional[str] = None
     # Path to exploration report HTML file

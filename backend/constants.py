@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.32.2"
+VERSION = "0.32.3"
 
 
 # ── Node → Agent mapping ───────────────────────────────────────────
@@ -97,6 +97,18 @@ PI_REVIEW_FALLBACK_DECISION = "revise"
 # at import time rather than silently breaking comparison semantics.
 CONTINUE_SIGNAL = "[CONTINUE]"
 PI_DECIDE_SIGNAL = "[PI_DECIDE]"
+
+# Semantic gate identifiers used by restore targets, wait helpers, and resume routing.
+GATE_ROUND_WAIT = "round_wait"
+GATE_DIRECTION_SELECTION = "direction_selection"
+GATE_INTEGRATION_SELECTION = "integration_selection"
+GATE_ANNOTATION_CONFIRMATION = "annotation_confirmation"
+
+# Only gates that can resume through the normal wait_for_user_input path.
+SEMANTIC_WAIT_GATES: frozenset[str] = frozenset({
+    GATE_ROUND_WAIT,
+    GATE_INTEGRATION_SELECTION,
+})
 
 # ── PI human-input stop keywords (single source of truth) ─────────
 # Used by pi_agent.process_human_guidance and pi_agent.process_user_input

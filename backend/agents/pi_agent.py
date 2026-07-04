@@ -11,6 +11,7 @@ from .base import BaseAgent
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.direction_evidence import build_fallback_direction_evidence
 from ..utils.formatting import safe_parse_json_array
+from .prompt_blocks import build_integration_block
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -3432,19 +3433,8 @@ Current research direction: {current_direction or "N/A"}
                 + "\n".join(mech_lines)
             )
 
-        # Cross-direction integration analyses (spec §13): feed cumulative
         # integration insights into the final report so they are not lost.
-        integration_block = ""
-        if getattr(state, "integration_reports", None):
-            int_parts = []
-            for i, report in enumerate(state.integration_reports, 1):
-                int_parts.append(f"### Integration Cycle {i}\n{report[:2000]}")
-            integration_block = (
-                "\n## Cross-Direction Integration Analyses\n"
-                "The following cross-direction integration analyses were performed "
-                "between direction batches. Incorporate their insights into the report.\n\n"
-                + "\n\n".join(int_parts)
-            )
+        integration_block = build_integration_block(state, style="final")
 
         prompt = f"""
 Based on all the analysis results below, write a complete analysis report:
@@ -4534,17 +4524,7 @@ an earlier version may win.
             )
 
         # Cross-direction integration analyses (spec §13)
-        integration_block = ""
-        if getattr(state, "integration_reports", None):
-            int_parts = []
-            for i, report in enumerate(state.integration_reports, 1):
-                int_parts.append(f"### Integration Cycle {i}\n{report[:2000]}")
-            integration_block = (
-                "**Cross-Direction Integration Analyses:**\n"
-                "The following cross-direction integration analyses were performed "
-                "between direction batches. Incorporate their insights.\n\n"
-                + "\n\n".join(int_parts)
-            )
+        integration_block = build_integration_block(state, style="integrated")
 
         prompt = f"""## Generate Integrated Research Report
 

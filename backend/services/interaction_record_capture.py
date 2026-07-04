@@ -6,8 +6,8 @@ the state as usual.
 from typing import Any, Dict, List, Optional
 
 from ..models.schemas import (
-    AnalysisState, SelectionEntry, DirectionSelectionRecord, AnnotationRecord,
-    AnnotationClusterEntry,
+    AnalysisPhase, AnalysisState, SelectionEntry, DirectionSelectionRecord,
+    AnnotationRecord, AnnotationClusterEntry,
 )
 
 
@@ -63,6 +63,34 @@ def map_selections(
             is_custom=is_custom, candidate_index=idx,
         ))
     return entries
+
+
+def populate_direction_record_from_state(state: AnalysisState, rec: DirectionSelectionRecord, event_type: str) -> None:
+    if state.analysis_phase == AnalysisPhase.INTEGRATION:
+        rec.candidates = list(state.integration_gate_candidates)
+        rec.literature_evidence = list(state.integration_gate_literature_evidence)
+    else:
+        report = state.exploration_report
+        rec.candidates = list(
+            getattr(report, "research_direction_candidates", []) if report else []
+        )
+        rec.literature_evidence = list(
+            getattr(report, "direction_literature_evidence", []) if report else []
+        )
+    rec.event_type = event_type
+
+
+def resolve_integration_gate(state, event_type: str):
+    rec = get_or_open_direction_record(
+        state,
+        round_number=state.current_round,
+        phase="integration",
+        integration_cycle=state.integration_cycle,
+    )
+    populate_direction_record_from_state(state, rec, event_type)
+    state.integration_gate_candidates = []
+    state.integration_gate_literature_evidence = []
+    return rec
 
 
 def build_annotation_record(

@@ -28,6 +28,7 @@ from backend.utils.files import validate_session_id
 from backend.utils.snapshot import SnapshotManager
 from backend.config import get_session_states
 from backend.workflow.direction_coverage import clone_round_results_for_branch
+from backend.workflow.helpers import build_integration_gate_payload
 from backend.workflow.restore_targets import (
     SNAPSHOT_RESUME_TARGET,
     stable_restore_branch_id,
@@ -227,20 +228,10 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
             ))
 
     if phase == "pre_integration_gate" and restored_state.integration_gate_candidates:
-        detailed_report_url = (
-            f"/api/session/{session_id}/detailed-report/html"
-            if getattr(restored_state, "detailed_report_html_path", None) else None
-        )
         restored_state.realtime_messages.append(WebSocketMessage(
             type="integration_gate",
             agent=AgentType.PI,
-            content={
-                "cycle": restored_state.integration_cycle,
-                "integration_analysis": (restored_state.integration_reports[-1]
-                                         if restored_state.integration_reports else ""),
-                "candidates": restored_state.integration_gate_candidates,
-                "detailed_report_url": detailed_report_url,
-            },
+            content=build_integration_gate_payload(restored_state, session_id),
         ))
 
     # Reset annotation confirmed flag so the restored HITL checkpoint works correctly

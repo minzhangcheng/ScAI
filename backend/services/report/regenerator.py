@@ -496,24 +496,12 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
             """
 
     # 7. Related Reports & Downloads
-    downloads_html = ""
-    related = appendix.get("related_reports", {})
-    notebook = appendix.get("notebook_filename", "")
-    literature_report = appendix.get("literature_report", "")
-    if related or notebook or literature_report:
-        dl_title = "Related Reports & Downloads"
-        dl_items = []
-        if related.get("annotation_record"):
-            dl_items.append(f'<li><a href="{esc(related["annotation_record"])}" download style="color:#4f46e5;">Cell Annotation Record</a></li>')
-        for dr in related.get("direction_records", []):
-            dl_items.append(f'<li><a href="{esc(dr["filename"])}" download style="color:#4f46e5;">'
-                            f'Direction Selection Record — {esc(dr["label"])}</a></li>')
-        if notebook:
-            label = "Analysis Notebook (.ipynb)"
-            dl_items.append(f'<li><a href="{esc(notebook)}" download style="color:#4f46e5;">{label}</a></li>')
-        if literature_report:
-            dl_items.append(render_literature_download_li(literature_report))
-        downloads_html = f'<h3>{dl_title}</h3><ul>{"".join(dl_items)}</ul>'
+    from .download_section import render_related_reports_downloads_html
+    downloads_html = render_related_reports_downloads_html(
+        appendix.get("related_reports", {}),
+        notebook_filename=appendix.get("notebook_filename", ""),
+        literature_report=appendix.get("literature_report", ""),
+    )
 
     # 8. Reproducibility / Checksums
     reproducibility_html = ""

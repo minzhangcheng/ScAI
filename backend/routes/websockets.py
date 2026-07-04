@@ -7,7 +7,8 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from backend.config import WS_RECEIVE_TIMEOUT
-from backend.models.schemas import WebSocketMessage, AnalysisState, TaskStatus
+from backend.models.schemas import WebSocketMessage, AnalysisState, TaskStatus, AnalysisPhase
+from backend.workflow.direction_coverage import active_batch_incomplete
 from backend.state import (
     websockets, workflows, _monitor_tasks,
     _run_tasks, state_lock, initializing_sessions,
@@ -28,19 +29,17 @@ router = APIRouter(tags=["websockets"])
 
 
 def _in_integration_loop(state) -> bool:
-    from ..models.schemas import AnalysisPhase
-    from ..workflow.direction_coverage import direction_coverage_status_for_batch
     # User explicitly chose to write the final report — not in the loop.
     if getattr(state, "final_report_requested", False):
         return False
-    batch = state.active_direction_batch or []
-    batch_incomplete = bool(batch) and not direction_coverage_status_for_batch(state, batch).complete
-    return bool(
-        state.pending_integration
-        or state.analysis_phase == AnalysisPhase.INTEGRATION
-        or batch_incomplete
-        or state.integration_gate_candidates
-    )
+    # Cheap boolean checks first; only fall back to the O(N) batch scan last.
+    if getattr(state, "pending_integration", False):
+        return True
+    if state.analysis_phase == AnalysisPhase.INTEGRATION:
+        return True
+    if getattr(state, "integration_gate_candidates", None):
+        return True
+    return active_batch_incomplete(state)
 
 
 async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> None:

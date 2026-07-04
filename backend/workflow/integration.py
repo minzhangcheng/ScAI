@@ -8,6 +8,7 @@ import logging
 from typing import List
 
 from ..models.schemas import AnalysisPhase, TaskStatus, RoundResult, AgentType
+from .helpers import build_integration_gate_payload
 from .retry import with_retry
 from .state import WorkflowState
 
@@ -97,16 +98,11 @@ class IntegrationMixin:
         self._continue_event.clear()
         self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
         await self._create_auto_snapshot(analysis_state, "pre_integration_gate")
-        detailed_report_url = (
-            f"/api/session/{session_id}/detailed-report/html"
-            if analysis_state.detailed_report_html_path else None
+        await self._send_message(
+            "integration_gate",
+            build_integration_gate_payload(analysis_state, session_id),
+            AgentType.PI,
         )
-        await self._send_message("integration_gate", {
-            "cycle": analysis_state.integration_cycle,
-            "integration_analysis": integration_report,
-            "candidates": scored_candidates,
-            "detailed_report_url": detailed_report_url,
-        }, AgentType.PI)
         await self._send_state_sync(analysis_state, "integration_gate")
         return {**state, "analysis_state": analysis_state, "integration_next": "gate"}
 

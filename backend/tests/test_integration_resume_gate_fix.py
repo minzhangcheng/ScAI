@@ -10,9 +10,12 @@ def test_resume_helper_skips_stop_guard_at_integration_gate():
     _check_convergence when parked at the integration gate — those guards
     would route to generate_final_report, bypassing the wait_for_user_input
     checkpoint that lets the user choose new directions."""
+    import inspect
+    from backend.workflow.core import SingleCellAnalysisWorkflow
+
     src = inspect.getsource(SingleCellAnalysisWorkflow.resume_restored_wait_state)
-    assert "at_integration_gate" in src or "integration_gate_candidates" in src
-    assert "if not at_integration_gate" in src or "if not " in src
+    assert "at_integration_gate(analysis_state)" in src
+    assert "if not is_integration_gate" in src
 
 
 def test_resume_helper_does_not_generate_report_at_integration_gate():

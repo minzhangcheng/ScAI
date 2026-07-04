@@ -17,7 +17,7 @@ from backend.workflow.routing import RoutingMixin
 
 def test_generate_report_clears_final_report_requested():
     src = inspect.getsource(SingleCellAnalysisWorkflow.generate_report)
-    assert "final_report_requested = False" in src, (
+    assert "consume_final_report_request()" in src, (
         "generate_report must consume final_report_requested so reconnect "
         "does not re-trigger report-only generation"
     )
