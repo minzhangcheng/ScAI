@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useCountdownTimer } from '../hooks/useCountdownTimer'
 
 export interface IntegrationCandidate {
   direction: string
@@ -11,10 +12,20 @@ export interface IntegrationGatePanelProps {
   candidates: IntegrationCandidate[]
   onSubmit: (selected: IntegrationCandidate[]) => void
   onFinalize: () => void
+  onLetPiDecide: () => void
+  countdownSeconds: number  // -1=manual, 0=no-wait, >0=countdown
 }
 
-export function IntegrationGatePanel({ cycle, candidates, onSubmit, onFinalize }: IntegrationGatePanelProps) {
+export function IntegrationGatePanel({
+  cycle,
+  candidates,
+  onSubmit,
+  onFinalize,
+  onLetPiDecide,
+  countdownSeconds,
+}: IntegrationGatePanelProps) {
   const [sel, setSel] = useState<Record<string, boolean>>({})
+  const [submitting, setSubmitting] = useState(false)
   const candidateKey = candidates
     .map((c, i) => `${c.direction_id ?? String(i)}:${c.direction}`)
     .join('|')
@@ -22,10 +33,73 @@ export function IntegrationGatePanel({ cycle, candidates, onSubmit, onFinalize }
     setSel({})
   }, [cycle, candidateKey])
   const toggle = (id: string) => setSel((s) => ({ ...s, [id]: !s[id] }))
-  const submit = () => onSubmit(candidates.filter((c, i) => sel[c.direction_id ?? String(i)]))
+  const submit = async () => {
+    if (submitting) return
+    setSubmitting(true)
+    try {
+      onSubmit(candidates.filter((c, i) => sel[c.direction_id ?? String(i)]))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+  const handleFinalize = async () => {
+    if (submitting) return
+    setSubmitting(true)
+    try {
+      await onFinalize()
+    } finally {
+      setSubmitting(false)
+    }
+  }
+  const handleLetPiDecide = async () => {
+    if (submitting) return
+    setSubmitting(true)
+    try {
+      await onLetPiDecide()
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  // Countdown timer: on expire, let PI decide (same pattern as ExplorationReportDialog)
+  const expiredRef = useRef(false)
+  useEffect(() => {
+    expiredRef.current = false
+  }, [cycle, candidateKey])
+  const handleAutoDecide = () => {
+    if (!submitting && !expiredRef.current) {
+      expiredRef.current = true
+      handleLetPiDecide()
+    }
+  }
+  const { timeRemaining, hasCountdown } = useCountdownTimer({
+    countdownSeconds,
+    onExpire: handleAutoDecide,
+    resetKey: `${cycle}-${candidateKey}`,
+  })
+
+  const minutes = Math.floor(timeRemaining / 60)
+  const seconds = timeRemaining % 60
+  const timerDisplay = hasCountdown ? `${minutes}:${seconds.toString().padStart(2, '0')}` : null
+
+  // No-wait mode: auto-trigger PI decide immediately
+  const isNoWait = countdownSeconds === 0
+  const onLetPiDecideRef = useRef(onLetPiDecide)
+  onLetPiDecideRef.current = onLetPiDecide
+  useEffect(() => {
+    if (isNoWait && !submitting) {
+      onLetPiDecideRef.current()
+    }
+  }, [isNoWait, submitting])
+
   return (
     <div className="integration-gate-panel">
       <h3>{`整合分析 (第 ${cycle} 次) — 选择新的研究方向`}</h3>
+      {timerDisplay && (
+        <div className="countdown-timer" style={{ marginBottom: '0.5rem', color: '#888' }}>
+          倒计时: {timerDisplay}
+        </div>
+      )}
       <ul>
         {candidates.map((c, i) => {
           const id = c.direction_id ?? String(i)
@@ -39,9 +113,10 @@ export function IntegrationGatePanel({ cycle, candidates, onSubmit, onFinalize }
           )
         })}
       </ul>
-      <div className="actions">
-        <button onClick={submit}>继续分析所选方向</button>
-        <button onClick={onFinalize}>进入报告撰写 (Write report)</button>
+      <div className="actions" style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+        <button onClick={submit} disabled={submitting}>继续分析所选方向</button>
+        <button onClick={handleLetPiDecide} disabled={submitting}>让 PI 决定 (Let PI decide)</button>
+        <button onClick={handleFinalize} disabled={submitting}>进入报告撰写 (Write report)</button>
       </div>
     </div>
   )

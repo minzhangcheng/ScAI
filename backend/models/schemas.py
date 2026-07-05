@@ -746,11 +746,13 @@ class RoundResult(BaseModel):
         default_factory=lambda: ["bioinformatics", "pathology", "biochemistry", "literature"]
     )
     reanalysis_agents: List[str] = Field(default_factory=list)  # Agents needing reanalysis of existing data
-    phase: str = "exploration"  # "exploration" or "innovation"
+    phase: str = "exploration"  # "exploration" | "innovation" | "integration"
     direction: str = ""  # Research direction for innovation rounds
     exploration_report: Optional[ExplorationReport] = None  # Only for Phase 1
     cross_modal_synthesis: Optional[CrossModalSynthesis] = None
     data_driven_mechanism_programs: List[DataDrivenMechanismProgram] = Field(default_factory=list)
+    integration_report_summary: str = ""  # Excerpt from cross-direction integration report (integration phase only)
+    integration_candidates: List[Dict[str, Any]] = Field(default_factory=list)  # Scored candidate directions from integration (integration phase only)
     lineage_id: str = "main"
     branch_id: Optional[str] = None
     branch_label: Optional[str] = None
@@ -1318,12 +1320,15 @@ class AnalysisState(BaseModel):
 
         return [
             {"round": r["round_number"], "pi_summary": r["pi_summary"],
+             "phase": r.get("phase", "exploration"),
              "pathology_findings": r["pathology_findings"],
              "bioinformatics_findings": r["bioinformatics_findings"],
              "biochemistry_findings": r["biochemistry_findings"],
              "literature_findings": r["literature_findings"],
              "next_steps": r["next_steps"], "conflicts": r["conflicts"],
              "cross_modal_candidates": _simplify_candidates(r.get("cross_modal_synthesis")),
+             "integration_report_summary": r.get("integration_report_summary", ""),
+             "integration_candidates": r.get("integration_candidates", []),
              "timestamp": r["timestamp"]}
             for r in results
         ]

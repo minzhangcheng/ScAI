@@ -48,8 +48,16 @@ class GraphMixin:
             }
         )
 
-        # pi_planning always proceeds to wet-lab analysis first
-        self.graph.add_edge("pi_planning", "biochemistry_analysis")
+        # pi_planning → agent pipeline, unless PI selected 0 integration directions
+        # (in which case final_report_requested is set and we short-circuit to report)
+        self.graph.add_conditional_edges(
+            "pi_planning",
+            self._after_pi_planning,
+            {
+                "continue": "biochemistry_analysis",
+                "finalize": "generate_final_report",
+            }
+        )
         self.graph.add_edge("planning_dialogue", "user_review_gate")
 
         self.graph.add_conditional_edges(

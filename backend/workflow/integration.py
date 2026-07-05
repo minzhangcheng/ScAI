@@ -25,6 +25,16 @@ class IntegrationMixin:
 
     @with_retry("integration_synthesis")
     async def _integration_synthesis(self, state: WorkflowState) -> WorkflowState:
+        """Integration round: cross-direction synthesis + new-direction gate.
+
+        When the user chooses new directions at the integration gate and those
+        directions complete, a subsequent integration cycle will have fresh
+        round_results to analyze. If the user does NOT choose new directions
+        (or the PI cannot generate novel ones), the integration cycle may
+        produce a report identical to the previous one because the underlying
+        data has not changed. This is by design — the cycle cap
+        (max_integration_cycles) prevents infinite repetition.
+        """
         analysis_state = state["analysis_state"]
         session_id = self.session_id
         logger.info(f"[{session_id}] Integration round (cycle {analysis_state.integration_cycle + 1})")
@@ -68,13 +78,43 @@ class IntegrationMixin:
         analysis_state.integration_reports.append(integration_report)
         analysis_state.multi_direction_correlation = integration_report
         analysis_state.pending_integration = False
+
+        # Create RoundResult for the integration cycle
+        from .synthesis import _upsert_round_result, build_round_summary_payload, derive_round_completion_status, current_lineage_id
+        integration_result = RoundResult(
+            round_number=analysis_state.current_round,
+            phase="integration",
+            pi_summary=integration_report[:2000] if integration_report else "Integration analysis completed.",
+            integration_report_summary=integration_report[:4000] if integration_report else "",
+            integration_candidates=list(scored_candidates) if scored_candidates else [],
+            round_status="completed",
+            evidence_status="substantive" if integration_report else "empty",
+        )
+        derive_round_completion_status({"analysis_state": analysis_state}, integration_result)
+        lineage_id = current_lineage_id(analysis_state)
+        _upsert_round_result(
+            analysis_state.round_results,
+            integration_result,
+            lineage_id=lineage_id,
+            branch_id=None if lineage_id == "main" else lineage_id,
+            branch_label=analysis_state.restore_branch_label,
+            restored_from_snapshot_id=analysis_state.last_restored_snapshot_id,
+        )
+
+        # Send round_summary so the frontend shows this integration round
+        effective_max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds
+        round_summary = build_round_summary_payload(
+            integration_result, analysis_state, effective_max_rounds,
+        )
+        await self._send_message("round_summary", round_summary, AgentType.PI)
+
         try:
             await self._build_and_save_detailed_segment(
                 analysis_state,
                 f"integration_cycle_{analysis_state.integration_cycle}",
                 f"Integration Cycle {analysis_state.integration_cycle} — Cross-Direction Analysis",
                 graph_state=state,
-                round_result=None,
+                round_result=integration_result,
             )
         except Exception as e:
             logger.warning(f"[{session_id}] Integration detailed segment failed: {e}")

@@ -25,11 +25,13 @@ export function transformRoundResults(raw: (RawRoundResult | null)[] | undefined
     return {
       round: r.round ?? 0,
       summary: r.pi_summary || r.summary || '',
+      phase: r.phase || '',
       pathologyFindings: Array.isArray(r.pathology_findings) ? r.pathology_findings : [],
       bioinformaticsFindings: Array.isArray(r.bioinformatics_findings) ? r.bioinformatics_findings : [],
       biochemistryFindings: Array.isArray(r.biochemistry_findings) ? r.biochemistry_findings : [],
       literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
       crossModalCandidates: Array.isArray(r.cross_modal_candidates) ? r.cross_modal_candidates : [],
+      integrationCandidates: Array.isArray(r.integration_candidates) ? r.integration_candidates : [],
     }
   }).filter((r): r is RoundResult => r !== null)
 }

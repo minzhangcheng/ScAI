@@ -2433,6 +2433,112 @@ Return JSON:
             "selection_rationale": rationale,
         }
 
+    async def select_integration_directions(
+        self,
+        state: "AnalysisState",
+        scored_candidates: List[Dict[str, Any]],
+        integration_report: str,
+    ) -> Dict[str, Any]:
+        """PI selects directions from integration candidates after cross-direction synthesis.
+
+        Unlike select_best_directions (which forces at least 1 direction), this method
+        allows returning zero selected_directions when none are sufficiently novel.
+
+        Returns:
+            DirectionSelectionDecision-shaped dict with selected_directions,
+            rejected_directions, selection_rationale. selected_directions may be empty.
+        """
+        logger.info("[PI] Selecting integration directions")
+        self.reset_history()
+
+        if not scored_candidates:
+            return {
+                "selected_directions": [],
+                "rejected_directions": [],
+                "selection_rationale": "No integration candidates available; proceeding to final report.",
+            }
+
+        already_chosen = [d.get("direction", "") for d in (state.user_chosen_directions or [])]
+        rounds_block = []
+        for rr in (state.round_results or []):
+            if getattr(rr, "phase", None) != "innovation":
+                continue
+            rounds_block.append(
+                f"### Round {rr.round_number} — direction: {getattr(rr, 'direction', 'N/A')}\n"
+                f"- Bioinformatics: {json.dumps(getattr(rr, 'bioinformatics_findings', [])[:8], ensure_ascii=False)}\n"
+                f"- Pathology: {json.dumps(getattr(rr, 'pathology_findings', [])[:3], ensure_ascii=False)}\n"
+                f"- Biochemistry: {json.dumps(getattr(rr, 'biochemistry_findings', [])[:3], ensure_ascii=False)}\n"
+                f"- Literature: {json.dumps(getattr(rr, 'literature_findings', [])[:3], ensure_ascii=False)}\n"
+                f"- Summary: {(getattr(rr, 'pi_summary', '') or '')[:600]}"
+            )
+
+        prompt = f"""You are the PI deciding whether to pursue new research directions after cross-direction integration analysis.
+
+## Project Context
+- Name: {state.name}
+- Research Objective: {state.initial_instruction}
+- Species: {state.species or "Not specified"}
+{state.build_experimental_design_summary()}
+
+## Cross-Direction Integration Report
+{integration_report[:4000]}
+
+## Innovation Rounds (cumulative)
+{chr(10).join(rounds_block) if rounds_block else "No innovation rounds yet."}
+
+## Integration Direction Candidates (scored by novelty and evidence)
+{json.dumps(scored_candidates, ensure_ascii=False, indent=2)}
+
+## Already-Investigated Directions (DO NOT repeat)
+{json.dumps(already_chosen, ensure_ascii=False)}
+
+Evaluate each candidate direction. Select ONLY those that are:
+1. Genuinely NOVEL relative to already-investigated directions
+2. Well-supported by concrete evidence from the integration analysis
+3. Likely to yield meaningful new biological insights
+
+IMPORTANT: If none of the candidates are sufficiently novel and evidence-supported, return an EMPTY selected_directions list. It is better to proceed to the final report than to pursue a direction that lacks solid evidence.
+
+Return JSON:
+{{
+    "selected_directions": [
+        {{
+            "direction": "The exact direction text from candidates",
+            "notes": "Brief PI notes on why this was selected and what to focus on"
+        }}
+    ],
+    "rejected_directions": [
+        {{
+            "direction": "The direction text from rejected candidates",
+            "reason_not_selected": "Why this direction was not selected",
+            "follow_up_value": "high|medium|low",
+            "dependency_note": ""
+        }}
+    ],
+    "selection_rationale": "Why these directions were chosen, or why none were selected"
+}}"""
+
+        response = await self.chat(prompt, temperature=0.3)
+        data = self._safe_parse_json(response, default={})
+
+        selected = data.get("selected_directions", [])
+        rejected = data.get("rejected_directions", [])
+        rationale = data.get("selection_rationale", "")
+
+        # Unlike select_best_directions, we do NOT force at least 1 direction.
+        # Empty selected_directions is a valid outcome meaning "proceed to report".
+        if not rationale:
+            if selected:
+                rationale = "Selected based on novelty and evidence strength."
+            else:
+                rationale = "No sufficiently novel and evidence-supported direction found; proceeding to final report."
+
+        return {
+            "selected_directions": selected,
+            "rejected_directions": rejected,
+            "selection_rationale": rationale,
+        }
+
     async def plan_supplementary_analysis(
         self, state: AnalysisState, user_request: str, context: str
     ) -> Dict[str, Any]:

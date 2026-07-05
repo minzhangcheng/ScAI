@@ -36,7 +36,8 @@ import {
   Pause,
   Square,
   Camera,
-  Trash2
+  Trash2,
+  GitMerge
 } from 'lucide-react'
 
 const API_BASE = '/api'
@@ -92,6 +93,8 @@ interface RoundSummaryContent {
   bioinformatics_findings?: string[]
   biochemistry_findings?: string[]
   literature_findings?: string[]
+  phase?: string
+  integration_candidates?: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
 }
 
 export function buildDirectionsPayload(
@@ -274,6 +277,8 @@ export function AnalysisPanel() {
           bioinformaticsFindings: content.bioinformatics_findings || [],
           biochemistryFindings: content.biochemistry_findings || [],
           literatureFindings: content.literature_findings || [],
+          phase: (content.phase as RoundSummary['phase']) || '',
+          integrationCandidates: content.integration_candidates || [],
         })
       }
     }
@@ -297,6 +302,8 @@ export function AnalysisPanel() {
             bioinformaticsFindings: round.bioinformaticsFindings || [],
             biochemistryFindings: round.biochemistryFindings || [],
             literatureFindings: round.literatureFindings || [],
+            phase: round.phase || '',
+            integrationCandidates: round.integrationCandidates || [],
           })
         }
       }
@@ -427,6 +434,14 @@ export function AnalysisPanel() {
   const finalizeFromIntegration = async () => {
     if (!currentSession) return
     await apiFetch(`/session/${currentSession.id}/finalize-from-integration`, { method: 'POST' })
+    setIntegrationGateData(null)
+  }
+  const handleLetPiDecideIntegration = async () => {
+    if (!currentSession) return
+    await apiFetch(`/session/${currentSession.id}/choose-direction`, {
+      method: 'POST',
+      body: JSON.stringify({ let_pi_decide: true }),
+    })
     setIntegrationGateData(null)
   }
 
@@ -1272,13 +1287,17 @@ export function AnalysisPanel() {
                 >
                   <div className="flex items-center gap-3">
                     <span className={`px-2.5 py-1 rounded-full text-sm font-medium ${
-                      round.status === 'waiting_input'
+                      round.phase === 'integration'
+                        ? 'bg-purple-200 text-purple-800'
+                        : round.status === 'waiting_input'
                         ? 'bg-amber-200 text-amber-800'
                         : round.status === 'analyzing'
                         ? 'bg-blue-200 text-blue-800'
                         : 'bg-green-200 text-green-800'
                     }`}>
-                      Round {round.round}
+                      {round.phase === 'integration'
+                        ? (language === 'zh' ? `整合轮 ${round.round}` : `Integration ${round.round}`)
+                        : `Round ${round.round}`}
                     </span>
                     <span className="text-sm text-slate-600 line-clamp-1">
                       {(round.summary || '').substring(0, 80)}...
@@ -1322,6 +1341,24 @@ export function AnalysisPanel() {
                               +{round.findings.length - 5} {language === 'zh' ? '更多发现...' : 'more findings...'}
                             </li>
                           )}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Integration Candidates */}
+                    {round.phase === 'integration' && round.integrationCandidates && round.integrationCandidates.length > 0 && (
+                      <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+                        <h4 className="text-sm font-medium text-purple-800 mb-2 flex items-center gap-2">
+                          <GitMerge className="w-4 h-4" />
+                          {language === 'zh' ? '候选研究方向' : 'Candidate Research Directions'}
+                        </h4>
+                        <ul className="text-sm text-purple-700 space-y-1">
+                          {round.integrationCandidates.map((c, idx) => (
+                            <li key={idx} className="flex items-start gap-2">
+                              <span className="text-purple-400 mt-0.5">•</span>
+                              <span>{c.direction}{c.score ? ` (score: ${c.score.toFixed(2)})` : ''}</span>
+                            </li>
+                          ))}
                         </ul>
                       </div>
                     )}
@@ -1465,6 +1502,8 @@ export function AnalysisPanel() {
           candidates={integrationGateData.candidates}
           onSubmit={submitIntegrationDirections}
           onFinalize={finalizeFromIntegration}
+          onLetPiDecide={handleLetPiDecideIntegration}
+          countdownSeconds={roundWaitSeconds}
         />
       )}
 

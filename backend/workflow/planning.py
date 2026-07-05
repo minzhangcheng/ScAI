@@ -308,42 +308,90 @@ class PlanningMixin:
                     # Consume the direction to avoid reusing in next round
                     analysis_state.user_chosen_direction = None
                 elif user_direction == PI_DECIDE_SIGNAL or (not user_direction and analysis_state.current_round == 2):
-                    # PI autonomously selects 2 best directions
-                    logger.info(f"[{self.session_id}] Innovation phase: PI selecting best directions")
-                    selection_decision = await self.pi_agent.select_best_directions(analysis_state)
-                    selected_dirs = _selected_directions_from_decision(selection_decision)
-                    rec = find_open_pi_decide_record(analysis_state)
-                    if rec is None:
-                        rec = get_or_open_direction_record(
-                            analysis_state, round_number=analysis_state.current_round,
-                            phase="exploration",
+                    # Distinguish integration-gate PI_DECIDE from Round-1 PI_DECIDE.
+                    # At this point, _wait_for_user_input has already switched phase to
+                    # INNOVATION, so we use integration_cycle > 0 as the signal that
+                    # this PI_DECIDE came from the integration gate.
+                    is_integration_decide = getattr(analysis_state, 'integration_cycle', 0) > 0
+
+                    if is_integration_decide:
+                        # Integration gate auto-skip: PI selects from integration candidates
+                        logger.info(f"[{self.session_id}] Integration gate: PI selecting directions")
+                        selection_decision = await self.pi_agent.select_integration_directions(
+                            analysis_state,
+                            analysis_state.integration_gate_candidates,
+                            analysis_state.multi_direction_correlation or "",
                         )
-                    if analysis_state.exploration_report:
-                        rec.candidates = list(analysis_state.exploration_report.research_direction_candidates)
-                        rec.literature_evidence = list(analysis_state.exploration_report.direction_literature_evidence)
-                    rec.let_pi_decide = True
-                    rec.pi_selected = [
-                        {"direction": d.get("direction", ""), "notes": d.get("notes", "")}
-                        for d in selected_dirs
-                    ]
-                    rec.event_type = "pi_decide"
-                    if analysis_state.exploration_report and isinstance(selection_decision, dict):
-                        analysis_state.exploration_report.direction_selection_summary = selection_decision
-                    # Set up multi-direction queue
-                    analysis_state.user_chosen_directions = selected_dirs
-                    analysis_state.active_direction_batch = list(selected_dirs)
-                    analysis_state.pending_integration = False
-                    # Pop first direction, rest goes to queue
-                    first_dir = selected_dirs[0] if selected_dirs else {"direction": "Continue analysis", "notes": ""}
-                    analysis_state.directions_queue = selected_dirs[1:] if len(selected_dirs) > 1 else []
-                    analysis_state.max_rounds = len(selected_dirs) + 1  # Round 1 + N direction rounds
-                    dir_text = first_dir.get("direction", "")
-                    dir_notes = first_dir.get("notes", "")
-                    instructions = await self.pi_agent.innovation_instruction(
-                        analysis_state, dir_text, notes=dir_notes
-                    )
-                    analysis_state.current_round_direction = dir_text
-                    analysis_state.user_chosen_direction = None
+                        selected_dirs = _selected_directions_from_decision(selection_decision)
+
+                        if not selected_dirs:
+                            # PI chose 0 directions → proceed to final report
+                            logger.info(f"[{self.session_id}] PI selected 0 integration directions; finalizing")
+                            analysis_state.final_report_requested = True
+                            analysis_state.user_chosen_direction = None
+                            # Return minimal instructions; routing will short-circuit
+                            # to generate_final_report via _after_pi_planning.
+                            instructions = {
+                                "pathology_tasks": [],
+                                "bioinformatics_tasks": [],
+                                "biochemistry_tasks": [],
+                                "literature_topics": [],
+                            }
+                            skip_nodes = ["pathology_analysis", "biochemistry_analysis", "literature_research"]
+                        else:
+                            # Set up multi-direction queue
+                            analysis_state.user_chosen_directions = selected_dirs
+                            analysis_state.active_direction_batch = list(selected_dirs)
+                            analysis_state.pending_integration = False
+                            first_dir = selected_dirs[0]
+                            analysis_state.directions_queue = selected_dirs[1:] if len(selected_dirs) > 1 else []
+                            analysis_state.max_rounds = analysis_state.current_round + len(selected_dirs)
+                            dir_text = first_dir.get("direction", "")
+                            dir_notes = first_dir.get("notes", "")
+                            instructions = await self.pi_agent.innovation_instruction(
+                                analysis_state, dir_text, notes=dir_notes
+                            )
+                            analysis_state.current_round_direction = dir_text
+                            analysis_state.user_chosen_direction = None
+                            skip_nodes = []
+                    else:
+                        # Round 1 direction selection (exploration gate PI_DECIDE)
+                        logger.info(f"[{self.session_id}] Innovation phase: PI selecting best directions")
+                        selection_decision = await self.pi_agent.select_best_directions(analysis_state)
+                        selected_dirs = _selected_directions_from_decision(selection_decision)
+                        rec = find_open_pi_decide_record(analysis_state)
+                        if rec is None:
+                            rec = get_or_open_direction_record(
+                                analysis_state, round_number=analysis_state.current_round,
+                                phase="exploration",
+                            )
+                        if analysis_state.exploration_report:
+                            rec.candidates = list(analysis_state.exploration_report.research_direction_candidates)
+                            rec.literature_evidence = list(analysis_state.exploration_report.direction_literature_evidence)
+                        rec.let_pi_decide = True
+                        rec.pi_selected = [
+                            {"direction": d.get("direction", ""), "notes": d.get("notes", "")}
+                            for d in selected_dirs
+                        ]
+                        rec.event_type = "pi_decide"
+                        if analysis_state.exploration_report and isinstance(selection_decision, dict):
+                            analysis_state.exploration_report.direction_selection_summary = selection_decision
+                        # Set up multi-direction queue
+                        analysis_state.user_chosen_directions = selected_dirs
+                        analysis_state.active_direction_batch = list(selected_dirs)
+                        analysis_state.pending_integration = False
+                        # Pop first direction, rest goes to queue
+                        first_dir = selected_dirs[0] if selected_dirs else {"direction": "Continue analysis", "notes": ""}
+                        analysis_state.directions_queue = selected_dirs[1:] if len(selected_dirs) > 1 else []
+                        analysis_state.max_rounds = len(selected_dirs) + 1  # Round 1 + N direction rounds
+                        dir_text = first_dir.get("direction", "")
+                        dir_notes = first_dir.get("notes", "")
+                        instructions = await self.pi_agent.innovation_instruction(
+                            analysis_state, dir_text, notes=dir_notes
+                        )
+                        analysis_state.current_round_direction = dir_text
+                        analysis_state.user_chosen_direction = None
+                        skip_nodes = []
                 else:
                     # Subsequent innovation rounds (3+): use previous round's next_steps
                     last_round = analysis_state.get_latest_round()

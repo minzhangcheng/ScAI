@@ -217,10 +217,12 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
                     "(post-exploration or integration). For mid-analysis input use "
                     "/supplementary-analysis or /human-input."),
         )
-    if integration_gate and (body.let_pi_decide or (body.direction and not body.directions)):
+    if integration_gate and (body.direction and not body.directions):
+        # Single direction string not allowed at integration gate;
+        # use directions list, let_pi_decide, or /finalize-from-integration.
         raise HTTPException(
             status_code=400,
-            detail="At the integration gate, select explicit new directions (or call /finalize-from-integration).",
+            detail="At the integration gate, select explicit new directions (list) or let PI decide.",
         )
 
     has_direction_choice = bool(body.let_pi_decide or body.direction or body.directions)
@@ -251,6 +253,8 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
     if body.let_pi_decide:
         state.user_chosen_direction = PI_DECIDE_SIGNAL
         state.pending_human_input = PI_DECIDE_SIGNAL
+        if integration_gate:
+            state.analysis_phase = AnalysisPhase.INNOVATION
     elif body.directions and len(body.directions) > 0:
         if integration_gate:
             state.user_chosen_directions = (state.user_chosen_directions or []) + list(body.directions)

@@ -76,6 +76,15 @@ class RoutingMixin:
             return "stop"
         return "continue"
 
+    def _after_pi_planning(self, state: "WorkflowState") -> str:
+        """Route after pi_planning: finalize if PI chose 0 integration directions,
+        otherwise continue to agent pipeline."""
+        analysis_state = state.get("analysis_state")
+        if analysis_state and getattr(analysis_state, "final_report_requested", False):
+            logger.info(f"[{self.session_id}] pi_planning: final_report_requested set, routing to finalize")
+            return "finalize"
+        return "continue"
+
     def _should_continue(self, state: "WorkflowState") -> str:
         """Determine if analysis should continue"""
         analysis_state = state["analysis_state"]

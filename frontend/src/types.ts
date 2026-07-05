@@ -105,11 +105,13 @@ export interface RawRoundResult {
   round?: number
   pi_summary?: string
   summary?: string
+  phase?: string
   pathology_findings?: string[]
   bioinformatics_findings?: string[]
   biochemistry_findings?: string[]
   literature_findings?: string[]
   cross_modal_candidates?: CrossModalCandidate[]
+  integration_candidates?: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
 }
 
 export interface RawPublicationFigure {
@@ -308,4 +310,6 @@ export interface RoundSummary {
   biochemistryFindings?: string[]
   literatureFindings?: string[]
   crossModalCandidates?: CrossModalCandidate[]
+  phase: 'exploration' | 'innovation' | 'integration' | ''
+  integrationCandidates: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
 }

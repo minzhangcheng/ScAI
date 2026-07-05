@@ -13,7 +13,8 @@ import {
   Microscope,
   Code2,
   FlaskConical,
-  BookOpen
+  BookOpen,
+  GitMerge
 } from 'lucide-react'
 
 // Typed content interfaces for message payloads (avoid `as any`)
@@ -285,8 +286,10 @@ export function ResultsPanel() {
                     ) : (
                       <ChevronRight className="w-5 h-5 text-slate-400" />
                     )}
-                    <span className="font-semibold text-slate-900">
-                      Round {round.round}
+                    <span className={`font-semibold ${round.phase === 'integration' ? 'text-purple-800' : 'text-slate-900'}`}>
+                      {round.phase === 'integration'
+                        ? (language === 'zh' ? `整合轮 ${round.round}` : `Integration ${round.round}`)
+                        : `Round ${round.round}`}
                     </span>
                     <span className="text-sm text-slate-500">
                       {(round.pathologyFindings?.length || 0) + (round.bioinformaticsFindings?.length || 0) + (round.biochemistryFindings?.length || 0) + (round.literatureFindings?.length || 0)} {t('findings')}
@@ -301,6 +304,26 @@ export function ResultsPanel() {
                     {round.summary && (
                       <div className="p-3 bg-slate-50 rounded-lg">
                         <p className="text-sm text-slate-700">{round.summary}</p>
+                      </div>
+                    )}
+
+                    {/* Integration Candidates */}
+                    {round.phase === 'integration' && round.integrationCandidates && round.integrationCandidates.length > 0 && (
+                      <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg mt-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <GitMerge className="w-4 h-4 text-purple-600" />
+                          <span className="text-sm font-medium text-purple-900">
+                            {language === 'zh' ? '候选研究方向' : 'Candidate Research Directions'}
+                          </span>
+                        </div>
+                        <ul className="text-sm text-purple-800 space-y-1">
+                          {round.integrationCandidates.map((c, i) => (
+                            <li key={i} className="flex items-start gap-2">
+                              <span className="text-purple-400 mt-1">•</span>
+                              <span>{c.direction}</span>
+                            </li>
+                          ))}
+                        </ul>
                       </div>
                     )}
 

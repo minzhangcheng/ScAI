@@ -10,6 +10,7 @@ class _Harness(IntegrationMixin):
         self.sent, self.snapshots, self.segments = [], [], []
         self._continue_event = types.SimpleNamespace(cleared=False)
         self._continue_event.clear = lambda: setattr(self._continue_event, "cleared", True)
+        self.config = types.SimpleNamespace(max_rounds=10)
 
         pi = types.SimpleNamespace()
         async def _analyze(state, dirs): return "INTEGRATION ANALYSIS TEXT"
@@ -86,3 +87,33 @@ def test_after_integration_routes_on_flag():
     assert h._after_integration({"integration_next": "gate"}) == "gate"
     assert h._after_integration({"integration_next": "stop"}) == "stop"
     assert h._after_integration({}) == "stop"
+
+
+def test_integration_creates_round_result():
+    """Integration synthesis should create a RoundResult with phase=integration."""
+    h = _Harness([{"direction": "NEW", "direction_id": "int_001"}])
+    s = _state_with_batch()
+    asyncio.run(h._integration_synthesis({"analysis_state": s}))
+    integration_rrs = [rr for rr in s.round_results if getattr(rr, "phase", None) == "integration"]
+    assert len(integration_rrs) == 1
+    rr = integration_rrs[0]
+    assert rr.round_number == s.current_round
+    assert rr.phase == "integration"
+    assert rr.pi_summary
+    assert rr.integration_report_summary == "INTEGRATION ANALYSIS TEXT"
+    assert len(rr.integration_candidates) == 1
+    assert rr.integration_candidates[0]["direction"] == "NEW"
+
+
+def test_integration_sends_round_summary_message():
+    """Integration synthesis should send a round_summary WebSocket message."""
+    h = _Harness([{"direction": "NEW", "direction_id": "int_001"}])
+    s = _state_with_batch()
+    asyncio.run(h._integration_synthesis({"analysis_state": s}))
+    round_summary_msgs = [c for t, c in h.sent if t == "round_summary"]
+    assert len(round_summary_msgs) == 1
+    msg = round_summary_msgs[0]
+    assert msg["round"] == s.current_round
+    assert msg["phase"] == "integration"
+    assert msg.get("integration_candidates")
+    assert len(msg["integration_candidates"]) == 1

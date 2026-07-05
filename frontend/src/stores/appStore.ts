@@ -110,11 +110,13 @@ export interface BiochemistryIndicator {
 export interface RoundResult {
   round: number
   summary: string
+  phase: 'exploration' | 'innovation' | 'integration' | ''
   pathologyFindings: string[]
   bioinformaticsFindings: string[]
   biochemistryFindings: string[]
   literatureFindings: string[]
   crossModalCandidates: import('../types').CrossModalCandidate[]
+  integrationCandidates: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
 }
 
 export interface Session {

@@ -269,6 +269,40 @@ def _build_directions_with_results_for_correlation(analysis_state: AnalysisState
     return directions_with_results
 
 
+def build_round_summary_payload(
+    round_result,
+    analysis_state,
+    effective_max_rounds: int,
+    data_requests: dict | None = None,
+    cross_modal_candidates: list | None = None,
+) -> dict:
+    """Build the round_summary WebSocket payload from a RoundResult.
+
+    Shared between _pi_synthesis (exploration/innovation) and
+    _integration_synthesis (integration) so the shape stays consistent.
+    """
+    return {
+        "round": round_result.round_number,
+        "max_rounds": effective_max_rounds,
+        "summary": round_result.pi_summary,
+        "pathology_findings": round_result.pathology_findings,
+        "bioinformatics_findings": round_result.bioinformatics_findings,
+        "biochemistry_findings": round_result.biochemistry_findings,
+        "literature_findings": round_result.literature_findings,
+        "findings": [
+            *round_result.pathology_findings,
+            *round_result.bioinformatics_findings,
+            *round_result.biochemistry_findings,
+            *round_result.literature_findings,
+        ],
+        "cross_modal_candidates": cross_modal_candidates or [],
+        "data_requests": data_requests or {"pathology": [], "biochemistry": [], "other": []},
+        "status": "waiting_input",
+        "phase": round_result.phase,
+        "integration_candidates": round_result.integration_candidates,
+    }
+
+
 class SynthesisMixin:
     """Mixin providing synthesis, user-input, and convergence methods. Composed into SingleCellAnalysisWorkflow."""
 
@@ -640,24 +674,11 @@ class SynthesisMixin:
             for c in round_result.cross_modal_synthesis.candidates:
                 cross_modal_candidates.append(c.to_summary_dict())
 
-        round_summary = {
-            "round": round_result.round_number,
-            "max_rounds": effective_max_rounds,
-            "summary": round_result.pi_summary,
-            "pathology_findings": round_result.pathology_findings,
-            "bioinformatics_findings": round_result.bioinformatics_findings,
-            "biochemistry_findings": round_result.biochemistry_findings,
-            "literature_findings": round_result.literature_findings,
-            "findings": [
-                *round_result.pathology_findings,
-                *round_result.bioinformatics_findings,
-                *round_result.biochemistry_findings,
-                *round_result.literature_findings,
-            ],
-            "cross_modal_candidates": cross_modal_candidates,
-            "data_requests": data_requests,
-            "status": "waiting_input"
-        }
+        round_summary = build_round_summary_payload(
+            round_result, analysis_state, effective_max_rounds,
+            data_requests=data_requests,
+            cross_modal_candidates=cross_modal_candidates,
+        )
         
         await self._send_message(
             "round_summary",
@@ -727,8 +748,11 @@ class SynthesisMixin:
         """
         analysis_state = state["analysis_state"]
 
-        # Integration gate (spec §9.4): self-contained; distinct from the round-1
-        # direction gate. Auto-skip / no-wait default = finalize (write report).
+        # Integration gate: auto-skip / timeout now triggers PI_DECIDE_SIGNAL
+        # (instead of final_report_requested), so PI gets a chance to select
+        # directions from integration candidates. User explicit finalize (via
+        # /finalize-from-integration) still sets final_report_requested and
+        # is handled first.
         is_integration_gate = (
             analysis_state.analysis_phase == AnalysisPhase.INTEGRATION
             and analysis_state.status == TaskStatus.WAITING_INPUT
@@ -736,23 +760,28 @@ class SynthesisMixin:
         if is_integration_gate:
             wait_seconds = analysis_state.round_wait_seconds
             if wait_seconds == 0:
-                analysis_state.final_report_requested = True
+                analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
+                analysis_state.pending_human_input = PI_DECIDE_SIGNAL
             else:
                 signaled = await wait_with_skip_time(
                     self._continue_event, wait_seconds, self.session_id, "integration_gate",
                 )
                 if not signaled:
-                    analysis_state.final_report_requested = True
+                    analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
+                    analysis_state.pending_human_input = PI_DECIDE_SIGNAL
                 else:
                     _consume_signal_then_clear(self._continue_event)
 
+            # User explicit finalize (via /finalize-from-integration API) takes priority.
             if analysis_state.consume_final_report_request():
                 self._set_status(analysis_state, TaskStatus.RUNNING)
                 await self._send_state_sync(analysis_state, "integration_finalize")
                 return {**state, "analysis_state": analysis_state, "should_continue": False}
 
-            # User chose new directions (choose-direction already set the batch +
-            # phase=INNOVATION). Continue the loop.
+            # Auto-skip set PI_DECIDE_SIGNAL, or user chose directions via API.
+            # If PI_DECIDE_SIGNAL, switch to INNOVATION so pi_planning handles it.
+            if analysis_state.user_chosen_direction == PI_DECIDE_SIGNAL:
+                analysis_state.analysis_phase = AnalysisPhase.INNOVATION
             self._set_status(analysis_state, TaskStatus.RUNNING)
             await self._send_state_sync(analysis_state, "integration_continue")
             return {**state, "analysis_state": analysis_state, "should_continue": True}

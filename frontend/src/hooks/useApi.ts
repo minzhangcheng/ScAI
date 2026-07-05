@@ -1100,11 +1100,13 @@ export function useWebSocket() {
             const newRoundResult = {
               round: roundData.round,
               summary: roundData.summary || '',
+              phase: roundData.phase || '',
               pathologyFindings: roundData.pathology_findings || [],
               bioinformaticsFindings: roundData.bioinformatics_findings || [],
               biochemistryFindings: roundData.biochemistry_findings || [],
               literatureFindings: roundData.literature_findings || [],
               crossModalCandidates: roundData.cross_modal_candidates || [],
+              integrationCandidates: roundData.integration_candidates || [],
             }
 
             let updatedRounds
