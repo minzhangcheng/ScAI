@@ -485,6 +485,12 @@ Please provide a detailed literature review report with specific citation inform
     planReviewStage2: '阶段 2: 下游分析',
     planReviewStageFull: '全量分析',
 
+    integrationGateTitle: '整合分析 (第 {cycle} 次) — 选择新的研究方向',
+    integrationGateCountdown: '倒计时:',
+    integrationGateContinue: '继续分析所选方向',
+    integrationGateLetPiDecide: '让 PI 决定',
+    integrationGateFinalize: '进入报告撰写',
+
     // Species input dialog
     speciesInputTitle: '物种信息',
     speciesGeneValidationTitle: '基因名验证',
@@ -989,6 +995,12 @@ Please provide a detailed literature review report with specific citations.`,
     planReviewStage1: 'Stage 1: QC+Clustering+Annotation',
     planReviewStage2: 'Stage 2: Downstream Analysis',
     planReviewStageFull: 'Full Analysis',
+
+    integrationGateTitle: 'Integration Analysis (Cycle {cycle}) — Select New Research Direction',
+    integrationGateCountdown: 'Countdown:',
+    integrationGateContinue: 'Continue with Selected',
+    integrationGateLetPiDecide: 'Let PI Decide',
+    integrationGateFinalize: 'Write Report',
 
     // Species input dialog
     speciesInputTitle: 'Species Information',

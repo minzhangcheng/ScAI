@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.32.6 · **Last updated**: 2026-07-05
+**Version**: 0.32.7 · **Last updated**: 2026-07-05
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.32.x — (2026-07-03)**
+
+- `0.32.7` — IntegrationGatePanel i18n, plan_review wait_seconds alignment, ResultsPanel integration summary (2026-07-05):
+  - **IntegrationGatePanel i18n (`frontend/src/components/IntegrationGatePanel.tsx`, `frontend/src/i18n/translations.ts`)**: Replaced hardcoded Chinese text with bilingual (zh/en) text driven by `language` prop. Title, countdown label, and all three action buttons follow the app language setting. New i18n keys: `integrationGateTitle`, `integrationGateCountdown`, `integrationGateContinue`, `integrationGateLetPiDecide`, `integrationGateFinalize`. Test updated (`IntegrationGate.test.tsx`) — new test covers English text rendering.
+  - **Plan review wait_seconds alignment (`backend/workflow/planning.py`, `frontend/src/components/AnalysisPanel.tsx`)**: `plan_review` WebSocket message now includes the resolved `wait_seconds` from `resolve_plan_review_wait()`. Frontend uses `planReviewData.wait_seconds` as the countdown source when present, falling back to `roundWaitSeconds`. Previously the plan review countdown always used `roundWaitSeconds`, which diverged from the backend timeout when `auto_approve_plans` was enabled with a different `plan_review_wait_seconds`.
+  - **ResultsPanel integration summary (`frontend/src/components/ResultsPanel.tsx`)**: Integration report summary rendered in the ResultsPanel round card (matching the existing display in AnalysisPanel), providing consistent UX across both UI panels.
 
 - `0.32.6` — Integration round fixes: WS message type registration, PI_DECIDE routing bypass, round serialization, phase-qualified keys, report summary surface (2026-07-05):
   - **WS message type registration (`backend/models/schemas.py`)**: `integration_gate` and `integration_complete` added to `WebSocketMessage.type` Literal. Previously missing, causing `ValidationError` outside `messaging.py`'s try/except and crashing `_integration_synthesis` under `@with_retry`, overrunning `integration_cycle`. New guard test (`test_websocket_message_types.py`) validates every `_send_message` type in workflow/ is registered.

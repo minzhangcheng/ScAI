@@ -72,6 +72,7 @@ interface PlanReviewData {
   phase?: string
   round?: number
   stage?: string
+  wait_seconds?: number
 }
 
 // Content shape for exploration_report HITL message from backend
@@ -1492,7 +1493,7 @@ export function AnalysisPanel() {
           phase={planReviewData.phase || ''}
           round={planReviewData.round || currentSession.currentRound || 1}
           stage={planReviewData.stage || 'full'}
-          countdownSeconds={roundWaitSeconds}
+          countdownSeconds={planReviewData.wait_seconds != null ? planReviewData.wait_seconds : roundWaitSeconds}
           onApprove={handlePlanApprove}
           onSkip={handlePlanSkip}
           onModify={handlePlanModify}
@@ -1524,6 +1525,7 @@ export function AnalysisPanel() {
           onFinalize={finalizeFromIntegration}
           onLetPiDecide={handleLetPiDecideIntegration}
           countdownSeconds={roundWaitSeconds}
+          language={language}
         />
       )}
 

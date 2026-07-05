@@ -14,6 +14,7 @@ export interface IntegrationGatePanelProps {
   onFinalize: () => void
   onLetPiDecide: () => void
   countdownSeconds: number  // -1=manual, 0=no-wait, >0=countdown
+  language: string
 }
 
 export function IntegrationGatePanel({
@@ -23,6 +24,7 @@ export function IntegrationGatePanel({
   onFinalize,
   onLetPiDecide,
   countdownSeconds,
+  language,
 }: IntegrationGatePanelProps) {
   const [sel, setSel] = useState<Record<string, boolean>>({})
   const [submitting, setSubmitting] = useState(false)
@@ -94,10 +96,12 @@ export function IntegrationGatePanel({
 
   return (
     <div className="integration-gate-panel">
-      <h3>{`整合分析 (第 ${cycle} 次) — 选择新的研究方向`}</h3>
+      <h3>{language === 'zh'
+        ? `整合分析 (第 ${cycle} 次) — 选择新的研究方向`
+        : `Integration Analysis (Cycle ${cycle}) — Select New Research Direction`}</h3>
       {timerDisplay && (
         <div className="countdown-timer" style={{ marginBottom: '0.5rem', color: '#888' }}>
-          倒计时: {timerDisplay}
+          {language === 'zh' ? '倒计时' : 'Countdown'}: {timerDisplay}
         </div>
       )}
       <ul>
@@ -114,9 +118,9 @@ export function IntegrationGatePanel({
         })}
       </ul>
       <div className="actions" style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-        <button onClick={submit} disabled={submitting}>继续分析所选方向</button>
-        <button onClick={handleLetPiDecide} disabled={submitting}>让 PI 决定 (Let PI decide)</button>
-        <button onClick={handleFinalize} disabled={submitting}>进入报告撰写 (Write report)</button>
+        <button onClick={submit} disabled={submitting}>{language === 'zh' ? '继续分析所选方向' : 'Continue with Selected'}</button>
+        <button onClick={handleLetPiDecide} disabled={submitting}>{language === 'zh' ? '让 PI 决定' : 'Let PI Decide'}</button>
+        <button onClick={handleFinalize} disabled={submitting}>{language === 'zh' ? '进入报告撰写' : 'Write Report'}</button>
       </div>
     </div>
   )

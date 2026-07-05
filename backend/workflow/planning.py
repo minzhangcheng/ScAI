@@ -953,12 +953,14 @@ class PlanningMixin:
             plan.status = "user_reviewing"
 
             # Send plan to frontend
+            wait_seconds = resolve_plan_review_wait(analysis_state)
             await self._send_message("plan_review", {
                 "plan": plan.model_dump(mode="json"),
                 "dialogue_html": dialogue_html,
                 "phase": analysis_state.analysis_phase.value,
                 "round": analysis_state.current_round,
                 "stage": state.get("planning_stage", "full"),
+                "wait_seconds": wait_seconds,
             }, AgentType.PI)
 
             # Set waiting status and sync

@@ -309,6 +309,18 @@ export function ResultsPanel() {
                       </div>
                     )}
 
+                    {/* Integration Report Summary */}
+                    {round.phase === 'integration' && round.integrationReportSummary && (
+                      <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg mt-3">
+                        <h4 className="text-sm font-medium text-purple-800 mb-1">
+                          {language === 'zh' ? '整合分析摘要' : 'Integration Summary'}
+                        </h4>
+                        <p className="text-sm text-purple-700 whitespace-pre-line">
+                          {round.integrationReportSummary}
+                        </p>
+                      </div>
+                    )}
+
                     {/* Integration Candidates */}
                     {round.phase === 'integration' && round.integrationCandidates && round.integrationCandidates.length > 0 && (
                       <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg mt-3">
