@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.32.3 · **Last updated**: 2026-07-04
+**Version**: 0.32.4 · **Last updated**: 2026-07-05
 
 ## 1. Runtime Architecture
 
@@ -285,7 +285,11 @@ Detailed release notes for every version are available through `git log` and rel
   - **`_check_convergence_condition` simplification (`backend/workflow/routing.py`)**: Uses shared predicates from `direction_coverage.py` for all batch/coverage checks. Eliminated duplicated `max_rounds` fallback logic — now delegates to `_should_continue()` via `return self._should_continue(state)` instead of reimplementing max-rounds checking.
   - **`_in_integration_loop` WS guard optimization (`backend/routes/websockets.py`)**: Cheap boolean early-return checks (`pending_integration`, `phase == INTEGRATION`, `integration_gate_candidates`) before O(N) batch scan via `active_batch_incomplete()`.
   - **Frontend selection reset (`frontend/src/components/IntegrationGatePanel.tsx`)**: `useEffect` resets checkbox state when `cycle` or `candidates` changes, preventing stale selections from a previous cycle from leaking into a new candidate set.
-  - **10 new test files** (190+ lines): `test_prompt_blocks.py`, `test_download_section.py`, `test_gate_constants.py`, `test_integration_gate_payload.py`, `test_integration_predicates.py`, `test_consume_final_report_request.py`, `test_resolve_integration_gate.py`, `test_write_records_guard.py`, `IntegrationGate.test.tsx` (selection reset). Updated 5 existing tests to assert against new helper names instead of raw inlined code.
+   - **10 new test files** (190+ lines): `test_prompt_blocks.py`, `test_download_section.py`, `test_gate_constants.py`, `test_integration_gate_payload.py`, `test_integration_predicates.py`, `test_consume_final_report_request.py`, `test_resolve_integration_gate.py`, `test_write_records_guard.py`, `IntegrationGate.test.tsx` (selection reset). Updated 5 existing tests to assert against new helper names instead of raw inlined code.
+
+- `0.32.4` — Plan review wait aligned with round-wait semantics (2026-07-05):
+  - **Plan review wait unified with round_wait_seconds (`backend/workflow/planning.py`)**: `resolve_plan_review_wait()` now inherits `round_wait_seconds` semantics instead of always returning `-1` when `auto_approve_plans` is `False`. Plan review now follows the same auto-skip (0) / countdown (>0) / manual (-1) behavior as all other HITL gates. Timeout while waiting for plan review action now always auto-skips instead of sending a status message, matching the round-wait pattern.
+  - **Tests restructured (`backend/tests/test_plan_review_wait.py`)**: 6 focused tests replace 4 ambiguous ones — each test case covers one unambiguous semantic: round_wait=0 auto-skips, positive round_wait applies to plan review, manual (-1) blocks plan review, auto_approve_plans uses dedicated plan_review_wait_seconds, auto_approve + zero seconds auto-skips.
 
 **0.30.x — (2026-06-30 → 2026-07-01)**
 

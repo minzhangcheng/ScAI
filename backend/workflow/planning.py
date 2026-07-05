@@ -68,7 +68,9 @@ def populate_plan_scope(plan: AnalysisPlan, state: AnalysisState) -> AnalysisPla
 def resolve_plan_review_wait(state: AnalysisState) -> int:
     if state.auto_approve_plans:
         return max(0, state.plan_review_wait_seconds)
-    return -1
+    # Inherit round_wait_seconds semantics so plan review follows the same
+    # auto-skip / countdown / manual behaviour as all other HITL gates.
+    return state.round_wait_seconds
 
 
 def approved_plan_matches_current_context(state: AnalysisState) -> bool:
@@ -935,15 +937,10 @@ class PlanningMixin:
                     "plan_review",
                 )
                 if not signaled:
-                    if analysis_state.auto_approve_plans:
-                        self._plan_review_action = {"action": "skip", "user_input": ""}
-                    else:
-                        await self._send_message(
-                            "status",
-                            "Plan review timed out; still waiting for an explicit approve, skip, or modify action.",
-                            AgentType.PI,
-                        )
-                        return state
+                    # Auto-skip on timeout regardless of auto_approve_plans,
+                    # since the user chose a finite wait via round_wait_seconds
+                    # or plan_review_wait_seconds — same semantics as round-wait.
+                    self._plan_review_action = {"action": "skip", "user_input": ""}
                 action = self._plan_review_action or {}
             else:
                 logger.info(f"[{self.session_id}] Plan review action already received, skipping wait")
