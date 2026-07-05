@@ -117,6 +117,7 @@ export interface RoundResult {
   literatureFindings: string[]
   crossModalCandidates: import('../types').CrossModalCandidate[]
   integrationCandidates: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
+  integrationReportSummary?: string
 }
 
 export interface Session {

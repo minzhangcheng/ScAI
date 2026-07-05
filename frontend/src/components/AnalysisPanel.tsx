@@ -3,6 +3,7 @@ import { useAppStore } from '../stores/appStore'
 import { useSession, useConfig, useUserConfig, generateId, apiFetch } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import type { RoundSummary } from '../types'
+import { roundKey } from '../utils/roundKey'
 import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
 import { AnnotationConfirmationDialog, ClusterAnnotation } from './AnnotationConfirmationDialog'
@@ -95,6 +96,7 @@ interface RoundSummaryContent {
   literature_findings?: string[]
   phase?: string
   integration_candidates?: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
+  integration_report_summary?: string
 }
 
 export function buildDirectionsPayload(
@@ -132,7 +134,7 @@ export function AnalysisPanel() {
   const clearExplorationFailedState = useAppStore(s => s.clearExplorationFailedState)
 
   // Round results state
-  const [expandedRound, setExpandedRound] = useState<number | null>(null)
+  const [expandedRound, setExpandedRound] = useState<string | null>(null)
 
   // Round feedback dialog state
   const [showFeedbackDialog, setShowFeedbackDialog] = useState(false)
@@ -279,6 +281,7 @@ export function AnalysisPanel() {
           literatureFindings: content.literature_findings || [],
           phase: (content.phase as RoundSummary['phase']) || '',
           integrationCandidates: content.integration_candidates || [],
+          integrationReportSummary: content.integration_report_summary || '',
         })
       }
     }
@@ -286,7 +289,7 @@ export function AnalysisPanel() {
     // Also check roundResults from session
     if (currentSession?.roundResults) {
       for (const round of currentSession.roundResults) {
-        const existing = summaries.find(s => s.round === round.round)
+        const existing = summaries.find(s => s.round === round.round && s.phase === round.phase)
         if (!existing) {
           summaries.push({
             round: round.round,
@@ -304,6 +307,7 @@ export function AnalysisPanel() {
             literatureFindings: round.literatureFindings || [],
             phase: round.phase || '',
             integrationCandidates: round.integrationCandidates || [],
+            integrationReportSummary: round.integrationReportSummary || '',
           })
         }
       }
@@ -822,7 +826,7 @@ export function AnalysisPanel() {
   useEffect(() => {
     if (roundSummaries.length > 0) {
       const latest = roundSummaries[roundSummaries.length - 1]
-      setExpandedRound(latest.round)
+      setExpandedRound(roundKey(latest.phase, latest.round))
 
       // Show feedback dialog when a round completes and is waiting for input
       // Use ref guard to prevent duplicate triggers for the same round
@@ -1273,7 +1277,7 @@ export function AnalysisPanel() {
           <div className="space-y-3">
             {roundSummaries.map((round) => (
               <div
-                key={round.round}
+                key={roundKey(round.phase, round.round)}
                 className={`border rounded-xl overflow-hidden transition-all ${
                   round.status === 'waiting_input'
                     ? 'border-amber-300 bg-amber-50'
@@ -1282,7 +1286,11 @@ export function AnalysisPanel() {
               >
                 {/* Round Header */}
                 <button
-                  onClick={() => setExpandedRound(expandedRound === round.round ? null : round.round)}
+                  onClick={() => setExpandedRound(
+                    expandedRound === roundKey(round.phase, round.round)
+                      ? null
+                      : roundKey(round.phase, round.round)
+                  )}
                   className="w-full flex items-center justify-between p-4 text-left hover:bg-slate-50 transition-colors"
                 >
                   <div className="flex items-center gap-3">
@@ -1303,7 +1311,7 @@ export function AnalysisPanel() {
                       {(round.summary || '').substring(0, 80)}...
                     </span>
                   </div>
-                  {expandedRound === round.round ? (
+                  {expandedRound === roundKey(round.phase, round.round) ? (
                     <ChevronUp className="w-5 h-5 text-slate-400" />
                   ) : (
                     <ChevronDown className="w-5 h-5 text-slate-400" />
@@ -1311,7 +1319,7 @@ export function AnalysisPanel() {
                 </button>
 
                 {/* Round Details */}
-                {expandedRound === round.round && (
+                {expandedRound === roundKey(round.phase, round.round) && (
                   <div className="px-4 pb-4 border-t border-slate-200">
                     {/* Summary */}
                     <div className="mt-3">
@@ -1342,6 +1350,18 @@ export function AnalysisPanel() {
                             </li>
                           )}
                         </ul>
+                      </div>
+                    )}
+
+                    {/* Integration Report Summary */}
+                    {round.phase === 'integration' && round.integrationReportSummary && (
+                      <div className="mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+                        <h4 className="text-sm font-medium text-purple-800 mb-1">
+                          {language === 'zh' ? '整合分析摘要' : 'Integration Summary'}
+                        </h4>
+                        <p className="text-sm text-purple-700 whitespace-pre-line">
+                          {round.integrationReportSummary}
+                        </p>
                       </div>
                     )}
 

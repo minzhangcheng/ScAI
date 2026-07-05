@@ -17,6 +17,7 @@ from backend.state import (
     get_session_lock,
 )
 from backend.utils.auth import ws_authenticate_and_load
+from .serialization import serialize_round_results
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.services.session_store import (
     update_session_cache as _update_session_cache,
@@ -237,17 +238,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     "status": "completed",
                     "message": "Analysis already completed. View results in the Reports tab.",
                     "final_summary": state.final_summary,
-                    "round_results": [
-                        {
-                            "round": r.round_number,
-                            "summary": r.pi_summary,
-                            "pathology_findings": r.pathology_findings,
-                            "bioinformatics_findings": r.bioinformatics_findings,
-                            "biochemistry_findings": r.biochemistry_findings,
-                            "literature_findings": r.literature_findings,
-                        }
-                        for r in state.round_results
-                    ],
+                    "round_results": serialize_round_results(state.round_results),
                 },
                 "timestamp": datetime.now().isoformat()
             })

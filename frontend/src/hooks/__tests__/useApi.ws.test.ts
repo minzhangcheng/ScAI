@@ -172,4 +172,61 @@ describe('useWebSocket', () => {
     expect(wsInstances.length).toBe(2)
     expect(wsInstances[1].url).toContain('session-B')
   })
+
+  it('keeps integration round_summary separate from same-number innovation round', async () => {
+    const { result } = renderHook(() => useWebSocket())
+
+    act(() => {
+      useAppStore.getState().setCurrentSession({
+        id: 'session-integration',
+        name: 'Integration session',
+        status: 'running' as const,
+        currentRound: 3,
+        createdAt: new Date().toISOString(),
+        instruction: '',
+        treatmentGroups: [],
+        dataFiles: [],
+        biochemistryIndicators: [],
+        roundResults: [
+          {
+            round: 3,
+            summary: 'Innovation round',
+            phase: 'innovation',
+            pathologyFindings: [],
+            bioinformaticsFindings: ['innovation finding'],
+            biochemistryFindings: [],
+            literatureFindings: [],
+            crossModalCandidates: [],
+            integrationCandidates: [],
+          },
+        ],
+      })
+    })
+
+    await act(async () => {
+      result.current.connect()
+    })
+
+    act(() => {
+      wsInstances[0].onmessage?.({
+        data: JSON.stringify({
+          type: 'round_summary',
+          agent: 'pi',
+          content: {
+            round: 3,
+            phase: 'integration',
+            summary: 'Integration round',
+            integration_report_summary: 'Shared mechanism summary',
+            integration_candidates: [{ direction: 'New axis X', score: 0.85 }],
+          },
+        }),
+      } as MessageEvent)
+    })
+
+    const rounds = useAppStore.getState().currentSession?.roundResults || []
+    expect(rounds).toHaveLength(2)
+    expect(rounds.map((round) => round.phase)).toEqual(['innovation', 'integration'])
+    expect(rounds[1].integrationReportSummary).toBe('Shared mechanism summary')
+    expect(rounds[1].integrationCandidates[0].score).toBe(0.85)
+  })
 })

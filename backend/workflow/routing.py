@@ -107,10 +107,12 @@ class RoutingMixin:
         from .direction_coverage import (
             active_batch_incomplete,
             at_integration_gate,
+            awaiting_integration_direction,
         )
         if (getattr(analysis_state, "pending_integration", False)
                 or active_batch_incomplete(analysis_state)
-                or at_integration_gate(analysis_state)):
+                or at_integration_gate(analysis_state)
+                or awaiting_integration_direction(analysis_state)):
             logger.info(f"[{self.session_id}] Integration loop active; bypassing max_rounds stop")
             return "continue"
 

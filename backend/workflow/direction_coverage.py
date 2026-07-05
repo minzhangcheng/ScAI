@@ -195,8 +195,8 @@ def clone_round_results_for_branch(
 def at_integration_gate(state: AnalysisState) -> bool:
     """True when parked at the integration gate awaiting user direction selection."""
     return (
-        state.analysis_phase == AnalysisPhase.INTEGRATION
-        and bool(state.integration_gate_candidates)
+        getattr(state, "analysis_phase", None) == AnalysisPhase.INTEGRATION
+        and bool(getattr(state, "integration_gate_candidates", None))
     )
 
 
@@ -210,3 +210,15 @@ def active_batch_complete(state: AnalysisState) -> bool:
     """True when an active direction batch exists and every direction is covered."""
     batch = getattr(state, "active_direction_batch", None) or []
     return bool(batch) and direction_coverage_status_for_batch(state, batch).complete
+
+
+def awaiting_integration_direction(state: AnalysisState) -> bool:
+    """True when an integration-gate auto-skip handed the decision to the PI
+    (PI_DECIDE_SIGNAL) but pi_planning has not yet consumed it. Routing must
+    bypass the max_rounds stop in this state so the flow can reach pi_planning
+    for integration direction selection."""
+    from ..constants import PI_DECIDE_SIGNAL
+    return (
+        getattr(state, "integration_cycle", 0) > 0
+        and getattr(state, "user_chosen_direction", None) == PI_DECIDE_SIGNAL
+    )

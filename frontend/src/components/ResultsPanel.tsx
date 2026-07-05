@@ -5,6 +5,7 @@ import { useTranslation } from '../i18n/translations'
 import type { GraphicAbstractContent } from '../types'
 import { FigureGallery, IntegratedReport, GraphicAbstract, DownloadButtons } from './analysis'
 import { downloadBlob } from '../utils/download'
+import { roundKey } from '../utils/roundKey'
 import {
   FileText,
   Download,
@@ -33,7 +34,7 @@ export function ResultsPanel() {
   const { getReport } = useSession()
   const { t } = useTranslation(language)
   const [report, setReport] = useState<any>(null)
-  const [expandedRounds, setExpandedRounds] = useState<Set<number>>(new Set())
+  const [expandedRounds, setExpandedRounds] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
 
   // Publication outputs state
@@ -146,12 +147,12 @@ export function ResultsPanel() {
     }
   }, [currentSession, messages])
 
-  const toggleRound = (round: number) => {
+  const toggleRound = (key: string) => {
     const newExpanded = new Set(expandedRounds)
-    if (newExpanded.has(round)) {
-      newExpanded.delete(round)
+    if (newExpanded.has(key)) {
+      newExpanded.delete(key)
     } else {
-      newExpanded.add(round)
+      newExpanded.add(key)
     }
     setExpandedRounds(newExpanded)
   }
@@ -268,16 +269,17 @@ export function ResultsPanel() {
         </h3>
         <div className="space-y-3">
           {(currentSession.roundResults || []).map((round) => {
-            const isExpanded = expandedRounds.has(round.round)
-            
+            const key = roundKey(round.phase, round.round)
+            const isExpanded = expandedRounds.has(key)
+
             return (
               <div
-                key={round.round}
+                key={key}
                 className="border border-slate-200 rounded-xl overflow-hidden bg-white"
               >
                 {/* Round Header */}
                 <button
-                  onClick={() => toggleRound(round.round)}
+                  onClick={() => toggleRound(key)}
                   className="w-full flex items-center justify-between p-4 hover:bg-slate-50 transition-colors"
                 >
                   <div className="flex items-center gap-3">
@@ -320,7 +322,7 @@ export function ResultsPanel() {
                           {round.integrationCandidates.map((c, i) => (
                             <li key={i} className="flex items-start gap-2">
                               <span className="text-purple-400 mt-1">•</span>
-                              <span>{c.direction}</span>
+                              <span>{c.direction}{c.score ? ` (score: ${c.score.toFixed(2)})` : ''}</span>
                             </li>
                           ))}
                         </ul>

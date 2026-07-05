@@ -32,6 +32,7 @@ export function transformRoundResults(raw: (RawRoundResult | null)[] | undefined
       literatureFindings: Array.isArray(r.literature_findings) ? r.literature_findings : [],
       crossModalCandidates: Array.isArray(r.cross_modal_candidates) ? r.cross_modal_candidates : [],
       integrationCandidates: Array.isArray(r.integration_candidates) ? r.integration_candidates : [],
+      ...(r.integration_report_summary ? { integrationReportSummary: r.integration_report_summary } : {}),
     }
   }).filter((r): r is RoundResult => r !== null)
 }

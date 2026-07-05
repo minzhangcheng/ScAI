@@ -1453,6 +1453,9 @@ class WebSocketMessage(BaseModel):
         "modality_warning",
         # Final report blocked (e.g. insufficient direction coverage) — awaits user
         "report_blocked",
+        # Integration (cross-direction) round: gate for direction selection, and
+        # terminal completion when the PI selects no further directions / cap hit
+        "integration_gate", "integration_complete",
     ]
     agent: Optional[AgentType] = None
     content: Any

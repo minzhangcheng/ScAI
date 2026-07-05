@@ -112,6 +112,7 @@ export interface RawRoundResult {
   literature_findings?: string[]
   cross_modal_candidates?: CrossModalCandidate[]
   integration_candidates?: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
+  integration_report_summary?: string
 }
 
 export interface RawPublicationFigure {
@@ -312,4 +313,5 @@ export interface RoundSummary {
   crossModalCandidates?: CrossModalCandidate[]
   phase: 'exploration' | 'innovation' | 'integration' | ''
   integrationCandidates: { direction: string; score?: number; notes?: string; [key: string]: unknown }[]
+  integrationReportSummary?: string
 }

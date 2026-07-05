@@ -31,6 +31,7 @@ from backend.state import detailed_reports, report_websockets
 from backend.utils.config_resolver import resolve_config_for_user
 from backend.utils.files import safe_filename, validate_path_within, validate_session_id, slugify_session_name, temp_file_on_error
 from backend.utils.auth import require_session_ownership
+from .serialization import serialize_round_results
 from backend.utils.settings_provider import AgentSettingsProvider
 from backend.services.session_store import async_save_session, update_session_cache as _update_session_cache
 from backend.services.report.paths import resolve_report_output_dir, resolve_report_target_lineage
@@ -1132,17 +1133,7 @@ async def get_report(session_id: str, request: Request):
         "session_id": session_id,
         "name": state.name,
         "status": state.status.value,
-        "round_results": [
-            {
-                "round": r.round_number,
-                "summary": r.pi_summary,
-                "pathology_findings": r.pathology_findings,
-                "bioinformatics_findings": r.bioinformatics_findings,
-                "biochemistry_findings": r.biochemistry_findings,
-                "literature_findings": r.literature_findings
-            }
-            for r in state.round_results
-        ],
+        "round_results": serialize_round_results(state.round_results),
         "final_summary": state.final_summary
     }
 

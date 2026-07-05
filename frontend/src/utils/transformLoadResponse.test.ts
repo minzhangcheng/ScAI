@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { transformLoadResponse } from './transformLoadResponse'
+import { transformLoadResponse, transformRoundResults } from './transformLoadResponse'
 import type { SessionLoadResponse } from '../types'
 
 const MINIMAL_RESPONSE: SessionLoadResponse = {
@@ -244,5 +244,29 @@ describe('transformLoadResponse', () => {
     expect(result.sessionUpdates.species).toBe('Mus musculus')
     expect(result.sessionUpdates.speciesResolved).toBe(true)
     expect(result.sessionUpdates.speciesGenesValidated).toBe(false)
+  })
+})
+
+describe('transformRoundResults integration fields', () => {
+  it('maps integration_report_summary and integration_candidates', () => {
+    const [round] = transformRoundResults([
+      {
+        round: 3,
+        phase: 'integration',
+        pi_summary: 'Cross-direction',
+        integration_report_summary: 'Shared: copper deficiency.',
+        integration_candidates: [{ direction: 'New axis X', score: 0.85 }],
+      },
+    ])
+    expect(round.phase).toBe('integration')
+    expect(round.integrationReportSummary).toBe('Shared: copper deficiency.')
+    expect(round.integrationCandidates).toEqual([{ direction: 'New axis X', score: 0.85 }])
+  })
+
+  it('omits integrationReportSummary when not provided', () => {
+    const [round] = transformRoundResults([
+      { round: 1, pi_summary: 'Round 1', pathology_findings: [], bioinformatics_findings: [], biochemistry_findings: [], literature_findings: [] },
+    ])
+    expect(round.integrationReportSummary).toBeUndefined()
   })
 })

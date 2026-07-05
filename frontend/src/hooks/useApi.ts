@@ -5,6 +5,7 @@ import { transformLoadResponse, transformRoundResults, type StoreUpdates } from 
 import { devLog } from '../utils/logger'
 import { buildLiteratureConfigPayload, isMaskedSecret } from '../utils/literatureConfig'
 import { downloadBlob } from '../utils/download'
+import { roundKey } from '../utils/roundKey'
 
 const SNAPSHOT_CLEANUP_THRESHOLD = 20
 const SNAPSHOT_REMINDER_INTERVAL = 5
@@ -1094,8 +1095,10 @@ export function useWebSocket() {
           const latestSession = useAppStore.getState().currentSession
           if (latestSession) {
             const existingRounds = latestSession.roundResults || []
-            // Check if this round already exists
-            const existingIndex = existingRounds.findIndex((r: RoundResult) => r.round === roundData.round)
+            const incomingKey = roundKey(roundData.phase || '', roundData.round)
+            const existingIndex = existingRounds.findIndex((r: RoundResult) => (
+              roundKey(r.phase, r.round) === incomingKey
+            ))
 
             const newRoundResult = {
               round: roundData.round,
@@ -1107,6 +1110,7 @@ export function useWebSocket() {
               literatureFindings: roundData.literature_findings || [],
               crossModalCandidates: roundData.cross_modal_candidates || [],
               integrationCandidates: roundData.integration_candidates || [],
+              integrationReportSummary: roundData.integration_report_summary || '',
             }
 
             let updatedRounds

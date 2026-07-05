@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.32.4 · **Last updated**: 2026-07-05
+**Version**: 0.32.6 · **Last updated**: 2026-07-05
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,14 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.32.x — (2026-07-03)**
+
+- `0.32.6` — Integration round fixes: WS message type registration, PI_DECIDE routing bypass, round serialization, phase-qualified keys, report summary surface (2026-07-05):
+  - **WS message type registration (`backend/models/schemas.py`)**: `integration_gate` and `integration_complete` added to `WebSocketMessage.type` Literal. Previously missing, causing `ValidationError` outside `messaging.py`'s try/except and crashing `_integration_synthesis` under `@with_retry`, overrunning `integration_cycle`. New guard test (`test_websocket_message_types.py`) validates every `_send_message` type in workflow/ is registered.
+  - **Integration-gate PI_DECIDE routing bypass (`backend/workflow/direction_coverage.py`, `backend/workflow/routing.py`)**: New `awaiting_integration_direction()` predicate detects when auto-skip set `PI_DECIDE_SIGNAL` with `integration_cycle > 0`. `_should_continue` honors it in the integration-loop guard, so PI direction selection can reach `pi_planning` past `max_rounds`. The integration cycle cap still stops the loop in `_check_convergence_condition`. New test file (`test_integration_pi_decide_routing.py`, 3 tests).
+  - **Centralized round serialization (`backend/routes/serialization.py` — new)**: `serialize_round_results()` preserves `phase`, `integration_candidates`, and `integration_report_summary` for all round results. Used by both `websockets.py` (completed-session reconnect) and `reports.py` (report-load), replacing duplicated inline serialization that dropped integration fields. New test file (`test_round_serialization.py`).
+  - **Phase-qualified round keys (`frontend/src/utils/roundKey.ts` — new)**: `roundKey(phase, round)` returns `"int-N"` for integration rounds and `"r-N"` for exploration/innovation, preventing React key collisions and reload de-dup issues when integration rounds reuse the same round number as the previous innovation round. AnalysisPanel's `expandedRound` state type changed from `number` to `string`; ResultsPanel's `expandedRounds` Set changed from `Set<number>` to `Set<string>`. WS `round_summary` handler de-dups by `roundKey` instead of round number. New test file (`roundKey.test.ts`, 4 tests).
+  - **Surface integration report summary + candidate scores (`frontend/src/types.ts`, `frontend/src/stores/appStore.ts`, `frontend/src/utils/transformLoadResponse.ts`, `frontend/src/components/AnalysisPanel.tsx`, `frontend/src/components/ResultsPanel.tsx`)**: `integration_report_summary` mapped end-to-end (raw type → store → transform → component) and rendered in integration round cards. ResultsPanel now shows candidate scores matching AnalysisPanel. Updated WS test (`useApi.ws.test.ts`) verifies integration round stays separate from same-numbered innovation round.
+  - **Design spec**: `docs/superpowers/plans/2026-07-05-fix-integration-round-issues.md` (911 lines) documents all 5 issues, reproduction paths, and implementation steps.
 
 - `0.32.5` — Integration gate auto-skip → PI decide, integration RoundResult, graph short-circuit for zero direction, shared round-summary payload, frontend integration round display (2026-07-05):
   - **Integration gate auto-skip now triggers PI_DECIDE (`backend/workflow/synthesis.py`)**: `_wait_for_user_input` integration-gate timeout no longer sets `final_report_requested`. Instead, it sets `user_chosen_direction = PI_DECIDE_SIGNAL` and switches phase to `INNOVATION`, giving PI a chance to select directions from integration candidates. User explicit finalize (via `/finalize-from-integration` API) continues to set `final_report_requested` directly.

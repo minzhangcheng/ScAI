@@ -300,6 +300,7 @@ def build_round_summary_payload(
         "status": "waiting_input",
         "phase": round_result.phase,
         "integration_candidates": round_result.integration_candidates,
+        "integration_report_summary": round_result.integration_report_summary,
     }
 
 
