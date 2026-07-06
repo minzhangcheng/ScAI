@@ -144,12 +144,6 @@
     ]
   ],
   [
-    "/api/health",
-    [
-      "GET"
-    ]
-  ],
-  [
     "/api/download",
     [
       "GET"
@@ -157,6 +151,12 @@
   ],
   [
     "/api/file",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/health",
     [
       "GET"
     ]
@@ -276,12 +276,6 @@
     ]
   ],
   [
-    "/api/session/{session_id}/finalize-from-integration",
-    [
-      "POST"
-    ]
-  ],
-  [
     "/api/session/{session_id}/exploration-report/html",
     [
       "GET"
@@ -322,6 +316,12 @@
     "/api/session/{session_id}/figure/{figure_id}/png",
     [
       "GET"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/finalize-from-integration",
+    [
+      "POST"
     ]
   ],
   [
@@ -386,6 +386,12 @@
   ],
   [
     "/api/session/{session_id}/integrated-report",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/integration-report/html",
     [
       "GET"
     ]

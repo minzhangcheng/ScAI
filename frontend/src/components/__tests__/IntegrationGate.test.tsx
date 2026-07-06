@@ -47,6 +47,19 @@ describe('IntegrationGatePanel', () => {
     screen.getAllByRole('checkbox').forEach((cb) => expect(cb).not.toBeChecked())
   })
 
+  it('renders report link when reportUrl is provided', () => {
+    render(<IntegrationGatePanel cycle={1} candidates={candidates}
+      onSubmit={() => {}} onFinalize={() => {}} onLetPiDecide={() => {}} countdownSeconds={-1} language="en"
+      reportUrl="/api/session/s/integration-report/html" />)
+    expect(screen.getByText(/View Integration Report/i)).toBeInTheDocument()
+  })
+
+  it('does not render report link when reportUrl is undefined', () => {
+    render(<IntegrationGatePanel cycle={1} candidates={candidates}
+      onSubmit={() => {}} onFinalize={() => {}} onLetPiDecide={() => {}} countdownSeconds={-1} language="en" />)
+    expect(screen.queryByText(/View Integration Report/i)).not.toBeInTheDocument()
+  })
+
   it('renders English text when language is en', () => {
     render(<IntegrationGatePanel cycle={1} candidates={candidates}
       onSubmit={() => {}} onFinalize={() => {}} onLetPiDecide={() => {}} countdownSeconds={-1} language="en" />)

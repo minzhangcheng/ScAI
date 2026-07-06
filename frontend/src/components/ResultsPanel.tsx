@@ -220,6 +220,17 @@ export function ResultsPanel() {
               {language === 'zh' ? '查看探索报告' : 'View Exploration Report'}
             </a>
           )}
+          {currentSession.integrationReportUrl && (
+            <a
+              href={currentSession.integrationReportUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 px-4 py-2 bg-accent-50 text-accent-700 rounded-xl font-medium hover:bg-accent-100 transition-colors"
+            >
+              <FileText className="w-4 h-4" />
+              {language === 'zh' ? '查看整合报告' : 'View Integration Report'}
+            </a>
+          )}
 
           {currentSession.finalSummary && (
             <button

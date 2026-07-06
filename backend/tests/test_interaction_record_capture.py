@@ -4,9 +4,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.models.schemas import (
     AnalysisState, AnnotationConfirmationState, ClusterAnnotation,
+    DirectionSelectionRecord,
 )
 from backend.services.interaction_record_capture import (
     get_or_open_direction_record, find_open_pi_decide_record,
+    resolve_integration_gate, find_open_integration_record,
     map_selections, build_annotation_record,
 )
 
@@ -90,3 +92,45 @@ def test_build_annotation_record_original_vs_final():
     assert rec.supplementary_requests == ["look at cluster 3"]
     assert rec.proportion_dimension == "sample"
     assert rec.auto_confirmed is False
+
+
+def test_resolve_integration_gate_preserves_candidates_when_clear_gate_false():
+    state = AnalysisState(id="test", name="Test", user_id="test", current_round=5, integration_cycle=1)
+    state.integration_gate_candidates = [{"direction": "Dir A"}]
+    state.integration_gate_literature_evidence = [{"direction_id": "d1"}]
+    rec = resolve_integration_gate(state, "open", clear_gate=False)
+    assert state.integration_gate_candidates == [{"direction": "Dir A"}]
+    assert state.integration_gate_literature_evidence == [{"direction_id": "d1"}]
+    assert rec.event_type == "open"
+
+
+def test_resolve_integration_gate_clears_candidates_by_default():
+    state = AnalysisState(id="test", name="Test", user_id="test", current_round=5, integration_cycle=1)
+    state.integration_gate_candidates = [{"direction": "Dir A"}]
+    state.integration_gate_literature_evidence = [{"direction_id": "d1"}]
+    resolve_integration_gate(state, "select")
+    assert state.integration_gate_candidates == []
+    assert state.integration_gate_literature_evidence == []
+
+
+def test_find_open_integration_record_finds_current_cycle():
+    state = AnalysisState(id="test", name="Test", user_id="test", integration_cycle=2)
+    rec1 = DirectionSelectionRecord(round_number=5, phase="integration", integration_cycle=1, event_type="open", let_pi_decide=True)
+    rec2 = DirectionSelectionRecord(round_number=6, phase="integration", integration_cycle=2, event_type="open", let_pi_decide=True)
+    state.direction_selection_records = [rec1, rec2]
+    result = find_open_integration_record(state)
+    assert result is rec2
+
+
+def test_find_open_integration_record_returns_none_for_wrong_cycle():
+    state = AnalysisState(id="test", name="Test", user_id="test", integration_cycle=2)
+    rec1 = DirectionSelectionRecord(round_number=5, phase="integration", integration_cycle=1, event_type="open", let_pi_decide=True)
+    state.direction_selection_records = [rec1]
+    result = find_open_integration_record(state)
+    assert result is None
+
+
+def test_find_open_integration_record_returns_none_when_empty():
+    state = AnalysisState(id="test", name="Test", user_id="test", integration_cycle=1)
+    result = find_open_integration_record(state)
+    assert result is None

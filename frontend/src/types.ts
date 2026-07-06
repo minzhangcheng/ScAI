@@ -33,6 +33,7 @@ export interface SessionLoadResponse {
   graphic_abstract?: RawGraphicAbstract
   integrated_report?: string | null
   exploration_report_url?: string
+  integration_report_url?: string
   state_version?: number
   round_wait_seconds?: number
   waiting_input_started_at?: string

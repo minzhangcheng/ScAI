@@ -80,7 +80,7 @@ def populate_direction_record_from_state(state: AnalysisState, rec: DirectionSel
     rec.event_type = event_type
 
 
-def resolve_integration_gate(state, event_type: str):
+def resolve_integration_gate(state, event_type: str, *, clear_gate: bool = True):
     rec = get_or_open_direction_record(
         state,
         round_number=state.current_round,
@@ -88,9 +88,22 @@ def resolve_integration_gate(state, event_type: str):
         integration_cycle=state.integration_cycle,
     )
     populate_direction_record_from_state(state, rec, event_type)
-    state.integration_gate_candidates = []
-    state.integration_gate_literature_evidence = []
+    if clear_gate:
+        state.integration_gate_candidates = []
+        state.integration_gate_literature_evidence = []
     return rec
+
+
+def find_open_integration_record(state: AnalysisState) -> Optional[DirectionSelectionRecord]:
+    for rec in reversed(state.direction_selection_records):
+        if (
+            rec.event_type == "open"
+            and rec.phase == "integration"
+            and rec.let_pi_decide
+            and rec.integration_cycle == state.integration_cycle
+        ):
+            return rec
+    return None
 
 
 def build_annotation_record(

@@ -233,7 +233,10 @@ async def _choose_direction_locked(session_id: str, user_id: str, body: Directio
         )
 
     if integration_gate:
-        rec = resolve_integration_gate(state, event_type="select")
+        if body.let_pi_decide:
+            rec = resolve_integration_gate(state, event_type="open", clear_gate=False)
+        else:
+            rec = resolve_integration_gate(state, event_type="select")
     else:
         rec = get_or_open_direction_record(
             state, round_number=state.current_round, phase="exploration",

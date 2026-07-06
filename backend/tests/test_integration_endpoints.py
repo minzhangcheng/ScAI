@@ -43,7 +43,7 @@ def test_integration_gate_accepts_let_pi_decide(monkeypatch):
     monkeypatch.setattr(ix, "_update_session_cache", fake_update)
     monkeypatch.setattr(ix, "async_save_session", fake_save)
     monkeypatch.setattr(ix, "workflows", {})
-    monkeypatch.setattr(ix, "resolve_integration_gate", lambda state, event_type: MagicMock())
+    monkeypatch.setattr(ix, "resolve_integration_gate", lambda state, event_type, **kwargs: MagicMock())
 
     result = asyncio.run(ix._choose_direction_locked("sess", "u", DirectionChoice(let_pi_decide=True)))
     # Should succeed and switch to INNOVATION phase

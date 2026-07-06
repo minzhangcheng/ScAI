@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from ..constants import LlmFailureAction, PI_DECIDE_SIGNAL, WaitInputReason, StateSyncChangeType
 from ..models.schemas import AgentType, AnalysisPhase, AnalysisPlan, AnalysisState, PlanStep, TaskStatus
 from ..services.interaction_record_capture import (
+    find_open_integration_record,
     find_open_pi_decide_record,
     get_or_open_direction_record,
 )
@@ -324,6 +325,36 @@ class PlanningMixin:
                         )
                         selected_dirs = _selected_directions_from_decision(selection_decision)
 
+                        # Close or create the integration pi_decide record.
+                        # IMPORTANT: Do NOT use populate_direction_record_from_state here!
+                        # At this point analysis_phase is INNOVATION (switched by
+                        # _wait_for_user_input / interaction.py), so populate_* would
+                        # read exploration_report candidates instead of integration gate
+                        # candidates. Direct assignment from gate fields is correct.
+                        _rec = find_open_integration_record(analysis_state)
+                        if _rec is not None:
+                            _rec.candidates = list(analysis_state.integration_gate_candidates)
+                            _rec.literature_evidence = list(analysis_state.integration_gate_literature_evidence)
+                        else:
+                            _rec = get_or_open_direction_record(
+                                analysis_state,
+                                round_number=analysis_state.current_round - 1,
+                                phase="integration",
+                                integration_cycle=analysis_state.integration_cycle,
+                            )
+                            _rec.candidates = list(analysis_state.integration_gate_candidates)
+                            _rec.literature_evidence = list(analysis_state.integration_gate_literature_evidence)
+                            _rec.let_pi_decide = True
+                        _rec.pi_selected = [
+                            {"direction": d.get("direction", ""), "notes": d.get("notes", "")}
+                            for d in selected_dirs
+                        ]
+                        _rec.event_type = "pi_decide"
+
+                        # Clear gate state now that PI has decided
+                        analysis_state.integration_gate_candidates = []
+                        analysis_state.integration_gate_literature_evidence = []
+
                         if not selected_dirs:
                             # PI chose 0 directions → proceed to final report
                             logger.info(f"[{self.session_id}] PI selected 0 integration directions; finalizing")
@@ -362,7 +393,7 @@ class PlanningMixin:
                         rec = find_open_pi_decide_record(analysis_state)
                         if rec is None:
                             rec = get_or_open_direction_record(
-                                analysis_state, round_number=analysis_state.current_round,
+                                analysis_state, round_number=analysis_state.current_round - 1,
                                 phase="exploration",
                             )
                         if analysis_state.exploration_report:

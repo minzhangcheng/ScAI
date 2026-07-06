@@ -1526,6 +1526,7 @@ export function AnalysisPanel() {
           onLetPiDecide={handleLetPiDecideIntegration}
           countdownSeconds={roundWaitSeconds}
           language={language}
+          reportUrl={integrationGateData.html_url || undefined}
         />
       )}
 

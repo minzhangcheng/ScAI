@@ -6,6 +6,7 @@ from .variants import (
     generate_detailed_report_segment_html,
     generate_combined_detailed_report_html,
     generate_annotation_context_report_html,
+    generate_integration_report_html,
 )
 from .regenerator import generate_html_report
 
@@ -16,5 +17,6 @@ __all__ = [
     "generate_detailed_report_segment_html",
     "generate_combined_detailed_report_html",
     "generate_annotation_context_report_html",
+    "generate_integration_report_html",
     "generate_html_report",
 ]

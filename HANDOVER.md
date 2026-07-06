@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.32.7 · **Last updated**: 2026-07-05
+**Version**: 0.32.8 · **Last updated**: 2026-07-06
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.32.x — (2026-07-03)**
+
+- `0.32.8` — Centralized integration report staging for detailed report appendix (2026-07-06):
+  - **Shared integration report staging (`backend/services/report/download_section.py`)**: New `build_related_reports_metadata()` function copies the integration report HTML from its source path into the target reports/branch directory, ensuring branch-specific detailed reports include the integration report. Handles path resolution, `shutil.copy2` (skipped when source and target are the same file), and OSError logging.
+  - **Consistent consumption (`backend/agents/supervisor_agent.py`, `backend/services/report/generator.py`)**: Both `SupervisorAgent._build_appendix()` and `DetailedReportGenerator._build_appendix_data()` now call `build_related_reports_metadata()` instead of constructing `related_reports` inline, eliminating the stale/hardcoded `integration_report` path that broke when reports lived in branch directories.
+  - **Regenerator cleanup (`backend/services/report/regenerator.py`)**: Removed a duplicate `integration_report` fallback assignment in `_build_appendix_from_report()` that was made redundant by the new centralized helper. Fixed missing trailing newline.
+  - **New tests (`backend/tests/test_appendix_literature_link.py`, `backend/tests/test_report_appendix_integration_report.py`)**: Added 3 tests verifying: integration report link comes from `related_reports` dict; top-level `integration_report` key is ignored by regenerator; `build_related_reports_metadata` copies the integration report into a branch output directory on request.
 
 - `0.32.7` — IntegrationGatePanel i18n, plan_review wait_seconds alignment, ResultsPanel integration summary (2026-07-05):
   - **IntegrationGatePanel i18n (`frontend/src/components/IntegrationGatePanel.tsx`, `frontend/src/i18n/translations.ts`)**: Replaced hardcoded Chinese text with bilingual (zh/en) text driven by `language` prop. Title, countdown label, and all three action buttons follow the app language setting. New i18n keys: `integrationGateTitle`, `integrationGateCountdown`, `integrationGateContinue`, `integrationGateLetPiDecide`, `integrationGateFinalize`. Test updated (`IntegrationGate.test.tsx`) — new test covers English text rendering.

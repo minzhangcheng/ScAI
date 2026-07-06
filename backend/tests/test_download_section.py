@@ -6,6 +6,7 @@ def test_renders_all_items_styled():
         "annotation_record": "annotation_record.html",
         "direction_records": [{"filename": "direction_record_00_round1.html",
                                "label": "Round 1 \u00b7 innovation"}],
+        "integration_report": "integration_report.html",
     }
     html = render_related_reports_downloads_html(
         related, notebook_filename="sess.ipynb", literature_report="lit.html")
@@ -14,6 +15,8 @@ def test_renders_all_items_styled():
     assert "direction_record_00_round1.html" in html
     assert "Round 1 \u00b7 innovation" in html
     assert "sess.ipynb" in html
+    assert "integration_report.html" in html
+    assert "Integration Report" in html
 
 
 def test_empty_returns_empty_string():

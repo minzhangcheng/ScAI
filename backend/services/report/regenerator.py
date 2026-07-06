@@ -497,8 +497,9 @@ def _build_appendix_from_report(report: dict, language: str, session_id: Optiona
 
     # 7. Related Reports & Downloads
     from .download_section import render_related_reports_downloads_html
+    related_reports = dict(appendix.get("related_reports", {}) or {})
     downloads_html = render_related_reports_downloads_html(
-        appendix.get("related_reports", {}),
+        related_reports,
         notebook_filename=appendix.get("notebook_filename", ""),
         literature_report=appendix.get("literature_report", ""),
     )

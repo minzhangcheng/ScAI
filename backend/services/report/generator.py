@@ -388,6 +388,12 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
 
         # Build appendix data for report.json (so regenerate can use it)
         record_files = write_interaction_record_files(report_state, reports_dir=self.output_dir)
+        from backend.services.report.download_section import build_related_reports_metadata
+        related_reports = build_related_reports_metadata(
+            report_state,
+            record_files,
+            reports_dir=self.output_dir,
+        )
         appendix_data = {
             "project_name": report_state.name,
             "project_description": report_state.initial_instruction,
@@ -443,10 +449,7 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 ] if report_state.annotation_state and report_state.annotation_state.cluster_annotations else [],
                 "direction_selection": report_state.user_chosen_directions or [],
             },
-            "related_reports": {
-                "annotation_record": record_files.get("annotation_record"),
-                "direction_records": record_files.get("direction_records", []),
-            },
+            "related_reports": related_reports,
             "notebook_filename": f"{report_state.id}.ipynb",
             "literature_report": LITERATURE_REPORT_FILENAME if report_state.literature_reports else "",
             "branch_id": None if self.target_lineage_id == "main" else self.target_lineage_id,
@@ -962,4 +965,3 @@ class DetailedReportGenerator(AnalysisLogMixin, FiguresMixin, ScoringMixin, LLMC
                 logger.info(f"Score definitions CSV saved to: {csv_path}")
 
         return html_path
-

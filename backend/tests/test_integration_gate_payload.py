@@ -20,6 +20,7 @@ def test_payload_shape_and_url_when_report_present():
         "integration_analysis": "latest analysis",
         "candidates": [{"direction": "x"}],
         "detailed_report_url": "/api/session/sess-1/detailed-report/html",
+        "html_url": None,
     }
 
 

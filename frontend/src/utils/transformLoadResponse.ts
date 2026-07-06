@@ -145,6 +145,7 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
     ...opt('graphicAbstract', data.graphic_abstract != null ? transformGraphicAbstract(data.graphic_abstract) : undefined),
     ...opt('integratedReport', data.integrated_report ?? undefined),
     ...opt('explorationReportUrl', data.exploration_report_url),
+    ...opt('integrationReportUrl', data.integration_report_url),
     ...opt('analysisPhase', data.analysis_phase),
     ...opt('species', data.species),
     ...opt('speciesResolved', data.species_resolved),

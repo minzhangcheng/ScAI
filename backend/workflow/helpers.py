@@ -271,9 +271,14 @@ def build_integration_gate_payload(state: AnalysisState, session_id: str) -> dic
         f"/api/session/{session_id}/detailed-report/html"
         if getattr(state, "detailed_report_html_path", None) else None
     )
+    integration_report_url = (
+        f"/api/session/{session_id}/integration-report/html"
+        if getattr(state, "integration_report_html_path", None) else None
+    )
     return {
         "cycle": getattr(state, "integration_cycle", 0),
         "integration_analysis": reports[-1] if reports else "",
         "candidates": list(getattr(state, "integration_gate_candidates", None) or []),
         "detailed_report_url": detailed_report_url,
+        "html_url": integration_report_url,
     }

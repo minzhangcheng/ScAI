@@ -60,6 +60,7 @@ class IntegrationMixin:
         )
 
         scored_candidates = []
+        literature_evidence = []
         if raw_candidates:
             try:
                 literature_evidence = await self.literature_agent.evaluate_direction_novelty_candidates(
@@ -119,6 +120,18 @@ class IntegrationMixin:
         except Exception as e:
             logger.warning(f"[{session_id}] Integration detailed segment failed: {e}")
 
+        try:
+            from ..services.report import generate_integration_report_html
+            html_path = generate_integration_report_html(
+                analysis_state,
+                candidates=list(scored_candidates) if scored_candidates else [],
+                literature_evidence=list(literature_evidence or []),
+            )
+            analysis_state.integration_report_html_path = html_path
+            logger.info(f"[{session_id}] Integration report HTML saved to: {html_path}")
+        except Exception as html_err:
+            logger.error(f"[{session_id}] Integration report HTML generation failed: {html_err}")
+
         cap_reached = analysis_state.integration_cycle >= analysis_state.max_integration_cycles
         if cap_reached or not scored_candidates:
             reason = ("Reached the integration analysis limit; proceeding to the final report."
@@ -126,8 +139,10 @@ class IntegrationMixin:
                       "No sufficiently novel research direction was found; proceeding to the final report.")
             analysis_state.integration_gate_candidates = []
             analysis_state.integration_gate_literature_evidence = []
+            html_url = f"/api/session/{session_id}/integration-report/html" if analysis_state.integration_report_html_path else None
             await self._send_message("integration_complete", {
                 "cycle": analysis_state.integration_cycle, "reason": reason,
+                "html_url": html_url,
             }, AgentType.PI)
             return {**state, "analysis_state": analysis_state,
                     "integration_next": "stop", "should_continue": False}

@@ -15,6 +15,7 @@ export interface IntegrationGatePanelProps {
   onLetPiDecide: () => void
   countdownSeconds: number  // -1=manual, 0=no-wait, >0=countdown
   language: string
+  reportUrl?: string | null
 }
 
 export function IntegrationGatePanel({
@@ -25,6 +26,7 @@ export function IntegrationGatePanel({
   onLetPiDecide,
   countdownSeconds,
   language,
+  reportUrl,
 }: IntegrationGatePanelProps) {
   const [sel, setSel] = useState<Record<string, boolean>>({})
   const [submitting, setSubmitting] = useState(false)
@@ -99,6 +101,12 @@ export function IntegrationGatePanel({
       <h3>{language === 'zh'
         ? `整合分析 (第 ${cycle} 次) — 选择新的研究方向`
         : `Integration Analysis (Cycle ${cycle}) — Select New Research Direction`}</h3>
+      {reportUrl && (
+        <a href={reportUrl} target="_blank" rel="noopener noreferrer"
+           style={{ display: 'inline-block', marginBottom: '0.5rem', color: '#4f46e5' }}>
+          {language === 'zh' ? '查看整合报告' : 'View Integration Report'}
+        </a>
+      )}
       {timerDisplay && (
         <div className="countdown-timer" style={{ marginBottom: '0.5rem', color: '#888' }}>
           {language === 'zh' ? '倒计时' : 'Countdown'}: {timerDisplay}

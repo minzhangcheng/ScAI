@@ -139,6 +139,7 @@ export interface Session {
   graphicAbstract?: GraphicAbstract
   integratedReport?: string
   explorationReportUrl?: string
+  integrationReportUrl?: string
   multiDirectionCorrelation?: string
   stateVersion?: number
   // Species inference state

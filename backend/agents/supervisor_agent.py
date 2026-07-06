@@ -841,7 +841,7 @@ class SupervisorAgent:
 
         report_id = str(uuid.uuid4())
         record_files = write_interaction_record_files(analysis_state, reports_dir=output_path)
-        appendix_data = self._build_appendix(analysis_state, stats, record_files)
+        appendix_data = self._build_appendix(analysis_state, stats, record_files, reports_dir=output_path)
 
         # Persist graphic abstract for downloadable zip. Wrapped so a
         # malformed/unopenable image degrades gracefully (ga_path stays None;
@@ -1851,7 +1851,7 @@ Report generation model call failed due to API connection error. Please refer to
             return "trajectory"
         return "other"
 
-    def _build_appendix(self, state: AnalysisState, stats: Dict, record_files=None) -> Dict:
+    def _build_appendix(self, state: AnalysisState, stats: Dict, record_files=None, reports_dir=None) -> Dict:
         """Build appendix metadata for the report."""
         # Build user interaction records
         cluster_annotations_data = []
@@ -1885,6 +1885,13 @@ Report generation model call failed due to API connection error. Please refer to
             state, default=agent_models["literature"]
         )
 
+        from ..services.report.download_section import build_related_reports_metadata
+        related_reports = build_related_reports_metadata(
+            state,
+            record_files or {},
+            reports_dir=reports_dir,
+        )
+
         return {
             "project_name": state.name,
             "project_description": state.initial_instruction[:500],
@@ -1910,10 +1917,7 @@ Report generation model call failed due to API connection error. Please refer to
                 "cluster_annotations": cluster_annotations_data,
                 "direction_selection": direction_selection_data,
             },
-            "related_reports": {
-                "annotation_record": (record_files or {}).get("annotation_record"),
-                "direction_records": (record_files or {}).get("direction_records", []),
-            },
+            "related_reports": related_reports,
             "notebook_filename": f"{state.id}.ipynb",
             "literature_report": LITERATURE_REPORT_FILENAME if state.literature_reports else "",
         }

@@ -876,6 +876,7 @@ class AnalysisState(BaseModel):
     exploration_report_html_path: Optional[str] = None
     # Path to exploration report HTML file
     annotation_report_html_path: Optional[str] = None
+    integration_report_html_path: Optional[str] = None
     # Path to annotation context report HTML file
 
     # Incremental detailed report segments (built at each HITL point)
@@ -1266,6 +1267,10 @@ class AnalysisState(BaseModel):
         result["annotation_report_url"] = (
             f"/api/session/{self.id}/annotation-report/html"
             if getattr(self, 'annotation_report_html_path', None) else None
+        )
+        result["integration_report_url"] = (
+            f"/api/session/{self.id}/integration-report/html"
+            if getattr(self, 'integration_report_html_path', None) else None
         )
         result["detailed_report_url"] = (
             f"/api/session/{self.id}/detailed-report/html"

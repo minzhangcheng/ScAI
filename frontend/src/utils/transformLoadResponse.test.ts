@@ -231,6 +231,12 @@ describe('transformLoadResponse', () => {
     expect(result.storeUpdates.literatureMaxSearchRounds).toBeUndefined()
   })
 
+  it('maps integration_report_url to integrationReportUrl', () => {
+    const data = { ...MINIMAL_RESPONSE, integration_report_url: '/api/session/s/integration-report/html' }
+    const { sessionUpdates } = transformLoadResponse(data)
+    expect(sessionUpdates.integrationReportUrl).toBe('/api/session/s/integration-report/html')
+  })
+
   it('maps species fields and accepts waiting_species_input status', () => {
     const data: any = {
       session_id: 's1',

@@ -87,6 +87,7 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
     restored_state.exploration_report_html_path = None
     restored_state.detailed_report_html_path = None
     restored_state.annotation_report_html_path = None
+    restored_state.integration_report_html_path = None
 
     restored_state.snapshots = state.snapshots
     restored_state.last_restored_snapshot_id = snapshot.id

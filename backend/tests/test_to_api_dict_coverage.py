@@ -23,6 +23,7 @@ _EXCLUDED_FIELDS = {
     "detailed_report_html_path",
     "exploration_report_html_path",
     "annotation_report_html_path",
+    "integration_report_html_path",
     "snapshots",
     "last_restored_snapshot_id",
     "last_snapshot_id",
@@ -76,6 +77,7 @@ _EXCLUDED_FIELDS = {
 _COMPUTED_FIELDS = {
     "exploration_report_url",
     "annotation_report_url",
+    "integration_report_url",
     "snapshot_count",
     "messages",
 }

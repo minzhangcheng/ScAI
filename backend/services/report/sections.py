@@ -504,6 +504,10 @@ Biochemistry: {json.dumps(findings['biochemistry'][:5], ensure_ascii=False)}
                 if getattr(state, "annotation_record", None) is not None else None
             ),
             "direction_records": direction_record_entries(state),
+            "integration_report": (
+                "integration_report.html"
+                if getattr(state, "integration_report_html_path", None) else None
+            ),
         }
         downloads_html = render_related_reports_downloads_html(
             related_reports,

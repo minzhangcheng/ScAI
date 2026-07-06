@@ -1,4 +1,5 @@
 import asyncio, types
+from unittest.mock import patch
 from backend.models.schemas import AnalysisState, AnalysisPhase, TaskStatus
 from backend.workflow.integration import IntegrationMixin
 
@@ -117,3 +118,53 @@ def test_integration_sends_round_summary_message():
     assert msg["phase"] == "integration"
     assert msg.get("integration_candidates")
     assert len(msg["integration_candidates"]) == 1
+
+
+def test_integration_synthesis_generates_report_stop_path():
+    """Verify _integration_synthesis generates integration report HTML and
+    sets integration_report_html_path (empty-candidate stop path)."""
+    h = _Harness([])
+    s = _state_with_batch()
+    with patch("backend.services.report.generate_integration_report_html",
+               return_value="/tmp/test/integration_report.html") as mock_gen:
+        out = asyncio.run(h._integration_synthesis({"analysis_state": s}))
+    assert out["integration_next"] == "stop"
+    mock_gen.assert_called_once()
+    assert s.integration_report_html_path == "/tmp/test/integration_report.html"
+
+
+def test_integration_synthesis_generates_report_gate_path():
+    """Verify _integration_synthesis generates integration report HTML
+    even when candidates exist (gate path)."""
+    h = _Harness([{"direction": "NEW", "direction_id": "int_001"}])
+    s = _state_with_batch()
+    with patch("backend.services.report.generate_integration_report_html",
+               return_value="/tmp/test/integration_report.html") as mock_gen:
+        out = asyncio.run(h._integration_synthesis({"analysis_state": s}))
+    assert out["integration_next"] == "gate"
+    mock_gen.assert_called_once()
+    assert s.integration_report_html_path == "/tmp/test/integration_report.html"
+
+
+def test_integration_complete_payload_includes_html_url():
+    """Verify the stop-path integration_complete WS payload includes html_url."""
+    h = _Harness([])
+    s = _state_with_batch()
+    with patch("backend.services.report.generate_integration_report_html",
+               return_value="/data/sessions/sess/reports/integration_report.html"):
+        asyncio.run(h._integration_synthesis({"analysis_state": s}))
+    complete_msgs = [c for t, c in h.sent if t == "integration_complete"]
+    assert len(complete_msgs) == 1
+    assert complete_msgs[0].get("html_url") == "/api/session/sess/integration-report/html"
+
+
+def test_integration_gate_payload_includes_html_url():
+    """Verify the gate-path integration_gate WS payload includes html_url."""
+    h = _Harness([{"direction": "NEW", "direction_id": "int_001"}])
+    s = _state_with_batch()
+    with patch("backend.services.report.generate_integration_report_html",
+               return_value="/data/sessions/sess/reports/integration_report.html"):
+        asyncio.run(h._integration_synthesis({"analysis_state": s}))
+    gate_msgs = [c for t, c in h.sent if t == "integration_gate"]
+    assert len(gate_msgs) == 1
+    assert gate_msgs[0].get("html_url") == "/api/session/sess/integration-report/html"

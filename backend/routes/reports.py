@@ -219,6 +219,23 @@ async def get_annotation_report_html(session_id: str, request: Request):
     return FileResponse(html_path, media_type="text/html", filename="annotation_context_report.html")
 
 
+@router.get("/{session_id}/integration-report/html")
+async def get_integration_report_html(session_id: str, request: Request):
+    """Serve the integration report HTML file"""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    html_path = state.integration_report_html_path
+    if not html_path or not Path(html_path).exists():
+        raise HTTPException(status_code=404, detail="Integration report HTML not found")
+
+    session_dir = get_session_dir(session_id)
+    validate_path_within(Path(html_path), session_dir)
+
+    return FileResponse(html_path, media_type="text/html", filename="integration_report.html")
+
+
 @router.get("/{session_id}/detailed-report/html")
 async def get_detailed_report_html(session_id: str, request: Request, branch_id: Optional[str] = None):
     """Serve the combined incremental detailed report HTML."""
