@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.32.9 · **Last updated**: 2026-07-07
+**Version**: 0.32.10 · **Last updated**: 2026-07-07
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.32.x — (2026-07-03)**
+
+- `0.32.10` — Integration gate robustness, frontend dialog guard for integration rounds (2026-07-07):
+  - **Integration gate continue robustness (`backend/workflow/synthesis.py`)**: A generic continue signal (e.g. `/human-input` with no direction or any route that bypassed `/choose-direction`) at the integration gate now defaults to `PI_DECIDE_SIGNAL` instead of leaving the gate unresolved. Previously the graph would proceed to `initialize_round` with no integration direction selected; now the gate always resolves by delegating to PI.
+  - **Frontend integration gate dialog guard (`frontend/src/components/AnalysisPanel.tsx`)**: The generic `RoundFeedbackDialog` is never opened during integration-phase rounds — the dedicated `IntegrationGatePanel` handles those. Added render-level guard (`!integrationGateData`) to defend against stale state on reconnect/rehydrate. The `feedbackRoundData.phase !== 'integration'` check prevents accidental dialog display when integration rounds share the same round number as a prior innovation round.
 
 - `0.32.9` — Snapshot restore validation hardening, direction dict type widening, PI JSON array parsing fix (2026-07-07):
   - **Snapshot restore safety (`backend/routes/snapshots.py`)**: Wrapped restore body in `try/finally` guaranteeing `_initializing_sessions` cleared on every exit path (including early 422 and late failures). Added `_format_restore_error()` helper producing human-readable `detail` strings. Catches `SnapshotRestoreError`/`ValidationError` → HTTP 422 with the formatted detail.

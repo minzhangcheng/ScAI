@@ -788,9 +788,12 @@ export function AnalysisPanel() {
     if (currentSession?.status === 'waiting_annotation') {
       setShowAnnotationDialog(true)
     } else if (currentSession?.status === 'waiting_input') {
-      if (explorationReportData && (currentSession.currentRound ?? 0) <= MAX_EXPLORATION_ROUND) {
+      if (integrationGateData) {
+        // Integration gate has its own panel; don't reopen the generic feedback dialog.
+        setIntegrationGateData({ ...integrationGateData })
+      } else if (explorationReportData && (currentSession.currentRound ?? 0) <= MAX_EXPLORATION_ROUND) {
         setShowExplorationDialog(true)
-      } else if (feedbackRoundData) {
+      } else if (feedbackRoundData && feedbackRoundData.phase !== 'integration') {
         setShowFeedbackDialog(true)
       }
     } else if (currentSession?.status === 'waiting_plan_review') {
@@ -798,7 +801,7 @@ export function AnalysisPanel() {
     } else if (currentSession?.status === 'waiting_species_input') {
       useAppStore.getState().setShowSpeciesInputDialog(true)
     }
-  }, [currentSession?.status, currentSession?.currentRound, explorationReportData, feedbackRoundData])
+  }, [currentSession?.status, currentSession?.currentRound, explorationReportData, feedbackRoundData, integrationGateData])
 
   // Countdown timer for LLM failure auto-skip
   const { timeRemaining } = useCountdownTimer({
@@ -829,9 +832,14 @@ export function AnalysisPanel() {
       const latest = roundSummaries[roundSummaries.length - 1]
       setExpandedRound(roundKey(latest.phase, latest.round))
 
-      // Show feedback dialog when a round completes and is waiting for input
-      // Use ref guard to prevent duplicate triggers for the same round
+      // Show feedback dialog when a round completes and is waiting for input.
+      // Use ref guard to prevent duplicate triggers for the same round.
+      // Integration-phase rounds are handled by the dedicated IntegrationGatePanel
+      // (direction selection / let-PI-decide / finalize); the generic feedback
+      // dialog's continue would send /human-input and leave the integration gate
+      // unresolved, so never open it for an integration round.
       if (latest.status === 'waiting_input' && currentSession?.status === 'waiting_input'
+          && latest.phase !== 'integration'
           && latest.round !== lastDialogRoundRef.current) {
         lastDialogRoundRef.current = latest.round
         setFeedbackRoundData(latest)
@@ -1530,8 +1538,13 @@ export function AnalysisPanel() {
         />
       )}
 
-      {/* Round Feedback Dialog — shown after each round completes (not during exploration report) */}
-      {showFeedbackDialog && !showExplorationDialog && feedbackRoundData && currentSession && !llmFailureInfo && (
+      {/* Round Feedback Dialog — shown after each round completes (not during exploration
+          report, and never at the integration gate, which has its own IntegrationGatePanel).
+          The integration exclusion is also enforced upstream where showFeedbackDialog is set;
+          this render-level guard defends against stale state on reconnect/rehydrate. */}
+      {showFeedbackDialog && !showExplorationDialog && !integrationGateData
+        && feedbackRoundData && feedbackRoundData.phase !== 'integration'
+        && currentSession && !llmFailureInfo && (
         <RoundFeedbackDialog
           roundNumber={feedbackRoundData.round}
           maxRounds={maxRounds}

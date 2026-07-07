@@ -18,6 +18,7 @@ from ..services.interaction_record_capture import get_or_open_direction_record
 from ..utils.direction_evidence import build_fallback_direction_evidence
 from ..utils.llm_client import UpstreamExhaustedError
 from .direction_coverage import (
+    at_integration_gate,
     build_result_identity_key,
     count_innovation_rounds_done,
     current_lineage_id,
@@ -778,6 +779,18 @@ class SynthesisMixin:
                 self._set_status(analysis_state, TaskStatus.RUNNING)
                 await self._send_state_sync(analysis_state, "integration_finalize")
                 return {**state, "analysis_state": analysis_state, "should_continue": False}
+
+            # Robustness: a generic continue (e.g. /human-input with no direction,
+            # or any signal that did not go through /choose-direction) leaves the
+            # gate unresolved — phase still INTEGRATION with candidates populated.
+            # Routing would then send the graph to initialize_round and start a
+            # fresh round with no integration direction selected. Treat such a
+            # continue as "let PI decide" (same default as auto-skip / no-wait) so
+            # the gate always resolves. An explicit selection clears the candidates
+            # (at_integration_gate becomes False) and is left untouched here.
+            if analysis_state.user_chosen_direction != PI_DECIDE_SIGNAL and at_integration_gate(analysis_state):
+                analysis_state.user_chosen_direction = PI_DECIDE_SIGNAL
+                analysis_state.pending_human_input = PI_DECIDE_SIGNAL
 
             # Auto-skip set PI_DECIDE_SIGNAL, or user chose directions via API.
             # If PI_DECIDE_SIGNAL, switch to INNOVATION so pi_planning handles it.
