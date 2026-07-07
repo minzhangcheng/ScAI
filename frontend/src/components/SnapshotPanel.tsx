@@ -72,6 +72,7 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [loading, setLoading] = useState(true)
   const [restoring, setRestoring] = useState<string | null>(null)
+  const [restoreError, setRestoreError] = useState<string | null>(null)
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null)
   const [rollbackPreview, setRollbackPreview] = useState<{
     snapshotId: string
@@ -105,15 +106,18 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
 
   const handleRestore = async (snapshotId: string) => {
     setRestoring(snapshotId)
+    setRestoreError(null)
     try {
       await apiFetch(`/session/${sessionId}/snapshots/${snapshotId}/restore`, {
         method: 'POST',
       })
       onRestore()
-    } finally {
-      setRestoring(null)
       setConfirmRestore(null)
       setRollbackPreview(null)
+    } catch (e) {
+      setRestoreError(e instanceof Error ? e.message : (isZh ? '回退失败' : 'Restore failed'))
+    } finally {
+      setRestoring(null)
     }
   }
 
@@ -392,6 +396,11 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
                     </ul>
                   </div>
                 )}
+                {restoreError && (
+                  <div className="p-2 bg-red-50 rounded text-xs text-red-700">
+                    {restoreError}
+                  </div>
+                )}
                 <div className="flex items-center gap-1">
                   <span className="text-xs text-amber-600 mr-1">
                     {isZh ? '确认？' : 'Sure?'}
@@ -404,7 +413,7 @@ export function SnapshotPanel({ sessionId, language, onClose, onRestore }: Snaps
                     {restoring === snap.id ? '...' : (isZh ? '确认' : 'Yes')}
                   </button>
                   <button
-                    onClick={() => { setConfirmRestore(null); setRollbackPreview(null) }}
+                    onClick={() => { setConfirmRestore(null); setRollbackPreview(null); setRestoreError(null) }}
                     className="px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 rounded-lg"
                   >
                     {isZh ? '取消' : 'No'}

@@ -1683,7 +1683,8 @@ For each candidate, provide ALL fields:
 
 Return a JSON array. Return [] if no sufficiently novel direction exists."""
         response = await self.chat(prompt, temperature=0.3)
-        data = self._safe_parse_json(response, default=[])
+        # This prompt contracts for a top-level JSON array; the dict parser drops valid arrays.
+        data = safe_parse_json_array(response, default=[])
         return data if isinstance(data, list) else []
 
     async def score_integration_directions_with_evidence(
@@ -1720,7 +1721,8 @@ Keep every original field. Drop candidates that are NOT novel (already establish
 
 Return the surviving candidates as a JSON array, sorted by priority_rank ascending."""
         response = await self.chat(prompt, temperature=0.3)
-        data = self._safe_parse_json(response, default=[])
+        # This prompt contracts for a top-level JSON array; the dict parser drops valid arrays.
+        data = safe_parse_json_array(response, default=[])
         return data if isinstance(data, list) else []
 
     async def score_directions_with_evidence(

@@ -18,6 +18,7 @@ from ..config import (
     get_session_states,
 )
 from ..utils.blob_store import externalize_blobs, inline_blobs
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,90 @@ def should_include_runtime_state(size_bytes: int, max_bytes: int = MAX_SNAPSHOT_
 
 def should_exclude_snapshot_file(filename: str, patterns=SNAPSHOT_EXCLUDED_WORKSPACE_PATTERNS) -> bool:
     return any(fnmatch.fnmatch(filename, pattern) for pattern in patterns)
+
+
+_DIRECTION_LIST_FIELDS = ("user_chosen_directions", "directions_queue", "active_direction_batch")
+
+
+def _coerce_is_custom(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
+def normalize_direction_dicts(state_dict: dict) -> dict:
+    """Coerce known scalar keys inside direction dicts to their intended types.
+
+    Runs before model_validate. Fixes semantic drift (e.g. is_custom stored as the
+    truthy string "false") that type-widening alone leaves in place. Operates per-key
+    inside each list item; never drops or empties a direction list.
+    """
+    for field in _DIRECTION_LIST_FIELDS:
+        items = state_dict.get(field)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if "is_custom" in item:
+                item["is_custom"] = _coerce_is_custom(item["is_custom"])
+            if item.get("candidate_index") is not None:
+                try:
+                    item["candidate_index"] = int(item["candidate_index"])
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "candidate_index %r could not be coerced to int; setting None",
+                        item["candidate_index"],
+                    )
+                    item["candidate_index"] = None
+    return state_dict
+
+
+class SnapshotRestoreError(Exception):
+    """Raised when a snapshot's state cannot be safely restored into an AnalysisState."""
+
+
+# Positive allowlist: ONLY these fields may be blanked to their model default when they
+# fail validation. They are regenerable, non-identity scalars whose loss does not corrupt
+# the workflow. Anything not listed here fails closed — that includes identity fields,
+# direction state, and every collection field (round_results, annotation records, ...),
+# so a drifted collection is never silently wiped (spec §2b). Keep this set minimal.
+RECOVERABLE_RESTORE_DEFAULT_FIELDS = frozenset({
+    "integration_cycle",
+})
+
+
+def _validate_state_with_fallback(state_dict: dict, session_id: str) -> "AnalysisState":
+    """Validate state_dict; blank only allowlisted drifted fields, else fail closed."""
+    try:
+        return AnalysisState.model_validate(state_dict)
+    except ValidationError as exc:
+        # loc[0] is the top-level field name even for nested errors
+        # (e.g. round_results.0.round_number -> "round_results").
+        offending = {err["loc"][0] for err in exc.errors() if err.get("loc")}
+        unrecoverable = offending - RECOVERABLE_RESTORE_DEFAULT_FIELDS
+        if unrecoverable:
+            first = exc.errors()[0]
+            loc = ".".join(str(p) for p in first.get("loc", ()))
+            raise SnapshotRestoreError(
+                f"non-recoverable field(s) {sorted(unrecoverable)} failed validation "
+                f"at {loc}: {first.get('msg', 'validation error')}"
+            ) from exc
+        for field in offending:
+            logger.warning(
+                "[%s] Snapshot restore: degrading drifted field %r to its default",
+                session_id, field,
+            )
+            state_dict.pop(field, None)
+        try:
+            return AnalysisState.model_validate(state_dict)
+        except ValidationError as exc2:
+            first = exc2.errors()[0] if exc2.errors() else {}
+            raise SnapshotRestoreError(
+                f"unrecoverable snapshot state: {first.get('msg', 'validation error')}"
+            ) from exc2
 
 
 class SnapshotManager:
@@ -301,8 +386,9 @@ class SnapshotManager:
 
         blob_dir = (self.snapshots_dir / snapshot.state_file).parent / f"{snapshot.id}_blobs"
         state_dict = inline_blobs(state_dict, blob_dir)
+        state_dict = normalize_direction_dicts(state_dict)
 
-        restored = AnalysisState.model_validate(state_dict)
+        restored = _validate_state_with_fallback(state_dict, self.session_id)
 
         # Decompress snapshot pkl back to the live path. Runs in backend process
         # so the kernel never holds the compression dictionary in memory.

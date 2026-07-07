@@ -89,6 +89,67 @@ async def test_scored_candidates_land_in_research_direction_candidates(monkeypat
     assert report.raw_direction_candidates[0].get("key_genes") == ["Stat1"]
 
 
+@pytest.mark.asyncio
+async def test_integration_direction_candidates_parse_json_array(monkeypatch):
+    agent = _make_pi_agent()
+
+    async def fake_chat(prompt, temperature=0.3):
+        return json.dumps([
+            {
+                "direction_id": "int_001",
+                "direction": "Cross-direction stress program",
+                "core_observation": "Round 2 and 3 share NRF2-linked signals.",
+            }
+        ])
+
+    monkeypatch.setattr(agent, "chat", fake_chat)
+    state = SimpleNamespace(
+        name="s",
+        initial_instruction="x",
+        species="mouse",
+        user_chosen_directions=[],
+        build_experimental_design_summary=lambda: "",
+    )
+    rr = SimpleNamespace(
+        round_number=2,
+        direction="D1",
+        bioinformatics_findings=[],
+        pathology_findings=[],
+        biochemistry_findings=[],
+        literature_findings=[],
+        pi_summary="",
+    )
+
+    candidates = await agent.generate_integration_direction_candidates(state, [rr], "report", "lit")
+
+    assert candidates[0]["direction_id"] == "int_001"
+    assert candidates[0]["direction"] == "Cross-direction stress program"
+
+
+@pytest.mark.asyncio
+async def test_integration_direction_scoring_parses_json_array(monkeypatch):
+    agent = _make_pi_agent()
+
+    async def fake_chat(prompt, temperature=0.3):
+        return json.dumps([
+            {
+                "direction_id": "int_001",
+                "direction": "Cross-direction stress program",
+                "novelty_score": 8,
+                "priority_rank": 1,
+            }
+        ])
+
+    monkeypatch.setattr(agent, "chat", fake_chat)
+    state = SimpleNamespace(name="s", initial_instruction="x")
+    raw_candidates = [{"direction_id": "int_001", "direction": "Cross-direction stress program"}]
+
+    scored = await agent.score_integration_directions_with_evidence(state, raw_candidates, [])
+
+    assert scored[0]["direction_id"] == "int_001"
+    assert scored[0]["novelty_score"] == 8
+
+
 def test_candidate_specific_core_observation_requires_data_element():
     assert PIAgent._candidate_has_specific_core_observation({
         "core_observation": "Cluster 7 hepatocytes show Mt2 log2FC=1.3 and NRF2 score correlation rho=0.38."

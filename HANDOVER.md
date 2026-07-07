@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.32.8 · **Last updated**: 2026-07-06
+**Version**: 0.32.9 · **Last updated**: 2026-07-07
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,15 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.32.x — (2026-07-03)**
+
+- `0.32.9` — Snapshot restore validation hardening, direction dict type widening, PI JSON array parsing fix (2026-07-07):
+  - **Snapshot restore safety (`backend/routes/snapshots.py`)**: Wrapped restore body in `try/finally` guaranteeing `_initializing_sessions` cleared on every exit path (including early 422 and late failures). Added `_format_restore_error()` helper producing human-readable `detail` strings. Catches `SnapshotRestoreError`/`ValidationError` → HTTP 422 with the formatted detail.
+  - **State normalization + fail-closed validation (`backend/utils/snapshot.py`)**: `normalize_direction_dicts()` coerces `is_custom` (→bool) and `candidate_index` (→int) before `model_validate`. New `SnapshotRestoreError` exception class. `_validate_state_with_fallback()` blanks only allowlisted drift-tolerant fields (`integration_cycle`) but fails closed on all others. `RECOVERABLE_RESTORE_DEFAULT_FIELDS` frozenset documents which fields may be safely defaulted.
+  - **Direction dict type widening (`backend/models/schemas.py`)**: `user_chosen_directions`, `directions_queue`, `active_direction_batch` changed from `List[Dict[str, str]]` to `List[Dict[str, Any]]` to accommodate `is_custom: bool` and `candidate_index: int|None` without silent coercion.
+  - **PI JSON array parsing fix (`backend/agents/pi_agent.py`)**: `generate_integration_direction_candidates()` and `score_integration_directions_with_evidence()` switched from `_safe_parse_json()` (which silently drops top-level arrays) to `safe_parse_json_array()`.
+  - **Frontend restore error display (`frontend/src/components/SnapshotPanel.tsx`)**: Added `restoreError` state; inline error banner in the confirmation dialog; clears on cancel.
+  - **Frontend test setup (`frontend/src/test-setup.ts`)**: Added `ResizeObserver` stub preventing `ReferenceError` in component tests.
+  - **New tests (`backend/tests/test_pi_score_field_contract.py`)**: 2 tests verifying integration direction candidate generation and scoring parse JSON arrays correctly.
 
 - `0.32.8` — Centralized integration report staging for detailed report appendix (2026-07-06):
   - **Shared integration report staging (`backend/services/report/download_section.py`)**: New `build_related_reports_metadata()` function copies the integration report HTML from its source path into the target reports/branch directory, ensuring branch-specific detailed reports include the integration report. Handles path resolution, `shutil.copy2` (skipped when source and target are the same file), and OSError logging.

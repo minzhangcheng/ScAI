@@ -8,6 +8,7 @@ import logging
 from typing import Dict
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import ValidationError
 
 from backend.models.schemas import (
     APIResponse, TaskStatus, WebSocketMessage, AgentType,
@@ -25,7 +26,7 @@ from backend.state import (
 )
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
-from backend.utils.snapshot import SnapshotManager
+from backend.utils.snapshot import SnapshotManager, SnapshotRestoreError
 from backend.config import get_session_states
 from backend.workflow.direction_coverage import clone_round_results_for_branch
 from backend.workflow.helpers import build_integration_gate_payload
@@ -39,6 +40,15 @@ from backend.routes._helpers import teardown_running_workflow
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/session", tags=["snapshots"])
+
+
+def _format_restore_error(exc: Exception) -> str:
+    """Human-readable, apiFetch-friendly detail string (apiFetch reads error.detail)."""
+    if isinstance(exc, ValidationError):
+        first = exc.errors()[0] if exc.errors() else {}
+        loc = ".".join(str(p) for p in first.get("loc", ()))
+        return f"Rollback failed: {loc} type mismatch ({first.get('msg', 'validation error')})"
+    return f"Rollback failed: {exc}"
 
 
 @router.get("/{session_id}/snapshots")
@@ -73,212 +83,223 @@ async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
     async with _state_lock:
         _initializing_sessions.add(session_id)
 
-    # Stop running workflow, cancel tasks, and delete checkpoint.
-    await teardown_running_workflow(session_id)
+    try:
+        # Stop running workflow, cancel tasks, and delete checkpoint.
+        await teardown_running_workflow(session_id)
 
-    # Restore state from snapshot
-    mgr = SnapshotManager(session_id)
-    restored_state = await mgr.restore_snapshot(snapshot)
+        # Restore state from snapshot
+        mgr = SnapshotManager(session_id)
+        try:
+            restored_state = await mgr.restore_snapshot(snapshot)
+        except (SnapshotRestoreError, ValidationError) as exc:
+            detail = _format_restore_error(exc)
+            logger.error("[%s] Snapshot restore failed: %s", session_id, detail)
+            raise HTTPException(status_code=422, detail=detail)
 
-    await mgr.restore_notebook(snapshot)
-    mgr.cleanup_workspace_files(snapshot.workspace_manifest)
-    mgr.cleanup_reports()
+        await mgr.restore_notebook(snapshot)
+        mgr.cleanup_workspace_files(snapshot.workspace_manifest)
+        mgr.cleanup_reports()
 
-    restored_state.exploration_report_html_path = None
-    restored_state.detailed_report_html_path = None
-    restored_state.annotation_report_html_path = None
-    restored_state.integration_report_html_path = None
+        restored_state.exploration_report_html_path = None
+        restored_state.detailed_report_html_path = None
+        restored_state.annotation_report_html_path = None
+        restored_state.integration_report_html_path = None
 
-    restored_state.snapshots = state.snapshots
-    restored_state.last_restored_snapshot_id = snapshot.id
-    # Move the lineage head to the restore target so forward snapshots after the
-    # branch's first one keep chaining onto the restored point.
-    restored_state.last_snapshot_id = snapshot.id
+        restored_state.snapshots = state.snapshots
+        restored_state.last_restored_snapshot_id = snapshot.id
+        # Move the lineage head to the restore target so forward snapshots after the
+        # branch's first one keep chaining onto the restored point.
+        restored_state.last_snapshot_id = snapshot.id
 
-    target = SNAPSHOT_RESUME_TARGET.get(str(snapshot.phase))
-    if target:
-        restored_state.restore_resume_phase = str(snapshot.phase)
-        restored_state.restore_resume_kind = target["kind"]
-        restored_state.restore_resume_node = target["node"]
-        restored_state.restore_resume_gate = target["gate"]
-    else:
-        restored_state.restore_resume_phase = str(snapshot.phase)
-        restored_state.restore_resume_kind = None
-        restored_state.restore_resume_node = None
-        restored_state.restore_resume_gate = None
-
-    # Restore creates a branch lineage by default, even from the latest main
-    # snapshot. This prevents restored analysis from silently overwriting main
-    # round_results or main report artifacts. A future explicit "continue main"
-    # restore mode must opt into main-line mutation deliberately.
-    restored_state.restore_branch_label = stable_restore_branch_label(snapshot.id, snapshot.branch_label)
-    restored_state.restore_branch_id = stable_restore_branch_id(snapshot.id, restored_state.restore_branch_label)
-    restored_state.round_results = clone_round_results_for_branch(
-        restored_state.round_results,
-        branch_id=restored_state.restore_branch_id,
-        branch_label=restored_state.restore_branch_label,
-        source_snapshot_id=snapshot.id,
-        source_lineage_id=snapshot.branch_id or "main",
-    )
-
-    # Phase-aware status setting
-    phase = snapshot.phase
-    if phase == "pre_direction":
-        restored_state.status = TaskStatus.WAITING_INPUT
-    elif phase == "pre_annotation":
-        restored_state.status = TaskStatus.WAITING_ANNOTATION
-    elif phase == "pre_round_wait":
-        restored_state.status = TaskStatus.WAITING_INPUT
-    elif phase == "pre_integration_gate":
-        restored_state.status = TaskStatus.WAITING_INPUT
-    else:
-        restored_state.status = TaskStatus.PAUSED
-
-    # Synthesize HITL messages into realtime_messages so frontend can show dialogs
-    if phase == "pre_annotation" and restored_state.annotation_state:
-        ann = restored_state.annotation_state
-        report_html_url = (
-            f"/api/session/{session_id}/annotation-report/html"
-            if getattr(restored_state, 'annotation_report_html_path', None) else None
-        )
-        detailed_report_url = (
-            f"/api/session/{session_id}/detailed-report/html"
-            if getattr(restored_state, 'detailed_report_html_path', None) else None
-        )
-        restored_state.realtime_messages.append(WebSocketMessage(
-            type="annotation_confirmation",
-            agent=AgentType.LITERATURE,
-            content={
-                "annotations": [a.model_dump(mode="json") for a in ann.cluster_annotations],
-                "tissue": ann.tissue,
-                "organism": ann.organism,
-                "tissue_summary": ann.tissue_summary,
-                "analysis_summary": ann.analysis_summary,
-                "report_html_url": report_html_url,
-                "detailed_report_url": detailed_report_url,
-            }
-        ))
-    elif phase == "pre_annotation" and not restored_state.annotation_state:
-        logger.warning(
-            f"[{session_id}] pre_annotation snapshot lacks annotation_state "
-            f"(legacy snapshot). Falling back to PAUSED status."
-        )
-        restored_state.status = TaskStatus.PAUSED
-    elif phase == "pre_direction" and restored_state.exploration_report:
-        exp = restored_state.exploration_report
-        html_url = (
-            f"/api/session/{session_id}/exploration-report/html"
-            if getattr(restored_state, 'exploration_report_html_path', None) else None
-        )
-        detailed_report_url = (
-            f"/api/session/{session_id}/detailed-report/html"
-            if getattr(restored_state, 'detailed_report_html_path', None) else None
-        )
-        last_round = restored_state.round_results[-1] if restored_state.round_results else None
-        restored_state.realtime_messages.append(WebSocketMessage(
-            type="exploration_report",
-            agent=AgentType.PI,
-            content={
-                "report_a": exp.model_dump(mode="json"),
-                "round": last_round.round_number if last_round else 1,
-                "summary": last_round.pi_summary if last_round else "",
-                "html_url": html_url,
-                "detailed_report_url": detailed_report_url,
-            }
-        ))
-
-    elif phase == "pre_round_wait":
-        last_round = restored_state.round_results[-1] if restored_state.round_results else None
-        if not last_round:
-            logger.warning(
-                f"[{session_id}] pre_round_wait snapshot has no round_results. "
-                f"Falling back to PAUSED status."
-            )
-            restored_state.status = TaskStatus.PAUSED
+        target = SNAPSHOT_RESUME_TARGET.get(str(snapshot.phase))
+        if target:
+            restored_state.restore_resume_phase = str(snapshot.phase)
+            restored_state.restore_resume_kind = target["kind"]
+            restored_state.restore_resume_node = target["node"]
+            restored_state.restore_resume_gate = target["gate"]
         else:
+            restored_state.restore_resume_phase = str(snapshot.phase)
+            restored_state.restore_resume_kind = None
+            restored_state.restore_resume_node = None
+            restored_state.restore_resume_gate = None
+
+        # Restore creates a branch lineage by default, even from the latest main
+        # snapshot. This prevents restored analysis from silently overwriting main
+        # round_results or main report artifacts. A future explicit "continue main"
+        # restore mode must opt into main-line mutation deliberately.
+        restored_state.restore_branch_label = stable_restore_branch_label(snapshot.id, snapshot.branch_label)
+        restored_state.restore_branch_id = stable_restore_branch_id(snapshot.id, restored_state.restore_branch_label)
+        restored_state.round_results = clone_round_results_for_branch(
+            restored_state.round_results,
+            branch_id=restored_state.restore_branch_id,
+            branch_label=restored_state.restore_branch_label,
+            source_snapshot_id=snapshot.id,
+            source_lineage_id=snapshot.branch_id or "main",
+        )
+
+        # Phase-aware status setting
+        phase = snapshot.phase
+        if phase == "pre_direction":
+            restored_state.status = TaskStatus.WAITING_INPUT
+        elif phase == "pre_annotation":
+            restored_state.status = TaskStatus.WAITING_ANNOTATION
+        elif phase == "pre_round_wait":
+            restored_state.status = TaskStatus.WAITING_INPUT
+        elif phase == "pre_integration_gate":
+            restored_state.status = TaskStatus.WAITING_INPUT
+        else:
+            restored_state.status = TaskStatus.PAUSED
+
+        # Synthesize HITL messages into realtime_messages so frontend can show dialogs
+        if phase == "pre_annotation" and restored_state.annotation_state:
+            ann = restored_state.annotation_state
+            report_html_url = (
+                f"/api/session/{session_id}/annotation-report/html"
+                if getattr(restored_state, 'annotation_report_html_path', None) else None
+            )
+            detailed_report_url = (
+                f"/api/session/{session_id}/detailed-report/html"
+                if getattr(restored_state, 'detailed_report_html_path', None) else None
+            )
             restored_state.realtime_messages.append(WebSocketMessage(
-                type="round_summary",
-                agent=AgentType.PI,
+                type="annotation_confirmation",
+                agent=AgentType.LITERATURE,
                 content={
-                    "round": last_round.round_number,
-                    "summary": last_round.pi_summary or "",
-                    "pathology_findings": last_round.pathology_findings or [],
-                    "bioinformatics_findings": last_round.bioinformatics_findings or [],
-                    "biochemistry_findings": last_round.biochemistry_findings or [],
-                    "literature_findings": last_round.literature_findings or [],
-                    "findings": [
-                        *(last_round.pathology_findings or []),
-                        *(last_round.bioinformatics_findings or []),
-                        *(last_round.biochemistry_findings or []),
-                        *(last_round.literature_findings or []),
-                    ],
-                    "data_requests": getattr(last_round, 'data_requests', []) or [],
-                    "status": "waiting_input"
+                    "annotations": [a.model_dump(mode="json") for a in ann.cluster_annotations],
+                    "tissue": ann.tissue,
+                    "organism": ann.organism,
+                    "tissue_summary": ann.tissue_summary,
+                    "analysis_summary": ann.analysis_summary,
+                    "report_html_url": report_html_url,
+                    "detailed_report_url": detailed_report_url,
                 }
             ))
-            max_rounds = restored_state.max_rounds if restored_state.max_rounds > 0 else 4
-            is_last_round = last_round.round_number >= max_rounds
-            if is_last_round:
-                status_msg = f"Round {last_round.round_number} complete (final round). You can provide additional data to extend analysis, or skip to generate the final report."
-            else:
-                status_msg = f"Round {last_round.round_number} complete. Waiting for your input."
+        elif phase == "pre_annotation" and not restored_state.annotation_state:
+            logger.warning(
+                f"[{session_id}] pre_annotation snapshot lacks annotation_state "
+                f"(legacy snapshot). Falling back to PAUSED status."
+            )
+            restored_state.status = TaskStatus.PAUSED
+        elif phase == "pre_direction" and restored_state.exploration_report:
+            exp = restored_state.exploration_report
+            html_url = (
+                f"/api/session/{session_id}/exploration-report/html"
+                if getattr(restored_state, 'exploration_report_html_path', None) else None
+            )
+            detailed_report_url = (
+                f"/api/session/{session_id}/detailed-report/html"
+                if getattr(restored_state, 'detailed_report_html_path', None) else None
+            )
+            last_round = restored_state.round_results[-1] if restored_state.round_results else None
             restored_state.realtime_messages.append(WebSocketMessage(
-                type="status",
+                type="exploration_report",
                 agent=AgentType.PI,
-                content=status_msg
+                content={
+                    "report_a": exp.model_dump(mode="json"),
+                    "round": last_round.round_number if last_round else 1,
+                    "summary": last_round.pi_summary if last_round else "",
+                    "html_url": html_url,
+                    "detailed_report_url": detailed_report_url,
+                }
             ))
 
-    if phase == "pre_integration_gate" and restored_state.integration_gate_candidates:
-        restored_state.realtime_messages.append(WebSocketMessage(
-            type="integration_gate",
-            agent=AgentType.PI,
-            content=build_integration_gate_payload(restored_state, session_id),
-        ))
+        elif phase == "pre_round_wait":
+            last_round = restored_state.round_results[-1] if restored_state.round_results else None
+            if not last_round:
+                logger.warning(
+                    f"[{session_id}] pre_round_wait snapshot has no round_results. "
+                    f"Falling back to PAUSED status."
+                )
+                restored_state.status = TaskStatus.PAUSED
+            else:
+                restored_state.realtime_messages.append(WebSocketMessage(
+                    type="round_summary",
+                    agent=AgentType.PI,
+                    content={
+                        "round": last_round.round_number,
+                        "summary": last_round.pi_summary or "",
+                        "pathology_findings": last_round.pathology_findings or [],
+                        "bioinformatics_findings": last_round.bioinformatics_findings or [],
+                        "biochemistry_findings": last_round.biochemistry_findings or [],
+                        "literature_findings": last_round.literature_findings or [],
+                        "findings": [
+                            *(last_round.pathology_findings or []),
+                            *(last_round.bioinformatics_findings or []),
+                            *(last_round.biochemistry_findings or []),
+                            *(last_round.literature_findings or []),
+                        ],
+                        "data_requests": getattr(last_round, 'data_requests', []) or [],
+                        "status": "waiting_input"
+                    }
+                ))
+                max_rounds = restored_state.max_rounds if restored_state.max_rounds > 0 else 4
+                is_last_round = last_round.round_number >= max_rounds
+                if is_last_round:
+                    status_msg = f"Round {last_round.round_number} complete (final round). You can provide additional data to extend analysis, or skip to generate the final report."
+                else:
+                    status_msg = f"Round {last_round.round_number} complete. Waiting for your input."
+                restored_state.realtime_messages.append(WebSocketMessage(
+                    type="status",
+                    agent=AgentType.PI,
+                    content=status_msg
+                ))
 
-    # Reset annotation confirmed flag so the restored HITL checkpoint works correctly
-    if phase == "pre_annotation" and restored_state.annotation_state:
-        restored_state.annotation_state.confirmed = False
-        restored_state.annotation_state.pending = True
+        if phase == "pre_integration_gate" and restored_state.integration_gate_candidates:
+            restored_state.realtime_messages.append(WebSocketMessage(
+                type="integration_gate",
+                agent=AgentType.PI,
+                content=build_integration_gate_payload(restored_state, session_id),
+            ))
 
-    # ---- Synchronization point ----
-    # Pop workflows AND write cache AND write disk inside the per-session lock.
-    # This serializes against state_callback and the CancelledError/Exception
-    # handlers in websocket_endpoint, which acquire the same lock before writing.
-    # Lock ordering: sess_lock → state_lock (never the reverse).
-    sess_lock = get_session_lock(session_id)
-    async with sess_lock:
+        # Reset annotation confirmed flag so the restored HITL checkpoint works correctly
+        if phase == "pre_annotation" and restored_state.annotation_state:
+            restored_state.annotation_state.confirmed = False
+            restored_state.annotation_state.pending = True
+
+        # ---- Synchronization point ----
+        # Pop workflows AND write cache AND write disk inside the per-session lock.
+        # This serializes against state_callback and the CancelledError/Exception
+        # handlers in websocket_endpoint, which acquire the same lock before writing.
+        # Lock ordering: sess_lock → state_lock (never the reverse).
+        sess_lock = get_session_lock(session_id)
+        async with sess_lock:
+            async with _state_lock:
+                workflows.pop(session_id, None)
+
+            await _update_session_cache(session_id, restored_state)
+            await async_save_session(session_id, restored_state, force=True)
+
+        logger.info(
+            f"[{session_id}] Snapshot restored: {snapshot.name} (Round {snapshot.round_number}), "
+            f"phase={phase}, status={restored_state.status.value}, "
+            f"current_round={restored_state.current_round}"
+        )
+
+        # Clear the initializing flag FIRST so the reconnecting WS can fall
+        # through to the HITL-hold path (websockets.py:215) with the restored
+        # state. If we close the WS before clearing the flag, a fast reconnect
+        # may arrive while initializing_sessions still holds the session, enter
+        # the observer path (is_restoring=True), and simply return without ever
+        # reaching HITL-hold.
         async with _state_lock:
-            workflows.pop(session_id, None)
+            _initializing_sessions.discard(session_id)
 
-        await _update_session_cache(session_id, restored_state)
-        await async_save_session(session_id, restored_state, force=True)
+        ws = websockets.get(session_id)
+        if ws:
+            try:
+                await ws.close(code=4000, reason="snapshot_restore")
+            except Exception:
+                logger.debug(f"[{session_id}] WebSocket close during restore", exc_info=True)
 
-    logger.info(
-        f"[{session_id}] Snapshot restored: {snapshot.name} (Round {snapshot.round_number}), "
-        f"phase={phase}, status={restored_state.status.value}, "
-        f"current_round={restored_state.current_round}"
-    )
-
-    # Clear the initializing flag FIRST so the reconnecting WS can fall
-    # through to the HITL-hold path (websockets.py:215) with the restored
-    # state. If we close the WS before clearing the flag, a fast reconnect
-    # may arrive while initializing_sessions still holds the session, enter
-    # the observer path (is_restoring=True), and simply return without ever
-    # reaching HITL-hold.
-    async with _state_lock:
-        _initializing_sessions.discard(session_id)
-
-    ws = websockets.get(session_id)
-    if ws:
-        try:
-            await ws.close(code=4000, reason="snapshot_restore")
-        except Exception:
-            logger.debug(f"[{session_id}] WebSocket close during restore", exc_info=True)
-
-    return APIResponse(
-        success=True,
-        message=f"State restored to snapshot: {snapshot.name} (Round {snapshot.round_number})"
-    )
+        return APIResponse(
+            success=True,
+            message=f"State restored to snapshot: {snapshot.name} (Round {snapshot.round_number})"
+        )
+    finally:
+        # Idempotent safety net: guarantees the flag is cleared on EVERY exit path
+        # (early 422, late failure in cleanup/save, or success). set.discard never raises.
+        async with _state_lock:
+            _initializing_sessions.discard(session_id)
 
 
 @router.get("/{session_id}/snapshots/{snapshot_id}/rollback-preview")

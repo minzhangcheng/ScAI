@@ -848,15 +848,15 @@ class AnalysisState(BaseModel):
         return "" if v is None else v
 
     # Multi-direction workflow
-    user_chosen_directions: List[Dict[str, str]] = Field(default_factory=list)
-    # Each dict: {"direction": str, "notes": str}
-    directions_queue: List[Dict[str, str]] = Field(default_factory=list)
+    user_chosen_directions: List[Dict[str, Any]] = Field(default_factory=list)
+    # Each dict: {"direction": str, "notes": str, "is_custom": bool, "candidate_index": int|None}
+    directions_queue: List[Dict[str, Any]] = Field(default_factory=list)
     # Remaining directions to process (popped one by one)
     multi_direction_correlation: Optional[str] = None
     integration_cycle: int = 0
     max_integration_cycles: int = 3
     pending_integration: bool = False
-    active_direction_batch: List[Dict[str, str]] = Field(default_factory=list)
+    active_direction_batch: List[Dict[str, Any]] = Field(default_factory=list)
     last_integrated_round: int = 0
     integration_gate_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     direction_selection_records: List[DirectionSelectionRecord] = Field(default_factory=list)
