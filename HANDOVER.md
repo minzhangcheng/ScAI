@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.32.10 · **Last updated**: 2026-07-07
+**Version**: 0.32.11 · **Last updated**: 2026-07-09
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.32.x — (2026-07-03)**
+
+- `0.32.11` — Stable integration gate detection via analysisPhase, `analysisPhase` type widening (2026-07-09):
+  - **Stable integration gate detection (`frontend/src/components/AnalysisPanel.tsx`)**: Extracted `isCurrentIntegrationGate` combining both `status === 'waiting_input'` and `analysisPhase === 'integration'`. The effect that opens the `IntegrationGatePanel` now depends only on this stable boolean instead of `currentSession?.status`, preventing spurious re-triggers. When not in integration gate, `integrationGateData` is reliably cleared (functional setState). `IntegrationGatePanel` renders only when `isCurrentIntegrationGate && integrationGateData`, and `RoundFeedbackDialog` excludes it with an additional render-level guard.
+  - **`analysisPhase` type widening (`frontend/src/stores/appStore.ts`, `frontend/src/types.ts`)**: Added `'integration'` to the `analysisPhase` / `analysis_phase` union type, preventing TypeScript errors when the backend reports integration-phase sessions.
 
 - `0.32.10` — Integration gate robustness, frontend dialog guard for integration rounds (2026-07-07):
   - **Integration gate continue robustness (`backend/workflow/synthesis.py`)**: A generic continue signal (e.g. `/human-input` with no direction or any route that bypassed `/choose-direction`) at the integration gate now defaults to `PI_DECIDE_SIGNAL` instead of leaving the gate unresolved. Previously the graph would proceed to `initialize_round` with no integration direction selected; now the gate always resolves by delegating to PI.

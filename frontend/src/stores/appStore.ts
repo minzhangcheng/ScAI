@@ -127,7 +127,7 @@ export interface Session {
   currentRound: number
   createdAt: string
   instruction: string
-  analysisPhase?: 'exploration' | 'innovation'
+  analysisPhase?: 'exploration' | 'innovation' | 'integration'
   treatmentGroups: TreatmentGroup[]
   dataFiles: DataFile[]
   biochemistryIndicators: BiochemistryIndicator[]

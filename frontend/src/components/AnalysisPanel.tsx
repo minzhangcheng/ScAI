@@ -929,7 +929,15 @@ export function AnalysisPanel() {
     }
   }, [messages, currentSession?.status, currentSession?.currentRound])
 
+  const isCurrentIntegrationGate = currentSession?.status === 'waiting_input' && currentSession?.analysisPhase === 'integration'
+
   useEffect(() => {
+    if (!isCurrentIntegrationGate) {
+      // Functional update returns the same ref when already null, so React skips
+      // the re-render and the effect doesn't need integrationGateData as a dep.
+      setIntegrationGateData((prev: any) => (prev ? null : prev))
+      return
+    }
     let msg: any = null
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].type === 'integration_gate') { msg = messages[i]; break }
@@ -937,11 +945,11 @@ export function AnalysisPanel() {
     // Dedup: only (re)open the panel for a message we haven't shown yet, so a
     // submit that clears integrationGateData isn't immediately re-populated from
     // the same stale message before the backend flips status away from waiting.
-    if (msg && currentSession?.status === 'waiting_input' && lastIntegrationMsgRef.current !== msg.id) {
+    if (msg && lastIntegrationMsgRef.current !== msg.id) {
       lastIntegrationMsgRef.current = msg.id
       setIntegrationGateData(msg.content)
     }
-  }, [messages, currentSession?.status])
+  }, [messages, isCurrentIntegrationGate])
 
   // Auto-dismiss annotation/exploration dialogs when analysis resumes
   useEffect(() => {
@@ -1525,7 +1533,7 @@ export function AnalysisPanel() {
         />
       )}
 
-      {integrationGateData && (
+      {isCurrentIntegrationGate && integrationGateData && (
         <IntegrationGatePanel
           cycle={integrationGateData.cycle}
           candidates={integrationGateData.candidates}
@@ -1542,7 +1550,8 @@ export function AnalysisPanel() {
           report, and never at the integration gate, which has its own IntegrationGatePanel).
           The integration exclusion is also enforced upstream where showFeedbackDialog is set;
           this render-level guard defends against stale state on reconnect/rehydrate. */}
-      {showFeedbackDialog && !showExplorationDialog && !integrationGateData
+      {showFeedbackDialog && !showExplorationDialog
+        && !(isCurrentIntegrationGate && integrationGateData)
         && feedbackRoundData && feedbackRoundData.phase !== 'integration'
         && currentSession && !llmFailureInfo && (
         <RoundFeedbackDialog

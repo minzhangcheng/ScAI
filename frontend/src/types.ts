@@ -22,7 +22,7 @@ export interface SessionLoadResponse {
   current_round?: number
   created_at?: string
   initial_instruction?: string
-  analysis_phase?: 'exploration' | 'innovation'
+  analysis_phase?: 'exploration' | 'innovation' | 'integration'
   treatment_groups?: RawTreatmentGroup[]
   data_files?: RawDataFile[]
   biochemistry_indicators?: RawBiochemistryIndicator[]
