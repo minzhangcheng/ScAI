@@ -6,6 +6,7 @@ import { getTargetTab, selectPrioritySession, selectCompletedSession, selectPend
 import type { SessionListItem } from '../types'
 import { useTranslation } from '../i18n/translations'
 import { ROUND_WAIT_OPTIONS } from '../constants/roundWait'
+import { DEFAULT_SESSION_NAME, DEFAULT_SESSION_INSTRUCTION } from '../constants/sessionDefaults'
 import { DataConfigMenu } from './DataConfigMenu'
 import { UserMenu } from './UserMenu'
 import { AboutDialog } from './AboutDialog'
@@ -51,8 +52,8 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
   const [savedSessions, setSavedSessions] = useState<any[]>([])
   const [loadingSessions, setLoadingSessions] = useState(false)
   
-  const [instruction, setInstruction] = useState(t('defaultProjectDescription'))
-  const [sessionName, setSessionName] = useState(t('defaultProjectName'))
+  const [instruction, setInstruction] = useState(DEFAULT_SESSION_INSTRUCTION)
+  const [sessionName, setSessionName] = useState(DEFAULT_SESSION_NAME)
   const [editingSession, setEditingSession] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -257,8 +258,8 @@ export function Sidebar({ isOpen, onOpenConfig }: SidebarProps) {
       }
       setShowNewSession(false)
       // Reset to defaults for next time
-      setInstruction(t('defaultProjectDescription'))
-      setSessionName(t('defaultProjectName'))
+      setInstruction(DEFAULT_SESSION_INSTRUCTION)
+      setSessionName(DEFAULT_SESSION_NAME)
     } catch (e) {
       console.error('Failed to create session:', e)
       const msg = e instanceof Error ? e.message : String(e)
