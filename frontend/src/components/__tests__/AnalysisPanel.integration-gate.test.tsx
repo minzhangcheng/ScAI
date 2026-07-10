@@ -1,7 +1,15 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AnalysisPanel } from '../AnalysisPanel'
 import { useAppStore, type Message, type Session } from '../../stores/appStore'
+
+const sessionMocks = vi.hoisted(() => ({
+  startAnalysis: vi.fn(),
+  resumeAnalysis: vi.fn(),
+  continueRound: vi.fn().mockResolvedValue(undefined),
+  pauseAnalysis: vi.fn(),
+  stopAnalysis: vi.fn(),
+}))
 
 vi.mock('../../hooks/useApi', () => ({
   apiFetch: vi.fn(),
@@ -12,13 +20,7 @@ vi.mock('../../hooks/useApi', () => ({
     validateSavedConfig: vi.fn(),
     saveConfig: vi.fn(),
   }),
-  useSession: () => ({
-    startAnalysis: vi.fn(),
-    resumeAnalysis: vi.fn(),
-    continueRound: vi.fn(),
-    pauseAnalysis: vi.fn(),
-    stopAnalysis: vi.fn(),
-  }),
+  useSession: () => sessionMocks,
   useUserConfig: () => ({
     getUserConfigStatus: vi.fn(),
     validateSavedConfig: vi.fn(),
@@ -69,6 +71,8 @@ const innovationWaitingSummary: Message = {
 
 describe('AnalysisPanel integration gate lifecycle', () => {
   beforeEach(() => {
+    sessionMocks.continueRound.mockClear()
+    sessionMocks.continueRound.mockResolvedValue(undefined)
     useAppStore.setState({
       currentSession: null,
       messages: [],
@@ -78,6 +82,7 @@ describe('AnalysisPanel integration gate lifecycle', () => {
       readMode: false,
       agentErrors: [],
       authUser: { id: 'user-1', username: 'tester', role: 'admin', status: 'active' },
+      roundWaitSeconds: -1,
     })
   })
 
@@ -99,16 +104,22 @@ describe('AnalysisPanel integration gate lifecycle', () => {
     })
   })
 
-  it('does not revive an old integration gate during a later innovation wait', async () => {
+  it('restores the ordinary feedback dialog and Continue action after stale gate history replay', async () => {
     useAppStore.setState({
       currentSession: makeSession('waiting_input', 'innovation'),
       messages: [integrationGateMessage, innovationWaitingSummary],
+      roundWaitSeconds: -1,
     })
 
     render(<AnalysisPanel />)
 
+    expect(await screen.findByRole('heading', { name: /Round 9 Complete/i })).toBeInTheDocument()
+    expect(screen.queryByText(/Stale integration direction/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /^Continue$/i }))
+
     await waitFor(() => {
-      expect(screen.queryByText(/Stale integration direction/i)).not.toBeInTheDocument()
+      expect(sessionMocks.continueRound).toHaveBeenCalledTimes(1)
     })
   })
 })

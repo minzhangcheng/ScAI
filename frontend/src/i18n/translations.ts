@@ -490,6 +490,8 @@ Please provide a detailed literature review report with specific citation inform
     integrationGateContinue: '继续分析所选方向',
     integrationGateLetPiDecide: '让 PI 决定',
     integrationGateFinalize: '进入报告撰写',
+    integrationGateSelectRequired: '请至少选择一个研究方向。',
+    integrationGateActionFailed: '操作失败：{message}',
 
     // Species input dialog
     speciesInputTitle: '物种信息',
@@ -1001,6 +1003,8 @@ Please provide a detailed literature review report with specific citations.`,
     integrationGateContinue: 'Continue with Selected',
     integrationGateLetPiDecide: 'Let PI Decide',
     integrationGateFinalize: 'Write Report',
+    integrationGateSelectRequired: 'Select at least one research direction.',
+    integrationGateActionFailed: 'Action failed: {message}',
 
     // Species input dialog
     speciesInputTitle: 'Species Information',
