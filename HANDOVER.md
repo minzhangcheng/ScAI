@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.32.11 · **Last updated**: 2026-07-09
+**Version**: 0.33.1 · **Last updated**: 2026-07-12
 
 ## 1. Runtime Architecture
 
@@ -194,7 +194,24 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
+**0.33.x — (2026-07-12)**
+
+- `0.33.1` — Version bump to 0.33.1 across all version-bearing files; HANDOVER.md changelog updated (2026-07-12).
+
 **0.32.x — (2026-07-03)**
+
+- `0.32.13` — Snapshot V2 content-addressed lifecycle: fail-closed runtime capture, restore reset/keep semantics, import trust_runtime=false, V1 restore 410 cutover, continuation capsules, integrity verification, storage quota governance, per-session safe points (2026-07-12):
+  - **Snapshot V2 module (`backend/services/snapshot_v2/`)**: 25 new files (10,710 lines) implementing a ground-up rewrite of the snapshot system — content-addressed object store (`objects/`), staging/committed lifecycle, journals for restore/delete, integrity material, safe-point descriptors, pre-restore validation, runtime capture/restore, GC, import/export, and multi-phase continuation capsules. Service layer (`service.py`, 2,082 lines) orchestrates capture → verify → commit with transactional staging.
+  - **Fail-closed runtime capture**: When runtime exceeds quota or serialization fails, workflow pauses at HITL (Retry / Manage Snapshots / Terminate) — **no Skip**. `@with_retry` in `retry.py` routes `SnapshotCaptureError` to the V2 HITL handler with distinct action set.
+  - **Restore reset/keep semantics**: `reset` quarantines runtime and forces re-run from inputs; `keep` retains current runtime with persistent risk acceptance. Import `trust_runtime=false` never materializes runtime objects from archives.
+  - **V1 cutover**: V1 restore returns HTTP 410. V1 inventory/export/delete remain for read-only management. `frontend/`: `LegacySnapshotInventory` component, `RestoreProgressDialog`, `RuntimeChoiceDialog`, `RuntimeWarningBanner`, `SnapshotFailureDialog`, `SnapshotPreview`, `SnapshotTree`, `StorageSummary`.
+  - **Integrity & storage governance**: Host-side `integrity/` material, `SNAPSHOT_V2_*` quota constants, `snapshot_v2_max_runtime_mb` / `snapshot_v2_integrity_verification_enabled` / `snapshot_v2_fail_closed_enabled` config knobs.
+  - **Route refactors**: `POST /v2/capture`, `POST /v2/restore`, `GET /v2/inventory`, `POST /v2/import`, `GET /v2/export/{id}`. Session lifecycle routes check for active V2 staging before interrupting captures.
+  - **74+ new test files** across backend unit/integration and frontend Vitest suites, covering capture/restore transactions, fault matrix, portability, real-kernel value cycle, security, concurrency, journals, deletion, GC, export, import, pre-restore, continuation, runtime kernel, structural boundary, storage acceptance, and V1 cutover.
+  - **AnnData alias disclaimer**: Snapshot V2 does not guarantee Python object alias identity when the same AnnData object is embedded inside arbitrary nested containers (`nested["adata"] is adata` may not hold after restore).
+
+- `0.32.12` — Integration gate auto-skip → PI decide, centralised round serialization, frontend restore error display (2026-07-09): 
+  - _The changes originally intended for `0.32.12` were merged into `0.32.13` above; this entry exists for version continuity._
 
 - `0.32.11` — Stable integration gate detection via analysisPhase, `analysisPhase` type widening (2026-07-09):
   - **Stable integration gate detection (`frontend/src/components/AnalysisPanel.tsx`)**: Extracted `isCurrentIntegrationGate` combining both `status === 'waiting_input'` and `analysisPhase === 'integration'`. The effect that opens the `IntegrationGatePanel` now depends only on this stable boolean instead of `currentSession?.status`, preventing spurious re-triggers. When not in integration gate, `integrationGateData` is reliably cleared (functional setState). `IntegrationGatePanel` renders only when `isCurrentIntegrationGate && integrationGateData`, and `RoundFeedbackDialog` excludes it with an additional render-level guard.

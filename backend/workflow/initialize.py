@@ -204,7 +204,7 @@ class InitializeMixin:
         # Send state sync for round initialization
         await self._send_state_sync(analysis_state, "round_start")
 
-        return {
+        result = {
             **state,
             "analysis_state": analysis_state,
             "current_round": analysis_state.current_round,
@@ -243,5 +243,13 @@ class InitializeMixin:
             # Reset continuation flags for new round
             "should_continue": True,
             "human_stop_requested": False,
-            "human_guidance_processed": False
+            "human_guidance_processed": False,
         }
+
+        # Carry forward the graph-node resume target from the initial workflow
+        # state so the routing decision survives the initialize_round node.
+        restore_node = state.get("_restore_resume_node")
+        if restore_node is not None:
+            result["_restore_resume_node"] = restore_node
+
+        return result

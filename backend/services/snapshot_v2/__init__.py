@@ -1,0 +1,83 @@
+"""Snapshot V2 public package surface.
+
+Heavy modules are imported lazily by consumers. This package re-exports the
+frozen models and commonly used service entry points.
+"""
+
+from backend.services.snapshot_v2.models import (
+    FORMAT_VERSION,
+    AuditBundleRef,
+    DeleteJournalRecord,
+    DeleteResult,
+    ObjectRef,
+    WorkspaceEntry,
+    GraphNodeCapsule,
+    SemanticGateCapsule,
+    TerminalCapsule,
+    IdleCapsule,
+    ContinuationCapsule,
+    SnapshotManifestV2,
+    RuntimeDependency,
+    RuntimeDependencyEntry,
+    RuntimeDependencyManifest,
+    RuntimeGenerationManifest,
+    RuntimeManifest,
+    RuntimeSkip,
+    SnapshotCaptureRequest,
+    SnapshotFailureRecord,
+    SnapshotRecordV2,
+    SnapshotRestoreRequest,
+    SnapshotTransactionRecord,
+    empty_complete_runtime,
+    runtime_manifest_from_generation,
+    validate_system_commit,
+)
+from backend.services.snapshot_v2.errors import (
+    SnapshotV2Error,
+    SnapshotCaptureError,
+    SnapshotDeleteConflict,
+    SnapshotStorageError,
+    SnapshotIntegrityError,
+    SnapshotCompatibilityError,
+    SnapshotTransactionError,
+)
+from backend.services.snapshot_v2.paths import SnapshotV2Paths
+from backend.services.snapshot_v2.deletion import read_delete_journal
+
+__all__ = [
+    "FORMAT_VERSION",
+    "AuditBundleRef",
+    "DeleteJournalRecord",
+    "DeleteResult",
+    "ObjectRef",
+    "WorkspaceEntry",
+    "GraphNodeCapsule",
+    "SemanticGateCapsule",
+    "TerminalCapsule",
+    "IdleCapsule",
+    "ContinuationCapsule",
+    "SnapshotManifestV2",
+    "RuntimeDependency",
+    "RuntimeDependencyEntry",
+    "RuntimeDependencyManifest",
+    "RuntimeGenerationManifest",
+    "RuntimeManifest",
+    "RuntimeSkip",
+    "SnapshotCaptureRequest",
+    "SnapshotFailureRecord",
+    "SnapshotRecordV2",
+    "SnapshotV2Error",
+    "SnapshotCaptureError",
+    "SnapshotDeleteConflict",
+    "SnapshotStorageError",
+    "SnapshotIntegrityError",
+    "SnapshotCompatibilityError",
+    "SnapshotTransactionError",
+    "SnapshotRestoreRequest",
+    "SnapshotTransactionRecord",
+    "empty_complete_runtime",
+    "runtime_manifest_from_generation",
+    "validate_system_commit",
+    "SnapshotV2Paths",
+    "read_delete_journal",
+]

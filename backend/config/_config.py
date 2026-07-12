@@ -110,6 +110,13 @@ def get_session_logs(session_id: str) -> Path:
     return get_session_dir(session_id) / "logs"
 
 
+def get_integrity_dir(session_id: str) -> Path:
+    """Host-scoped integrity root (not sandbox-writable). HMAC files live here."""
+    path = DATA_BASE_DIR / "integrity" / session_id / "snapshot-v2"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def ensure_session_dirs(session_id: str) -> Path:
     """Create all subdirectories for a session, return session root."""
     root = get_session_dir(session_id)
@@ -297,6 +304,17 @@ class SystemConfig(BaseModel):
         le=8,
         description="Max code-generation iterations for the annotation validation executor (hard-capped at 8 in code).",
     )
+
+    # Snapshot V2 settings (V2 is the authoritative lifecycle; V1 restore cut over)
+    snapshot_safe_point_timeout_seconds: int | None = None
+    snapshot_v2_session_quota_bytes: int = 100 * 1024 ** 3
+    snapshot_v2_free_space_reserve_bytes: int = 5 * 1024 ** 3
+    snapshot_v1_restore_cutover: bool = True
+
+    def get_snapshot_safe_point_timeout_seconds(self) -> int:
+        if self.snapshot_safe_point_timeout_seconds is not None and self.snapshot_safe_point_timeout_seconds > 0:
+            return self.snapshot_safe_point_timeout_seconds
+        return self.sandbox_timeout + 120
 
     # State persistence (deprecated: use get_session_states/get_session_workspace instead)
     # Kept for serialization compatibility only.

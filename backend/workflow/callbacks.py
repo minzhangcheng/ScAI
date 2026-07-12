@@ -140,8 +140,9 @@ IMPORTANT: Respond in English only. Do not use any other language."""
 
                         if judgment.get("needs_user_popup"):
                             response += "\n\n" + PLAN_REVISION_NEEDED_TAG
-                            # Create snapshot before major revision
-                            await self._create_auto_snapshot(analysis_state, "pre_major_revision")
+                            # Pre-major-revision snapshot is handled by the
+                            # post-PI-synthesis snapshot in core.py. No need
+                            # for a dedicated snapshot here.
                     except Exception as e:
                         logger.warning(f"[{self.session_id}] Plan deviation judgment failed: {e}")
 

@@ -39,12 +39,39 @@ class GraphMixin:
         self.graph.add_node("integration_synthesis", self._integration_synthesis)
 
         # Add edges - sequential execution (with early-stop check after init)
+        # The _restore_resume_node field in workflow state can trigger
+        # graph-node restore routing via "_should_continue_after_init".
+        _ROUTE_NAMES = {
+            "route_initialize_round",
+            "route_pi_planning",
+            "route_planning_dialogue",
+            "route_user_review_gate",
+            "route_pathology_analysis",
+            "route_bioinformatics_analysis",
+            "route_biochemistry_analysis",
+            "route_literature_research",
+            "route_pi_synthesis",
+            "route_wait_for_user_input",
+            "route_check_convergence",
+            "route_generate_final_report",
+            "route_generate_graphic_abstract",
+            "route_generate_detailed_report",
+            "route_integration_synthesis",
+        }
         self.graph.add_conditional_edges(
             "initialize_round",
             self._should_continue_after_init,
             {
                 "continue": "pi_planning",
-                "stop": "generate_final_report"
+                "stop": "generate_final_report",
+                **{f"route_{n}": n for n in [
+                    "initialize_round", "pi_planning", "planning_dialogue",
+                    "user_review_gate", "pathology_analysis", "bioinformatics_analysis",
+                    "biochemistry_analysis", "literature_research", "pi_synthesis",
+                    "wait_for_user_input", "check_convergence",
+                    "generate_final_report", "generate_graphic_abstract",
+                    "generate_detailed_report", "integration_synthesis",
+                ]},
             }
         )
 

@@ -1,5 +1,6 @@
 """Retry decorator for workflow nodes."""
 import asyncio
+import inspect
 import logging
 import traceback
 from functools import wraps
@@ -7,6 +8,7 @@ from functools import wraps
 from ..constants import LlmFailureAction, NODE_TO_RESULT_KEY
 from ..models.schemas import AgentType
 from ..utils.llm_client import UpstreamExhaustedError
+from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
 from .helpers import _retry_backoff_delay, WorkflowTerminatedError
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,15 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                     f"[{getattr(self, 'session_id', '?')}] Node {node_name} "
                     f"resumed"
                 )
+
+            # Restore safe-point: acknowledge pending request and freeze until
+            # the restore job releases (shared process-wide coordinator).
+            # Skip MagicMock/non-coroutine callables used by lightweight stubs.
+            await_restore = getattr(self, "await_restore_safe_point", None)
+            if callable(await_restore):
+                result = await_restore()
+                if inspect.isawaitable(result):
+                    await result
 
             # Check skip_nodes
             if node_name in state.get("skip_nodes", []):
@@ -96,6 +107,11 @@ def with_retry(node_name: str, max_retries: int = MAX_NODE_RETRIES):
                             "status": "failed"
                         }
                     }
+
+                except RequiredSnapshotBlocked:
+                    # Fail-closed snapshot boundary — do not convert into node
+                    # retries. Caught once at the workflow run/resume boundary.
+                    raise
 
                 except WorkflowTerminatedError:
                     # User chose to abort (e.g. TERMINATE at a HITL gate, or a

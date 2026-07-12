@@ -44,9 +44,20 @@ def _pkl_hmac(data: bytes) -> str:
     ).hexdigest()
 
 
+def _pkl_hmac_stream(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    h = hmac.new(get_integrity_secret().encode(), b"", hashlib.sha256)
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _write_pkl_signature(pkl: Path, integrity_dir: Path) -> None:
     integrity_dir.mkdir(parents=True, exist_ok=True)
-    _sig_path(pkl, integrity_dir).write_text(_pkl_hmac(pkl.read_bytes()))
+    _sig_path(pkl, integrity_dir).write_text(_pkl_hmac_stream(pkl))
 
 
 def _verify_pkl_integrity(pkl: Path, integrity_dir: Path) -> bool:
@@ -54,7 +65,7 @@ def _verify_pkl_integrity(pkl: Path, integrity_dir: Path) -> bool:
     if not pkl.exists() or not sig.exists():
         return False
     return hmac.compare_digest(
-        sig.read_text().strip(), _pkl_hmac(pkl.read_bytes())
+        sig.read_text().strip(), _pkl_hmac_stream(pkl)
     )
 
 
@@ -723,11 +734,21 @@ class LocalJupyterSandbox:
         self.kc = None
         self.notebook_state = NotebookState(session_id, state_dir)
         self._initialized = False
+        self.runtime_revision: int = 0
+        self.saved_runtime_revision: int = 0
         self._session_restored = False
         self._session_restore_failed = False  # Track if session restore failed
         self._kernel_dead = False  # Set when kernel restart fails
         self._restarting = False  # reentrancy guard for _restart_kernel
         self._pending_save_tasks: set = set()
+        # Snapshot V2 runtime dependency tracking (created/loaded user globals).
+        self._known_user_globals: set[str] = set()
+        self._last_execution_diff: Dict[str, Any] = {
+            "created": set(),
+            "loaded": set(),
+            "removed": set(),
+        }
+        self.runtime_dependency_tracker = None  # set by agent / capture pipeline
         self._init_exec_lock()
 
     def _init_exec_lock(self):
@@ -751,6 +772,10 @@ class LocalJupyterSandbox:
                 - session_restored: bool - whether previous session was restored
                 - restore_failed: bool - whether restore was attempted but failed
         """
+        # Snapshot V2: unresolved recovery blocks kernel startup entirely.
+        from backend.services.session_store import assert_recovery_clear
+        assert_recovery_clear(session_id=self.session_id)
+
         if self.km is not None:
             return {
                 "started": False,
@@ -1260,27 +1285,40 @@ print(f"I/O sandbox active: writes restricted to session directory")
         until EOFError. No compression handling — snapshots are decompressed
         out-of-kernel before being placed at this path.
         """
+        # Recover any interrupted runtime-pair apply FIRST — before the
+        # has_session_dump() early-return — so a crashed apply that left no live
+        # pkl cannot leave a journal lingering until a later start (where it could
+        # otherwise interfere with a subsequently saved pkl).
+        from .runtime_apply import (
+            recover_runtime_apply_journal, verify_live_pkl_or_raise, RuntimeApplyError,
+        )
+        recover_runtime_apply_journal(self.session_id)
+
+        # Snapshot V2: unresolved APPLYING journals block kernel rehydrate
+        from backend.services.session_store import assert_recovery_clear
+        assert_recovery_clear(session_id=self.session_id)
+
         self.notebook_state.load()
 
         if not self.notebook_state.has_session_dump():
             logger.info("No session dump to restore")
             return
 
-        # Verify pkl integrity before restoring (host-side check prevents
-        # sandbox-forged payloads — the signature lives outside the session root).
+        # A present pkl with a missing/invalid HMAC is a hard error, not a silent
+        # skip: continuing would rehydrate a kernel inconsistent with the state
+        # that referenced this pkl. Raising lets the caller surface a typed
+        # runtime-failure state (Stage 1 safety contract).
         try:
-            pkl_path = Path(self.notebook_state.session_path)
-            if pkl_path.exists() and not _verify_pkl_integrity(
-                pkl_path, _integrity_dir(self.session_id)
-            ):
-                logger.error(
-                    "PKL integrity check failed for %s - skipping restore",
-                    self.session_id,
-                )
-                return
-        except Exception:
-            logger.exception("PKL integrity check error - skipping restore")
-            return
+            verify_live_pkl_or_raise(self.session_id)
+        except RuntimeApplyError:
+            # Symmetric with the dill-restore-failure path below: mark the failure
+            # so start()'s "restore_failed" result reflects it, then abort startup.
+            self._session_restore_failed = True
+            logger.error(
+                "[%s] live pkl present but HMAC invalid; aborting session restore",
+                self.session_id,
+            )
+            raise
 
         session_path = str(self.notebook_state.session_path.absolute())
         escaped_path = repr(session_path)
@@ -1527,11 +1565,101 @@ if _skipped_vars:
         finally:
             self._restarting = False
 
+    def mark_runtime_committed(self, runtime_revision: int | None = None) -> None:
+        """Called after a snapshot capture transaction commits the runtime generation.
+
+        Sets ``saved_runtime_revision`` to *runtime_revision* (or the current
+        ``runtime_revision`` if omitted), marking the point at which the last
+        successful commit occurred.
+        """
+        if runtime_revision is None:
+            runtime_revision = self.runtime_revision
+        self.saved_runtime_revision = runtime_revision
+
+
+    def get_runtime_dependency_names(self) -> set[str]:
+        """Return accumulated required runtime names from the dependency tracker."""
+        tracker = self.runtime_dependency_tracker
+        if tracker is None:
+            return set()
+        return set(tracker.required_outputs)
+
+    def record_declared_outputs(self, names) -> None:
+        """Merge explicit persistent_outputs into the dependency tracker."""
+        if not names:
+            return
+        if self.runtime_dependency_tracker is None:
+            from backend.services.snapshot_v2.runtime_registry import (
+                RuntimeDependencyTracker,
+            )
+            self.runtime_dependency_tracker = RuntimeDependencyTracker()
+        self.runtime_dependency_tracker.merge_declared(set(names))
+
+    async def _snapshot_user_globals(self) -> set[str]:
+        """Return non-underscore user global names currently in the kernel."""
+        code = (
+            "import json as _jg\n"
+            "_names = [n for n in list(globals().keys()) if not n.startswith('_')]\n"
+            "print('__USER_GLOBALS__:' + _jg.dumps(sorted(_names)))\n"
+        )
+        result = await self._execute_unlocked(
+            code, save_to_history=False, skip_safety_check=True
+        )
+        if not result.success:
+            return set(self._known_user_globals)
+        for line in (result.output or "").splitlines():
+            if line.startswith("__USER_GLOBALS__:"):
+                raw = line[len("__USER_GLOBALS__:"):].strip()
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        return set(str(x) for x in parsed)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return set(self._known_user_globals)
+
+    def _record_globals_diff(
+        self,
+        before: set[str],
+        after: set[str],
+        declared: set[str] | None = None,
+    ) -> Dict[str, Any]:
+        """Update tracker from a created/loaded user-global diff.
+
+        - created: names present after but not before
+        - loaded: names present both before and after (treated as read/used)
+        - removed: names present before but not after
+        """
+        created = after - before
+        removed = before - after
+        loaded = before & after
+        self._last_execution_diff = {
+            "created": set(created),
+            "loaded": set(loaded),
+            "removed": set(removed),
+        }
+        self._known_user_globals = set(after)
+        if self.runtime_dependency_tracker is None:
+            from backend.services.snapshot_v2.runtime_registry import (
+                RuntimeDependencyTracker,
+            )
+            self.runtime_dependency_tracker = RuntimeDependencyTracker()
+        # Only promote loaded names that were previously created by a cell.
+        # Passing the full intersection would promote every pre-existing name.
+        self.runtime_dependency_tracker.record_execution(
+            created=created,
+            loaded=loaded,
+            declared=set(declared or set()),
+        )
+        return self._last_execution_diff
+
     async def execute(
         self,
         code: str,
         save_to_history: bool = True,
-        skip_safety_check: bool = False
+        skip_safety_check: bool = False,
+        declared_outputs: Optional[List[str]] = None,
+        track_globals: bool = False,
     ) -> CodeExecutionResult:
         """Execute code in the kernel.
 
@@ -1540,11 +1668,27 @@ if _skipped_vars:
             save_to_history: Whether to save successful execution to notebook history
             skip_safety_check: If True, skip dangerous-pattern validation.
                 Only set this for trusted internal code (e.g. kernel init, session restore).
+            declared_outputs: Optional persistent_outputs declared by the agent tool call.
+            track_globals: When True (and save_to_history), record created/loaded
+                user-global diffs into the runtime dependency tracker.
         """
+        declared = set(declared_outputs or [])
+        before: set[str] = set()
+        should_track = bool(track_globals or declared) and save_to_history
         async with self._exec_lock:
-            return await self._execute_unlocked(
+            if should_track:
+                before = await self._snapshot_user_globals()
+            result = await self._execute_unlocked(
                 code, save_to_history=save_to_history, skip_safety_check=skip_safety_check
             )
+            if result.success and should_track:
+                after = await self._snapshot_user_globals()
+                self._record_globals_diff(before, after, declared=declared)
+        if result.success and save_to_history:
+            self.runtime_revision += 1
+            if declared:
+                self.record_declared_outputs(declared)
+        return result
 
     async def _execute_unlocked(
         self,

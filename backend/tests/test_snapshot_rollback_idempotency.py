@@ -30,6 +30,7 @@ def mock_workflow(analysis_state):
 
     wf = MagicMock()
     wf.session_id = "test"
+    wf.await_restore_safe_point = None
     wf.biochemistry_agent = AsyncMock()
     wf.biochemistry_agent.process = AsyncMock(
         return_value={"findings": ["bio_finding_1"], "status": "completed"}
@@ -81,6 +82,7 @@ async def test_biochem_disabled_agent_also_caches(analysis_state):
 
     wf = MagicMock()
     wf.session_id = "test"
+    wf.await_restore_safe_point = None
     wf.biochemistry_agent = None
     wf._send_message = AsyncMock()
     wf.ensure_agent_ready = MagicMock(return_value=False)
@@ -100,6 +102,7 @@ async def test_pathology_cache_hit_skips_agent(analysis_state):
 
     wf = MagicMock()
     wf.session_id = "test"
+    wf.await_restore_safe_point = None
     wf.pathology_agent = AsyncMock()
     wf.pathology_agent.process = AsyncMock(return_value={"findings": ["should_not_be_called"]})
     wf._send_message = AsyncMock()
@@ -129,6 +132,7 @@ async def test_pathology_no_data_path_caches_skipped_result(analysis_state):
 
     wf = MagicMock()
     wf.session_id = "test"
+    wf.await_restore_safe_point = None
     wf.pathology_agent = AsyncMock()
     wf._send_message = AsyncMock()
     wf._pathology_analysis = AgentNodesMixin._pathology_analysis.__get__(wf)
@@ -152,6 +156,7 @@ async def test_pathology_disabled_path_caches_skipped(analysis_state):
 
     wf = MagicMock()
     wf.session_id = "test"
+    wf.await_restore_safe_point = None
     wf.pathology_agent = None
     wf._send_message = AsyncMock()
     wf.ensure_agent_ready = MagicMock(return_value=False)
@@ -170,6 +175,7 @@ async def test_literature_cache_hit_skips_agent(analysis_state):
 
     wf = MagicMock()
     wf.session_id = "test"
+    wf.await_restore_safe_point = None
     wf.literature_agent = MagicMock()
     wf.literature_agent.is_deep_research_available = False
     wf.literature_agent.process = AsyncMock(return_value={"findings": ["x"], "report": "r"})
@@ -202,6 +208,7 @@ async def test_bioinformatics_cache_hit_skips_agent(analysis_state):
 
     wf = MagicMock()
     wf.session_id = "test"
+    wf.await_restore_safe_point = None
     wf.bioinformatics_agent = AsyncMock()
     wf.bioinformatics_agent.run_autonomous_analysis = AsyncMock(
         return_value={"findings": ["should_not_run"]}
@@ -240,6 +247,7 @@ async def test_bioinformatics_waiting_data_path_caches_skipped(analysis_state):
 
     wf = MagicMock()
     wf.session_id = "test"
+    wf.await_restore_safe_point = None
     wf.bioinformatics_agent = AsyncMock()
     wf._send_message = AsyncMock()
     wf._current_graph_state = None
@@ -281,6 +289,7 @@ async def test_bioinformatics_stage2_cache_hit_transitions_planning_stage_to_ful
 
     wf = MagicMock()
     wf.session_id = "test"
+    wf.await_restore_safe_point = None
     wf.bioinformatics_agent = AsyncMock()
     wf._send_message = AsyncMock()
     wf._current_graph_state = None

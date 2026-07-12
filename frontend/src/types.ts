@@ -53,6 +53,17 @@ export interface SessionLoadResponse {
     pubmed_email?: string
     max_search_rounds?: number
   }
+  runtime_restore_status?: 'complete' | 'unavailable' | 'intentionally_kept'
+  runtime_restore_warning?: string | null
+  snapshot_failure?: {
+    snapshot_id?: string
+    session_id?: string
+    failed_at?: string
+    code?: string
+    message?: string
+    details?: Record<string, unknown>
+    allowed_actions?: Array<'retry' | 'manage' | 'terminate' | string>
+  } | null
 }
 
 export interface RawTreatmentGroup {

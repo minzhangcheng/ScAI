@@ -1,48 +1,97 @@
-import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach, type Mock } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { SnapshotPanel } from '../SnapshotPanel'
 
-vi.mock('../../hooks/useApi', () => ({ apiFetch: vi.fn() }))
-import { apiFetch } from '../../hooks/useApi'
+const mockListSnapshotsV2 = vi.fn()
+const mockRestoreSnapshotV2 = vi.fn()
+const mockDeleteSnapshotV2 = vi.fn()
+const mockCancelSnapshotTransaction = vi.fn()
+const mockGetSnapshotTransaction = vi.fn()
 
-const mockFetch = apiFetch as unknown as Mock
+vi.mock('../../hooks/useApi', () => ({
+  apiFetch: vi.fn(),
+  listSnapshotsV2: (...args: unknown[]) => mockListSnapshotsV2(...args),
+  deleteSnapshotV2: (...args: unknown[]) => mockDeleteSnapshotV2(...args),
+  restoreSnapshotV2: (...args: unknown[]) => mockRestoreSnapshotV2(...args),
+  cancelSnapshotTransaction: (...args: unknown[]) => mockCancelSnapshotTransaction(...args),
+  getSnapshotTransaction: (...args: unknown[]) => mockGetSnapshotTransaction(...args),
+}))
 
-const oneSnapshot = {
-  success: true,
-  data: {
-    snapshots: [{
-      id: 's1', name: 'S1', description: '', phase: 'pre_round_wait',
-      round_number: 1, timestamp: new Date().toISOString(), size_bytes: 1,
-      parent_id: null, branch_label: null, notebook_file: '', workspace_manifest: {},
-    }],
+vi.mock('../../stores/appStore', () => {
+  const useAppStore = Object.assign(
+    (selector?: (s: Record<string, unknown>) => unknown) => {
+      const state = {
+        snapshotTransaction: null,
+        setSnapshotTransaction: vi.fn(),
+        setSnapshotsV2: vi.fn(),
+        setSnapshotStoreStatus: vi.fn(),
+        setSnapshotCount: vi.fn(),
+      }
+      return selector ? selector(state) : state
+    },
+    {
+      getState: () => ({
+        snapshotTransaction: null,
+        setSnapshotTransaction: vi.fn(),
+        setSnapshotsV2: vi.fn(),
+        setSnapshotStoreStatus: vi.fn(),
+        setSnapshotCount: vi.fn(),
+      }),
+    },
+  )
+  return { useAppStore }
+})
+
+const oneSnapshotV2 = {
+  snapshots: [
+    {
+      snapshot_id: 's1',
+      manifest: {
+        format_version: 2,
+        session_id: 'sess',
+        snapshot_id: 's1',
+        captured_at: new Date().toISOString(),
+        branch: 'main',
+        generation: 1,
+        parent_id: null,
+        root_hash: 'abc',
+        capsule: { kind: 'idle', graph_version: '1.0' },
+        workspace: [],
+        objects: {},
+      },
+      failure: null,
+    },
+  ],
+  store_status: {
+    object_count: 0,
+    total_bytes: 0,
+    snapshot_count: 1,
+    gc_eligible_bytes: 0,
   },
 }
 
 beforeEach(() => {
-  mockFetch.mockReset()
-  mockFetch.mockImplementation((url: string) => {
-    if (url.endsWith('/snapshots')) return Promise.resolve(oneSnapshot)
-    if (url.includes('/rollback-preview')) {
-      return Promise.resolve({ success: true, data: {
-        files_to_delete_count: 0, notebook_cells_removed: 0, descendant_snapshots: [],
-      } })
-    }
-    if (url.includes('/restore')) {
-      return Promise.reject(new Error('Rollback failed: current_round type mismatch'))
-    }
-    return Promise.resolve({ success: true, data: {} })
-  })
+  mockListSnapshotsV2.mockReset()
+  mockRestoreSnapshotV2.mockReset()
+  mockDeleteSnapshotV2.mockReset()
+  mockCancelSnapshotTransaction.mockReset()
+  mockGetSnapshotTransaction.mockReset()
+  mockListSnapshotsV2.mockResolvedValue(oneSnapshotV2)
+  mockRestoreSnapshotV2.mockRejectedValue(
+    new Error('Rollback failed: current_round type mismatch'),
+  )
 })
 
 describe('SnapshotPanel restore error', () => {
   it('shows an inline error when restore fails', async () => {
     render(
-      <SnapshotPanel sessionId="sess" language="en" onClose={vi.fn()} onRestore={vi.fn()} />
+      <SnapshotPanel sessionId="sess" language="en" onClose={vi.fn()} onRestore={vi.fn()} />,
     )
-    // Wait for the snapshot list to render.
     await screen.findByTitle('Restore')
-    fireEvent.click(screen.getByTitle('Restore'))          // open confirm
-    fireEvent.click(await screen.findByText('Yes'))        // confirm restore
-    expect(await screen.findByText(/Rollback failed/)).toBeInTheDocument()
+    fireEvent.click(screen.getByTitle('Restore'))
+    fireEvent.click(await screen.findByText('Start Restore'))
+    await waitFor(() => {
+      expect(screen.getByText(/Rollback failed/)).toBeInTheDocument()
+    })
   })
 })

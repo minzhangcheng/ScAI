@@ -2,6 +2,7 @@ import { create, type StateCreator } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { Language, getDefaultPrompts } from '../i18n/translations'
 import { getToken, setToken, clearToken } from '../utils/authStorage'
+import type { SnapshotRecordV2, SnapshotStoreStatus, SnapshotTransactionRecord, SnapshotFailureInfo } from '../types/snapshotV2'
 
 // Types
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor' | 'technique'
@@ -399,6 +400,31 @@ export interface AppState {
   showSnapshotCleanupReminder: boolean
   setShowSnapshotCleanupReminder: (show: boolean) => void
 
+  // Snapshot V2 state
+  snapshotsV2: SnapshotRecordV2[]
+  setSnapshotsV2: (snapshots: SnapshotRecordV2[]) => void
+  snapshotStoreStatus: SnapshotStoreStatus | null
+  setSnapshotStoreStatus: (status: SnapshotStoreStatus | null) => void
+  snapshotTransaction: SnapshotTransactionRecord | null
+  setSnapshotTransaction: (txn: SnapshotTransactionRecord | null) => void
+  snapshotFailure: SnapshotFailureInfo | null
+  setSnapshotFailure: (failure: SnapshotFailureInfo | null) => void
+  clearSnapshotFailure: () => void
+  /** Backend AnalysisState.runtime_restore_status — survives reload via session load. */
+  runtimeRestoreStatus: 'complete' | 'unavailable' | 'intentionally_kept'
+  setRuntimeRestoreStatus: (status: 'complete' | 'unavailable' | 'intentionally_kept') => void
+  runtimeRestoreWarning: string | null
+  setRuntimeRestoreWarning: (warning: string | null) => void
+  hydrateRuntimeRestoreFromSession: (payload: {
+    runtime_restore_status?: string | null
+    runtime_restore_warning?: string | null
+    snapshot_failure?: SnapshotFailureInfo['failure'] | Record<string, unknown> | null
+    snapshot_failure_allowed_actions?: SnapshotFailureInfo['allowed_actions'] | null
+  }) => void
+  isForwardResumeBlocked: () => boolean
+  isRerunEnabled: () => boolean
+  isSnapshotFailureBlocked: () => boolean
+
   // Session browser callback (set by Sidebar, invoked by ConfigPanel's Read Mode)
   openSessionBrowser: (() => void) | null
   setOpenSessionBrowserCallback: (callback: (() => void) | null) => void
@@ -664,6 +690,87 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
       setShowSnapshotCleanupReminder: (show) => {
         if (get().showSnapshotCleanupReminder !== show) set({ showSnapshotCleanupReminder: show })
       },
+
+      // Snapshot V2 state
+      snapshotsV2: [],
+      setSnapshotsV2: (snapshots) => set({ snapshotsV2: snapshots }),
+      snapshotStoreStatus: null,
+      setSnapshotStoreStatus: (status) => set({ snapshotStoreStatus: status }),
+      snapshotTransaction: null,
+      setSnapshotTransaction: (txn) => set({
+        snapshotTransaction: txn !== null
+          ? {
+              ...txn,
+              recovery_mode: txn.recovery_mode ?? (get().snapshotTransaction?.recovery_mode ?? 'rollback'),
+            }
+          : null,
+      }),
+      snapshotFailure: null,
+      setSnapshotFailure: (failure) => set({ snapshotFailure: failure }),
+      clearSnapshotFailure: () => set({ snapshotFailure: null }),
+      runtimeRestoreStatus: 'complete',
+      setRuntimeRestoreStatus: (status) => set({ runtimeRestoreStatus: status }),
+      runtimeRestoreWarning: null,
+      setRuntimeRestoreWarning: (warning) => set({ runtimeRestoreWarning: warning }),
+      hydrateRuntimeRestoreFromSession: (payload) => {
+        const statusRaw = payload.runtime_restore_status
+        const status =
+          statusRaw === 'unavailable' || statusRaw === 'intentionally_kept'
+            ? statusRaw
+            : 'complete'
+        const warning =
+          typeof payload.runtime_restore_warning === 'string'
+            ? payload.runtime_restore_warning
+            : null
+        const updates: Partial<AppState> = {
+          runtimeRestoreStatus: status,
+          runtimeRestoreWarning: warning,
+        }
+        const rawFailure = payload.snapshot_failure
+        if (rawFailure && typeof rawFailure === 'object') {
+          const f = rawFailure as Record<string, unknown>
+          const code = typeof f.code === 'string' ? f.code : ''
+          const message = typeof f.message === 'string' ? f.message : ''
+          if (code || message) {
+            const allowed =
+              payload.snapshot_failure_allowed_actions ||
+              (Array.isArray(f.allowed_actions)
+                ? (f.allowed_actions as SnapshotFailureInfo['allowed_actions'])
+                : (['retry', 'manage', 'terminate'] as SnapshotFailureInfo['allowed_actions']))
+            updates.snapshotFailure = {
+              failure: {
+                snapshot_id: typeof f.snapshot_id === 'string' ? f.snapshot_id : '',
+                session_id: typeof f.session_id === 'string' ? f.session_id : '',
+                failed_at: typeof f.failed_at === 'string' ? f.failed_at : '',
+                code,
+                message,
+                details:
+                  f.details && typeof f.details === 'object'
+                    ? (f.details as Record<string, unknown>)
+                    : undefined,
+              },
+              allowed_actions: allowed.filter(
+                (a): a is 'retry' | 'manage' | 'terminate' =>
+                  a === 'retry' || a === 'manage' || a === 'terminate',
+              ),
+            }
+          }
+        }
+        set(updates)
+      },
+      isForwardResumeBlocked: () => {
+        const s = get()
+        if (s.snapshotFailure) return true
+        return s.runtimeRestoreStatus === 'unavailable'
+      },
+      isRerunEnabled: () => {
+        const s = get()
+        return (
+          s.runtimeRestoreStatus === 'unavailable' ||
+          s.runtimeRestoreStatus === 'intentionally_kept'
+        )
+      },
+      isSnapshotFailureBlocked: () => get().snapshotFailure != null,
 
       // Session browser callback
       openSessionBrowser: null,

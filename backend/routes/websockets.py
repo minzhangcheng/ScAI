@@ -43,37 +43,29 @@ def _in_integration_loop(state) -> bool:
     return active_batch_incomplete(state)
 
 
-async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> None:
-    """Re-emit state_sync for pending HITL gates after a reconnect.
+async def _send_restore_state_sync(websocket, state, session_id: str) -> None:
+    """Emit a state_sync after a restored session connects.
 
-    The LlmTimeoutDialog and disabled-agent dialog are driven exclusively by
-    state_sync messages (useApi.ts). On page reload, the workflow may already
-    be parked in _wait_for_llm_intervention with llm_failure_info set, but the
-    reconnect path only replays message_history — which does not feed the
-    state_sync handler. Without this resend the dialog never reopens.
+    Communicates the restore kind and branch identity to the frontend so it
+    can render the appropriate banner/dialog (graph-node restore, terminal
+    restore, idle restore, etc.).
     """
-    reason = getattr(state, "wait_input_reason", None)
-    _HITL_RESEND_REASONS = (
-        "llm_failure",
-        "agent_disabled",
-        "marker_db_missing",
-        "species_input",
-        "gene_species_mismatch",
-    )
-    if reason not in _HITL_RESEND_REASONS:
+    kind = getattr(state, "restore_resume_kind", None)
+    if kind is None:
         return
+    branch_id = getattr(state, "restore_branch_id", None) or ""
     payload = {
-        "change_type": "llm_failure" if reason == "marker_db_missing" else reason,
+        "change_type": f"restore_{kind}",
         "version": getattr(state, "state_version", 0),
         "status": state.status.value if hasattr(state.status, "value") else state.status,
         "current_round": getattr(state, "current_round", 0),
         "analysis_phase": getattr(state, "analysis_phase", None),
         "timestamp": datetime.now().isoformat(),
-        "unresolved_errors": len(state.get_unresolved_errors()) if hasattr(state, "get_unresolved_errors") else 0,
-        "wait_input_reason": reason,
-        "llm_failure_info": getattr(state, "llm_failure_info", None),
-        "agent_disabled_info": getattr(state, "agent_disabled_info", None),
-        "species_input_info": getattr(state, "species_input_info", None),
+        "restore_resume_kind": kind,
+        "restore_resume_node": getattr(state, "restore_resume_node", None),
+        "restore_resume_gate": getattr(state, "restore_resume_gate", None),
+        "restore_branch_id": branch_id,
+        "restore_branch_label": getattr(state, "restore_branch_label", None) or "",
     }
     try:
         await websocket.send_json({
@@ -82,7 +74,69 @@ async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> No
             "content": payload,
             "timestamp": datetime.now().isoformat(),
         })
-        logger.info(f"[{session_id}] Re-sent state_sync for pending {reason} on reconnect")
+        logger.info(
+            f"[{session_id}] Sent restore state_sync for kind={kind} "
+            f"branch_id={branch_id}"
+        )
+    except Exception:
+        logger.warning(f"[{session_id}] Failed to send restore state_sync", exc_info=True)
+
+
+async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> None:
+    """Re-emit state_sync for pending HITL gates after a reconnect.
+
+    The LlmTimeoutDialog and disabled-agent dialog are driven exclusively by
+    state_sync messages (useApi.ts). On page reload, the workflow may already
+    be parked in _wait_for_llm_intervention with llm_failure_info set, but the
+    reconnect path only replays message_history — which does not feed the
+    state_sync handler. Without this resend the dialog never reopens.
+
+    Also re-emits snapshot_failure so the failure HITL gate survives reconnect.
+    """
+    reason = getattr(state, "wait_input_reason", None)
+    snapshot_failure = getattr(state, "snapshot_failure", None)
+    _HITL_RESEND_REASONS = (
+        "llm_failure",
+        "agent_disabled",
+        "marker_db_missing",
+        "species_input",
+        "gene_species_mismatch",
+        "snapshot_failure",
+    )
+    if reason not in _HITL_RESEND_REASONS and not snapshot_failure:
+        return
+    # Prefer snapshot_failure payload when present even if reason drifted.
+    effective_reason = reason
+    if snapshot_failure and reason != "snapshot_failure":
+        effective_reason = "snapshot_failure"
+    change_type = (
+        "snapshot_failure"
+        if effective_reason == "snapshot_failure" or snapshot_failure
+        else ("llm_failure" if effective_reason == "marker_db_missing" else effective_reason)
+    )
+    payload = {
+        "change_type": change_type,
+        "version": getattr(state, "state_version", 0),
+        "status": state.status.value if hasattr(state.status, "value") else state.status,
+        "current_round": getattr(state, "current_round", 0),
+        "analysis_phase": getattr(state, "analysis_phase", None),
+        "timestamp": datetime.now().isoformat(),
+        "unresolved_errors": len(state.get_unresolved_errors()) if hasattr(state, "get_unresolved_errors") else 0,
+        "wait_input_reason": effective_reason or ("snapshot_failure" if snapshot_failure else reason),
+        "llm_failure_info": getattr(state, "llm_failure_info", None),
+        "agent_disabled_info": getattr(state, "agent_disabled_info", None),
+        "species_input_info": getattr(state, "species_input_info", None),
+        "snapshot_failure": snapshot_failure,
+        "snapshot_transaction": getattr(state, "snapshot_transaction", None),
+    }
+    try:
+        await websocket.send_json({
+            "type": "state_sync",
+            "agent": None,
+            "content": payload,
+            "timestamp": datetime.now().isoformat(),
+        })
+        logger.info(f"[{session_id}] Re-sent state_sync for pending {effective_reason or change_type} on reconnect")
     except Exception:
         logger.warning(f"[{session_id}] Failed to resend wait-input state_sync", exc_info=True)
 
@@ -407,6 +461,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.exception(f"[{session_id}] Failed to send initial message")
 
+    # Notify frontend about restored snapshot state (if any).
+    # Must happen before the workflow is started so the UI can show
+    # a restore banner / dialog before analysis begins.
+    await _send_restore_state_sync(websocket, state, session_id)
+
     # State callback to save after each round
     # (_sess_lock acquired above for create-or-observe gate; reuse same handle)
 
@@ -435,6 +494,27 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     # Import workflow here to avoid circular imports
     from backend.workflow import SingleCellAnalysisWorkflow
+    from backend.services.session_store import assert_recovery_clear
+    from backend.services.snapshot_v2.errors import SnapshotTransactionError
+
+    try:
+        assert_recovery_clear(state, session_id=session_id)
+    except SnapshotTransactionError as exc:
+        logger.error("[%s] recovery blocked; refusing workflow construction: %s", session_id, exc)
+        async with state_lock:
+            initializing_sessions.discard(session_id)
+            if websockets.get(session_id) is websocket:
+                del websockets[session_id]
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "agent": None,
+                "content": str(exc),
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception:
+            pass
+        return
 
     # Create workflow with session_id for state persistence.
     # If construction fails we are NOT yet inside the run try/finally (below),

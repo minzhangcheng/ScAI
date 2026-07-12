@@ -1,10 +1,8 @@
-"""Tests for snapshot rollback enhancement: ipynb backup, workspace manifest, branch labels."""
+"""Tests for snapshot rollback enhancement: workspace cleanup, branch labels, V1 fixtures."""
 
 import json
 import shutil
-import tempfile
 from pathlib import Path
-from datetime import datetime
 
 import dill
 import pytest
@@ -12,6 +10,74 @@ import zstandard as zstd
 
 from backend.models.schemas import Snapshot, AnalysisState
 from backend.utils.snapshot import SnapshotManager
+
+
+def _write_v1_snapshot(
+    mgr: SnapshotManager,
+    state: AnalysisState,
+    name: str,
+    phase: str,
+    *,
+    parent_id=None,
+    branch_label=None,
+    notebook_src: Path | None = None,
+    pkl_bytes: bytes | None = None,
+    workspace_manifest: dict | None = None,
+    runtime_state_included: bool | None = None,
+) -> Snapshot:
+    """Hand-written V1 snapshot artifacts (no SnapshotManager.create_snapshot)."""
+    mgr._ensure_dir()
+    snapshot = Snapshot(
+        name=name,
+        phase=phase,
+        round_number=state.current_round,
+        parent_id=parent_id,
+        branch_label=branch_label,
+    )
+    snapshot.branch_id = state.restore_branch_id
+    snapshot.state_file = f"{snapshot.id}.json"
+
+    state_dict = state.model_dump(mode="json")
+    state_dict.pop("snapshots", None)
+    state_dict.pop("realtime_messages", None)
+    for seg in state_dict.get("detailed_report_segments", []) or []:
+        if isinstance(seg, dict):
+            seg.pop("content_html", None)
+
+    state_path = mgr.snapshots_dir / snapshot.state_file
+    state_path.write_text(
+        json.dumps(state_dict, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    snapshot.size_bytes = state_path.stat().st_size
+
+    if pkl_bytes is not None:
+        pkl_dst = mgr.snapshots_dir / f"{snapshot.id}_session.pkl.zst"
+        pkl_dst.write_bytes(zstd.ZstdCompressor(level=3).compress(pkl_bytes))
+        snapshot.runtime_state_included = True
+        snapshot.size_bytes += pkl_dst.stat().st_size
+    elif runtime_state_included is not None:
+        snapshot.runtime_state_included = runtime_state_included
+
+    if notebook_src is not None and notebook_src.exists():
+        nb_dst = mgr.snapshots_dir / f"{snapshot.id}_notebook.ipynb"
+        shutil.copy2(notebook_src, nb_dst)
+        snapshot.notebook_file = f"{snapshot.id}_notebook.ipynb"
+        snapshot.size_bytes += nb_dst.stat().st_size
+
+    if workspace_manifest is not None:
+        snapshot.workspace_manifest = workspace_manifest
+    else:
+        snapshot.workspace_manifest = mgr.scan_workspace_manifest()
+    return snapshot
+
+
+def _streaming_pkl_bytes(pairs) -> bytes:
+    import io
+    buf = io.BytesIO()
+    for name, obj in pairs:
+        dill.dump((name, obj), buf)
+    return buf.getvalue()
 
 
 @pytest.fixture
@@ -28,14 +94,12 @@ def temp_session(tmp_path):
     (session_dir / "reports" / "figures").mkdir(parents=True)
     (session_dir / "reports" / "tables").mkdir(parents=True)
 
-    # Create a minimal ipynb file
     import nbformat
     nb = nbformat.v4.new_notebook()
     nb.cells.append(nbformat.v4.new_code_cell("print('round 1')"))
     nb_path = session_dir / "states" / f"{session_id}.ipynb"
     nbformat.write(nb, str(nb_path))
 
-    # Create a minimal pkl file
     pkl_path = session_dir / "states" / f"{session_id}_session.pkl"
     pkl_path.write_text("fake pkl content")
 
@@ -55,44 +119,45 @@ def mock_config(monkeypatch, temp_session):
 
     monkeypatch.setattr("backend.utils.snapshot.get_session_dir", mock_get_session_dir)
     monkeypatch.setattr("backend.utils.snapshot.get_session_states", mock_get_session_states)
+    try:
+        monkeypatch.setattr("backend.utils.runtime_apply.get_session_states", mock_get_session_states)
+    except AttributeError:
+        pass
+
+    monkeypatch.setattr("backend.config.get_session_states", mock_get_session_states)
 
     return session_id, session_dir, tmp_path
 
 
-class TestSnapshotCreateWithManifest:
-    """Tests for create_snapshot with ipynb backup and workspace manifest."""
+class TestV1SnapshotFixtures:
+    """Inventory-style checks for hand-written V1 snapshot artifacts."""
 
-    @pytest.mark.asyncio
-    async def test_create_snapshot_includes_notebook_backup(self, mock_config):
+    def test_v1_fixture_includes_notebook_and_manifest(self, mock_config):
         session_id, session_dir, tmp_path = mock_config
         mgr = SnapshotManager(session_id)
 
-        # Create workspace files
         (session_dir / "workspace" / "figures" / "fig_001.jpg").write_text("fake fig")
         (session_dir / "workspace" / "tables" / "markers.csv").write_text("a,b,c")
 
-        # Create a minimal state
         state = AnalysisState(
             session_id=session_id,
             user_id="test_user",
             data_files=[],
             current_round=1,
         )
+        nb_src = session_dir / "states" / f"{session_id}.ipynb"
+        snapshot = _write_v1_snapshot(
+            mgr, state, "Test", "pre_annotation", notebook_src=nb_src,
+        )
 
-        snapshot = await mgr.create_snapshot(state, "Test", "pre_annotation")
-
-        # Verify notebook backup exists
         nb_backup = mgr.snapshots_dir / f"{snapshot.id}_notebook.ipynb"
-        assert nb_backup.exists(), "Notebook backup should be created"
+        assert nb_backup.exists()
         assert snapshot.notebook_file == f"{snapshot.id}_notebook.ipynb"
-
-        # Verify manifest includes workspace files
         assert "figures" in snapshot.workspace_manifest
         assert "fig_001.jpg" in snapshot.workspace_manifest["figures"]
         assert "markers.csv" in snapshot.workspace_manifest["tables"]
 
-    @pytest.mark.asyncio
-    async def test_create_snapshot_manifest_empty_dirs(self, mock_config):
+    def test_v1_fixture_manifest_empty_dirs(self, mock_config):
         session_id, session_dir, tmp_path = mock_config
         mgr = SnapshotManager(session_id)
 
@@ -102,10 +167,8 @@ class TestSnapshotCreateWithManifest:
             data_files=[],
             current_round=1,
         )
+        snapshot = _write_v1_snapshot(mgr, state, "Test", "pre_annotation")
 
-        snapshot = await mgr.create_snapshot(state, "Test", "pre_annotation")
-
-        # Empty dirs should produce empty lists
         assert snapshot.workspace_manifest == {
             "figures": [],
             "tables": [],
@@ -113,8 +176,7 @@ class TestSnapshotCreateWithManifest:
             "root": [],
         }
 
-    @pytest.mark.asyncio
-    async def test_create_snapshot_with_branch_label(self, mock_config):
+    def test_v1_fixture_with_branch_label(self, mock_config):
         session_id, session_dir, tmp_path = mock_config
         mgr = SnapshotManager(session_id)
 
@@ -124,9 +186,8 @@ class TestSnapshotCreateWithManifest:
             data_files=[],
             current_round=1,
         )
-
-        snapshot = await mgr.create_snapshot(
-            state, "Branch Test", "pre_annotation", branch_label="branch-A"
+        snapshot = _write_v1_snapshot(
+            mgr, state, "Branch Test", "pre_annotation", branch_label="branch-A",
         )
         assert snapshot.branch_label == "branch-A"
 
@@ -138,9 +199,7 @@ class TestSnapshotRestoreWithCleanup:
         session_id, session_dir, tmp_path = mock_config
         mgr = SnapshotManager(session_id)
 
-        # Create files that exist in the manifest
         (session_dir / "workspace" / "figures" / "fig_001.jpg").write_text("keep me")
-        # Create files NOT in the manifest (should be deleted)
         (session_dir / "workspace" / "figures" / "fig_002.jpg").write_text("delete me")
         (session_dir / "workspace" / "tables" / "new_data.csv").write_text("delete me too")
 
@@ -153,11 +212,8 @@ class TestSnapshotRestoreWithCleanup:
 
         result = mgr.cleanup_workspace_files(manifest)
 
-        # fig_001.jpg should survive
         assert (session_dir / "workspace" / "figures" / "fig_001.jpg").exists()
-        # fig_002.jpg should be deleted
         assert not (session_dir / "workspace" / "figures" / "fig_002.jpg").exists()
-        # new_data.csv should be deleted
         assert not (session_dir / "workspace" / "tables" / "new_data.csv").exists()
 
         assert result["figures"] == 1
@@ -168,11 +224,9 @@ class TestSnapshotRestoreWithCleanup:
         session_id, session_dir, tmp_path = mock_config
         mgr = SnapshotManager(session_id)
 
-        # Create a file in workspace root
         (session_dir / "workspace" / "output.h5ad").write_text("h5ad data")
         (session_dir / "workspace" / "markers.csv").write_text("a,b,c")
 
-        # Manifest tracks root files that should be kept
         manifest = {
             "figures": [],
             "tables": [],
@@ -182,9 +236,7 @@ class TestSnapshotRestoreWithCleanup:
 
         result = mgr.cleanup_workspace_files(manifest)
 
-        # output.h5ad is in manifest, should survive
         assert (session_dir / "workspace" / "output.h5ad").exists()
-        # markers.csv not in manifest, should be deleted
         assert not (session_dir / "workspace" / "markers.csv").exists()
 
         assert result["root"] == 1
@@ -193,7 +245,6 @@ class TestSnapshotRestoreWithCleanup:
         session_id, session_dir, tmp_path = mock_config
         mgr = SnapshotManager(session_id)
 
-        # Create report files (including report_embedded.html which was missing from old hardcoded list)
         (session_dir / "reports" / "detailed_report.html").write_text("<html>report</html>")
         (session_dir / "reports" / "report.html").write_text("<html>main</html>")
         (session_dir / "reports" / "report_embedded.html").write_text("<html>embedded</html>")
@@ -205,7 +256,6 @@ class TestSnapshotRestoreWithCleanup:
 
         mgr.cleanup_reports()
 
-        # All report files should be deleted (html, json, csv, ipynb)
         assert not (session_dir / "reports" / "detailed_report.html").exists()
         assert not (session_dir / "reports" / "report.html").exists()
         assert not (session_dir / "reports" / "report_embedded.html").exists()
@@ -215,7 +265,6 @@ class TestSnapshotRestoreWithCleanup:
         assert not (session_dir / "reports" / "tables" / "data.csv").exists()
         assert not (session_dir / "reports" / f"{session_id}.ipynb").exists()
 
-        # Directory structure should be preserved
         assert (session_dir / "reports" / "figures").is_dir()
         assert (session_dir / "reports" / "tables").is_dir()
 
@@ -226,7 +275,6 @@ class TestBranchLabels:
     def test_main_branch_label(self):
         """Snapshot without a restored parent should get 'main' branch label."""
         parent = Snapshot(name="Round 1", phase="pre_annotation", round_number=1, parent_id=None)
-        # No last_restored_snapshot_id → branch_label = "main"
         last_restored_snapshot_id = None
         snapshots = [parent]
         if last_restored_snapshot_id:
@@ -242,20 +290,14 @@ class TestBranchLabels:
         assert branch_label == "main"
 
     def test_branch_from_restore(self):
-        """Snapshot after a restore should get branch-A.
-
-        The main-line continuation (branch_label='main') should NOT be counted
-        when computing the branch letter, so the first new branch is always 'A'.
-        """
+        """Snapshot after a restore should get branch-A."""
         parent = Snapshot(name="Round 1", phase="pre_annotation", round_number=1, parent_id=None)
-        # Main-line continuation — should NOT be counted as a branch
         main_line = Snapshot(
             name="Round 2", phase="pre_direction", round_number=2,
             parent_id=parent.id, branch_label="main"
         )
         snapshots = [parent, main_line]
 
-        # Only count non-main branches
         existing = sum(
             1 for s in snapshots
             if s.parent_id == parent.id and s.branch_label and s.branch_label != "main"
@@ -278,7 +320,6 @@ class TestBranchLabels:
         )
         snapshots = [parent, main_line, first_branch]
 
-        # Only count non-main branches (first_branch counts, main_line doesn't)
         existing = sum(
             1 for s in snapshots
             if s.parent_id == parent.id and s.branch_label and s.branch_label != "main"
@@ -290,7 +331,7 @@ class TestBranchLabels:
 
 
 class TestDeleteBranch:
-    """Tests for branch deletion."""
+    """Tests for branch deletion against hand-written V1 fixtures."""
 
     @pytest.mark.asyncio
     async def test_delete_branch_removes_descendants(self, mock_config):
@@ -304,56 +345,51 @@ class TestDeleteBranch:
             current_round=1,
         )
 
-        # Create a chain of snapshots: A -> B -> C
-        snap_a = await mgr.create_snapshot(state, "A", "pre_annotation")
-        snap_b = await mgr.create_snapshot(state, "B", "pre_direction", parent_id=snap_a.id)
-        snap_c = await mgr.create_snapshot(state, "C", "pre_round_wait", parent_id=snap_b.id)
+        snap_a = _write_v1_snapshot(mgr, state, "A", "pre_annotation")
+        snap_b = _write_v1_snapshot(
+            mgr, state, "B", "pre_direction", parent_id=snap_a.id,
+        )
+        snap_c = _write_v1_snapshot(
+            mgr, state, "C", "pre_round_wait", parent_id=snap_b.id,
+        )
 
         all_snapshots = [snap_a, snap_b, snap_c]
 
-        # Delete branch starting from B (should delete B and C)
         deleted_ids = await mgr.delete_branch(snap_b, all_snapshots)
 
         assert snap_b.id in deleted_ids
         assert snap_c.id in deleted_ids
-        assert snap_a.id not in deleted_ids  # Root of a different branch
+        assert snap_a.id not in deleted_ids
 
-        # Verify files are removed
         assert not (mgr.snapshots_dir / snap_b.state_file).exists()
         assert not (mgr.snapshots_dir / snap_c.state_file).exists()
 
 
 class TestPklCompressionSnapshotCompat:
-    """Tests that snapshot pkl files are compressed to .zst by the backend
-    and can be decompressed back to the live streaming dill format."""
+    """Hand-written V1 .pkl.zst fixtures for restore / inventory classification."""
 
-    @pytest.mark.asyncio
-    async def test_snapshot_compresses_streaming_pkl_to_zst(self, mock_config):
-        """Snapshot should compress an uncompressed streaming dill pkl to .pkl.zst."""
+    def test_v1_fixture_zst_roundtrip_streaming_dill(self, mock_config):
+        """Hand-written compressed pkl fixture round-trips streaming dill."""
         session_id, session_dir, tmp_path = mock_config
-        pkl_path = session_dir / "states" / f"{session_id}_session.pkl"
-
-        # Write per-var streaming dill (mimics what new save_session produces)
-        original_data = [("adata", "mock"), ("results", [1, 2, 3])]
-        with open(pkl_path, "wb") as f:
-            for name, obj in original_data:
-                dill.dump((name, obj), f)
-
         mgr = SnapshotManager(session_id)
+
+        original_data = [("adata", "mock"), ("results", [1, 2, 3])]
+        pkl_bytes = _streaming_pkl_bytes(original_data)
+
         state = AnalysisState(
             session_id=session_id,
             user_id="test_user",
             data_files=[],
             current_round=1,
         )
+        snapshot = _write_v1_snapshot(
+            mgr, state, "Streaming Pkl", "pre_annotation", pkl_bytes=pkl_bytes,
+        )
 
-        snapshot = await mgr.create_snapshot(state, "Streaming Pkl", "pre_annotation")
-
-        # Verify the snapshot produced a .pkl.zst file
         snapshot_pkl = mgr.snapshots_dir / f"{snapshot.id}_session.pkl.zst"
-        assert snapshot_pkl.exists(), "Snapshot .pkl.zst should exist"
+        assert snapshot_pkl.exists()
+        assert snapshot.runtime_state_included is True
 
-        # Decompress and verify round-trip
         _dctx = zstd.ZstdDecompressor()
         with open(snapshot_pkl, "rb") as f:
             with _dctx.stream_reader(f) as zf:
@@ -369,14 +405,11 @@ class TestPklCompressionSnapshotCompat:
 
     @pytest.mark.asyncio
     async def test_snapshot_restore_decompresses_zst_to_live_pkl(self, mock_config):
-        """restore_snapshot should decompress .pkl.zst back to live .pkl path."""
+        """restore_snapshot should decompress hand-written .pkl.zst to live .pkl."""
         session_id, session_dir, tmp_path = mock_config
         pkl_path = session_dir / "states" / f"{session_id}_session.pkl"
 
-        # Write per-var streaming dill
-        with open(pkl_path, "wb") as f:
-            dill.dump(("adata", "mock"), f)
-            dill.dump(("results", [4, 5, 6]), f)
+        pkl_bytes = _streaming_pkl_bytes([("adata", "mock"), ("results", [4, 5, 6])])
 
         mgr = SnapshotManager(session_id)
         state = AnalysisState(
@@ -385,19 +418,16 @@ class TestPklCompressionSnapshotCompat:
             data_files=[],
             current_round=1,
         )
+        snapshot = _write_v1_snapshot(
+            mgr, state, "Restore Test", "pre_annotation", pkl_bytes=pkl_bytes,
+        )
 
-        snapshot = await mgr.create_snapshot(state, "Restore Test", "pre_annotation")
+        pkl_path.unlink(missing_ok=True)
 
-        # Delete the live pkl to simulate a rollback scenario
-        pkl_path.unlink()
-
-        # Restore from snapshot
         restored_state = await mgr.restore_snapshot(snapshot)
 
-        # Live pkl should be restored (decompressed from .zst)
-        assert pkl_path.exists(), "Live pkl should be restored after snapshot restore"
+        assert pkl_path.exists()
 
-        # Verify the content is readable as streaming dill
         loaded = {}
         with open(pkl_path, "rb") as f:
             while True:
@@ -408,3 +438,5 @@ class TestPklCompressionSnapshotCompat:
                 loaded[name] = obj
 
         assert loaded == {"adata": "mock", "results": [4, 5, 6]}
+        assert restored_state.id
+        assert restored_state.user_id == "test_user"

@@ -1,13 +1,17 @@
 import inspect
-import backend.routes.snapshots as snaps
 import backend.routes.lifecycle as lc
+import backend.workflow.integration as integration
+import backend.workflow.restore_targets as restore_targets
 
 
 def test_snapshot_restore_sets_waiting_input_for_integration_gate():
-    src = inspect.getsource(snaps)
-    assert 'phase == "pre_integration_gate"' in src
+    """Integration gate snapshot phase is wired through restore targets + node."""
+    assert "pre_integration_gate" in restore_targets.SNAPSHOT_RESUME_TARGET
+    gate = restore_targets.SNAPSHOT_RESUME_TARGET["pre_integration_gate"]
+    assert gate.get("gate") or gate.get("kind")
+    src = inspect.getsource(integration)
+    assert "pre_integration_gate" in src
     assert "integration_gate" in src
-    assert "WebSocketMessage(" in src
 
 
 def test_lifecycle_accepts_integration_selection():

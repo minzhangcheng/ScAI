@@ -99,3 +99,10 @@ report_ws_lock: asyncio.Lock = asyncio.Lock()
 
 # Detailed report generation state: session_id -> report dict
 detailed_reports: Dict[str, Any] = {}
+
+# Snapshot V2 capture jobs: job_id -> status dict
+snapshot_jobs: Dict[str, Any] = {}
+
+# Snapshot V2 restore jobs: transaction_id -> RestoreJobHandle
+# Shared process-wide so cancel/status work across independent HTTP requests.
+snapshot_restore_jobs: Dict[str, Any] = {}

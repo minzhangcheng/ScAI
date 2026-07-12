@@ -601,6 +601,13 @@ class PlanningMixin:
 
     async def _planning_dialogue(self, state: WorkflowState) -> WorkflowState:
         """PI ↔ Bioinformatics dialogue to design an analysis plan (max 5 rounds)."""
+        import inspect
+
+        await_restore = getattr(self, "await_restore_safe_point", None)
+        if callable(await_restore):
+            result = await_restore()
+            if inspect.isawaitable(result):
+                await result
         analysis_state = state["analysis_state"]
 
         for agent_name, node in [("pi", "planning_dialogue"), ("bioinformatics", "planning_dialogue")]:
@@ -951,6 +958,13 @@ class PlanningMixin:
         Blocks until the user responds (approve/skip/modify).
         For modification requests, loops back to planning_dialogue.
         """
+        import inspect
+
+        await_restore = getattr(self, "await_restore_safe_point", None)
+        if callable(await_restore):
+            result = await_restore()
+            if inspect.isawaitable(result):
+                await result
         analysis_state = state["analysis_state"]
         plan = analysis_state.current_plan
 

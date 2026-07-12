@@ -770,6 +770,10 @@ class ReportingMixin:
             "status", "Generating detailed report with figures and tables...", AgentType.PI
         )
 
+        # Generate a report_generation_id for capture idempotency
+        report_generation_id = str(uuid.uuid4())
+        analysis_state.report_generation_id = report_generation_id
+
         target_lineage_id = current_lineage_id(analysis_state)
         branch_id = None if target_lineage_id == "main" else target_lineage_id
         output_dir = str(resolve_report_output_dir(self.session_id, branch_id))
@@ -793,8 +797,6 @@ class ReportingMixin:
         # === LLM call with retry + user intervention ===
         while True:
             try:
-                # Resolve per attempt so a Retry after the user changes the
-                # report model in settings picks up the new model/client.
                 llm_client = self._settings_provider.get_llm_client('pi')
                 pi_model = self._settings_provider.get_model("pi")
                 bio_model = self._settings_provider.get_model("bioinformatics")
@@ -852,7 +854,6 @@ class ReportingMixin:
                     raise WorkflowTerminatedError(
                         "User terminated workflow during detailed report generation"
                     )
-                # Skip: send error and fall through to post-processing
                 await self._send_message(
                     "error",
                     "Detailed report generation skipped due to LLM failure. "
@@ -871,17 +872,147 @@ class ReportingMixin:
                 )
                 break
 
-        # === POST-PROCESSING: ALWAYS RUNS (even on Skip/Error) ===
-        await self._create_auto_snapshot(analysis_state, "post_report")
+        # === POST-PROCESSING: ALWAYS RUNS (even on Error) ===
+        # Idempotent post-report snapshot with pending_required_snapshot state machine
+        # Failure UX: retry / manage / terminate (no Skip).
+        if analysis_state.pending_required_snapshot is not None:
+            logger.info(
+                "[%s] Found pending_required_snapshot from previous attempt; retrying capture",
+                self.session_id,
+            )
+            pending = analysis_state.pending_required_snapshot
+            try:
+                record = await self._capture_required_snapshot(
+                    analysis_state,
+                    pending.get("report_generation_id", report_generation_id),
+                )
+                analysis_state.pending_required_snapshot = None
+            except Exception:
+                pending["attempts"] = pending.get("attempts", 0) + 1
+                analysis_state.pending_required_snapshot = pending
+                raise
+        else:
+            # Set pending state before capture, clear on success
+            analysis_state.pending_required_snapshot = {
+                "report_generation_id": report_generation_id,
+                "phase": "post_report",
+                "attempts": 0,
+            }
+            try:
+                record = await self._capture_post_report_snapshot(
+                    analysis_state, report_generation_id,
+                )
+                analysis_state.pending_required_snapshot = None
+            except Exception:
+                # Keep pending so retry re-enters capture only
+                raise
 
-        self._set_status(analysis_state, TaskStatus.COMPLETED)
-        await self._send_message("completed", "Analysis completed", AgentType.PI)
+        # Only set COMPLETED if snapshot capture succeeded.
+        # If capture failed, RequiredSnapshotBlocked is raised and the run
+        # boundary holds WAITING_INPUT for the snapshot-failure HITL gate
+        # (retry/manage/terminate).
+        if analysis_state.pending_required_snapshot is None:
+            self._set_status(analysis_state, TaskStatus.COMPLETED)
+            await self._send_message("completed", "Analysis completed", AgentType.PI)
 
-        await self._send_state_sync(analysis_state, "analysis_complete")
+            await self._send_state_sync(analysis_state, "analysis_complete")
 
-        logger.info(f"[{self.session_id}] Analysis workflow completed")
+            logger.info(f"[{self.session_id}] Analysis workflow completed")
+        else:
+            logger.warning(
+                "[%s] Post-report snapshot capture failed; "
+                "keeping status GENERATING_REPORT for snapshot-failure HITL gate",
+                self.session_id,
+            )
 
         return {
             **state,
             "analysis_state": analysis_state,
         }
+
+    async def _capture_post_report_snapshot(
+        self,
+        analysis_state: AnalysisState,
+        report_generation_id: str,
+    ):
+        """Capture a required post-report snapshot (fail closed).
+
+        Returns the SnapshotRecordV2. Raises RequiredSnapshotBlocked on failure.
+        """
+        from ..config import get_session_workspace
+        from ..services.snapshot_v2.service import SnapshotService
+        from ..services.snapshot_v2.continuation import ContinuationRegistry
+        from ..services.snapshot_v2.models import SnapshotCaptureRequest
+        from ..services.snapshot_v2.paths import SnapshotV2Paths
+
+        service = getattr(self, "snapshot_service", None)
+        if service is None:
+            paths = SnapshotV2Paths.for_session(self.session_id)
+            service = SnapshotService(self.session_id, paths)
+            self.snapshot_service = service
+
+        workflow_state = {
+            "analysis_state": analysis_state,
+            "current_round": analysis_state.current_round,
+            "kernel_present": (
+                getattr(self, "sandbox", None) is not None
+                and getattr(getattr(self, "sandbox", None), "km", None) is not None
+            ),
+        }
+        capsule = ContinuationRegistry(service.object_store).freeze(
+            "post_report", analysis_state, workflow_state,
+        )
+        request = SnapshotCaptureRequest(
+            session_id=self.session_id,
+            reason="post_report",
+            phase="post_report",
+            capsule=capsule,
+            round_number=analysis_state.current_round or 0,
+            idempotency_key=str(report_generation_id) if report_generation_id else None,
+        )
+        workspace_root = str(get_session_workspace(self.session_id))
+        record = await service.capture_required_snapshot(
+            analysis_state,
+            request,
+            sandbox=getattr(self, "sandbox", None),
+            workflow_state=workflow_state,
+            workspace_root=workspace_root,
+        )
+        logger.info(
+            "[%s] Post-report snapshot created: %s (gen_id=%s)",
+            self.session_id, record.snapshot_id, report_generation_id,
+        )
+        return record
+
+    async def _capture_required_snapshot(self, analysis_state, report_generation_id):
+        """Retry a pending required snapshot using stored state (capture only)."""
+        return await self._capture_post_report_snapshot(
+            analysis_state, report_generation_id,
+        )
+
+    async def retry_pending_required_snapshot(self):
+        """Re-enter capture only for a pending post-report snapshot.
+
+        Does not re-run report generators. Clears pending on success.
+        Raises RequiredSnapshotBlocked on failure.
+        """
+        analysis_state = (
+            getattr(self, "state", None)
+            or getattr(self, "_current_analysis_state", None)
+            or getattr(self, "_state", None)
+        )
+        if analysis_state is None:
+            raise RuntimeError("No analysis state available for snapshot retry")
+
+        pending = getattr(analysis_state, "pending_required_snapshot", None)
+        if not pending:
+            return None
+
+        report_generation_id = pending.get("report_generation_id") or getattr(
+            analysis_state, "report_generation_id", None
+        )
+        record = await self._capture_required_snapshot(
+            analysis_state, report_generation_id,
+        )
+        analysis_state.pending_required_snapshot = None
+        return record

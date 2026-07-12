@@ -72,6 +72,8 @@ _EXCLUDED_FIELDS = {
     "integration_gate_literature_evidence",
     "integration_reports",
     "final_report_requested",
+    "report_generation_id",
+    "recovery_blocked",
 }
 
 _COMPUTED_FIELDS = {

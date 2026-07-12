@@ -2,7 +2,7 @@
 
 **ScAI** is a multi-agent AI system for multi-omics biomedical research. It integrates single-cell sequencing (scRNA-seq / snRNA-seq), bulk RNA-seq, pathology image analysis (H&E / IHC), and biochemical indicators into a unified, iterative workflow. Powered by specialized agents and a **human-in-the-loop** design, ScAI is **provider-agnostic**: any OpenAI-compatible endpoint works, with per-agent routing so you can mix flagship and open-source models to balance quality and cost. Verified endpoints include cloud aggregators (OpenRouter, n1n.ai), direct provider APIs (DeepSeek, Moonshot, Zhipu, MiniMax, Aliyun/Qwen), Google Gemini (for Deep Research literature mode), and **locally deployed open-source models via Ollama**.
 
-**Version**: 0.32.11 · **License**: Apache 2.0
+**Version**: 0.33.1 · **License**: Apache 2.0
 
 ## Quick Start
 
@@ -56,6 +56,21 @@ The script creates a virtual environment, installs dependencies, and starts both
 - **Provider-agnostic LLM layer** — each agent independently selects its model and endpoint; any OpenAI-compatible API works (cloud or self-hosted), including **local Ollama** deployments of open-source models for fully offline use.
 - **Publication-ready output** — PI-reviewed figures (PNG + high-res PDF), a 9-chapter HTML report with appendix, and an AI-generated graphic abstract.
 - **Session lifecycle** — pause, resume, snapshot, export, and import complete sessions (data, state, notebooks, figures, reports).
+
+### Snapshot V2 safety contract
+
+Snapshot V2 is the authoritative checkpoint lifecycle for continuation. Operators and developers should treat the following as product contracts:
+
+| Topic | Behavior |
+|-------|----------|
+| Fail-closed large runtime | Required system snapshots commit only with complete, verified runtime. Oversized or failed runtime capture does **not** publish a state-only partial snapshot; the workflow pauses at snapshot-failure HITL with **Retry / Manage Snapshots / Terminate** (no Skip). |
+| V1 restore cutover | Legacy V1 restore always returns **HTTP 410**. V1 inventory, export, and delete remain available as non-restorable management only. |
+| Runtime unavailable (`reset` / `keep`) | Restore of a snapshot without usable runtime requires an explicit choice: **`reset`** restores business state and workspace, quarantines live runtime, and blocks resume until a full re-run from original inputs; **`keep`** retains the current live runtime and records a **persistent** risk acceptance (not an exact restore). |
+| Import `trust_runtime=false` (default) | Imported archives never materialize dill/runtime objects unless trust is explicitly enabled. Imported snapshots report unavailable runtime and require `reset`/`keep` for continuation. |
+| Session-local layout | Paths follow `backend/services/snapshot_v2/paths.py`: `sessions/{id}/v2`, `objects/`, `staging/`, `journals/`, `committed/`, and `integrity/`. Layout is not migrated in this release. |
+| AnnData alias residual | Snapshot V2 preserves supported top-level values and workflow continuation, but it does not guarantee Python object alias identity when the same AnnData object is also embedded inside an arbitrary nested container. Code must not rely on identity checks such as `nested["adata"] is adata` across restore. |
+
+Release evidence for design acceptance criteria: [docs/verification/snapshot-v2-acceptance.md](docs/verification/snapshot-v2-acceptance.md).
 
 ## Agents
 

@@ -415,6 +415,151 @@ async def export_download(session_id: str, request: Request):
     )
 
 
+@router.post("/api/session/{session_id}/export-v2")
+async def export_v2(
+    session_id: str,
+    request: Request,
+    include_runtime: bool = True,
+    snapshot_ids: str | None = None,
+):
+    """Export verified V2 snapshot objects as a tar.gz archive.
+
+    Unlike the legacy ``/export`` endpoint, V2 export streams verified
+    snapshot objects (blobs) from the V2 object store into a portable
+    archive.  Base/workspace objects always export; runtime objects
+    (adata variables, dill residuals) only with ``include_runtime=true``.
+
+    Query params:
+        include_runtime: Include runtime snapshot objects (default True).
+        snapshot_ids: Comma-separated list of snapshot IDs to export
+            (default: all committed snapshots).
+    """
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+    from backend.services.snapshot_v2.service import SnapshotService
+    from backend.services.snapshot_v2.errors import SnapshotV2Error
+
+    paths = SnapshotV2Paths.for_session(session_id)
+
+    # Parse optional snapshot_ids
+    parsed_ids: list[str] | None = None
+    if snapshot_ids:
+        parsed_ids = [s.strip() for s in snapshot_ids.split(",") if s.strip()]
+
+    service = SnapshotService(session_id, paths)
+    try:
+        export_path = await service.export_snapshots(
+            include_runtime=include_runtime,
+            snapshot_ids=parsed_ids,
+        )
+    except SnapshotV2Error as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Move to stable location for download
+    export_dir = UPLOAD_TEMP_DIR
+    export_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"v2-export-{session_id[:8]}-{uuid.uuid4().hex[:8]}.tar.gz"
+    final_path = export_dir / filename
+    shutil.move(str(export_path), str(final_path))
+
+    size_bytes = final_path.stat().st_size
+
+    async with _prepared_exports_lock:
+        _prepared_exports[session_id] = {
+            "path": str(final_path),
+            "filename": filename,
+            "size": size_bytes,
+        }
+
+    return {
+        "status": "ready",
+        "download_url": f"/api/session/{session_id}/export/download",
+        "filename": filename,
+        "size_bytes": size_bytes,
+    }
+
+
+@router.post("/api/session/{session_id}/import-v2")
+async def import_v2(
+    session_id: str,
+    request: Request,
+):
+    """Import a V2 snapshot export archive (tar.gz) into a session.
+
+    Accepts a raw tar.gz body (not multipart) uploaded as
+    ``application/gzip`` with an ``X-Filename`` header identifying
+    the archive.  Uses the path *session_id* as the destination
+    session — all snapshot/session IDs in the archive are rebound
+    to this session via a deterministic mapping.
+
+    Headers:
+        X-Trust: ``"true"`` to restore runtime objects (dill/h5ad).
+            Default ``false`` — runtime is marked unavailable and
+            no dill objects are written to the destination store.
+
+    Returns the ``ImportResult`` payload.
+    """
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required to import V2 snapshots")
+    # Ownership check (also rejects missing sessions for non-auth callers that
+    # slipped past middleware with a stale user_id).
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    trust = (request.headers.get("x-trust") or "").lower() in ("true", "1", "yes")
+
+    # Stream body to a temp file
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False, dir=str(UPLOAD_TEMP_DIR))
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        buffer_size = 0
+        with open(tmp_path, "wb") as f:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                f.write(chunk)
+                buffer_size += len(chunk)
+
+        if buffer_size == 0:
+            raise HTTPException(status_code=400, detail="Empty upload")
+
+        from backend.services.snapshot_v2.paths import SnapshotV2Paths
+        from backend.services.snapshot_v2.service import SnapshotService
+        from backend.services.snapshot_v2.errors import SnapshotV2Error
+
+        paths = SnapshotV2Paths.for_session(session_id)
+        service = SnapshotService(session_id, paths)
+        try:
+            result = await service.import_snapshots(tmp_path, trust_runtime=trust)
+        except SnapshotV2Error as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        if not result.success:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Import failed: {'; '.join(result.errors)}",
+            )
+
+        return result.model_dump(mode="json")
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("V2 import failed for session %s", session_id)
+        raise HTTPException(status_code=500, detail=f"Import failed: {exc}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 @router.post("/api/session/import")
 async def import_state(
     request: Request,

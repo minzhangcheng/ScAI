@@ -17,6 +17,8 @@ import LlmModifySubDialog from './LlmModifySubDialog'
 import ExplorationFailedDialog from './ExplorationFailedDialog'
 import { useCountdownTimer } from '../hooks/useCountdownTimer'
 import { SnapshotPanel } from './SnapshotPanel'
+import { SnapshotFailureDialog } from './snapshots/SnapshotFailureDialog'
+import { RuntimeWarningBanner } from './snapshots/RuntimeWarningBanner'
 import { TextInputDialog } from './TextInputDialog'
 import { ConfirmDialog } from './ConfirmDialog'
 import {
@@ -169,6 +171,14 @@ export function AnalysisPanel() {
   const snapshotCount = useAppStore(state => state.snapshotCount)
   const showSnapshotCleanupReminder = useAppStore(state => state.showSnapshotCleanupReminder)
   const setShowSnapshotCleanupReminder = useAppStore(state => state.setShowSnapshotCleanupReminder)
+
+  // Snapshot V2 failure / runtime restore safety
+  const snapshotFailure = useAppStore(s => s.snapshotFailure)
+  const clearSnapshotFailure = useAppStore(s => s.clearSnapshotFailure)
+  const runtimeRestoreStatus = useAppStore(s => s.runtimeRestoreStatus)
+  const runtimeRestoreWarning = useAppStore(s => s.runtimeRestoreWarning)
+  const isForwardResumeBlocked = useAppStore(s => s.isForwardResumeBlocked)
+  const isRerunEnabled = useAppStore(s => s.isRerunEnabled)
 
   // Reset message refs when session changes so dialogs can re-trigger after page reload
   useEffect(() => {
@@ -639,8 +649,20 @@ export function AnalysisPanel() {
     }
   }, [pauseAnalysis])
 
-  // Resume handler
+  // Resume handler — gated by backend runtime_restore_status / snapshot_failure
   const handleResume = useCallback(async () => {
+    if (isForwardResumeBlocked()) {
+      addMessage({
+        id: generateId(),
+        type: 'error',
+        content:
+          language === 'zh'
+            ? '当前会话禁止继续分析（运行时不可用或快照失败）。请使用重新运行或快照失败处置操作。'
+            : 'Forward resume is blocked (runtime unavailable or snapshot failure). Use re-run or snapshot failure actions.',
+        timestamp: new Date().toISOString(),
+      })
+      return
+    }
     try {
       await resumeAnalysis()
       if (!wsConnected) {
@@ -649,7 +671,61 @@ export function AnalysisPanel() {
     } catch (e) {
       console.error('Failed to resume:', e)
     }
-  }, [resumeAnalysis, wsConnected, wsConnect])
+  }, [resumeAnalysis, wsConnected, wsConnect, isForwardResumeBlocked, addMessage, language])
+
+  const handleRerun = useCallback(async () => {
+    if (!currentSession) return
+    try {
+      await apiFetch(`/session/${currentSession.id}/run`, { method: 'POST' })
+      useAppStore.getState().setRuntimeRestoreStatus('complete')
+      useAppStore.getState().setRuntimeRestoreWarning(null)
+      useAppStore.getState().updateSession({ status: 'running' })
+      if (!wsConnected) {
+        setTimeout(() => wsConnect?.(), 100)
+      }
+    } catch (e) {
+      console.error('Failed to re-run analysis:', e)
+      addMessage({
+        id: generateId(),
+        type: 'error',
+        content: `Failed to re-run analysis: ${e instanceof Error ? e.message : String(e)}`,
+        timestamp: new Date().toISOString(),
+      })
+    }
+  }, [currentSession, wsConnected, wsConnect, addMessage])
+
+  const handleSnapshotFailureRetry = useCallback(async () => {
+    if (!currentSession) return
+    try {
+      // Capture-only retry — must not regenerate completed reports
+      await apiFetch(`/session/${currentSession.id}/snapshot-failure/retry`, {
+        method: 'POST',
+        body: JSON.stringify({ regenerate_reports: false }),
+      })
+      clearSnapshotFailure()
+      if (!wsConnected) {
+        setTimeout(() => wsConnect?.(), 100)
+      }
+    } catch (e) {
+      console.error('Snapshot failure retry failed:', e)
+    }
+  }, [currentSession, clearSnapshotFailure, wsConnected, wsConnect])
+
+  const handleSnapshotFailureManage = useCallback(() => {
+    setShowSnapshotPanel(true)
+  }, [])
+
+  const handleSnapshotFailureTerminate = useCallback(async () => {
+    if (!currentSession) return
+    try {
+      await apiFetch(`/session/${currentSession.id}/snapshot-failure/terminate`, {
+        method: 'POST',
+      })
+      clearSnapshotFailure()
+    } catch (e) {
+      console.error('Snapshot failure terminate failed:', e)
+    }
+  }, [currentSession, clearSnapshotFailure])
 
   // Stop handler (immediate or summarize)
   const handleStop = useCallback(async (action: 'immediate' | 'summarize') => {
@@ -1006,6 +1082,17 @@ export function AnalysisPanel() {
         />
       )}
 
+      {/* Runtime restore safety banner (persists across reload) */}
+      {(runtimeRestoreStatus === 'unavailable' || runtimeRestoreStatus === 'intentionally_kept') && (
+        <div className="mb-2">
+          <RuntimeWarningBanner
+            runtimeRestoreStatus={runtimeRestoreStatus}
+            warning={runtimeRestoreWarning}
+            isZh={language === 'zh'}
+          />
+        </div>
+      )}
+
       {/* Header - Compact */}
       <div className="flex items-center justify-between pb-2 border-b border-slate-200">
         <div>
@@ -1016,16 +1103,38 @@ export function AnalysisPanel() {
           {currentSession.status === 'pending' && (
             <button
               onClick={handleStart}
-              disabled={readMode}
+              disabled={readMode || isForwardResumeBlocked()}
               className={`flex items-center gap-2 px-4 py-1.5 text-white rounded-lg font-medium transition-colors ${
-                readMode
+                readMode || isForwardResumeBlocked()
                   ? 'bg-slate-400 cursor-not-allowed'
                   : 'bg-green-600 hover:bg-green-700'
               }`}
-              title={readMode ? t('readModeRestriction') : undefined}
+              title={
+                isForwardResumeBlocked()
+                  ? (language === 'zh' ? '运行时不可用或快照失败，无法启动' : 'Blocked by runtime/snapshot failure')
+                  : readMode
+                    ? t('readModeRestriction')
+                    : undefined
+              }
             >
               <Play className="w-4 h-4" />
               {t('startAnalysis')}
+            </button>
+          )}
+
+          {isRerunEnabled() && !isRunning && (
+            <button
+              onClick={handleRerun}
+              disabled={readMode}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                readMode
+                  ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                  : 'bg-indigo-100 hover:bg-indigo-200 text-indigo-800'
+              }`}
+              title={language === 'zh' ? '从原始数据重新运行 (/rerun)' : 'Re-run analysis from raw inputs (/rerun)'}
+            >
+              <Play className="w-3.5 h-3.5" />
+              {language === 'zh' ? '重新运行' : 'Re-run'}
             </button>
           )}
           
@@ -1078,7 +1187,17 @@ export function AnalysisPanel() {
               </div>
               <button
                 onClick={handleResume}
-                className="flex items-center gap-1.5 px-3 py-1 bg-green-100 hover:bg-green-200 text-green-700 rounded-lg text-sm font-medium transition-colors"
+                disabled={isForwardResumeBlocked()}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-sm font-medium transition-colors ${
+                  isForwardResumeBlocked()
+                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                    : 'bg-green-100 hover:bg-green-200 text-green-700'
+                }`}
+                title={
+                  isForwardResumeBlocked()
+                    ? (language === 'zh' ? '运行时不可用，无法继续' : 'Resume blocked — runtime unavailable')
+                    : undefined
+                }
               >
                 <Play className="w-3.5 h-3.5" />
                 {language === 'zh' ? '继续' : 'Resume'}
@@ -1633,6 +1752,21 @@ export function AnalysisPanel() {
           onGoToData={handleExplorationFailedGoToData}
           onContinue={handleExplorationFailedContinue}
           onStop={handleExplorationFailedStop}
+        />
+      )}
+
+      {/* Snapshot failure HITL — no Skip; Retry re-enters capture only */}
+      {snapshotFailure && (
+        <SnapshotFailureDialog
+          failure={snapshotFailure}
+          isZh={language === 'zh'}
+          onRetry={() => {
+            void handleSnapshotFailureRetry()
+          }}
+          onManage={handleSnapshotFailureManage}
+          onTerminate={() => {
+            void handleSnapshotFailureTerminate()
+          }}
         />
       )}
 

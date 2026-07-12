@@ -18,6 +18,16 @@ import type {
   SessionListResponse,
   ChatMessage,
 } from '../types'
+import type {
+  SnapshotV2ListResult,
+  SnapshotV2PreviewResult,
+  SnapshotTransactionResponse,
+  SnapshotTransactionRecord,
+  RestoreSnapshotV2Request,
+  DeleteSnapshotV2Result,
+  ExportV2Result,
+  ImportV2Result,
+} from '../types/snapshotV2'
 
 const API_BASE = '/api'
 export const WS_CONNECT_TIMEOUT_MS = 10_000
@@ -47,6 +57,19 @@ export function applyStoreUpdates(updates: StoreUpdates): void {
   }
   if (updates.pubmedEmail != null) store.setPubmedEmail(updates.pubmedEmail)
   if (updates.literatureMaxSearchRounds != null) store.setLiteratureMaxSearchRounds(updates.literatureMaxSearchRounds)
+  if (updates.runtimeRestoreStatus != null || updates.runtimeRestoreWarning !== undefined || updates.snapshotFailure !== undefined) {
+    store.hydrateRuntimeRestoreFromSession({
+      runtime_restore_status: updates.runtimeRestoreStatus,
+      runtime_restore_warning: updates.runtimeRestoreWarning,
+      snapshot_failure: updates.snapshotFailure?.failure ?? (updates.snapshotFailure === null ? null : undefined),
+      snapshot_failure_allowed_actions: updates.snapshotFailure?.allowed_actions,
+    })
+    if (updates.snapshotFailure === null) {
+      store.clearSnapshotFailure()
+    } else if (updates.snapshotFailure) {
+      store.setSnapshotFailure(updates.snapshotFailure)
+    }
+  }
 }
 
 // Generate UUID using crypto API with fallback for non-HTTPS contexts
@@ -846,7 +869,9 @@ export function useWebSocket() {
 
         // Handle state_sync messages - version control and state synchronization
         if (data.type === 'state_sync') {
-          const syncContent = data.content
+          // Normalise: some backend paths nest fields under `content`
+          // while others place them at the top level of the message.
+          const syncContent = data.content ?? data
           const currentVersion = useAppStore.getState().stateVersion
 
           // Check for version conflict - reload full session state from server
@@ -920,6 +945,31 @@ export function useWebSocket() {
                   likelySpecies: info.likely_species,
                 })
                 store.setShowSpeciesInputDialog(true)
+              }
+            } else if (syncContent.change_type === 'snapshot_transaction') {
+              const info = syncContent.snapshot_transaction
+              if (info) {
+                const store = useAppStore.getState()
+                store.setSnapshotTransaction(info)
+
+                // Terminal committed events may trigger reconnect if backend directs
+                if (info.status === 'committed' && info.reconnect === true) {
+                  const { wsConnect: connectWs } = useAppStore.getState()
+                  if (connectWs) setTimeout(() => connectWs(), 100)
+                }
+              }
+            } else if (syncContent.change_type === 'snapshot_failure') {
+              const failure = syncContent.snapshot_failure
+              if (failure) {
+                const store = useAppStore.getState()
+                store.setSnapshotFailure({
+                  failure,
+                  allowed_actions: failure.allowed_actions || ['retry', 'manage', 'terminate'],
+                })
+              }
+              const txn = syncContent.snapshot_transaction
+              if (txn) {
+                useAppStore.getState().setSnapshotTransaction(txn)
               }
             } else if (
               syncContent.change_type === 'species_resolved' ||
@@ -1396,4 +1446,99 @@ export function useUserConfig() {
     getUserConfig, saveUserConfig, getUserConfigStatus,
     validateUserConfig, validateSavedConfig, deleteUserConfig,
   }
+}
+
+// ── Snapshot V2 API methods ────────────────────────────────────────
+
+export async function listSnapshotsV2(sessionId: string): Promise<SnapshotV2ListResult> {
+  const response = await apiFetch<{ success: boolean; data: SnapshotV2ListResult }>(
+    `/session/${sessionId}/snapshots-v2`,
+  )
+  return response.data
+}
+
+export async function previewSnapshotV2(sessionId: string, snapshotId: string): Promise<SnapshotV2PreviewResult> {
+  const response = await apiFetch<{ success: boolean; data: SnapshotV2PreviewResult }>(
+    `/session/${sessionId}/snapshots-v2/${snapshotId}`,
+  )
+  return response.data
+}
+
+export async function restoreSnapshotV2(
+  sessionId: string,
+  snapshotId: string,
+  request: RestoreSnapshotV2Request,
+): Promise<SnapshotTransactionResponse> {
+  return apiFetch<SnapshotTransactionResponse>(
+    `/session/${sessionId}/snapshots/${snapshotId}/restore-v2`,
+    {
+      method: 'POST',
+      body: JSON.stringify(request),
+    },
+  )
+}
+
+export async function cancelSnapshotTransaction(sessionId: string, transactionId: string): Promise<void> {
+  await apiFetch<void>(
+    `/session/${sessionId}/snapshot-transactions/${transactionId}/cancel`,
+    { method: 'POST' },
+  )
+}
+
+export async function getSnapshotTransaction(
+  sessionId: string,
+  transactionId: string,
+): Promise<SnapshotTransactionRecord> {
+  const response = await apiFetch<{ success: boolean; data: SnapshotTransactionRecord }>(
+    `/session/${sessionId}/snapshot-transactions/${transactionId}`,
+  )
+  return response.data
+}
+
+export async function deleteSnapshotV2(
+  sessionId: string,
+  snapshotId: string,
+  branch?: boolean,
+): Promise<DeleteSnapshotV2Result> {
+  const query = branch ? '?branch=true' : ''
+  const response = await apiFetch<{ success: boolean; data: DeleteSnapshotV2Result }>(
+    `/session/${sessionId}/snapshots-v2/${snapshotId}${query}`,
+    { method: 'DELETE' },
+  )
+  return response.data
+}
+
+export async function exportSnapshotsV2(
+  sessionId: string,
+  options?: { include_runtime?: boolean; snapshot_ids?: string[] },
+): Promise<ExportV2Result> {
+  const params = new URLSearchParams()
+  if (options?.include_runtime !== undefined) {
+    params.set('include_runtime', String(options.include_runtime))
+  }
+  if (options?.snapshot_ids && options.snapshot_ids.length > 0) {
+    params.set('snapshot_ids', options.snapshot_ids.join(','))
+  }
+  const qs = params.toString()
+  return apiFetch<ExportV2Result>(
+    `/session/${sessionId}/export-v2${qs ? `?${qs}` : ''}`,
+  )
+}
+
+export async function importSnapshotsV2(
+  sessionId: string,
+  file: File,
+  trust?: boolean,
+): Promise<ImportV2Result> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/gzip',
+    'X-Filename': file.name,
+    'X-Trust': trust ? 'true' : 'false',
+  }
+  const options: RequestInit = {
+    method: 'POST',
+    headers,
+    body: file,
+  }
+  return apiFetch<ImportV2Result>(`/session/${sessionId}/import-v2`, options)
 }

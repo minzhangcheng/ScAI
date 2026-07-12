@@ -16,8 +16,18 @@ from backend.models.api_requests import LlmFailureActionRequest, RetryNodeReques
 from backend.models.schemas import (
     APIResponse, TaskStatus,
 )
-from backend.services.session_store import async_save_session, ensure_session_loaded, pause_and_restart_ws as _pause_and_restart_ws_impl
+from backend.services.session_store import (
+    async_save_session,
+    assert_recovery_clear,
+    ensure_session_loaded,
+    pause_and_restart_ws as _pause_and_restart_ws_impl,
+)
 from backend.utils.auth import require_session_ownership
+from backend.utils.runtime_apply import is_forward_resume_blocked
+from backend.services.snapshot_v2.errors import (
+    SnapshotTransactionError,
+    is_snapshot_failure_blocked,
+)
 from backend.utils.files import validate_session_id
 from backend.state import (
     _run_tasks,
@@ -96,6 +106,20 @@ async def run_analysis(session_id: str, request: Request):
     if state.status == TaskStatus.RUNNING:
         raise HTTPException(status_code=400, detail="Analysis already running")
 
+    try:
+        assert_recovery_clear(state, session_id=session_id)
+    except SnapshotTransactionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if is_snapshot_failure_blocked(state):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Session is blocked on a required snapshot failure. "
+                "Use Retry, Manage, or Terminate — generic start is refused."
+            ),
+        )
+
     state.status = TaskStatus.RUNNING
     await async_save_session(session_id, state)
 
@@ -167,10 +191,46 @@ async def resume_analysis(session_id: str, request: Request):
 async def _resume_analysis_locked(session_id: str, user_id: str):
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
 
+    try:
+        assert_recovery_clear(state, session_id=session_id)
+    except SnapshotTransactionError as exc:
+        return APIResponse(
+            success=False,
+            message=str(exc),
+            data={"needs_reconnect": False, "recovery_blocked": True},
+        )
+
+    # Snapshot-failure gate: generic resume must not clear or advance.
+    # Only dedicated retry/manage/terminate endpoints may clear the gate.
+    if is_snapshot_failure_blocked(state):
+        return APIResponse(
+            success=False,
+            message=(
+                "Session is blocked on a required snapshot failure. "
+                "Use Retry, Manage, or Terminate — generic resume is refused."
+            ),
+            data={
+                "needs_reconnect": False,
+                "snapshot_failure": getattr(state, "snapshot_failure", None),
+                "wait_input_reason": getattr(state, "wait_input_reason", None),
+            },
+        )
+
     # Restore original max_rounds if it was saved during a stop operation
     if state.original_max_rounds is not None:
         state.max_rounds = state.original_max_rounds
         state.original_max_rounds = None
+
+    if is_forward_resume_blocked(state.runtime_restore_status) and state.status != TaskStatus.COMPLETED:
+        return APIResponse(
+            success=True,
+            message=(
+                "This session was restored without a consistent kernel runtime. "
+                "Forward analysis is blocked. Re-run the analysis from your data to "
+                "recompute kernel state, or view the session read-only."
+            ),
+            data={"needs_reconnect": False, "runtime_unavailable": True},
+        )
 
     if state.status == TaskStatus.COMPLETED:
         # Re-analysis: tear down the terminated checkpoint so the WS
@@ -180,6 +240,7 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         state.status = TaskStatus.RUNNING
         state.max_rounds = state.current_round + 1
         state.last_restored_snapshot_id = None
+        state.runtime_restore_status = "complete"  # re-run recomputes kernel state
         await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
         return APIResponse(
@@ -376,6 +437,19 @@ async def _stop_analysis_locked(session_id: str, user_id: str, req: StopAnalysis
         return APIResponse(success=True, message="Analysis terminated")
 
     elif req.action == "summarize":
+        # Snapshot-failure gate: stop-and-summarize must not skip or advance.
+        if is_snapshot_failure_blocked(state):
+            return APIResponse(
+                success=False,
+                message=(
+                    "Session is blocked on a required snapshot failure. "
+                    "Stop-and-summarize is refused until Retry, Manage, or Terminate."
+                ),
+                data={
+                    "snapshot_failure": getattr(state, "snapshot_failure", None),
+                    "wait_input_reason": getattr(state, "wait_input_reason", None),
+                },
+            )
         if state.status == TaskStatus.WAITING_INPUT:
             skip_target = resolve_hitl_skip_target(state)
             if skip_target is not None:

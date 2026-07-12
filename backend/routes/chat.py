@@ -20,7 +20,6 @@ from backend.state import (
     websockets, workflows, state_lock,
 )
 from backend.utils.config_resolver import resolve_config_for_user
-from backend.utils.snapshot import SnapshotManager
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import safe_filename, validate_session_id
 from backend.utils.upload import stream_save_file
@@ -270,14 +269,223 @@ async def _send_chat_ws(session_id: str, msg_type: str, content: Any):
         logger.warning(f"Chat WS: no connection for {session_id}, message {msg_type} not delivered")
 
 
-async def _create_chat_snapshot(session_id: str, state: AnalysisState):
-    """Create an automatic snapshot after chat exchange completes."""
+async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
+    """Capture a required post-chat snapshot at an exact safe point.
+
+    Active workflow path: request the shared cooperative safe point, wait for
+    acknowledgement, freeze the dynamic capsule from the live descriptor, and
+    capture with the workflow sandbox. Idle/terminal path: prove no-kernel
+    from persisted lifecycle state and an explicit descriptor — never hard-code
+    ``kernel_present=False`` before determining lifecycle.
+
+    Only cancels/releases a safe point this call owns. Foreign holds
+    (restore or another capture) fail closed and are never stolen.
+    """
+    import asyncio
+
+    from backend.config._config import default_config, get_session_workspace
+    from backend.services.snapshot_v2.continuation import ContinuationRegistry
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.snapshot_v2.models import SnapshotCaptureRequest
+    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+    from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
+    from backend.services.snapshot_v2.service import SnapshotService
+    from backend.state import workflows
+
+    paths = SnapshotV2Paths.for_session(session_id)
+    service = SnapshotService(session_id, paths)
+    sp = get_snapshot_safe_point_manager()
+    workspace_root = str(get_session_workspace(session_id))
+    workflow = workflows.get(session_id)
+    # True only when THIS call created the pending request or acquired the pause.
+    owned = False
+
     try:
-        await SnapshotManager.create_and_register_snapshot(
-            session_id, state, "post_chat", notify_fn=_send_chat_ws,
+        if workflow is not None:
+            # Foreign hold / pending request — do not steal.
+            if sp.is_paused(session_id) or sp.has_pending_request(session_id):
+                raise RequiredSnapshotBlocked(
+                    "LIVE_SANDBOX_REQUIRED",
+                    "Post-chat capture cannot steal an existing safe-point hold",
+                )
+
+            owned = sp.request_safe_point(session_id)
+            if not owned:
+                raise RequiredSnapshotBlocked(
+                    "LIVE_SANDBOX_REQUIRED",
+                    "Post-chat capture failed to create a safe-point request",
+                )
+
+            # Wait for boundary acknowledgement.
+            if not sp.is_paused(session_id):
+                ack_event = sp.get_pending_event(session_id)
+                if ack_event is not None:
+                    timeout = default_config.get_snapshot_safe_point_timeout_seconds()
+                    try:
+                        await asyncio.wait_for(ack_event.wait(), timeout=timeout)
+                    except asyncio.TimeoutError as exc:
+                        raise RequiredSnapshotBlocked(
+                            "LIVE_SANDBOX_REQUIRED",
+                            "Timed out waiting for post-chat safe-point "
+                            "acknowledgement",
+                        ) from exc
+
+            # Require a successful workflow acknowledgement — never force-acquire.
+            if not sp.is_paused(session_id):
+                raise RequiredSnapshotBlocked(
+                    "LIVE_SANDBOX_REQUIRED",
+                    "Post-chat safe point was not acknowledged by the "
+                    "active workflow",
+                )
+
+            live_sp = sp.get_descriptor(session_id) or {}
+            graph_state = dict(getattr(workflow, "_current_graph_state", None) or {})
+            sandbox = getattr(workflow, "sandbox", None)
+            kernel_present = (
+                sandbox is not None and getattr(sandbox, "km", None) is not None
+            )
+            if "kernel_present" not in live_sp:
+                live_sp = {
+                    **live_sp,
+                    "kernel_present": kernel_present,
+                }
+            # Prefer graph next_node for dynamic capsule when descriptor lacks it.
+            if "next_node" not in live_sp and graph_state.get("next_node"):
+                live_sp = {**live_sp, "next_node": graph_state["next_node"]}
+            if "current_round" not in live_sp:
+                live_sp = {
+                    **live_sp,
+                    "current_round": getattr(state, "current_round", 0) or 0,
+                }
+
+            # Refresh descriptor under the held (owned) safe point for capture.
+            if not sp.update_descriptor(session_id, live_sp):
+                raise RequiredSnapshotBlocked(
+                    "LIVE_SANDBOX_REQUIRED",
+                    "Post-chat safe point was released before descriptor refresh",
+                )
+
+            workflow_state = {**graph_state, **live_sp}
+            capsule = ContinuationRegistry(service.object_store).freeze(
+                "post_chat",
+                state,
+                workflow_state,
+                live_safe_point=live_sp,
+            )
+            request = SnapshotCaptureRequest(
+                session_id=session_id,
+                reason="post_chat",
+                phase="post_chat",
+                capsule=capsule,
+                round_number=getattr(state, "current_round", 0) or 0,
+            )
+            return await service.capture_required_snapshot(
+                state,
+                request,
+                sandbox=sandbox,
+                workflow_state=workflow_state,
+                workspace_root=workspace_root,
+            )
+
+        # No active workflow — derive terminal/idle from persisted state.
+        from backend.models.schemas import TaskStatus
+
+        status = getattr(state, "status", None)
+        terminal = status in (
+            TaskStatus.COMPLETED,
+            getattr(TaskStatus, "FAILED", None),
+        ) or str(status) in ("completed", "failed")
+        # All non-running HITL / idle statuses authorize empty-complete.
+        inactive = status in (
+            TaskStatus.PENDING,
+            TaskStatus.PAUSED,
+            TaskStatus.WAITING_INPUT,
+            TaskStatus.WAITING_ANNOTATION,
+            TaskStatus.WAITING_PLAN_REVIEW,
+            TaskStatus.WAITING_SPECIES_INPUT,
+        ) or terminal or status is None
+
+        descriptor = {
+            "kernel_present": False,
+            "current_round": getattr(state, "current_round", 0) or 0,
+        }
+        if terminal:
+            descriptor["status"] = "completed"
+            descriptor["continuation_kind"] = "terminal"
+        else:
+            descriptor["inactive"] = True if inactive else False
+
+        # Only authorize empty-complete when we can prove idle/terminal.
+        if not (terminal or inactive):
+            raise RequiredSnapshotBlocked(
+                "LIVE_SANDBOX_REQUIRED",
+                "Post-chat capture without workflow cannot prove idle/terminal",
+            )
+
+        # Foreign hold — do not steal.
+        if sp.is_paused(session_id) or sp.has_pending_request(session_id):
+            raise RequiredSnapshotBlocked(
+                "LIVE_SANDBOX_REQUIRED",
+                "Post-chat capture cannot steal an existing safe-point hold",
+            )
+
+        if not sp.acquire(session_id, descriptor):
+            raise RequiredSnapshotBlocked(
+                "LIVE_SANDBOX_REQUIRED",
+                "Post-chat capture failed to acquire idle safe point",
+            )
+        owned = True
+        live_sp = dict(descriptor)
+        workflow_state = dict(descriptor)
+        capsule = ContinuationRegistry(service.object_store).freeze(
+            "post_chat",
+            state,
+            workflow_state,
+            live_safe_point=live_sp,
         )
-    except Exception as e:
-        logger.warning(f"[{session_id}] Chat auto-snapshot failed: {e}")
+        request = SnapshotCaptureRequest(
+            session_id=session_id,
+            reason="post_chat",
+            phase="post_chat",
+            capsule=capsule,
+            round_number=getattr(state, "current_round", 0) or 0,
+        )
+        return await service.capture_required_snapshot(
+            state,
+            request,
+            sandbox=None,
+            workflow_state=workflow_state,
+            workspace_root=workspace_root,
+        )
+    finally:
+        if owned:
+            sp.cancel_safe_point_request(session_id)
+
+
+async def _create_chat_snapshot(session_id: str, state: AnalysisState) -> None:
+    """Required post-chat snapshot via SnapshotService (fail closed).
+
+    Delegates to :func:`capture_post_chat_snapshot`. On failure, persists the
+    same blocking snapshot_failure state so a later run/resume refuses to
+    start until Retry, Manage, or Terminate.
+    """
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.session_store import async_save_session, update_session_cache
+
+    try:
+        await capture_post_chat_snapshot(session_id, state)
+    except RequiredSnapshotBlocked:
+        # Persist blocking failure so run/resume refuses until HITL action.
+        try:
+            await update_session_cache(session_id, state)
+            await async_save_session(session_id, state)
+        except Exception:
+            logger.warning(
+                "[%s] Failed to persist post-chat snapshot failure state",
+                session_id,
+                exc_info=True,
+            )
+        raise
 
 
 def _try_parse_delegation(content: str) -> Optional[Dict[str, Any]]:
@@ -566,6 +774,7 @@ async def _run_chat_delegation(
     """Background task: orchestrate delegated agent work, then PI synthesizes results."""
     import traceback
     from backend.utils.llm_client import LLMManager
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
 
     user_id = getattr(state, "user_id", "") if state else ""
     config = await resolve_config_for_user(user_id)
@@ -825,6 +1034,53 @@ async def _run_chat_delegation(
             logger.warning(f"[{session_id}] Failed to save session during cancellation", exc_info=True)
         raise
 
+    except RequiredSnapshotBlocked as e:
+        # Coherent HITL: structured snapshot_failure, not generic chat_error.
+        from backend.models.schemas import TaskStatus
+        from backend.services.snapshot_v2.errors import SNAPSHOT_FAILURE_ACTIONS
+
+        logger.warning(
+            f"[{session_id}] Post-chat snapshot blocked after delegation: {e}"
+        )
+        if not getattr(state, "snapshot_failure", None):
+            state.snapshot_failure = {
+                "code": e.code,
+                "message": str(e),
+                "allowed_actions": list(SNAPSHOT_FAILURE_ACTIONS),
+                "snapshot_id": getattr(e, "snapshot_id", None),
+            }
+        state.wait_input_reason = "snapshot_failure"
+        try:
+            state.status = TaskStatus.WAITING_INPUT
+        except Exception:
+            pass
+        for i in range(len(state.chat_messages) - 1, -1, -1):
+            if state.chat_messages[i].get("delegation_active"):
+                state.chat_messages[i] = {
+                    "role": "assistant",
+                    "content": (
+                        "Chat completed, but a required snapshot failed. "
+                        "Use Retry, Manage, or Terminate."
+                    ),
+                    "timestamp": datetime.now().isoformat(),
+                    "snapshot_failure": state.snapshot_failure,
+                }
+                break
+        await _send_chat_ws(session_id, "state_sync", {
+            "change_type": "snapshot_failure",
+            "status": getattr(state.status, "value", state.status),
+            "wait_input_reason": "snapshot_failure",
+            "snapshot_failure": state.snapshot_failure,
+        })
+        try:
+            await update_session_cache(session_id, state)
+            await async_save_session(session_id, state)
+        except Exception:
+            logger.warning(
+                f"[{session_id}] Failed to persist snapshot_failure after delegation",
+                exc_info=True,
+            )
+
     except Exception as e:
         logger.error(f"Chat delegation error for {session_id}: {traceback.format_exc()}")
         error_msg = f"Analysis failed: {str(e)}"
@@ -870,6 +1126,7 @@ async def chat_with_pi(
 ):
     """Chat with PI Agent using analysis context. Supports file uploads with per-file agent targeting."""
     from backend.utils.agent_llm import get_agent_llm_client
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
     import base64
 
     validate_session_id(session_id)
@@ -1180,9 +1437,32 @@ async def chat_with_pi(
     if assistant_msg.get("figures"):
         result["figures"] = assistant_msg["figures"]
 
-    # Auto-snapshot after chat exchange
-    await _create_chat_snapshot(session_id, state)
-    await async_save_session(session_id, state)
+    # Auto-snapshot after chat exchange (fail closed → coherent HITL)
+    try:
+        await _create_chat_snapshot(session_id, state)
+        await async_save_session(session_id, state)
+    except RequiredSnapshotBlocked as e:
+        from backend.models.schemas import TaskStatus
+        from backend.services.snapshot_v2.errors import SNAPSHOT_FAILURE_ACTIONS
+
+        logger.warning(f"[{session_id}] Post-chat snapshot blocked: {e}")
+        if not getattr(state, "snapshot_failure", None):
+            state.snapshot_failure = {
+                "code": e.code,
+                "message": str(e),
+                "allowed_actions": list(SNAPSHOT_FAILURE_ACTIONS),
+                "snapshot_id": getattr(e, "snapshot_id", None),
+            }
+        state.wait_input_reason = "snapshot_failure"
+        try:
+            state.status = TaskStatus.WAITING_INPUT
+        except Exception:
+            pass
+        await async_save_session(session_id, state)
+        result["snapshot_failure"] = state.snapshot_failure
+        result["wait_input_reason"] = "snapshot_failure"
+        result["status"] = "snapshot_failure"
+        return result
 
     return result
 

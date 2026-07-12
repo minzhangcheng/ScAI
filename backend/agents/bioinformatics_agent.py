@@ -444,9 +444,22 @@ TOOLS = [
                         "type": "string",
                         "enum": ["technical", "biological"],
                         "description": "Whether this is a technical step (can proceed autonomously) or requires biological interpretation"
+                    },
+                    "persistent_outputs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "REQUIRED when this cell creates variables intended for later "
+                            "cells or snapshot restore (e.g., adata, results, markers, "
+                            "model). List every user-global name that subsequent cells will "
+                            "read. Empty array is allowed only when the cell creates no "
+                            "values for later reuse. Dynamic namespace reads depend on "
+                            "this declaration."
+                        ),
+                        "default": [],
                     }
                 },
-                "required": ["code", "description", "step_type"]
+                "required": ["code", "description", "step_type", "persistent_outputs"]
             }
         }
     },
@@ -2897,6 +2910,23 @@ If results significantly deviate from plan expectations, report via consult_pi i
                 except Exception:
                     pass
 
+            # Restore safe-point between sandbox steps (shared coordinator).
+            session_id = getattr(self, "session_id", None) or getattr(state, "id", None)
+            if session_id:
+                from backend.services.snapshot_v2.safe_point import (
+                    get_snapshot_safe_point_manager,
+                )
+
+                sp = get_snapshot_safe_point_manager()
+                if sp.has_pending_request(session_id):
+                    sp.acknowledge_safe_point_request(session_id)
+                if sp.is_paused(session_id):
+                    logger.info(
+                        f"[Bioinformatics] Restore safe-point active at step "
+                        f"{step_count}; freezing until release"
+                    )
+                    await sp.wait_for(session_id)
+
             step_count += 1
             force_break = False  # Reset per-iteration
 
@@ -3227,6 +3257,7 @@ If results significantly deviate from plan expectations, report via consult_pi i
                         code = args.get("code", "")
                         description = args.get("description", "")
                         step_type = args.get("step_type", "technical")
+                        persistent_outputs = args.get("persistent_outputs", [])
 
                         # Validate code for security before execution
                         is_safe, security_error = self._validate_code(code)
@@ -3285,7 +3316,12 @@ If results significantly deviate from plan expectations, report via consult_pi i
                             code, str(figures_dir), timestamp
                         )
 
-                        result = await self.sandbox.execute(wrapped_code)
+                        result = await self.sandbox.execute(
+                            wrapped_code,
+                            declared_outputs=list(persistent_outputs or []),
+                            track_globals=True,
+                        )
+
 
                         # Auto-fix: ensure obs/var names are unique after every execution
                         await self.sandbox.execute(
@@ -3366,6 +3402,26 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                 validated = await self._auto_validate_species_genes()
                                 if validated:
                                     self._current_analysis_state.species_genes_validated = True
+
+                            # Store persistent_outputs + promoted deps in sandbox_state for snapshot runtime tracking
+                            if self._current_analysis_state:
+                                sandbox_state = self._current_analysis_state.sandbox_state or {}
+                                deps = sandbox_state.setdefault("runtime_dependencies_v2", [])
+                                # Explicit declarations
+                                for var_name in (persistent_outputs or []):
+                                    if var_name and var_name not in deps:
+                                        deps.append(var_name)
+                                # Cross-cell promotions from sandbox tracker
+                                tracker = getattr(self.sandbox, "runtime_dependency_tracker", None)
+                                if tracker is not None:
+                                    for var_name in sorted(tracker.required_outputs):
+                                        if var_name and var_name not in deps:
+                                            deps.append(var_name)
+                                    sandbox_state["runtime_dependency_tracker_v2"] = tracker.to_state_dict()
+                                sandbox_state["runtime_revision"] = getattr(
+                                    self.sandbox, "runtime_revision", 0
+                                )
+                                self._current_analysis_state.sandbox_state = sandbox_state
 
                         tool_result = f"Execution {'successful' if not result.error else 'failed'}.\n"
                         if result.output:

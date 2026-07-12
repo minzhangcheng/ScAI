@@ -60,6 +60,8 @@ class MessagingMixin:
                     "llm_failure_info": analysis_state.llm_failure_info,
                     "agent_disabled_info": analysis_state.agent_disabled_info,
                     "species_input_info": analysis_state.species_input_info,
+                    "snapshot_failure": analysis_state.snapshot_failure,
+                    "snapshot_transaction": analysis_state.snapshot_transaction,
                 }
             )
             try:

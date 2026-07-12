@@ -289,6 +289,12 @@
     ]
   ],
   [
+    "/api/session/{session_id}/export-v2",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/{session_id}/export/download",
     [
       "GET"
@@ -362,6 +368,12 @@
   ],
   [
     "/api/session/{session_id}/human-input",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/import-v2",
     [
       "POST"
     ]
@@ -613,7 +625,37 @@
     ]
   ],
   [
+    "/api/session/{session_id}/snapshot-transactions/{transaction_id}",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshot-transactions/{transaction_id}/cancel",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/{session_id}/snapshots",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshots-v2",
+    [
+      "GET"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshots-v2/{snapshot_id}",
+    [
+      "DELETE"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshots-v2/{snapshot_id}",
     [
       "GET"
     ]
@@ -632,6 +674,12 @@
   ],
   [
     "/api/session/{session_id}/snapshots/{snapshot_id}/restore",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshots/{snapshot_id}/restore-v2",
     [
       "POST"
     ]

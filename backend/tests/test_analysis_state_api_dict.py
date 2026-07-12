@@ -76,6 +76,10 @@ class TestAnalysisStateApiDictRoundTrip:
             "integrated_report",
             "species", "species_resolved", "species_genes_validated",
             "species_input_info",
+            "runtime_restore_status",
+            "snapshot_failure",
+            "snapshot_transaction",
+            "pending_required_snapshot",
         }
         assert set(api.keys()) == expected_keys
 

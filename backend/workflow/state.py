@@ -52,7 +52,7 @@ def make_initial_workflow_state(analysis_state: AnalysisState, current_round: in
     plan = analysis_state.current_plan
     plan_approved = plan is not None and plan.status == "approved"
     planning_stage = plan.stage if plan and plan.stage else "full"
-    return {
+    result: WorkflowState = {
         "analysis_state": analysis_state,
         "current_round": current_round,
         "pi_instructions": {},
@@ -67,3 +67,9 @@ def make_initial_workflow_state(analysis_state: AnalysisState, current_round: in
         "plan_approved": plan_approved,
         "planning_stage": planning_stage,
     }
+    # Graph-node restore: preserve the target node in the workflow state so
+    # _should_continue_after_init can route directly to it, bypassing the
+    # normal initialize_round → pi_planning → … pipeline.
+    if analysis_state.restore_resume_kind == "graph_node" and analysis_state.restore_resume_node:
+        result["_restore_resume_node"] = analysis_state.restore_resume_node
+    return result

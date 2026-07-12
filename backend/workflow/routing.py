@@ -67,13 +67,23 @@ class RoutingMixin:
         return "continue_to_synthesis"
 
     def _should_continue_after_init(self, state: "WorkflowState") -> str:
-        """Route to report generation if user requested stop during round initialization."""
+        """Route to report generation if user requested stop during round initialization.
+
+        Also handles graph-node restore routing: when the session was restored
+        from a snapshot with a declared next_node, route directly to that node
+        instead of following the default pi_planning → biochemistry pipeline.
+        """
         if state.get("human_stop_requested", False):
             logger.info(f"[{self.session_id}] Stop requested during init, routing to final report")
             return "stop"
         if state.get("should_continue") is False:
             logger.info(f"[{self.session_id}] should_continue=False after init, routing to final report")
             return "stop"
+        # Graph-node restore: route directly to the declared next node.
+        next_node = state.get("_restore_resume_node")
+        if next_node is not None:
+            logger.info(f"[{self.session_id}] Graph-node restore → routing to {next_node}")
+            return f"route_{next_node}"
         return "continue"
 
     def _after_pi_planning(self, state: "WorkflowState") -> str:

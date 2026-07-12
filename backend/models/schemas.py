@@ -60,6 +60,8 @@ SnapshotPhase = Literal[
     "pre_major_revision", "post_report",
     "manual",
     "pre_integration_gate",
+    "post_chat",
+    "pre_restore",
 ]
 
 AnalysisPhaseType = Literal["exploration", "innovation", "integration"]
@@ -510,7 +512,11 @@ class DetailedReportSegment(BaseModel):
     round_number: int = 0
 
 class Snapshot(BaseModel):
-    """A saved snapshot of analysis state for debugging rollback"""
+    """A saved snapshot of analysis state for debugging rollback.
+
+    Derived compatibility cache for both V1 files and committed Snapshot V2
+    manifests. V2 listing projection may populate the optional V2 fields below.
+    """
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     description: str = ""
@@ -527,6 +533,13 @@ class Snapshot(BaseModel):
     runtime_state_included: bool = False
     skipped_files: List[Dict[str, str]] = Field(default_factory=list)
     branch_id: Optional[str] = None
+    # Snapshot V2 projection fields (optional; absent for pure V1 records)
+    format_version: Optional[int] = None
+    runtime_status: Optional[Literal["complete", "missing", "state_only", "corrupt"]] = None
+    logical_size_bytes: Optional[int] = None
+    physical_added_bytes: Optional[int] = None
+    source_restore_transaction_id: Optional[str] = None
+    continuation_kind: Optional[str] = None
 
 class PlanStep(BaseModel):
     """A single step in an analysis plan."""
@@ -894,6 +907,23 @@ class AnalysisState(BaseModel):
     restore_branch_id: Optional[str] = None
     restore_branch_label: Optional[str] = None
 
+    # Snapshot runtime consistency (Stage 1 foundation safety).
+    # "complete": kernel runtime matches restored business state.
+    # "unavailable": restored without a consistent runtime; forward resume is blocked.
+    # "intentionally_kept": user override kept a mismatched live runtime (risk accepted).
+    runtime_restore_status: Literal["complete", "unavailable", "intentionally_kept"] = "complete"
+
+    # Snapshot V2: failure and transaction tracking
+    snapshot_failure: Optional[Dict[str, Any]] = None
+    snapshot_transaction: Optional[Dict[str, Any]] = None
+
+    # Recovery failure marker: set when journal recovery fails, blocks mutations
+    recovery_blocked: bool = False
+
+    # Post-report snapshot idempotency (Task 6)
+    report_generation_id: Optional[str] = None
+    pending_required_snapshot: Optional[Dict[str, Any]] = None
+
     # Collaborative analysis planning
     current_plan: Optional[AnalysisPlan] = None
     plan_dialogue_history: List[Dict[str, Any]] = Field(default_factory=list)  # PI↔生信对话记录
@@ -985,7 +1015,9 @@ class AnalysisState(BaseModel):
     chat_messages: List[Dict[str, Any]] = Field(default_factory=list)
 
     # Sandbox state (for potential restoration)
-    sandbox_state: Optional[Dict[str, Any]] = None
+    sandbox_state: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {"runtime_revision": 0, "saved_runtime_revision": 0}
+    )
     
     # Config snapshot
     config_snapshot: Optional[Dict[str, Any]] = None
@@ -1053,6 +1085,10 @@ class AnalysisState(BaseModel):
         "species_genes_validated": "species_genes_validated",
         "species_input_info": "species_input_info",
         "literature_config": "literature_config",
+        "runtime_restore_status": "runtime_restore_status",
+        "snapshot_failure": "snapshot_failure",
+        "snapshot_transaction": "snapshot_transaction",
+        "pending_required_snapshot": "pending_required_snapshot",
     }
 
     # --- Data helper methods ---

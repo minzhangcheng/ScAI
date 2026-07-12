@@ -122,6 +122,20 @@ async def lifespan(app: FastAPI):
     from backend.services.upload import set_session_callbacks
     set_session_callbacks(_update_session_cache, async_save_session)
 
+    # Recover any incomplete snapshot restore transactions for all sessions
+    try:
+        from backend.services.snapshot_v2.recovery import recover_for_all_sessions
+        recovery_result = await recover_for_all_sessions()
+        if recovery_result.recovered:
+            logger.info(
+                "Lifespan: recovered %d restore transactions across all sessions",
+                len(recovery_result.recovered_transactions),
+            )
+            if recovery_result.errors:
+                logger.warning("Lifespan recovery errors: %s", recovery_result.errors)
+    except Exception:
+        logger.exception("Lifespan snapshot recovery failed; continuing")
+
     from backend.tasks.session_cleanup import cleanup_stale_sessions
     cleanup_task = asyncio.create_task(
         cleanup_stale_sessions(

@@ -36,6 +36,8 @@ from .graph import GraphMixin
 from .reporting import ReportingMixin
 from .integration import IntegrationMixin
 
+from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
+
 from ..models.schemas import (
     AnalysisState, AgentType, TaskStatus, RoundResult, AnalysisPhase,
     WebSocketMessage, AgentMessage, MessageRole,
@@ -53,6 +55,7 @@ from ..utils.llm_client import LLMManager, UpstreamExhaustedError
 from ..constants import LlmFailureAction, WaitInputReason, StateSyncChangeType, SEMANTIC_WAIT_GATES
 from ..utils.settings_provider import AgentSettingsProvider
 from ..utils.sandbox import LocalJupyterSandbox
+from ..utils.runtime_apply import is_forward_resume_blocked
 from ..config import SystemConfig, get_session_workspace, get_session_states
 
 
@@ -140,6 +143,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         message_callback: Optional[Callable] = None,
         state_callback: Optional[Callable] = None  # Callback to save state after each round
     ):
+        # Fail closed: unresolved recovery blocks workflow construction.
+        from ..services.session_store import assert_recovery_clear
+        assert_recovery_clear(session_id=session_id)
+
         self.config = config
         self.session_id = session_id
         self.message_callback = message_callback
@@ -426,6 +433,65 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     def signal_resume(self):
         """Release the cooperative pause gate so blocked nodes/agent loops can proceed."""
         self._pause_event.set()
+
+    async def acknowledge_at_boundary(self) -> bool:
+        """Acknowledge a pending restore/post-chat safe-point at a boundary.
+
+        Uses the process-wide SafePointManager (never a private instance).
+        Transitions a pending request to acquired so the waiting capture or
+        restore job can proceed. Stores a live descriptor including
+        ``kernel_present`` and graph position so post-chat / pre_restore
+        capture can freeze an exact capsule.
+
+        Does not wait for release — callers that must freeze mutations should
+        call ``await_restore_safe_point`` afterward.
+
+        Returns ``True`` if a pending request was acknowledged.
+        """
+        from ..services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
+
+        sp = get_snapshot_safe_point_manager()
+        if not sp.has_pending_request(self.session_id):
+            return False
+
+        graph_state = dict(getattr(self, "_current_graph_state", None) or {})
+        sb = getattr(self, "sandbox", None)
+        if "kernel_present" not in graph_state:
+            graph_state["kernel_present"] = (
+                sb is not None and getattr(sb, "km", None) is not None
+            )
+        if "current_round" not in graph_state:
+            analysis = getattr(self, "state", None) or getattr(
+                self, "_current_analysis_state", None,
+            )
+            if analysis is not None:
+                graph_state["current_round"] = (
+                    getattr(analysis, "current_round", 0) or 0
+                )
+
+        acked = sp.acknowledge_safe_point_request(self.session_id, graph_state)
+        if acked:
+            logger.info(
+                f"[{self.session_id}] Acknowledged safe-point at boundary"
+            )
+        return acked
+
+    async def await_restore_safe_point(self) -> None:
+        """Acknowledge pending restore safe-point and freeze until released.
+
+        Called at graph-node boundaries and between sandbox steps. Freezes
+        new workflow mutations while a restore job holds the safe point.
+        """
+        from ..services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
+
+        await self.acknowledge_at_boundary()
+        sp = get_snapshot_safe_point_manager()
+        if sp.is_paused(self.session_id):
+            logger.info(
+                f"[{self.session_id}] Waiting for restore safe-point release"
+            )
+            await sp.wait_for(self.session_id)
+            logger.info(f"[{self.session_id}] Restore safe-point released; resuming")
 
     def signal_annotation_confirmed(self):
         """Signal that user has confirmed cell type annotations"""
@@ -754,24 +820,57 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         return make_initial_workflow_state(analysis_state, current_round)
 
     async def _create_auto_snapshot(self, state: AnalysisState, phase: str):
-        """Create an automatic snapshot at a key analysis point."""
-        from ..utils.snapshot import SnapshotManager
-        try:
-            if self.sandbox:
-                if hasattr(self.sandbox, 'notebook_state') and self.sandbox.notebook_state:
-                    await asyncio.to_thread(self.sandbox.notebook_state.save)
-                await self.sandbox.save_session()
+        """Create a required workflow snapshot via SnapshotService.
 
-            async def notify(sid, msg_type, content):
-                await self._send_message(msg_type, content, AgentType.PI)
+        Fail-closed: on capture failure raises RequiredSnapshotBlocked after
+        persisting the snapshot_failure gate (retry/manage/terminate only).
+        """
+        from ..config import get_session_workspace
+        from ..services.snapshot_v2.service import SnapshotService
+        from ..services.snapshot_v2.continuation import ContinuationRegistry
+        from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
+        from ..services.snapshot_v2.models import SnapshotCaptureRequest
+        from ..services.snapshot_v2.paths import SnapshotV2Paths
+        from ..services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
 
-            await SnapshotManager.create_and_register_snapshot(
-                self.session_id, state, phase, notify_fn=notify,
+        # Prefer a long-lived service on the workflow when tests inject one.
+        service = getattr(self, "snapshot_service", None)
+        if service is None:
+            paths = SnapshotV2Paths.for_session(self.session_id)
+            service = SnapshotService(self.session_id, paths)
+            self.snapshot_service = service
+
+        workflow_state = dict(self._current_graph_state or {})
+        # Enrich with kernel presence for runtime capture decisions.
+        if "kernel_present" not in workflow_state:
+            sb = getattr(self, "sandbox", None)
+            workflow_state["kernel_present"] = (
+                sb is not None and getattr(sb, "km", None) is not None
             )
-        except WorkflowTerminatedError:
-            raise
-        except Exception as e:
-            logger.warning(f"[{self.session_id}] Auto-snapshot failed: {e}")
+
+        live_sp = get_snapshot_safe_point_manager().get_descriptor(self.session_id)
+        capsule = ContinuationRegistry(service.object_store).freeze(
+            phase,
+            state,
+            workflow_state,
+            live_safe_point=live_sp,
+        )
+        request = SnapshotCaptureRequest(
+            session_id=self.session_id,
+            reason=phase,
+            phase=phase,
+            capsule=capsule,
+            round_number=getattr(state, "current_round", 0) or 0,
+        )
+        workspace_root = str(get_session_workspace(self.session_id))
+        # capture_required_snapshot applies success/failure and raises on failure
+        return await service.capture_required_snapshot(
+            state,
+            request,
+            sandbox=getattr(self, "sandbox", None),
+            workflow_state=workflow_state,
+            workspace_root=workspace_root,
+        )
 
     def _merge_supplementary_findings(self, agent_key: str, new_findings: List[str]):
         """Merge supplementary findings into the current graph state for an agent."""
@@ -866,14 +965,67 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
     ) -> AnalysisState:
         """
         Run the complete workflow
-        
+
         Args:
             initial_state: Initial analysis state
             thread_id: Thread ID for checkpointing
-            
+
         Returns:
             Final analysis state
         """
+        # §1d: never run the graph forward on a kernel that is inconsistent with
+        # the restored state. Twin of the lifecycle run guard.
+        if is_forward_resume_blocked(
+            getattr(initial_state, "runtime_restore_status", "complete")
+        ):
+            logger.warning(
+                f"[{self.session_id}] run blocked: "
+                "runtime_restore_status=unavailable; refusing to start the graph"
+            )
+            self._set_status(initial_state, TaskStatus.FAILED)
+            return initial_state
+
+        # Entry guard: already blocked on required snapshot failure — hold,
+        # do not start the graph or clear the gate.
+        from ..services.snapshot_v2.errors import is_snapshot_failure_blocked
+        if is_snapshot_failure_blocked(initial_state):
+            logger.warning(
+                f"[{self.session_id}] run blocked: snapshot_failure already present; "
+                "holding WAITING_INPUT until Retry/Manage/Terminate"
+            )
+            self._set_status(initial_state, TaskStatus.WAITING_INPUT)
+            initial_state.wait_input_reason = "snapshot_failure"
+            try:
+                await self._send_state_sync(initial_state, "snapshot_failure")
+            except Exception:
+                pass
+            return initial_state
+
+        # Guard: terminal restore → no workflow, mark complete immediately.
+        if initial_state.restore_resume_kind == "terminal":
+            logger.info(
+                f"[{self.session_id}] Terminal restore — marking complete "
+                f"(current_round={initial_state.current_round})"
+            )
+            self._set_status(initial_state, TaskStatus.COMPLETED)
+            return initial_state
+
+        # Guard: idle restore (branch_id set but no resume kind) → persist only.
+        # The session was restored from a manual snapshot with no continuation
+        # target; the user must explicitly start analysis from the UI.
+        if initial_state.restore_resume_kind is None and (
+            initial_state.restore_branch_id or initial_state.last_restored_snapshot_id
+        ):
+            logger.info(
+                f"[{self.session_id}] Idle restore — no auto-start "
+                f"(branch={initial_state.restore_branch_id})"
+            )
+            # Ensure status reflects the idle state — PAUSED so the UI
+            # offers a "Start" / "Resume" button rather than "Analysis running".
+            if initial_state.status == TaskStatus.RUNNING:
+                self._set_status(initial_state, TaskStatus.PAUSED)
+            return initial_state
+
         # Store state for settings provider initialization
         self._state = initial_state
 
@@ -894,6 +1046,17 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             and initial_state.status == TaskStatus.RUNNING
         ):
             return await self.resume_restored_wait_state(initial_state)
+
+        # Guard: graph-node restore → seed workflow state and start graph.
+        # This handles the case where a snapshot was taken at a specific graph
+        # node boundary. The initial workflow state is built from the restore
+        # context so the correct planning stage and round are carried forward.
+        if initial_state.restore_resume_kind == "graph_node":
+            logger.info(
+                f"[{self.session_id}] Graph-node restore — starting graph "
+                f"from node {initial_state.restore_resume_node} "
+                f"(round={initial_state.current_round})"
+            )
 
         # Create initial workflow state
         workflow_state = self._make_initial_workflow_state(initial_state)
@@ -925,6 +1088,25 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             await self._send_state_sync(initial_state, StateSyncChangeType.LLM_RETRY.value)
             return initial_state
 
+        except RequiredSnapshotBlocked as e:
+            logger.warning(
+                f"[{self.session_id}] Required snapshot blocked workflow: {e}"
+            )
+            self._set_status(initial_state, TaskStatus.WAITING_INPUT)
+            initial_state.wait_input_reason = "snapshot_failure"
+            if not initial_state.snapshot_failure:
+                initial_state.snapshot_failure = {
+                    "code": e.code,
+                    "message": str(e),
+                    "allowed_actions": ["retry", "manage", "terminate"],
+                    "snapshot_id": getattr(e, "snapshot_id", None),
+                }
+            try:
+                await self._send_state_sync(initial_state, "snapshot_failure")
+            except Exception:
+                pass
+            return initial_state
+
         except Exception as e:
             import traceback
             error_detail = traceback.format_exc()
@@ -948,6 +1130,35 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         Used when a session completed all analysis rounds but was interrupted
         before report generation finished.
         """
+        # Entry guard: snapshot_failure or pending post-report snapshot means
+        # reports already ran; hold WAITING_INPUT for capture-only retry.
+        # WS reconnect must not re-run report generators.
+        from ..services.snapshot_v2.errors import is_snapshot_failure_blocked
+        pending = getattr(initial_state, "pending_required_snapshot", None)
+        if is_snapshot_failure_blocked(initial_state) or pending is not None:
+            logger.warning(
+                f"[{self.session_id}] generate_report blocked: "
+                f"snapshot_failure={is_snapshot_failure_blocked(initial_state)} "
+                f"pending_required_snapshot={pending is not None}; "
+                "holding WAITING_INPUT without re-running report generators"
+            )
+            self._set_status(initial_state, TaskStatus.WAITING_INPUT)
+            initial_state.wait_input_reason = "snapshot_failure"
+            if not initial_state.snapshot_failure and pending is not None:
+                initial_state.snapshot_failure = {
+                    "code": "pending_required_snapshot",
+                    "message": (
+                        "Post-report snapshot is pending; use Retry to "
+                        "re-enter capture only (reports will not re-run)."
+                    ),
+                    "allowed_actions": ["retry", "manage", "terminate"],
+                }
+            try:
+                await self._send_state_sync(initial_state, "snapshot_failure")
+            except Exception:
+                pass
+            return initial_state
+
         # Store state for settings provider initialization
         self._state = initial_state
 
@@ -1009,6 +1220,24 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             state = await self._generate_detailed_report(state)
             logger.info(f"[{self.session_id}] Report generation completed")
             return state["analysis_state"]
+        except RequiredSnapshotBlocked as e:
+            logger.warning(
+                f"[{self.session_id}] Required snapshot blocked during report generation: {e}"
+            )
+            self._set_status(initial_state, TaskStatus.WAITING_INPUT)
+            initial_state.wait_input_reason = "snapshot_failure"
+            if not initial_state.snapshot_failure:
+                initial_state.snapshot_failure = {
+                    "code": e.code,
+                    "message": str(e),
+                    "allowed_actions": ["retry", "manage", "terminate"],
+                    "snapshot_id": getattr(e, "snapshot_id", None),
+                }
+            try:
+                await self._send_state_sync(initial_state, "snapshot_failure")
+            except Exception:
+                pass
+            return initial_state
         except Exception as e:
             import traceback
             error_detail = traceback.format_exc()
@@ -1029,6 +1258,38 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             analysis_state: Optional analysis state to restore custom config from
         """
         logger.info(f"[{self.session_id}] Resuming workflow for thread {thread_id}")
+
+        # §1d: never run the graph forward on a kernel that is inconsistent with
+        # the restored state. This is the workflow-level twin of the lifecycle
+        # resume block and covers the WebSocket-reconnect resume path.
+        if analysis_state is not None and is_forward_resume_blocked(
+            getattr(analysis_state, "runtime_restore_status", "complete")
+        ):
+            logger.warning(
+                f"[{self.session_id}] resume blocked: runtime_restore_status=unavailable; "
+                "holding without running the graph"
+            )
+            return analysis_state
+
+        # Entry guard: already blocked on required snapshot failure.
+        from ..services.snapshot_v2.errors import is_snapshot_failure_blocked
+        if analysis_state is not None and is_snapshot_failure_blocked(analysis_state):
+            logger.warning(
+                f"[{self.session_id}] resume blocked: snapshot_failure already present; "
+                "holding without running the graph"
+            )
+            self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+            analysis_state.wait_input_reason = "snapshot_failure"
+            return analysis_state
+
+        # Terminal restore → no workflow, mark complete immediately.
+        if analysis_state is not None and analysis_state.restore_resume_kind == "terminal":
+            logger.info(
+                f"[{self.session_id}] Terminal restore in resume — marking complete "
+                f"(round={analysis_state.current_round})"
+            )
+            self._set_status(analysis_state, TaskStatus.COMPLETED)
+            return analysis_state
 
         # Re-initialize agents and components if not already initialized
         if self.compiled_graph is None:
@@ -1093,9 +1354,25 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                     self._set_status(effective, TaskStatus.STOPPED)
                     effective.wait_input_reason = None
                 return effective or analysis_state or state.values["analysis_state"]
+            except RequiredSnapshotBlocked as e:
+                logger.warning(
+                    f"[{self.session_id}] Required snapshot blocked on resume: {e}"
+                )
+                effective = analysis_state or state.values.get("analysis_state")
+                if effective:
+                    self._set_status(effective, TaskStatus.WAITING_INPUT)
+                    effective.wait_input_reason = "snapshot_failure"
+                    if not effective.snapshot_failure:
+                        effective.snapshot_failure = {
+                            "code": e.code,
+                            "message": str(e),
+                            "allowed_actions": ["retry", "manage", "terminate"],
+                            "snapshot_id": getattr(e, "snapshot_id", None),
+                        }
+                return effective or analysis_state
 
-        # No checkpoint found — start a fresh run from initialize_round.
-        # This is the expected path after snapshot restore (checkpoint was deleted).
+        # No checkpoint found. Exact continuation only — never fall back to a
+        # generic fresh run from initialize_round.
         if analysis_state is None:
             logger.error(f"[{self.session_id}] No checkpoint and no analysis_state for {thread_id}")
             raise ValueError(f"No saved state found for thread {thread_id}")
@@ -1107,6 +1384,45 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         ):
             return await self.resume_restored_wait_state(analysis_state)
 
+        if analysis_state.restore_resume_kind == "graph_node":
+            logger.info(
+                f"[{self.session_id}] Graph-node restore without checkpoint — "
+                f"seeding exact next node {analysis_state.restore_resume_node} "
+                f"(round={analysis_state.current_round})"
+            )
+            self._set_status(analysis_state, TaskStatus.RUNNING)
+            self._current_analysis_state = analysis_state
+            workflow_state = self._make_initial_workflow_state(
+                analysis_state, current_round=analysis_state.current_round
+            )
+            if analysis_state.restore_resume_node:
+                workflow_state["_restore_resume_node"] = analysis_state.restore_resume_node
+            try:
+                final_state = await self.compiled_graph.ainvoke(workflow_state, config)
+                logger.info(f"[{self.session_id}] Exact graph-node continuation completed")
+                return final_state["analysis_state"]
+            except WorkflowTerminatedError as e:
+                logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
+                if analysis_state:
+                    self._set_status(analysis_state, TaskStatus.STOPPED)
+                    analysis_state.wait_input_reason = None
+                return analysis_state
+            except RequiredSnapshotBlocked as e:
+                logger.warning(
+                    f"[{self.session_id}] Required snapshot blocked after restore: {e}"
+                )
+                if analysis_state:
+                    self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
+                    analysis_state.wait_input_reason = "snapshot_failure"
+                    if not analysis_state.snapshot_failure:
+                        analysis_state.snapshot_failure = {
+                            "code": e.code,
+                            "message": str(e),
+                            "allowed_actions": ["retry", "manage", "terminate"],
+                            "snapshot_id": getattr(e, "snapshot_id", None),
+                        }
+                return analysis_state
+
         if analysis_state.status in (TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION):
             logger.info(
                 f"[{self.session_id}] Status is {analysis_state.status.value}, "
@@ -1114,31 +1430,15 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             )
             return analysis_state
 
+        # Idle / unknown: do not invent a fresh initialize_round run.
         logger.info(
-            f"[{self.session_id}] No checkpoint found, starting fresh run "
+            f"[{self.session_id}] No checkpoint and no exact continuation target "
+            f"(kind={analysis_state.restore_resume_kind}); holding without fresh run "
             f"(current_round={analysis_state.current_round})"
         )
-        await self._send_message(
-            "status",
-            f"Resuming from snapshot (Round {analysis_state.current_round})..."
-        )
-
-        self._set_status(analysis_state, TaskStatus.RUNNING)
-        self._current_analysis_state = analysis_state
-
-        workflow_state = self._make_initial_workflow_state(
-            analysis_state, current_round=analysis_state.current_round
-        )
-        try:
-            final_state = await self.compiled_graph.ainvoke(workflow_state, config)
-            logger.info(f"[{self.session_id}] Fresh run after restore completed")
-            return final_state["analysis_state"]
-        except WorkflowTerminatedError as e:
-            logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
-            if analysis_state:
-                self._set_status(analysis_state, TaskStatus.STOPPED)
-                analysis_state.wait_input_reason = None
-            return analysis_state
+        if analysis_state.status == TaskStatus.RUNNING:
+            self._set_status(analysis_state, TaskStatus.PAUSED)
+        return analysis_state
 
     async def pause(self, thread_id: str):
         """Pause the workflow and save sandbox state including Python session.

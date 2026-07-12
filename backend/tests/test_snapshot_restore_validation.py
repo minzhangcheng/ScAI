@@ -158,9 +158,13 @@ class _FakeReqState:
 class _FakeRequest:
     state = _FakeReqState()
 
+    async def json(self):
+        return {"runtime_choice": "reset"}
+
 
 @pytest.mark.asyncio
 async def test_restore_route_maps_failure_to_422_and_clears_flag(monkeypatch):
+    """Batch 4 cutover: V1 restore is always HTTP 410 (no 422 restore body)."""
     session_id = str(uuid.uuid4())
     snap = Snapshot(name="n", phase="pre_round_wait")
     state = AnalysisState(session_id=session_id, user_id="u", data_files=[], current_round=1)
@@ -169,31 +173,19 @@ async def test_restore_route_maps_failure_to_422_and_clears_flag(monkeypatch):
     async def fake_owner(session_id, user_id):
         return state
 
-    async def fake_teardown(session_id):
-        return None
-
-    async def fake_restore(self, snapshot):
-        raise snaps.SnapshotRestoreError("current_round type mismatch")
-
     monkeypatch.setattr(snaps, "require_session_ownership", fake_owner)
-    monkeypatch.setattr(snaps, "teardown_running_workflow", fake_teardown)
-    monkeypatch.setattr(snaps.SnapshotManager, "restore_snapshot", fake_restore)
-
-    initializing_sessions.discard(session_id)          # ensure clean precondition
-    assert session_id not in initializing_sessions
+    initializing_sessions.discard(session_id)
     with pytest.raises(HTTPException) as excinfo:
         await snaps.restore_snapshot(session_id, snap.id, _FakeRequest())
 
-    assert excinfo.value.status_code == 422
-    assert isinstance(excinfo.value.detail, str)
-    assert "Rollback failed" in excinfo.value.detail
-    assert "current_round" in excinfo.value.detail  # detail names the offending field (spec §3)
-    assert session_id not in initializing_sessions  # no leaked flag
+    assert excinfo.value.status_code == 410
+    assert "V1" in str(excinfo.value.detail)
+    assert session_id not in initializing_sessions
 
 
 @pytest.mark.asyncio
 async def test_restore_route_clears_flag_on_late_failure(monkeypatch):
-    """A failure AFTER restore_snapshot (e.g. notebook restore) must still clear the flag."""
+    """Batch 4 cutover: V1 restore never enters restore body / initializing flag."""
     session_id = str(uuid.uuid4())
     snap = Snapshot(name="n", phase="pre_round_wait")
     state = AnalysisState(session_id=session_id, user_id="u", data_files=[], current_round=1)
@@ -202,22 +194,10 @@ async def test_restore_route_clears_flag_on_late_failure(monkeypatch):
     async def fake_owner(session_id, user_id):
         return state
 
-    async def fake_teardown(session_id):
-        return None
-
-    async def fake_restore(self, snapshot):
-        return state  # restore itself succeeds
-
-    async def boom_notebook(self, snapshot):
-        raise RuntimeError("late failure restoring notebook")
-
     monkeypatch.setattr(snaps, "require_session_ownership", fake_owner)
-    monkeypatch.setattr(snaps, "teardown_running_workflow", fake_teardown)
-    monkeypatch.setattr(snaps.SnapshotManager, "restore_snapshot", fake_restore)
-    monkeypatch.setattr(snaps.SnapshotManager, "restore_notebook", boom_notebook)
-
     initializing_sessions.discard(session_id)
-    with pytest.raises(RuntimeError):  # late failure is NOT mapped to 422, but flag still cleared
+    with pytest.raises(HTTPException) as excinfo:
         await snaps.restore_snapshot(session_id, snap.id, _FakeRequest())
 
-    assert session_id not in initializing_sessions  # finally cleared it
+    assert excinfo.value.status_code == 410
+    assert session_id not in initializing_sessions

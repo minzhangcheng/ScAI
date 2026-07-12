@@ -118,6 +118,19 @@ export type StoreUpdates = {
   stateVersion?: number
   snapshotCount?: number
   roundWaitSeconds?: number
+  runtimeRestoreStatus?: 'complete' | 'unavailable' | 'intentionally_kept'
+  runtimeRestoreWarning?: string | null
+  snapshotFailure?: {
+    failure: {
+      snapshot_id: string
+      session_id: string
+      failed_at: string
+      code: string
+      message: string
+      details?: Record<string, unknown>
+    }
+    allowed_actions: Array<'retry' | 'manage' | 'terminate'>
+  } | null
 } & LiteratureConfigStoreUpdates
 
 export interface TransformedLoadResponse {
@@ -156,6 +169,42 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
     ...opt('stateVersion', data.state_version),
     ...opt('snapshotCount', data.snapshot_count),
     ...opt('roundWaitSeconds', typeof data.round_wait_seconds === 'number' ? data.round_wait_seconds : undefined),
+  }
+
+  if (
+    data.runtime_restore_status === 'complete' ||
+    data.runtime_restore_status === 'unavailable' ||
+    data.runtime_restore_status === 'intentionally_kept'
+  ) {
+    storeUpdates.runtimeRestoreStatus = data.runtime_restore_status
+  }
+  if (data.runtime_restore_warning != null) {
+    storeUpdates.runtimeRestoreWarning = data.runtime_restore_warning
+  } else if (data.runtime_restore_status) {
+    storeUpdates.runtimeRestoreWarning = null
+  }
+
+  if (data.snapshot_failure && typeof data.snapshot_failure === 'object') {
+    const f = data.snapshot_failure
+    const code = typeof f.code === 'string' ? f.code : ''
+    const message = typeof f.message === 'string' ? f.message : ''
+    if (code || message) {
+      const rawActions = Array.isArray(f.allowed_actions) ? f.allowed_actions : ['retry', 'manage', 'terminate']
+      storeUpdates.snapshotFailure = {
+        failure: {
+          snapshot_id: typeof f.snapshot_id === 'string' ? f.snapshot_id : '',
+          session_id: typeof f.session_id === 'string' ? f.session_id : '',
+          failed_at: typeof f.failed_at === 'string' ? f.failed_at : '',
+          code,
+          message,
+          details: f.details && typeof f.details === 'object' ? f.details : undefined,
+        },
+        allowed_actions: rawActions.filter(
+          (a): a is 'retry' | 'manage' | 'terminate' =>
+            a === 'retry' || a === 'manage' || a === 'terminate',
+        ),
+      }
+    }
   }
 
   if (data.literature_config && typeof data.literature_config === 'object') {

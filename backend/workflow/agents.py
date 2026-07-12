@@ -777,6 +777,9 @@ Call report_findings ONLY after completing ALL assigned tasks above."""
                 f"[{self.session_id}] Mid-execution plan revision triggered in stage "
                 f"'{planning_stage}'; staying in stage, bioinfo cache invalidated"
             )
+            # Required boundary: plan_revision semantic gate (pre_major_revision).
+            # Fail closed via capture_required_snapshot → RequiredSnapshotBlocked.
+            await self._create_auto_snapshot(analysis_state, "pre_major_revision")
         elif action == "stage1_complete":
             # Stage transition: stage1 genuinely completed → set up for stage2.
             # Don't cache the stage1 result — stage2 re-enters this node and must

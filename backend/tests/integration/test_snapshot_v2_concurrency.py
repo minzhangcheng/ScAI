@@ -1,0 +1,181 @@
+"""Concurrency and safe-point integration tests for Snapshot V2.
+
+Uses asyncio events/barriers to coordinate concurrent lifecycle operations
+and verify serialized access to session state.
+"""
+
+import asyncio
+
+import pytest
+
+from backend.services.snapshot_v2.jobs import RestoreJobManager
+from backend.services.snapshot_v2.models import (
+    IdleCapsule,
+    SnapshotCaptureRequest,
+    SnapshotRestoreRequest,
+)
+from backend.services.snapshot_v2.preflight import RestorePreflightResult
+from backend.services.snapshot_v2.safe_point import SafePointManager
+
+
+@pytest.mark.asyncio
+class TestConcurrentLifecycle:
+    """Verify that concurrent snapshot operations are serialized."""
+
+    async def test_safe_point_acquire_release(self):
+        mgr = SafePointManager()
+        sid = "conc-session"
+
+        acquired = mgr.acquire(sid)
+        assert acquired is True
+
+        assert mgr.is_paused(sid) is True
+
+        mgr.release(sid)
+        assert mgr.is_paused(sid) is False
+
+    async def test_safe_point_idempotent_acquire(self):
+        mgr = SafePointManager()
+        sid = "conc-session2"
+
+        first = mgr.acquire(sid)
+        second = mgr.acquire(sid)
+        assert first is True
+        assert second is False
+
+        mgr.release(sid)
+
+    async def test_safe_point_wait_unblocks(self):
+        mgr = SafePointManager()
+        sid = "conc-wait"
+
+        mgr.acquire(sid)
+
+        async def release_after_delay():
+            await asyncio.sleep(0.05)
+            mgr.release(sid)
+
+        task = asyncio.create_task(release_after_delay())
+        await mgr.wait_for(sid)
+        await task
+
+        assert mgr.is_paused(sid) is False
+
+    async def test_pending_request_acknowledge(self):
+        mgr = SafePointManager()
+        sid = "conc-pending"
+
+        requested = mgr.request_safe_point(sid)
+        assert requested is True
+
+        assert mgr.has_pending_request(sid) is True
+
+        acknowledged = mgr.acknowledge_safe_point_request(sid)
+        assert acknowledged is True
+
+        assert mgr.has_pending_request(sid) is False
+        assert mgr.is_paused(sid) is True
+
+        mgr.release(sid)
+
+    async def test_cancel_safe_point_request(self):
+        mgr = SafePointManager()
+        sid = "conc-cancel"
+
+        mgr.request_safe_point(sid)
+        mgr.cancel_safe_point_request(sid)
+
+        assert mgr.has_pending_request(sid) is False
+        assert mgr.is_paused(sid) is False
+
+    async def test_duplicate_request_returns_false(self):
+        mgr = SafePointManager()
+        sid = "conc-dup"
+
+        first = mgr.request_safe_point(sid)
+        second = mgr.request_safe_point(sid)
+
+        assert first is True
+        assert second is False
+
+        mgr.cancel_safe_point_request(sid)
+
+    async def test_async_lock_serializes_capture(self, v2_paths, service):
+        """Two concurrent capture attempts on the same session are serialized."""
+        from backend.state import get_session_lock
+
+        sid = service.session_id
+        lock = get_session_lock(sid)
+
+        events = []
+        async with lock:
+            events.append("first_locked")
+        async with lock:
+            events.append("second_locked")
+
+        assert len(events) == 2
+        assert events == ["first_locked", "second_locked"]
+
+    async def test_job_manager_race(self, v2_paths):
+        """Multiple cancel calls on same transaction are safe."""
+        session_id = "conc-race"
+        mgr = RestoreJobManager(v2_paths, session_id)
+
+        preflight = RestorePreflightResult(
+            session_id=session_id,
+            snapshot_id="snap-race",
+            snapshot_size=100,
+            runtime_status="complete",
+            runtime_action="apply",
+            pre_restore_required=False,
+            has_children=False,
+        )
+        request = SnapshotRestoreRequest(
+            snapshot_id="snap-race",
+            runtime_choice="keep",
+        )
+
+        record = await mgr.enqueue(session_id, preflight, request, timeout_seconds=10)
+        assert record.status == "queued"
+
+        cancel_coro1 = mgr.cancel(record.transaction_id)
+        cancel_coro2 = mgr.cancel(record.transaction_id)
+
+        await asyncio.gather(cancel_coro1, cancel_coro2)
+
+        final = mgr.get(record.transaction_id)
+        assert final is None or final.status == "cancelled"
+
+    async def test_job_manager_concurrent_enqueue(self, v2_paths):
+        """Two sequential enqueues with different snapshot ids."""
+        session_id = "conc-enq"
+        mgr = RestoreJobManager(v2_paths, session_id)
+
+        preflight1 = RestorePreflightResult(
+            session_id=session_id,
+            snapshot_id="snap-enq-1",
+            snapshot_size=100,
+            runtime_status="complete",
+            runtime_action="apply",
+            pre_restore_required=False,
+            has_children=False,
+        )
+        preflight2 = RestorePreflightResult(
+            session_id=session_id,
+            snapshot_id="snap-enq-2",
+            snapshot_size=100,
+            runtime_status="complete",
+            runtime_action="apply",
+            pre_restore_required=False,
+            has_children=False,
+        )
+
+        r1 = SnapshotRestoreRequest(snapshot_id="snap-enq-1", runtime_choice="keep")
+        r2 = SnapshotRestoreRequest(snapshot_id="snap-enq-2", runtime_choice="keep")
+
+        rec1 = await mgr.enqueue(session_id, preflight1, r1, timeout_seconds=5)
+        rec2 = await mgr.enqueue(session_id, preflight2, r2, timeout_seconds=5)
+
+        assert rec1.status == "queued"
+        assert rec2.status == "queued"
+        assert rec1.transaction_id != rec2.transaction_id

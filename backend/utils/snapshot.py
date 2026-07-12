@@ -1,4 +1,10 @@
-"""Snapshot manager for saving and restoring analysis state at key points."""
+"""Snapshot manager for V1 file-backed snapshots.
+
+After the Batch 4 V1 restore cutover, HTTP restore always returns 410.
+``SnapshotManager`` retains compatibility readers/deleters used by V1
+list/preview/delete and by unit tests of the on-disk V1 format. Authoritative
+restorable lifecycle is Snapshot V2 (``backend.services.snapshot_v2``).
+"""
 
 import asyncio
 import fnmatch
@@ -191,7 +197,14 @@ class SnapshotManager:
         state.last_snapshot_id = snapshot.id
         if state.last_restored_snapshot_id:
             state.last_restored_snapshot_id = None
-        await notify_fn(session_id, "snapshot_count", {"count": len(state.snapshots)})
+        # Runtime consistency is decided by the producer that owns the runtime
+        # save attempt. Registration alone cannot prove that snapshot runtime
+        # belongs to the same logical state.
+        await notify_fn(
+            session_id,
+            "snapshot_count",
+            {"count": len(state.snapshots)},
+        )
         logger.info(f"[{session_id}] Auto-snapshot ({phase}): {ctx['name']}")
         return snapshot
 
@@ -372,7 +385,7 @@ class SnapshotManager:
 
         return snapshot
 
-    async def restore_snapshot(self, snapshot: Snapshot) -> AnalysisState:
+    async def restore_snapshot(self, snapshot: Snapshot, runtime_action: str = "apply") -> AnalysisState:
         """Load AnalysisState from a snapshot and restore kernel session pkl."""
         state_path = (self.snapshots_dir / snapshot.state_file).resolve()
         # Guard against path traversal
@@ -390,34 +403,27 @@ class SnapshotManager:
 
         restored = _validate_state_with_fallback(state_dict, self.session_id)
 
-        # Decompress snapshot pkl back to the live path. Runs in backend process
-        # so the kernel never holds the compression dictionary in memory.
+        # Materialize runtime through the journaled, re-signed apply path.
+        # "apply": decompress the snapshot pkl to the live path and re-sign its
+        # HMAC (fixes the stale-signature bug). "reset": quarantine the live
+        # runtime so no mismatched kernel loads. "keep": leave the live runtime.
+        from .runtime_apply import apply_runtime_pkl, quarantine_live_runtime
+
         pkl_backup = self.snapshots_dir / f"{snapshot.id}_session.pkl.zst"
-        if pkl_backup.exists():
-            pkl_dst = get_session_states(self.session_id) / f"{self.session_id}_session.pkl"
-
-            def _decompress_to_live():
-                import zstandard as zstd
-                dctx = zstd.ZstdDecompressor()
-                tmp_dst = pkl_dst.with_suffix(pkl_dst.suffix + ".tmp")
-                try:
-                    with open(pkl_backup, "rb") as src_f, open(tmp_dst, "wb") as dst_f:
-                        dctx.copy_stream(src_f, dst_f)
-                    os.replace(tmp_dst, pkl_dst)
-                except Exception:
-                    try:
-                        tmp_dst.unlink()
-                    except OSError:
-                        pass
-                    raise
-
-            await asyncio.to_thread(_decompress_to_live)
-            logger.info(f"[{self.session_id}] Kernel session restored from snapshot {snapshot.name}")
-        else:
-            logger.warning(
-                f"[{self.session_id}] No pkl backup found for snapshot {snapshot.name}; "
-                "kernel state will not be rolled back"
-            )
+        if runtime_action == "apply":
+            if pkl_backup.exists():
+                await asyncio.to_thread(apply_runtime_pkl, self.session_id, pkl_backup)
+                logger.info(f"[{self.session_id}] Kernel session restored from snapshot {snapshot.name}")
+            else:
+                logger.warning(
+                    f"[{self.session_id}] No pkl backup for snapshot {snapshot.name}; "
+                    "runtime not rolled back"
+                )
+        elif runtime_action == "reset":
+            await asyncio.to_thread(quarantine_live_runtime, self.session_id)
+            logger.info(f"[{self.session_id}] Live runtime quarantined on reset restore")
+        elif runtime_action == "keep":
+            logger.info(f"[{self.session_id}] Live runtime kept (user override) on restore")
 
         logger.info(f"[{self.session_id}] Snapshot restored: {snapshot.name}")
         return restored

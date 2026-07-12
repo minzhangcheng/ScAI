@@ -5,7 +5,7 @@ action enums, and LLM failure intervention constants.
 """
 from enum import Enum
 
-VERSION = "0.32.11"
+VERSION = "0.33.1"
 
 
 # ── Node → Agent mapping ───────────────────────────────────────────
@@ -69,6 +69,7 @@ class WaitInputReason(str, Enum):
     MARKER_DB_MISSING = "marker_db_missing"
     SPECIES_INPUT = "species_input"
     GENE_SPECIES_MISMATCH = "gene_species_mismatch"
+    SNAPSHOT_FAILURE = "snapshot_failure"
 
 
 class StateSyncChangeType(str, Enum):
@@ -80,6 +81,7 @@ class StateSyncChangeType(str, Enum):
     GENE_SPECIES_MISMATCH = "gene_species_mismatch"
     SPECIES_RESOLVED = "species_resolved"
     SPECIES_AUTO_SKIPPED = "species_auto_skipped"
+    SNAPSHOT_FAILURE = "snapshot_failure"
 
 
 # Core agents whose absence blocks the workflow. Disabling any of these

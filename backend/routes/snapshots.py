@@ -5,301 +5,126 @@ Extracted from backend/main.py to decouple snapshot route handlers.
 import asyncio
 import json
 import logging
-from typing import Dict
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import ValidationError
 
-from backend.models.schemas import (
-    APIResponse, TaskStatus, WebSocketMessage, AgentType,
-)
+from backend.models.schemas import APIResponse
+from backend.models.api_requests import SnapshotTransactionResponse
 from backend.services.session_store import (
-    async_save_session, ensure_session_loaded,
+    async_save_session,
     update_session_cache as _update_session_cache,
 )
-from backend.state import (
-    workflows,
-    state_lock as _state_lock,
-    initializing_sessions as _initializing_sessions,
-    websockets,
-    get_session_lock,
-)
+from backend.services.snapshot_v2.models import SnapshotRestoreRequest as SnapshotV2RestoreRequest
+from backend.services.snapshot_v2.jobs import RestoreJobManager
+from backend.services.snapshot_v2.paths import SnapshotV2Paths
 from backend.utils.auth import require_session_ownership
 from backend.utils.files import validate_session_id
-from backend.utils.snapshot import SnapshotManager, SnapshotRestoreError
-from backend.config import get_session_states
-from backend.workflow.direction_coverage import clone_round_results_for_branch
-from backend.workflow.helpers import build_integration_gate_payload
-from backend.workflow.restore_targets import (
-    SNAPSHOT_RESUME_TARGET,
-    stable_restore_branch_id,
-    stable_restore_branch_label,
+from backend.utils.snapshot import SnapshotManager
+from backend.utils.runtime_apply import (
+    compute_runtime_status, RuntimeChoiceRequired,
 )
-from backend.routes._helpers import teardown_running_workflow
+from backend.config import get_session_states
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/session", tags=["snapshots"])
 
 
-def _format_restore_error(exc: Exception) -> str:
-    """Human-readable, apiFetch-friendly detail string (apiFetch reads error.detail)."""
-    if isinstance(exc, ValidationError):
-        first = exc.errors()[0] if exc.errors() else {}
-        loc = ".".join(str(p) for p in first.get("loc", ()))
-        return f"Rollback failed: {loc} type mismatch ({first.get('msg', 'validation error')})"
-    return f"Rollback failed: {exc}"
+from backend.services.snapshot_v2.errors import (
+    SnapshotCompatibilityError,
+    SnapshotDeleteConflict,
+    SnapshotIntegrityError,
+    SnapshotStorageError,
+    SnapshotTransactionError,
+    SnapshotV2Error,
+)
+
+
+def _map_v2_error(exc: Exception, _context: dict | None = None) -> int:
+    """Map a V2 snapshot operation exception to an HTTP status code.
+
+    Centralised so every V2 route returns the same codes for the same
+    error types.  The canonical mapping is:
+
+    ==================================  ====
+    Exception type                      Code
+    ==================================  ====
+    SnapshotCompatibilityError          422
+    SnapshotIntegrityError              422  (found → 422, not-found → 410)
+    SnapshotStorageError                507
+    SnapshotDeleteConflict              409
+    SnapshotTransactionError            503  (or 500 for apply-phase)
+    Any other SnapshotV2Error           500
+    Any other Exception                 500
+    ==================================  ====
+    """
+    # SnapshotIntegrityError with MANIFEST_NOT_FOUND → 410 Gone
+    if isinstance(exc, SnapshotIntegrityError):
+        if exc.code in ("MANIFEST_NOT_FOUND", "SNAPSHOT_NOT_FOUND"):
+            return 410
+        return 422
+    if isinstance(exc, SnapshotCompatibilityError):
+        return 422
+    if isinstance(exc, SnapshotStorageError):
+        return 507
+    if isinstance(exc, SnapshotDeleteConflict):
+        return 409
+    if isinstance(exc, SnapshotTransactionError):
+        return 503
+    if isinstance(exc, SnapshotV2Error):
+        return 500
+    return 500
 
 
 @router.get("/{session_id}/snapshots")
 async def list_snapshots(session_id: str, request: Request):
-    """List all snapshots for a session."""
+    """List V1 inventory snapshots (metadata only; not restorable via V1 restore)."""
+    from backend.services.snapshot_v2.legacy import build_legacy_inventory
+    from backend.constants import VERSION
+
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     state = await require_session_ownership(session_id=session_id, user_id=user_id)
+    inventory = build_legacy_inventory(state, warning_version=VERSION)
+    # Retain full session snapshot list for delete/export; mark restorable=false.
+    snapshots = []
+    for s in state.snapshots:
+        payload = s.model_dump(mode="json")
+        fv = s.format_version
+        if fv is None or fv < 2:
+            payload["restorable"] = False
+            payload["unsupported"] = True
+        else:
+            payload["restorable"] = False  # V1 list is non-authoritative; use V2
+            payload["unsupported"] = False
+        snapshots.append(payload)
     return APIResponse(
         success=True,
-        data={"snapshots": [s.model_dump(mode="json") for s in state.snapshots]},
-        message="ok"
+        data={
+            "snapshots": snapshots,
+            "legacy_inventory": inventory.model_dump(mode="json"),
+            "restorable": False,
+        },
+        message="ok",
     )
 
 
 @router.post("/{session_id}/snapshots/{snapshot_id}/restore")
 async def restore_snapshot(session_id: str, snapshot_id: str, request: Request):
-    """Restore analysis state from a snapshot.
+    """V1 restore endpoint — permanently cut over to HTTP 410.
 
-    WARNING: This stops any running workflow and replaces the session state.
+    V1 snapshots remain listable/exportable/deletable. Restorable lifecycle
+    is exclusively Snapshot V2 (``restore-v2``). This handler never tears down
+    workflows or mutates session state.
     """
+    from backend.services.snapshot_v2.legacy import v1_restore_gone_detail
+
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
-    state = await require_session_ownership(session_id=session_id, user_id=user_id)
-
-    snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
-    if not snapshot:
-        raise HTTPException(status_code=404, detail="Snapshot not found")
-
-    # Mark session as initializing + save workflow ref in one lock acquisition.
-    # Observer WS connections will wait until this flag is cleared.
-    async with _state_lock:
-        _initializing_sessions.add(session_id)
-
-    try:
-        # Stop running workflow, cancel tasks, and delete checkpoint.
-        await teardown_running_workflow(session_id)
-
-        # Restore state from snapshot
-        mgr = SnapshotManager(session_id)
-        try:
-            restored_state = await mgr.restore_snapshot(snapshot)
-        except (SnapshotRestoreError, ValidationError) as exc:
-            detail = _format_restore_error(exc)
-            logger.error("[%s] Snapshot restore failed: %s", session_id, detail)
-            raise HTTPException(status_code=422, detail=detail)
-
-        await mgr.restore_notebook(snapshot)
-        mgr.cleanup_workspace_files(snapshot.workspace_manifest)
-        mgr.cleanup_reports()
-
-        restored_state.exploration_report_html_path = None
-        restored_state.detailed_report_html_path = None
-        restored_state.annotation_report_html_path = None
-        restored_state.integration_report_html_path = None
-
-        restored_state.snapshots = state.snapshots
-        restored_state.last_restored_snapshot_id = snapshot.id
-        # Move the lineage head to the restore target so forward snapshots after the
-        # branch's first one keep chaining onto the restored point.
-        restored_state.last_snapshot_id = snapshot.id
-
-        target = SNAPSHOT_RESUME_TARGET.get(str(snapshot.phase))
-        if target:
-            restored_state.restore_resume_phase = str(snapshot.phase)
-            restored_state.restore_resume_kind = target["kind"]
-            restored_state.restore_resume_node = target["node"]
-            restored_state.restore_resume_gate = target["gate"]
-        else:
-            restored_state.restore_resume_phase = str(snapshot.phase)
-            restored_state.restore_resume_kind = None
-            restored_state.restore_resume_node = None
-            restored_state.restore_resume_gate = None
-
-        # Restore creates a branch lineage by default, even from the latest main
-        # snapshot. This prevents restored analysis from silently overwriting main
-        # round_results or main report artifacts. A future explicit "continue main"
-        # restore mode must opt into main-line mutation deliberately.
-        restored_state.restore_branch_label = stable_restore_branch_label(snapshot.id, snapshot.branch_label)
-        restored_state.restore_branch_id = stable_restore_branch_id(snapshot.id, restored_state.restore_branch_label)
-        restored_state.round_results = clone_round_results_for_branch(
-            restored_state.round_results,
-            branch_id=restored_state.restore_branch_id,
-            branch_label=restored_state.restore_branch_label,
-            source_snapshot_id=snapshot.id,
-            source_lineage_id=snapshot.branch_id or "main",
-        )
-
-        # Phase-aware status setting
-        phase = snapshot.phase
-        if phase == "pre_direction":
-            restored_state.status = TaskStatus.WAITING_INPUT
-        elif phase == "pre_annotation":
-            restored_state.status = TaskStatus.WAITING_ANNOTATION
-        elif phase == "pre_round_wait":
-            restored_state.status = TaskStatus.WAITING_INPUT
-        elif phase == "pre_integration_gate":
-            restored_state.status = TaskStatus.WAITING_INPUT
-        else:
-            restored_state.status = TaskStatus.PAUSED
-
-        # Synthesize HITL messages into realtime_messages so frontend can show dialogs
-        if phase == "pre_annotation" and restored_state.annotation_state:
-            ann = restored_state.annotation_state
-            report_html_url = (
-                f"/api/session/{session_id}/annotation-report/html"
-                if getattr(restored_state, 'annotation_report_html_path', None) else None
-            )
-            detailed_report_url = (
-                f"/api/session/{session_id}/detailed-report/html"
-                if getattr(restored_state, 'detailed_report_html_path', None) else None
-            )
-            restored_state.realtime_messages.append(WebSocketMessage(
-                type="annotation_confirmation",
-                agent=AgentType.LITERATURE,
-                content={
-                    "annotations": [a.model_dump(mode="json") for a in ann.cluster_annotations],
-                    "tissue": ann.tissue,
-                    "organism": ann.organism,
-                    "tissue_summary": ann.tissue_summary,
-                    "analysis_summary": ann.analysis_summary,
-                    "report_html_url": report_html_url,
-                    "detailed_report_url": detailed_report_url,
-                }
-            ))
-        elif phase == "pre_annotation" and not restored_state.annotation_state:
-            logger.warning(
-                f"[{session_id}] pre_annotation snapshot lacks annotation_state "
-                f"(legacy snapshot). Falling back to PAUSED status."
-            )
-            restored_state.status = TaskStatus.PAUSED
-        elif phase == "pre_direction" and restored_state.exploration_report:
-            exp = restored_state.exploration_report
-            html_url = (
-                f"/api/session/{session_id}/exploration-report/html"
-                if getattr(restored_state, 'exploration_report_html_path', None) else None
-            )
-            detailed_report_url = (
-                f"/api/session/{session_id}/detailed-report/html"
-                if getattr(restored_state, 'detailed_report_html_path', None) else None
-            )
-            last_round = restored_state.round_results[-1] if restored_state.round_results else None
-            restored_state.realtime_messages.append(WebSocketMessage(
-                type="exploration_report",
-                agent=AgentType.PI,
-                content={
-                    "report_a": exp.model_dump(mode="json"),
-                    "round": last_round.round_number if last_round else 1,
-                    "summary": last_round.pi_summary if last_round else "",
-                    "html_url": html_url,
-                    "detailed_report_url": detailed_report_url,
-                }
-            ))
-
-        elif phase == "pre_round_wait":
-            last_round = restored_state.round_results[-1] if restored_state.round_results else None
-            if not last_round:
-                logger.warning(
-                    f"[{session_id}] pre_round_wait snapshot has no round_results. "
-                    f"Falling back to PAUSED status."
-                )
-                restored_state.status = TaskStatus.PAUSED
-            else:
-                restored_state.realtime_messages.append(WebSocketMessage(
-                    type="round_summary",
-                    agent=AgentType.PI,
-                    content={
-                        "round": last_round.round_number,
-                        "summary": last_round.pi_summary or "",
-                        "pathology_findings": last_round.pathology_findings or [],
-                        "bioinformatics_findings": last_round.bioinformatics_findings or [],
-                        "biochemistry_findings": last_round.biochemistry_findings or [],
-                        "literature_findings": last_round.literature_findings or [],
-                        "findings": [
-                            *(last_round.pathology_findings or []),
-                            *(last_round.bioinformatics_findings or []),
-                            *(last_round.biochemistry_findings or []),
-                            *(last_round.literature_findings or []),
-                        ],
-                        "data_requests": getattr(last_round, 'data_requests', []) or [],
-                        "status": "waiting_input"
-                    }
-                ))
-                max_rounds = restored_state.max_rounds if restored_state.max_rounds > 0 else 4
-                is_last_round = last_round.round_number >= max_rounds
-                if is_last_round:
-                    status_msg = f"Round {last_round.round_number} complete (final round). You can provide additional data to extend analysis, or skip to generate the final report."
-                else:
-                    status_msg = f"Round {last_round.round_number} complete. Waiting for your input."
-                restored_state.realtime_messages.append(WebSocketMessage(
-                    type="status",
-                    agent=AgentType.PI,
-                    content=status_msg
-                ))
-
-        if phase == "pre_integration_gate" and restored_state.integration_gate_candidates:
-            restored_state.realtime_messages.append(WebSocketMessage(
-                type="integration_gate",
-                agent=AgentType.PI,
-                content=build_integration_gate_payload(restored_state, session_id),
-            ))
-
-        # Reset annotation confirmed flag so the restored HITL checkpoint works correctly
-        if phase == "pre_annotation" and restored_state.annotation_state:
-            restored_state.annotation_state.confirmed = False
-            restored_state.annotation_state.pending = True
-
-        # ---- Synchronization point ----
-        # Pop workflows AND write cache AND write disk inside the per-session lock.
-        # This serializes against state_callback and the CancelledError/Exception
-        # handlers in websocket_endpoint, which acquire the same lock before writing.
-        # Lock ordering: sess_lock → state_lock (never the reverse).
-        sess_lock = get_session_lock(session_id)
-        async with sess_lock:
-            async with _state_lock:
-                workflows.pop(session_id, None)
-
-            await _update_session_cache(session_id, restored_state)
-            await async_save_session(session_id, restored_state, force=True)
-
-        logger.info(
-            f"[{session_id}] Snapshot restored: {snapshot.name} (Round {snapshot.round_number}), "
-            f"phase={phase}, status={restored_state.status.value}, "
-            f"current_round={restored_state.current_round}"
-        )
-
-        # Clear the initializing flag FIRST so the reconnecting WS can fall
-        # through to the HITL-hold path (websockets.py:215) with the restored
-        # state. If we close the WS before clearing the flag, a fast reconnect
-        # may arrive while initializing_sessions still holds the session, enter
-        # the observer path (is_restoring=True), and simply return without ever
-        # reaching HITL-hold.
-        async with _state_lock:
-            _initializing_sessions.discard(session_id)
-
-        ws = websockets.get(session_id)
-        if ws:
-            try:
-                await ws.close(code=4000, reason="snapshot_restore")
-            except Exception:
-                logger.debug(f"[{session_id}] WebSocket close during restore", exc_info=True)
-
-        return APIResponse(
-            success=True,
-            message=f"State restored to snapshot: {snapshot.name} (Round {snapshot.round_number})"
-        )
-    finally:
-        # Idempotent safety net: guarantees the flag is cleared on EVERY exit path
-        # (early 422, late failure in cleanup/save, or success). set.discard never raises.
-        async with _state_lock:
-            _initializing_sessions.discard(session_id)
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+    # snapshot_id retained for route shape / client logging only.
+    _ = snapshot_id
+    raise HTTPException(status_code=410, detail=v1_restore_gone_detail())
 
 
 @router.get("/{session_id}/snapshots/{snapshot_id}/rollback-preview")
@@ -312,6 +137,8 @@ async def rollback_preview(session_id: str, snapshot_id: str, request: Request):
     snapshot = next((s for s in state.snapshots if s.id == snapshot_id), None)
     if not snapshot:
         raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    runtime_status = compute_runtime_status(snapshot, session_id)
 
     mgr = SnapshotManager(session_id)
     current_manifest = await asyncio.to_thread(mgr.scan_workspace_manifest)
@@ -358,6 +185,7 @@ async def rollback_preview(session_id: str, snapshot_id: str, request: Request):
             "current_notebook_cells": current_cells,
             "snapshot_notebook_cells": snapshot_cells,
             "descendant_snapshots": descendant_names,
+            "runtime_status": runtime_status,
         },
         message="ok"
     )
@@ -405,3 +233,235 @@ async def delete_branch(session_id: str, snapshot_id: str, request: Request):
         message=f"Deleted {len(deleted_ids)} snapshots in branch",
         data={"deleted_count": len(deleted_ids), "deleted_ids": deleted_ids}
     )
+
+
+# ── Snapshot V2 Listing & Status ──────────────────────────────────────
+# All V2 mutations go through SnapshotService under the session lock.
+# Routes only: ownership checks + HTTP error translation.
+
+
+@router.get("/{session_id}/snapshots-v2")
+async def list_snapshots_v2(session_id: str, request: Request):
+    """List V2 snapshots with store-level status and integrity diagnostics."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    paths = SnapshotV2Paths.for_session(session_id)
+    from backend.services.snapshot_v2.service import SnapshotService
+
+    service = SnapshotService(session_id, paths)
+    try:
+        snapshots = service.list_snapshots()
+        store_status = service.store_status()
+    except SnapshotV2Error as exc:
+        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+
+    return APIResponse(
+        success=True,
+        data={
+            "snapshots": snapshots,
+            "store_status": store_status.model_dump(mode="json"),
+        },
+        message="ok",
+    )
+
+
+@router.get("/{session_id}/snapshots-v2/{snapshot_id}")
+async def get_snapshot_v2(session_id: str, snapshot_id: str, request: Request):
+    """Get a single V2 snapshot manifest via SnapshotService."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    paths = SnapshotV2Paths.for_session(session_id)
+    from backend.services.snapshot_v2.service import SnapshotService
+
+    service = SnapshotService(session_id, paths)
+    try:
+        data = service.preview_snapshot(snapshot_id)
+    except SnapshotIntegrityError as exc:
+        if exc.code in ("MANIFEST_NOT_FOUND", "SNAPSHOT_NOT_FOUND"):
+            raise HTTPException(status_code=404, detail="Snapshot not found") from exc
+        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+    except SnapshotV2Error as exc:
+        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+
+    return APIResponse(
+        success=True,
+        data=data,
+        message="ok",
+    )
+
+
+@router.delete("/{session_id}/snapshots-v2/{snapshot_id}")
+async def delete_snapshot_v2(session_id: str, snapshot_id: str, request: Request, branch: bool = False):
+    """Delete a V2 snapshot via SnapshotService (leaf or branch).
+
+    Leaf deletion (default): fails with 409 if the snapshot has children
+    or is protected.
+
+    Branch deletion (``?branch=true``): removes the snapshot and all its
+    descendants (computed inside the service under the session lock).
+    """
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    paths = SnapshotV2Paths.for_session(session_id)
+    from backend.services.snapshot_v2.service import SnapshotService
+
+    service = SnapshotService(session_id, paths)
+    try:
+        if branch:
+            result = await service.delete_branch(snapshot_id)
+        else:
+            result = await service.delete_leaf(snapshot_id)
+    except SnapshotDeleteConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SnapshotStorageError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    except SnapshotIntegrityError as exc:
+        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+    except SnapshotV2Error as exc:
+        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+
+    return APIResponse(
+        success=True,
+        data=result.model_dump(mode="json"),
+        message=f"Deleted {len(result.deleted_ids)} snapshot(s)",
+    )
+
+
+# ── Snapshot V2 Restore Jobs ──────────────────────────────────────────
+
+
+def _transaction_urls(request: Request, session_id: str, transaction_id: str) -> tuple[str, str]:
+    """Build absolute status/cancel URLs for a restore transaction."""
+    base = str(request.base_url).rstrip("/")
+    status_url = f"{base}/api/session/{session_id}/snapshot-transactions/{transaction_id}"
+    cancel_url = f"{status_url}/cancel"
+    return status_url, cancel_url
+
+
+@router.post("/{session_id}/snapshots/{snapshot_id}/restore-v2", status_code=202)
+async def restore_snapshot_v2(session_id: str, snapshot_id: str, request: Request):
+    """Initiate a background V2 restore job.
+
+    Runs a preflight check synchronously, then enqueues a background
+    ``RestoreJobManager`` task that progresses through the restore
+    lifecycle.  Returns HTTP 202 with the transaction details so the
+    client can poll/cancel the job.
+    """
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    # Parse the V2 restore request body
+    try:
+        body = await request.json()
+        v2_req = SnapshotV2RestoreRequest(**body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid restore request: {exc}")
+
+    if v2_req.snapshot_id != snapshot_id:
+        raise HTTPException(
+            status_code=422,
+            detail=f"snapshot_id mismatch: path '{snapshot_id}' != body '{v2_req.snapshot_id}'",
+        )
+
+    paths = SnapshotV2Paths.for_session(session_id)
+    from backend.services.snapshot_v2.preflight import RestorePreflight
+
+    try:
+        preflight = RestorePreflight(paths).run(snapshot_id, v2_req)
+    except RuntimeChoiceRequired as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Snapshot runtime is '{exc.status}'. Provide runtime_choice='reset' "
+                f"or 'keep'."
+            ),
+        ) from exc
+    except SnapshotStorageError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    except SnapshotIntegrityError as exc:
+        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+    except SnapshotCompatibilityError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SnapshotV2Error as exc:
+        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+
+    if preflight.status != "ready":
+        if preflight.status == "incompatible":
+            raise HTTPException(
+                status_code=410,
+                detail=(
+                    f"Legacy snapshot cannot be restored: "
+                    f"{preflight.compatibility_errors or preflight.status}"
+                ),
+            )
+        raise HTTPException(
+            status_code=422,
+            detail=f"Preflight failed: {preflight.compatibility_errors or preflight.status}",
+        )
+
+    try:
+        mgr = RestoreJobManager(paths=paths, session_id=session_id)
+        record = await mgr.enqueue(session_id, preflight, v2_req)
+    except SnapshotStorageError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    except SnapshotTransactionError as exc:
+        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+    except SnapshotV2Error as exc:
+        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+
+    status_url, cancel_url = _transaction_urls(request, session_id, record.transaction_id)
+    return SnapshotTransactionResponse(
+        transaction_id=record.transaction_id,
+        status=record.status,
+        status_url=status_url,
+        cancel_url=cancel_url,
+    )
+
+
+@router.get("/{session_id}/snapshot-transactions/{transaction_id}")
+async def get_restore_transaction_status(
+    session_id: str, transaction_id: str, request: Request,
+):
+    """Return current status of a V2 restore transaction (shared registry + journal)."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    from backend.services.snapshot_v2.jobs import load_transaction
+
+    paths = SnapshotV2Paths.for_session(session_id)
+    record = load_transaction(transaction_id, paths=paths)
+    if record is None or record.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Restore transaction not found")
+
+    return APIResponse(
+        success=True,
+        data=record.model_dump(mode="json"),
+        message="ok",
+    )
+
+
+@router.post("/{session_id}/snapshot-transactions/{transaction_id}/cancel")
+async def cancel_restore_v2(session_id: str, transaction_id: str, request: Request):
+    """Cancel a running V2 restore job via the shared job registry."""
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    from backend.services.snapshot_v2.jobs import cancel_restore_job
+
+    try:
+        await cancel_restore_job(transaction_id, session_id=session_id)
+    except SnapshotTransactionError as exc:
+        if exc.code == "TRANSACTION_NOT_FOUND":
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return APIResponse(success=True, message="Restore cancelled")
