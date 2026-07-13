@@ -580,8 +580,8 @@ describe('Gate D acceptance: delete leaf/branch and protected 409', () => {
 
 // ── Snapshot failure: no Skip ─────────────────────────────────────
 
-describe('Gate D acceptance: snapshot-failure no-Skip', () => {
-  it('failure dialog never offers Skip; only retry/manage/terminate', () => {
+describe('snapshot-failure Skip is producer-gated', () => {
+  it('base actions (no skip) render no Skip button', () => {
     render(
       <SnapshotFailureDialog
         failure={{
@@ -596,24 +596,41 @@ describe('Gate D acceptance: snapshot-failure no-Skip', () => {
           allowed_actions: ['retry', 'manage', 'terminate'],
         }}
         onRetry={vi.fn()}
+        onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
       />,
     )
     expect(screen.getByRole('dialog', { name: /snapshot failure/i })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^skip$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /skip snapshot/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
-    useAppStore.getState().setSnapshotFailure({
-      failure: {
-        snapshot_id: 'snap-1',
-        session_id: SESSION,
-        failed_at: '2025-01-01T00:00:00Z',
-        code: 'required_runtime_unpersistable',
-        message: 'fail',
-      },
-      allowed_actions: ['retry', 'manage', 'terminate'],
-    })
-    expect(useAppStore.getState().snapshotFailure).not.toBeNull()
+  })
+
+  it('skippable actions render a Skip button that calls onSkip', () => {
+    const onSkip = vi.fn()
+    render(
+      <SnapshotFailureDialog
+        failure={{
+          failure: {
+            snapshot_id: 'snap-1',
+            session_id: SESSION,
+            failed_at: '2025-01-01T00:00:00Z',
+            code: 'required_runtime_unpersistable',
+            message: "Required variable 'loom_con' not found in kernel globals",
+            details: { required_variables: ['loom_con'], phase: 'pre_annotation' },
+          },
+          allowed_actions: ['retry', 'skip', 'manage', 'terminate'],
+        }}
+        onRetry={vi.fn()}
+        onSkip={onSkip}
+        onManage={vi.fn()}
+        onTerminate={vi.fn()}
+      />,
+    )
+    const skipBtn = screen.getByRole('button', { name: /skip snapshot/i })
+    expect(skipBtn).toBeInTheDocument()
+    fireEvent.click(skipBtn)
+    expect(onSkip).toHaveBeenCalledTimes(1)
   })
 })
 

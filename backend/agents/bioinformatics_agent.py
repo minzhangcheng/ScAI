@@ -3407,21 +3407,29 @@ If results significantly deviate from plan expectations, report via consult_pi i
                                 if validated:
                                     self._current_analysis_state.species_genes_validated = True
 
-                            # Store persistent_outputs + promoted deps in sandbox_state for snapshot runtime tracking
+                            # Store required runtime deps in sandbox_state for snapshot tracking.
                             if self._current_analysis_state:
                                 sandbox_state = self._current_analysis_state.sandbox_state or {}
-                                deps = sandbox_state.setdefault("runtime_dependencies_v2", [])
-                                # Explicit declarations
-                                for var_name in (persistent_outputs or []):
-                                    if var_name and var_name not in deps:
-                                        deps.append(var_name)
-                                # Cross-cell promotions from sandbox tracker
+                                # The sandbox tracker is the single source of truth: it
+                                # already merges explicit declarations + cross-cell
+                                # promotions AND prunes names deleted from the namespace
+                                # (del). Deriving runtime_dependencies_v2 from it — rather
+                                # than append-only accumulation — keeps deleted transient
+                                # objects (e.g. a loompy connection) from staying
+                                # permanently required and breaking every capture.
                                 tracker = getattr(self.sandbox, "runtime_dependency_tracker", None)
                                 if tracker is not None:
-                                    for var_name in sorted(tracker.required_outputs):
+                                    sandbox_state["runtime_dependencies_v2"] = sorted(
+                                        tracker.required_outputs
+                                    )
+                                    sandbox_state["runtime_dependency_tracker_v2"] = tracker.to_state_dict()
+                                else:
+                                    # No tracker (should not happen with track_globals): fall
+                                    # back to append-only explicit declarations.
+                                    deps = sandbox_state.setdefault("runtime_dependencies_v2", [])
+                                    for var_name in (persistent_outputs or []):
                                         if var_name and var_name not in deps:
                                             deps.append(var_name)
-                                    sandbox_state["runtime_dependency_tracker_v2"] = tracker.to_state_dict()
                                 sandbox_state["runtime_revision"] = getattr(
                                     self.sandbox, "runtime_revision", 0
                                 )

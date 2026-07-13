@@ -857,6 +857,29 @@ export function AnalysisPanel() {
     }
   }, [currentSession, clearSnapshotFailure, monitorSnapshotRetry, wsConnected, wsConnect])
 
+  const handleSnapshotFailureSkip = useCallback(async () => {
+    if (!currentSession) return
+    try {
+      const resp = await apiFetch<{
+        success?: boolean
+        data?: { status?: TaskStatus }
+      }>(`/session/${currentSession.id}/snapshot-failure/skip`, {
+        method: 'POST',
+      })
+      if (resp?.success !== true) return
+      if (resp?.data?.status) {
+        useAppStore.getState().updateSession({ status: resp.data.status })
+      }
+      clearSnapshotFailure()
+      // Reconnect the WebSocket so the workflow resumes past the skipped boundary.
+      if (!wsConnected) {
+        setTimeout(() => wsConnect?.(), 100)
+      }
+    } catch (e) {
+      console.error('Snapshot failure skip failed:', e)
+    }
+  }, [currentSession, clearSnapshotFailure, wsConnected, wsConnect])
+
   const handleSnapshotFailureManage = useCallback(() => {
     setShowSnapshotPanel(true)
   }, [])
@@ -1901,13 +1924,17 @@ export function AnalysisPanel() {
         />
       )}
 
-      {/* Snapshot failure HITL — no Skip; Retry re-enters capture only */}
+      {/* Snapshot failure HITL — Retry re-enters capture only; Skip continues
+          without capturing at that boundary (skippable producers only) */}
       {snapshotFailure && (
         <SnapshotFailureDialog
           failure={snapshotFailure}
           isZh={language === 'zh'}
           onRetry={() => {
             void handleSnapshotFailureRetry()
+          }}
+          onSkip={() => {
+            void handleSnapshotFailureSkip()
           }}
           onManage={handleSnapshotFailureManage}
           onTerminate={() => {

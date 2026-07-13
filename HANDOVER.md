@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.5.3 · **Last updated**: 2026-07-13
+**Version**: 0.33.6 · **Last updated**: 2026-07-13
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,13 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-13)**
+
+- `0.33.6` — Snapshot V2 "Skip snapshot & continue" HITL action, soft-skip absent advisory runtime deps, runtime tracker "del" pruning; version bump (2026-07-13):
+  - **Snapshot failure gate Skip action (`backend/services/snapshot_v2/failure_gate.py`, `backend/services/snapshot_v2/errors.py`, `backend/models/schemas.py`, `backend/routes/lifecycle.py`, `backend/workflow/core.py`)**: New `SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE` tuple adds "skip" alongside retry/manage/terminate for producers where skipping is safe (workflow_boundary, post_report, chat). `skip_workflow_boundary()` / `skip_post_report()` / `skip_chat()` handlers arm a one-shot `skip_required_snapshot_phase` marker on `AnalysisState`; `consume_snapshot_skip()` in `_capture_required_snapshot()` makes the next required capture a no-op. `POST /{session_id}/snapshot-failure/skip` endpoint dispatches to the correct producer handler. pre_restore producer explicitly excludes skip (would overwrite live state without a safety point → 409).
+  - **Soft-skip absent advisory runtime deps (`backend/services/snapshot_v2/runtime.py`)**: `RuntimeCapture.capture()` now distinguishes mandatory (checkpoint) vs advisory declared names. Absent advisory names are soft-skipped (recorded as incidental skips) instead of raising `required_runtime_unpersistable`, preventing transient/unused declared outputs from permanently bricking snapshot capture. Absent checkpoint dependencies still fail closed.
+  - **Runtime dependency tracker "del" pruning (`backend/services/snapshot_v2/runtime_registry.py`, `backend/utils/sandbox.py`, `backend/agents/bioinformatics_agent.py`)**: `RuntimeDependencyTracker.record_execution()` accepts a new `removed` set — names deleted from the kernel namespace (e.g. a `loompy` connection) are pruned from the required and created sets, preventing permanently broken snapshots. Sandbox passes the `removed` names on code execution; bioinformatics agent derives `runtime_dependencies_v2` from the tracker as single source of truth instead of append-only accumulation.
+  - **Frontend Skip button (`frontend/src/components/snapshots/SnapshotFailureDialog.tsx`, `frontend/src/components/AnalysisPanel.tsx`)**: New Skip button rendered when `allowed_actions` includes "skip" and producer is not pre_restore. AnalysisPanel gains `handleSnapshotFailureSkip` callback that POSTs to the skip endpoint and reconnects the WebSocket. `SnapshotFailureAction` type widened to include "skip".
+  - **New tests**: `test_snapshot_failure_gate.py` (skippable producers offer skip, base actions exclude skip), `test_snapshot_v2_runtime.py` (absent advisory soft-skip, absent checkpoint still fails closed, removed global pruned from required), `test_snapshot_v2_capture_transaction.py` (embedding soft-skip regression update), `test_snapshot_v2_producers.py` (post_report skip action), `SnapshotDialogs.v2.test.tsx` (Skip button rendered/hidden), `SnapshotV2.acceptance.test.tsx` (Skip producer-gated acceptance).
 
 - `0.33.5.3` — Frontend Snapshot V2 manifest shape adapter (flat-backend → wrapped-panel); version bump (2026-07-13):
   - **`normalizeSnapshotRecordV2` adapter (`frontend/src/utils/snapshotV2.ts`)**: New adapter that normalizes the backend's flat manifest dump (no `manifest` envelope, `continuation` instead of `capsule`, `created_at` instead of `captured_at`, `branch_id`/`branch_label` instead of `branch`) into the wrapped `SnapshotRecordV2` shape the panel/tree/preview consume. Defensively handles corrupt entries (missing manifest, error fields) to prevent crashing the render.

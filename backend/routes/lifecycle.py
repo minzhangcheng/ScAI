@@ -784,6 +784,72 @@ async def snapshot_failure_retry(session_id: str, request: Request):
     )
 
 
+@router.post("/{session_id}/snapshot-failure/skip")
+async def snapshot_failure_skip(session_id: str, request: Request):
+    """Skip snapshot creation and continue the analysis.
+
+    Clears the failure gate WITHOUT capturing a snapshot and resumes the
+    workflow, forfeiting only the restore point at that boundary. Producer-aware:
+    workflow_boundary / post_report / chat are skippable; pre_restore is not
+    (skipping would proceed with a restore that overwrites live state without a
+    safety point) and returns 409.
+    """
+    from pydantic import ValidationError
+
+    from backend.services.snapshot_v2.failure_gate import skip_snapshot_producer
+    from backend.services.snapshot_v2.models import SnapshotRetryContext
+
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    if not is_snapshot_failure_blocked(state):
+        raise HTTPException(
+            status_code=409,
+            detail="Session is not blocked on a snapshot failure",
+        )
+
+    failure = getattr(state, "snapshot_failure", None) or {}
+    raw_context = failure.get("retry_context")
+    if not isinstance(raw_context, dict) or not raw_context:
+        raise HTTPException(
+            status_code=409,
+            detail="Snapshot failure retry context is missing; gate left intact",
+        )
+    try:
+        context = SnapshotRetryContext.model_validate(raw_context)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Snapshot failure retry context is invalid; gate left intact",
+        ) from exc
+
+    outcome = skip_snapshot_producer(state, context)
+    if not outcome.success:
+        # Skip unsupported for this producer (e.g. pre_restore): gate left intact.
+        raise HTTPException(status_code=409, detail=outcome.message)
+
+    # Clear gate + arm the one-shot skip marker + set RUNNING, then persist. The
+    # frontend reconnects the WebSocket, which resumes the workflow from the graph
+    # checkpoint; the armed marker makes the next required capture at that phase a
+    # no-op so the analysis proceeds past the boundary that previously failed.
+    # (Mirrors the Retry flow, which likewise defers graph re-drive to reconnect.)
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state)
+
+    return APIResponse(
+        success=True,
+        message=outcome.message,
+        data={
+            "status": outcome.status
+            if outcome.status is not None
+            else getattr(state.status, "value", str(state.status)),
+            "wait_input_reason": None,
+            "snapshot_failure": None,
+        },
+    )
+
+
 @router.post("/{session_id}/snapshot-failure/terminate")
 async def snapshot_failure_terminate(session_id: str, request: Request):
     """Terminate the session on snapshot failure.

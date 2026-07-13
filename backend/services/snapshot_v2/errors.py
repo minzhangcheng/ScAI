@@ -5,9 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 
-# Snapshot V2 failure HITL: never Skip. Retry re-enters capture only;
-# manage opens snapshot management; terminate stops the workflow.
+# Snapshot V2 failure HITL base actions. Retry re-enters capture only; manage
+# opens snapshot management; terminate stops the workflow. Used for producers
+# where skipping the capture is unsafe (e.g. pre_restore, whose snapshot is the
+# only safety point before a restore overwrites live state).
 SNAPSHOT_FAILURE_ACTIONS: tuple[str, ...] = ("retry", "manage", "terminate")
+
+# Actions for producers where "Skip snapshot & continue" is safe — the analysis
+# proceeds with reduced restorability at that one boundary
+# (workflow_boundary / post_report / chat).
+SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE: tuple[str, ...] = (
+    "retry", "skip", "manage", "terminate",
+)
 
 
 def is_snapshot_failure_blocked(state: Any) -> bool:

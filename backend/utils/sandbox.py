@@ -1644,10 +1644,14 @@ if _skipped_vars:
             self.runtime_dependency_tracker = RuntimeDependencyTracker()
         # Only promote loaded names that were previously created by a cell.
         # Passing the full intersection would promote every pre-existing name.
+        # `removed` names (del'd from the namespace) are pruned from the required
+        # set so a declared-then-deleted transient (e.g. a loompy connection)
+        # cannot permanently break snapshot capture.
         self.runtime_dependency_tracker.record_execution(
             created=created,
             loaded=loaded,
             declared=set(declared or set()),
+            removed=removed,
         )
         return self._last_execution_diff
 

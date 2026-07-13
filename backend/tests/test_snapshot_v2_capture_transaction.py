@@ -499,12 +499,16 @@ class TestRuntimeCaptureFailClosed:
             record = await service.capture(
                 req, sandbox=sandbox, workspace_root=str(workspace_root),
             )
-            # Required embedding missing from kernel → fail closed
-            assert record.failure is not None
-            assert record.failure.code == "required_runtime_unpersistable" or (
-                "embedding" in (record.failure.message or "")
-            )
-            # Tracker rehydrated onto sandbox
+            # `embedding` is an advisory declared dependency (rehydrated from
+            # sandbox_state) that is absent from kernel globals. It is soft-skipped
+            # (recorded as an incidental skip) rather than failing closed — only
+            # continuation-critical checkpoint dependencies fail closed when absent.
+            assert record.failure is None
+            skip_names = {
+                s.name for s in record.manifest.runtime.dependencies.incidental_skips
+            }
+            assert "embedding" in skip_names
+            # Tracker rehydrated onto sandbox (proves sandbox_state rehydration ran).
             assert sandbox.runtime_dependency_tracker is not None
             assert "embedding" in sandbox.runtime_dependency_tracker.required_outputs
         finally:

@@ -124,10 +124,12 @@ class RuntimeDependencyTracker:
         created: set[str] | None = None,
         loaded: set[str] | None = None,
         declared: set[str] | None = None,
+        removed: set[str] | None = None,
     ) -> set[str]:
         created = set(created or set())
         loaded = set(loaded or set())
         declared = set(declared or set())
+        removed = set(removed or set())
 
         self._created.update(created)
         # Declared outputs are required immediately.
@@ -135,6 +137,14 @@ class RuntimeDependencyTracker:
         # Cross-cell promotion: prior-created name later loaded becomes required.
         promoted = loaded & self._created
         self._required.update(promoted)
+        # A name removed from the namespace (del / rebinding out of existence) is
+        # no longer capturable and must drop out of the required set. Without this
+        # a transient object (e.g. a loompy connection) declared as a persistent
+        # output then deleted would stay permanently required and fail every
+        # subsequent snapshot capture (required_runtime_unpersistable).
+        if removed:
+            self._required.difference_update(removed)
+            self._created.difference_update(removed)
         return set(self._required)
 
     def merge_declared(self, names: set[str] | list[str] | None) -> None:

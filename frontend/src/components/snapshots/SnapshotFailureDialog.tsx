@@ -9,6 +9,7 @@ interface SnapshotFailureDialogProps {
   failure: SnapshotFailureInfo
   isZh?: boolean
   onRetry: (options: SnapshotFailureRetryOptions) => void
+  onSkip: () => void
   onManage: () => void
   onTerminate: () => void
   onClose?: () => void
@@ -39,6 +40,7 @@ export function SnapshotFailureDialog({
   failure,
   isZh = false,
   onRetry,
+  onSkip,
   onManage,
   onTerminate,
   onClose,
@@ -130,6 +132,20 @@ export function SnapshotFailureDialog({
               className="w-full px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
             >
               {isZh ? '重试' : 'Retry'}
+            </button>
+          )}
+          {actions.has('skip') && !isPreRestore && (
+            <button
+              type="button"
+              onClick={onSkip}
+              className="w-full px-3 py-2 text-sm bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-lg font-medium"
+              title={
+                isZh
+                  ? '跳过本次快照创建，继续分析（该检查点将无法用于恢复）'
+                  : 'Skip creating this snapshot and continue the analysis (this checkpoint will not be restorable)'
+              }
+            >
+              {isZh ? '跳过快照并继续' : 'Skip snapshot & continue'}
             </button>
           )}
           {actions.has('manage') && (

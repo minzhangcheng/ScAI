@@ -753,8 +753,8 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
                     : undefined,
               },
               allowed_actions: allowed.filter(
-                (a): a is 'retry' | 'manage' | 'terminate' =>
-                  a === 'retry' || a === 'manage' || a === 'terminate',
+                (a): a is 'retry' | 'skip' | 'manage' | 'terminate' =>
+                  a === 'retry' || a === 'skip' || a === 'manage' || a === 'terminate',
               ),
             }
           }

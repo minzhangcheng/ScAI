@@ -905,8 +905,29 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         """Create a required workflow snapshot via SnapshotService.
 
         Fail-closed: on capture failure raises RequiredSnapshotBlocked after
-        persisting the snapshot_failure gate (retry/manage/terminate only).
+        persisting the snapshot_failure gate (retry/skip/manage/terminate).
+
+        One-shot skip: when the user chose "Skip snapshot & continue" on a prior
+        failure at this boundary, the marker is consumed here and the capture is a
+        no-op so the graph proceeds past the boundary that previously failed.
         """
+        from ..services.snapshot_v2.failure_gate import consume_snapshot_skip
+
+        if consume_snapshot_skip(state, phase):
+            logger.warning(
+                f"[{self.session_id}] Skipping required snapshot at boundary "
+                f"'{phase}' (user chose Skip snapshot & continue)"
+            )
+            try:
+                await self._send_message(
+                    "status",
+                    f"Skipped snapshot at '{phase}'; continuing analysis "
+                    "(this checkpoint will not be restorable).",
+                )
+            except Exception:
+                pass
+            return None
+
         from ..config import get_session_workspace
         from ..services.snapshot_v2.service import SnapshotService
         from ..services.snapshot_v2.continuation import ContinuationRegistry
@@ -1244,9 +1265,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                         "code": "pending_required_snapshot",
                         "message": (
                             "Post-report snapshot is pending; use Retry to "
-                            "re-enter capture only (reports will not re-run)."
+                            "re-enter capture only (reports will not re-run), "
+                            "or Skip to complete without this snapshot."
                         ),
-                        "allowed_actions": ["retry", "manage", "terminate"],
+                        "allowed_actions": ["retry", "skip", "manage", "terminate"],
                     },
                     retry_context={
                         "producer": "post_report",

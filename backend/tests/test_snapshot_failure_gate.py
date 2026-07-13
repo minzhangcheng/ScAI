@@ -200,23 +200,29 @@ class TestSnapshotFailureGate:
         assert state.snapshot_transaction.get("status") == "completed"
 
     @pytest.mark.asyncio
-    async def test_failure_rejects_skip(self, v2_paths, sandbox, workspace_root):
-        """Skip is not a valid action for snapshot failure gate."""
-        # The failure gate does not recognize "skip" as an action.
-        # Verify this by checking constants or the gate handler.
-        from backend.constants import WaitInputReason
-
-        state = make_analysis_state()
-        state.wait_input_reason = "snapshot_failure"
-        state.snapshot_failure = {"code": "TEST", "message": "test"}
-
-        # Ensure there's no skip-related field in the failure
-        assert "skip" not in state.snapshot_failure.get("allowed_actions", [])
-        # By design, the allowed actions are: retry, manage, terminate
+    async def test_base_actions_exclude_skip(self, v2_paths, sandbox, workspace_root):
+        """Base (non-skippable, e.g. pre_restore) gate actions exclude skip."""
         assert "retry" in _allowed_actions()
         assert "manage" in _allowed_actions()
         assert "terminate" in _allowed_actions()
         assert "skip" not in _allowed_actions()
+
+    @pytest.mark.asyncio
+    async def test_skippable_producers_offer_skip(self):
+        """Workflow-boundary / post_report / chat producers additionally offer skip.
+
+        "Skip snapshot & continue" lets the analysis proceed past a boundary
+        without that restore point; only continuation-critical producers
+        (pre_restore) withhold it.
+        """
+        from backend.services.snapshot_v2.errors import (
+            SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE,
+        )
+
+        assert "skip" in SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE
+        assert set(SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE) == {
+            "retry", "skip", "manage", "terminate",
+        }
 
     @pytest.mark.asyncio
     async def test_failure_accepts_manage(self):

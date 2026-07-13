@@ -489,6 +489,31 @@ class RuntimeCapture:
         incidental_skips: list[RuntimeSkip] = []
         manifest_warnings: list[str] = []
 
+        # Names that are continuation-critical (checkpoint dependencies) must
+        # fail closed when absent from globals. Advisory declared names (e.g. an
+        # LLM-declared persistent output that was later `del`-eted) cannot be
+        # captured if they are gone, and failing closed on them would permanently
+        # brick every snapshot. Those are soft-skipped instead.
+        mandatory_names = set(checkpoint_dependencies or set())
+
+        # Pruned required set drives the completeness proof; soft-skipped absent
+        # advisory names are removed from it and recorded as incidental skips.
+        pruned_required = dict(dep_manifest.required)
+
+        def _soft_skip_absent(name: str, serializer: str) -> None:
+            type_str = dep_manifest.required[name].type_name
+            incidental_skips.append(
+                RuntimeSkip(
+                    name=name,
+                    type_name=type_str,
+                    reason=(
+                        f"declared runtime dependency absent from kernel globals "
+                        f"at capture (serializer={serializer}); soft-skipped"
+                    ),
+                )
+            )
+            pruned_required.pop(name, None)
+
         try:
             # Partition required names into h5ad vs dill based on dependency serializer.
             h5ad_names: list[str] = []
@@ -502,9 +527,12 @@ class RuntimeCapture:
             for var_name in sorted(h5ad_names):
                 type_str = globals_meta.get(var_name, dep_manifest.required[var_name].type_name)
                 if var_name not in globals_meta:
-                    self._raise_unpersistable(
-                        var_name, type_str, "h5ad", "not found in kernel globals"
-                    )
+                    if var_name in mandatory_names:
+                        self._raise_unpersistable(
+                            var_name, type_str, "h5ad", "not found in kernel globals"
+                        )
+                    _soft_skip_absent(var_name, "h5ad")
+                    continue
                 try:
                     ref = await self._capture_adata(
                         sandbox, var_name, type_str, capture_dir,
@@ -519,7 +547,16 @@ class RuntimeCapture:
                 captured_adata_vars.append(var_name)
                 captured_adata_refs[var_name] = ref
 
-            residual_names = sorted(dill_names)
+            # Drop absent advisory dill names (soft-skip); keep absent mandatory
+            # names so the fail-closed check below still raises for them.
+            present_dill_names: list[str] = []
+            for var_name in sorted(dill_names):
+                if var_name not in globals_meta and var_name not in mandatory_names:
+                    _soft_skip_absent(var_name, "dill")
+                    continue
+                present_dill_names.append(var_name)
+
+            residual_names = sorted(present_dill_names)
             if residual_names:
                 for var_name in residual_names:
                     if var_name not in globals_meta:
@@ -587,11 +624,13 @@ class RuntimeCapture:
                 )
 
             # Build complete RuntimeManifest with dependency proof.
-            # Keep required as declared (from registry), not only captured.
+            # Required is the registry-declared set minus soft-skipped absent
+            # advisory names, so the completeness proof holds against what was
+            # actually captured.
             runtime = RuntimeManifest(
                 status="complete",
                 dependencies=RuntimeDependencyManifest(
-                    required=dep_manifest.required,
+                    required=pruned_required,
                     incidental_skips=incidental_skips,
                 ),
                 residual_ref=captured_residual_ref,

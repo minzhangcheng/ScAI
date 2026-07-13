@@ -928,6 +928,12 @@ class AnalysisState(BaseModel):
     snapshot_failure: Optional[Dict[str, Any]] = None
     snapshot_transaction: Optional[Dict[str, Any]] = None
 
+    # One-shot "skip snapshot & continue" marker. Set when the user chooses Skip
+    # on a snapshot-failure gate; consumed by the next required workflow-boundary
+    # capture for the matching phase ("*" matches any) so the workflow proceeds
+    # without capturing at that boundary. See failure_gate.consume_snapshot_skip.
+    skip_required_snapshot_phase: Optional[str] = None
+
     # Recovery failure marker: set when journal recovery fails, blocks mutations
     recovery_blocked: bool = False
 

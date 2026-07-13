@@ -134,6 +134,22 @@ class TestRequiredRuntimeRegistry:
         registry.record_execution(created={"model"}, loaded=set(), declared={"model"})
         assert registry.required_outputs == {"model"}
 
+    def test_removed_global_is_pruned_from_required(self):
+        """A declared/promoted output deleted (del) later must drop out of required.
+
+        Regression: a loompy connection declared as a persistent output then
+        `del`-eted stayed permanently required, breaking every snapshot capture.
+        """
+        from backend.services.snapshot_v2.runtime_registry import RuntimeDependencyTracker
+
+        registry = RuntimeDependencyTracker()
+        registry.record_execution(created={"loom_con"}, loaded=set(), declared={"loom_con"})
+        assert registry.required_outputs == {"loom_con"}
+        # A later cell deletes loom_con from the namespace.
+        registry.record_execution(created=set(), loaded=set(), removed={"loom_con"})
+        assert registry.required_outputs == set()
+        assert "loom_con" not in registry.created_outputs
+
     def test_canonical_dict_list_artifacts_required(self):
         from backend.services.snapshot_v2.runtime_registry import build_required_runtime_manifest
 
@@ -426,6 +442,110 @@ class TestRuntimeCapture:
             await capturer.capture(sandbox, declared_outputs={"adata"})
         assert "required_runtime_unpersistable" in str(exc_info.value.code)
         obj_store.put_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_absent_advisory_declared_name_is_soft_skipped(self, tmp_path):
+        """A declared (advisory) required name absent from globals must NOT fail closed.
+
+        Regression: `loom_con` (a loompy connection) was declared as a persistent
+        output, then deleted (del). It stayed in the declared set but was gone from
+        the kernel. Capture must soft-skip it (record as incidental skip) and still
+        succeed capturing the real objects — not raise required_runtime_unpersistable.
+        """
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        async def mock_execute(code, save_to_history=True, skip_safety_check=False):
+            if "__RUNTIME_GLOBALS_BEGIN__" in code:
+                return MagicMock(
+                    success=True,
+                    output='__RUNTIME_GLOBALS_BEGIN__\n{"adata": "AnnData(50, 10)"}\n__RUNTIME_GLOBALS_END__',
+                    error=None,
+                )
+            if ".h5ad" in code:
+                m = re.search(r"'([^']+\.h5ad)'", code)
+                if m:
+                    p = Path(m.group(1))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    _write_valid_h5ad_stub(p)
+                return MagicMock(success=True, output="__H5AD_SAVED__:1000", error=None)
+            return MagicMock(success=True, output="ok", error=None)
+
+        sandbox = AsyncMock()
+        sandbox.execute = mock_execute
+        sandbox.session_id = "test-session"
+        sandbox.km = MagicMock()
+
+        from backend.services.snapshot_v2.models import ObjectRef
+
+        obj_store = MagicMock()
+        obj_store.put_file = MagicMock(
+            return_value=MagicMock(
+                ref=ObjectRef(sha256="a" * 64, size=1000, media_type="application/x-hdf5")
+            )
+        )
+        paths = MagicMock()
+        paths.staging = staging
+
+        capturer = RuntimeCapture(obj_store, paths)
+        runtime = await capturer.capture(
+            sandbox, declared_outputs={"adata", "loom_con"}
+        )
+        assert runtime.status == "complete"
+        assert "adata" in runtime.adata_refs
+        # loom_con was absent + advisory → soft-skipped, not a captured requirement.
+        assert "loom_con" not in runtime.adata_refs
+        assert "loom_con" not in runtime.captured_residual_names
+        skip_names = {s.name for s in runtime.dependencies.incidental_skips}
+        assert "loom_con" in skip_names
+
+    @pytest.mark.asyncio
+    async def test_absent_checkpoint_dependency_still_fails_closed(self, tmp_path):
+        """A continuation-critical checkpoint dependency absent from globals must
+        still fail closed — soft-skip only applies to advisory declarations."""
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+        from backend.services.snapshot_v2.errors import SnapshotCaptureError
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        async def mock_execute(code, save_to_history=True, skip_safety_check=False):
+            if "__RUNTIME_GLOBALS_BEGIN__" in code:
+                return MagicMock(
+                    success=True,
+                    output='__RUNTIME_GLOBALS_BEGIN__\n{"adata": "AnnData(50, 10)"}\n__RUNTIME_GLOBALS_END__',
+                    error=None,
+                )
+            if ".h5ad" in code:
+                m = re.search(r"'([^']+\.h5ad)'", code)
+                if m:
+                    p = Path(m.group(1))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    _write_valid_h5ad_stub(p)
+                return MagicMock(success=True, output="__H5AD_SAVED__:1000", error=None)
+            return MagicMock(success=True, output="ok", error=None)
+
+        sandbox = AsyncMock()
+        sandbox.execute = mock_execute
+        sandbox.session_id = "test-session"
+        sandbox.km = MagicMock()
+
+        obj_store = MagicMock()
+        obj_store.put_file = MagicMock(return_value=MagicMock(ref=MagicMock(size=1000)))
+        paths = MagicMock()
+        paths.staging = staging
+
+        capturer = RuntimeCapture(obj_store, paths)
+        with pytest.raises(SnapshotCaptureError) as exc_info:
+            await capturer.capture(
+                sandbox,
+                declared_outputs={"adata"},
+                checkpoint_dependencies={"continuation_only"},
+            )
+        assert "required_runtime_unpersistable" in str(exc_info.value.code)
+        assert "continuation_only" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_mark_runtime_committed(self, tmp_path):

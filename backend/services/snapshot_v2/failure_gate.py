@@ -22,6 +22,7 @@ from backend.constants import WaitInputReason
 from backend.models.schemas import TaskStatus
 from backend.services.snapshot_v2.errors import (
     SNAPSHOT_FAILURE_ACTIONS,
+    SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE,
     RequiredSnapshotBlocked,
 )
 from backend.services.snapshot_v2.models import RetryOutcome, SnapshotRetryContext
@@ -30,6 +31,11 @@ from backend.services.snapshot_v2.models import RetryOutcome, SnapshotRetryConte
 SnapshotFailureActions = tuple[str, ...]
 
 SNAPSHOT_FAILURE_GATE_ACTIONS: SnapshotFailureActions = SNAPSHOT_FAILURE_ACTIONS
+
+# Producers whose gate additionally offers "Skip snapshot & continue".
+SNAPSHOT_SKIPPABLE_GATE_ACTIONS: SnapshotFailureActions = (
+    SNAPSHOT_FAILURE_ACTIONS_SKIPPABLE
+)
 
 RetryProducerFn = Callable[
     [str, Any, SnapshotRetryContext],
@@ -215,7 +221,7 @@ def ensure_post_report_retry_context(
             {
                 "code": code,
                 "message": message,
-                "allowed_actions": list(SNAPSHOT_FAILURE_GATE_ACTIONS),
+                "allowed_actions": list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
                 "snapshot_id": snapshot_id,
             },
             retry_context=typed,
@@ -223,8 +229,9 @@ def ensure_post_report_retry_context(
         return
 
     payload = dict(existing)
-    if "allowed_actions" not in payload:
-        payload["allowed_actions"] = list(SNAPSHOT_FAILURE_GATE_ACTIONS)
+    # post_report is skippable: reports are already generated, so continuing
+    # without the post-report snapshot only forfeits that restore point.
+    payload["allowed_actions"] = list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS)
     if _post_report_context_incomplete(payload.get("retry_context")):
         payload["retry_context"] = typed
     state.snapshot_failure = payload
@@ -326,7 +333,7 @@ def ensure_workflow_boundary_retry_context(
             {
                 "code": code,
                 "message": message,
-                "allowed_actions": list(SNAPSHOT_FAILURE_GATE_ACTIONS),
+                "allowed_actions": list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
                 "snapshot_id": snapshot_id,
             },
             retry_context=typed,
@@ -334,8 +341,9 @@ def ensure_workflow_boundary_retry_context(
         return
 
     payload = dict(existing)
-    if "allowed_actions" not in payload:
-        payload["allowed_actions"] = list(SNAPSHOT_FAILURE_GATE_ACTIONS)
+    # Workflow-boundary captures are skippable: the analysis proceeds past the
+    # boundary without that restore point.
+    payload["allowed_actions"] = list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS)
     if _workflow_boundary_context_incomplete(payload.get("retry_context")):
         payload["retry_context"] = typed
     state.snapshot_failure = payload
@@ -395,7 +403,7 @@ def enter_chat_snapshot_failure_gate(
         {
             "code": code,
             "message": message,
-            "allowed_actions": list(SNAPSHOT_FAILURE_GATE_ACTIONS),
+            "allowed_actions": list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS),
             "snapshot_id": snapshot_id,
         },
         retry_context={
@@ -456,6 +464,114 @@ def retry_chat(
         state.status = TaskStatus.COMPLETED
 
 
+def consume_snapshot_skip(state: Any, phase: str) -> bool:
+    """One-shot check-and-consume of a "skip snapshot & continue" marker.
+
+    Returns True (and clears the marker) when the user armed a skip for *phase*
+    (or the wildcard ``"*"``). A required workflow-boundary capture calls this at
+    entry; on True it proceeds without capturing at that boundary.
+    """
+    marker = getattr(state, "skip_required_snapshot_phase", None)
+    if not marker:
+        return False
+    if marker == "*" or marker == phase:
+        state.skip_required_snapshot_phase = None
+        return True
+    return False
+
+
+def skip_workflow_boundary(state: Any, phase: str | None) -> None:
+    """Skip a workflow-boundary required snapshot and resume RUNNING.
+
+    Arms a one-shot skip marker for *phase* so the graph resume re-hits the same
+    boundary and proceeds without capturing, then continues the analysis.
+    """
+    state.snapshot_failure = None
+    state.wait_input_reason = None
+    state.skip_required_snapshot_phase = (phase or "*")
+    state.status = TaskStatus.RUNNING
+
+
+def skip_post_report(state: Any) -> None:
+    """Skip the post-report snapshot: reports are already generated, mark done."""
+    state.snapshot_failure = None
+    state.wait_input_reason = None
+    if hasattr(state, "pending_required_snapshot"):
+        state.pending_required_snapshot = None
+    state.status = TaskStatus.COMPLETED
+
+
+def skip_chat(state: Any, previous_status: TaskStatus | str | None = None) -> None:
+    """Skip the post-chat snapshot and restore *previous_status*."""
+    state.snapshot_failure = None
+    state.wait_input_reason = None
+    if previous_status is not None:
+        try:
+            state.status = (
+                TaskStatus(previous_status)
+                if isinstance(previous_status, str)
+                else previous_status
+            )
+        except Exception:
+            state.status = TaskStatus.COMPLETED
+    else:
+        state.status = TaskStatus.COMPLETED
+
+
+def skip_snapshot_producer(state: Any, context: SnapshotRetryContext) -> RetryOutcome:
+    """Dispatch "Skip snapshot & continue" to the matching producer.
+
+    workflow_boundary / post_report / chat are skippable. pre_restore is not:
+    skipping there would proceed with a restore that overwrites live state
+    without a safety point, so it returns an unsuccessful outcome and leaves the
+    gate intact.
+    """
+    producer = context.producer
+    if producer == "workflow_boundary":
+        phase = (context.snapshot_request or {}).get("phase")
+        skip_workflow_boundary(state, phase)
+        return RetryOutcome(
+            success=True,
+            still_blocked=False,
+            message="Snapshot skipped; workflow continuing without this checkpoint",
+            status=_status_value(state),
+            wait_input_reason=None,
+            snapshot_failure=None,
+        )
+    if producer == "post_report":
+        skip_post_report(state)
+        return RetryOutcome(
+            success=True,
+            still_blocked=False,
+            message="Post-report snapshot skipped; analysis marked complete",
+            status=_status_value(state),
+            wait_input_reason=None,
+            snapshot_failure=None,
+        )
+    if producer == "chat":
+        skip_chat(state, context.previous_status)
+        return RetryOutcome(
+            success=True,
+            still_blocked=False,
+            message="Post-chat snapshot skipped; conversation state retained in memory",
+            status=_status_value(state),
+            wait_input_reason=None,
+            snapshot_failure=None,
+        )
+    # pre_restore (or any unknown producer): skip is unsafe. Leave gate intact.
+    return RetryOutcome(
+        success=False,
+        still_blocked=True,
+        message=(
+            f"Skip is not supported for producer '{producer}'; "
+            "the snapshot failure gate is left intact"
+        ),
+        status=_status_value(state),
+        wait_input_reason=getattr(state, "wait_input_reason", None),
+        snapshot_failure=getattr(state, "snapshot_failure", None),
+    )
+
+
 def terminate_snapshot_failure(state: Any) -> None:
     """Clear failure gate, mark STOPPED, and record an audit reason.
 
@@ -477,6 +593,18 @@ def _status_value(state: Any) -> str | None:
     return getattr(status, "value", str(status))
 
 
+_SKIPPABLE_PRODUCERS: frozenset[str] = frozenset({
+    "workflow_boundary", "post_report", "chat",
+})
+
+
+def _actions_for_producer(producer: str | None) -> list[str]:
+    """Base actions plus Skip for producers where skipping is safe."""
+    if producer in _SKIPPABLE_PRODUCERS:
+        return list(SNAPSHOT_SKIPPABLE_GATE_ACTIONS)
+    return list(SNAPSHOT_FAILURE_GATE_ACTIONS)
+
+
 def _reenter_gate_on_failure(
     state: Any,
     *,
@@ -490,7 +618,7 @@ def _reenter_gate_on_failure(
         {
             "code": code,
             "message": message,
-            "allowed_actions": list(SNAPSHOT_FAILURE_GATE_ACTIONS),
+            "allowed_actions": _actions_for_producer(context.producer),
             "snapshot_id": snapshot_id,
         },
         retry_context=context.model_dump(mode="json"),

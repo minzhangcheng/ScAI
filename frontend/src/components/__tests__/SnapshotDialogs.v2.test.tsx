@@ -23,11 +23,12 @@ const baseFailure: SnapshotFailureInfo = {
 }
 
 describe('SnapshotFailureDialog', () => {
-  it('renders backend error code and never offers Skip', () => {
+  it('renders backend error code; Skip hidden unless allowed_actions includes it', () => {
     render(
       <SnapshotFailureDialog
         failure={baseFailure}
         onRetry={vi.fn()}
+        onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
       />,
@@ -35,10 +36,27 @@ describe('SnapshotFailureDialog', () => {
 
     expect(screen.getByRole('dialog', { name: /snapshot failure/i })).toBeInTheDocument()
     expect(screen.getByText(/required_runtime_unpersistable/i)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^skip$/i })).not.toBeInTheDocument()
+    // baseFailure has base actions (no skip) → no Skip button.
+    expect(screen.queryByRole('button', { name: /skip snapshot/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /manage/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /terminate/i })).toBeInTheDocument()
+  })
+
+  it('offers a Skip button when allowed_actions includes skip', () => {
+    const onSkip = vi.fn()
+    render(
+      <SnapshotFailureDialog
+        failure={{ ...baseFailure, allowed_actions: ['retry', 'skip', 'manage', 'terminate'] }}
+        onRetry={vi.fn()}
+        onSkip={onSkip}
+        onManage={vi.fn()}
+        onTerminate={vi.fn()}
+      />,
+    )
+    const skipBtn = screen.getByRole('button', { name: /skip snapshot/i })
+    fireEvent.click(skipBtn)
+    expect(onSkip).toHaveBeenCalledTimes(1)
   })
 
   it('shows named required-variable diagnostics from failure details', () => {
@@ -46,6 +64,7 @@ describe('SnapshotFailureDialog', () => {
       <SnapshotFailureDialog
         failure={baseFailure}
         onRetry={vi.fn()}
+        onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
       />,
@@ -69,6 +88,7 @@ describe('SnapshotFailureDialog', () => {
           },
         }}
         onRetry={onRetry}
+        onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
       />,
@@ -95,6 +115,7 @@ describe('SnapshotFailureDialog', () => {
           },
         }}
         onRetry={vi.fn()}
+        onSkip={vi.fn()}
         onManage={vi.fn()}
         onTerminate={vi.fn()}
       />,

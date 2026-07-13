@@ -132,7 +132,7 @@ export interface SnapshotTransactionResponse {
   cancel_url: string
 }
 
-export type SnapshotFailureAction = 'retry' | 'manage' | 'terminate'
+export type SnapshotFailureAction = 'retry' | 'skip' | 'manage' | 'terminate'
 
 export interface SnapshotFailureInfo {
   failure: SnapshotFailureRecord

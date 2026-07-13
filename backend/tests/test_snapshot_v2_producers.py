@@ -610,8 +610,10 @@ async def test_generate_report_catches_required_snapshot_blocked():
     assert state.wait_input_reason == "snapshot_failure"
     assert state.snapshot_failure is not None
     assert state.snapshot_failure["code"] == "quota"
+    # post_report is skippable: reports are already generated, so Skip is offered
+    # in addition to retry/manage/terminate.
     assert set(state.snapshot_failure["allowed_actions"]) == {
-        "retry", "manage", "terminate",
+        "retry", "skip", "manage", "terminate",
     }
     wf._generate_graphic_abstract.assert_not_awaited()
     wf._generate_detailed_report.assert_not_awaited()

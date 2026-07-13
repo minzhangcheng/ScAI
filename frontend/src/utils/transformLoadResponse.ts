@@ -131,7 +131,7 @@ export type StoreUpdates = {
       message: string
       details?: Record<string, unknown>
     }
-    allowed_actions: Array<'retry' | 'manage' | 'terminate'>
+    allowed_actions: Array<'retry' | 'skip' | 'manage' | 'terminate'>
   } | null
   snapshotTransaction?: SnapshotTransactionRecord | null
 } & LiteratureConfigStoreUpdates
