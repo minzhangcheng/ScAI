@@ -1,11 +1,13 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AnalysisPanel } from '../AnalysisPanel'
 import { useAppStore, type Session } from '../../stores/appStore'
-import { apiFetch } from '../../hooks/useApi'
+import { apiFetch, getSnapshotTransaction } from '../../hooks/useApi'
+import type { SnapshotTransactionRecord } from '../../types/snapshotV2'
 
 vi.mock('../../hooks/useApi', () => ({
   apiFetch: vi.fn(),
+  getSnapshotTransaction: vi.fn(),
   generateId: () => 'test-id',
   useConfig: () => ({
     checkStatus: vi.fn(),
@@ -27,6 +29,7 @@ vi.mock('../../hooks/useApi', () => ({
 }))
 
 const mockApiFetch = apiFetch as unknown as ReturnType<typeof vi.fn>
+const mockGetSnapshotTransaction = getSnapshotTransaction as unknown as ReturnType<typeof vi.fn>
 
 function makeSession(): Session {
   return {
@@ -59,6 +62,7 @@ const blockedFailure = {
 describe('AnalysisPanel snapshot-failure retry gate', () => {
   beforeEach(() => {
     mockApiFetch.mockReset()
+    mockGetSnapshotTransaction.mockReset()
     useAppStore.setState({
       currentSession: makeSession(),
       messages: [],
@@ -125,5 +129,81 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
     await waitFor(() => {
       expect(useAppStore.getState().snapshotFailure).toBeNull()
     })
+  })
+
+  it('hydrates and polls the queued pre-restore retry transaction', async () => {
+    const queued = {
+      transaction_id: 'restore-job-retry',
+      session_id: 'sess-snap-retry',
+      snapshot_id: 'target-snapshot',
+      status: 'queued' as const,
+      recovery_mode: 'rollback' as const,
+      failure: null,
+      retry_of_transaction_id: 'restore-job-original',
+    }
+    const committed = { ...queued, status: 'committed' as const }
+    mockApiFetch.mockResolvedValueOnce({
+      success: true,
+      message: 'Restore retry queued',
+      data: {
+        status: 'paused',
+        wait_input_reason: null,
+        snapshot_failure: null,
+        transaction_id: queued.transaction_id,
+        snapshot_transaction: queued,
+      },
+    })
+    mockGetSnapshotTransaction.mockResolvedValueOnce(committed)
+
+    render(<AnalysisPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+
+    await waitFor(() => {
+      expect(mockGetSnapshotTransaction).toHaveBeenCalledWith(
+        'sess-snap-retry',
+        'restore-job-retry',
+      )
+      expect(useAppStore.getState().snapshotTransaction).toEqual(committed)
+      expect(useAppStore.getState().snapshotFailure).toBeNull()
+    })
+  })
+
+  it('cancels retry polling when the active session changes', async () => {
+    const queued = {
+      transaction_id: 'restore-job-retry',
+      session_id: 'sess-snap-retry',
+      snapshot_id: 'target-snapshot',
+      status: 'queued' as const,
+      recovery_mode: 'rollback' as const,
+      failure: null,
+    }
+    let resolvePoll!: (value: SnapshotTransactionRecord) => void
+    mockApiFetch.mockResolvedValueOnce({
+      success: true,
+      data: {
+        status: 'paused',
+        snapshot_failure: null,
+        snapshot_transaction: queued,
+      },
+    })
+    mockGetSnapshotTransaction.mockReturnValueOnce(new Promise<SnapshotTransactionRecord>(resolve => {
+      resolvePoll = resolve
+    }))
+
+    render(<AnalysisPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+    await waitFor(() => expect(mockGetSnapshotTransaction).toHaveBeenCalledOnce())
+
+    await act(async () => {
+      useAppStore.setState({
+        currentSession: { ...makeSession(), id: 'another-session' },
+      })
+    })
+    await act(async () => {
+      resolvePoll({ ...queued, status: 'committed' })
+      await Promise.resolve()
+    })
+
+    expect(useAppStore.getState().snapshotTransaction?.status).toBe('queued')
   })
 })

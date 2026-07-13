@@ -324,7 +324,11 @@ class TestPreRestoreCaptureReuse:
             PreRestoreCapture, RestoreCaptureContext,
         )
         from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
-        from backend.services.snapshot_v2.models import SnapshotFailureRecord
+        from backend.services.snapshot_v2.models import (
+            SnapshotFailureRecord,
+            SnapshotRestoreRequest,
+            SnapshotRetryContext,
+        )
 
         analysis_state = make_analysis_state()
         ctx = RestoreCaptureContext(
@@ -334,6 +338,12 @@ class TestPreRestoreCaptureReuse:
             workspace_root=None,
             workflow_state={},
             analysis_state=analysis_state,
+            restore_transaction_id="restore-job-original",
+            restore_request=SnapshotRestoreRequest(
+                snapshot_id="target-snapshot",
+                runtime_choice="reset",
+                current_state_choice="abort",
+            ),
         )
 
         capture = PreRestoreCapture(service, object_store, manifest_store)
@@ -362,6 +372,12 @@ class TestPreRestoreCaptureReuse:
         assert analysis_state.wait_input_reason == "snapshot_failure"
         assert analysis_state.snapshot_failure is not None
         assert analysis_state.snapshot_failure["code"] == "TEST_FAIL"
+        retry_context = SnapshotRetryContext.model_validate(
+            analysis_state.snapshot_failure["retry_context"]
+        )
+        assert retry_context.restore_transaction_id == "restore-job-original"
+        assert retry_context.restore_request is not None
+        assert retry_context.restore_request["snapshot_id"] == "target-snapshot"
 
 
 # ── Discard / SnapshotRestoreRequest Validation Tests ─────────────────────────

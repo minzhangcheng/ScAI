@@ -1025,6 +1025,87 @@ class TestWorkflowCoreDispatch:
         result = await workflow.run(state, "s3")
         workflow.initialize.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_resume_observes_pending_restore_safe_point_before_checkpoint(self):
+        """A reconstructed workflow must acknowledge restore before graph access."""
+        from unittest.mock import AsyncMock, MagicMock
+        from backend.models.schemas import AnalysisState, TaskStatus
+        from backend.workflow.core import SingleCellAnalysisWorkflow
+
+        state = AnalysisState(
+            id="safe-point-resume",
+            user_id="u1",
+            initial_instruction="test",
+            status=TaskStatus.PAUSED,
+            current_round=1,
+        )
+        workflow = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+        workflow.session_id = state.id
+        workflow.compiled_graph = MagicMock()
+        workflow.compiled_graph.aget_state = AsyncMock(
+            return_value=MagicMock(values=None, next=None),
+        )
+        workflow.await_restore_safe_point = AsyncMock()
+
+        result = await workflow.resume(state.id, state)
+
+        workflow.await_restore_safe_point.assert_awaited_once()
+        workflow.compiled_graph.aget_state.assert_awaited_once()
+        assert result is state
+
+    @pytest.mark.asyncio
+    async def test_resume_refreshes_restored_state_after_safe_point_release(self):
+        """The pre-restore state must not overwrite the newly restored checkpoint."""
+        from unittest.mock import AsyncMock, MagicMock
+        from backend.models.schemas import AnalysisState, TaskStatus
+        from backend.state import sessions
+        from backend.workflow.core import SingleCellAnalysisWorkflow
+
+        session_id = "safe-point-refresh"
+        pre_restore = AnalysisState(
+            id=session_id,
+            user_id="u1",
+            initial_instruction="old",
+            status=TaskStatus.PAUSED,
+            current_round=1,
+        )
+        restored = AnalysisState(
+            id=session_id,
+            user_id="u1",
+            initial_instruction="restored",
+            status=TaskStatus.PAUSED,
+            current_round=3,
+        )
+        graph_state = MagicMock(
+            values={"analysis_state": restored},
+            next=("bioinformatics_analysis",),
+        )
+        workflow = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+        workflow.session_id = session_id
+        workflow.compiled_graph = MagicMock()
+        workflow.compiled_graph.aget_state = AsyncMock(return_value=graph_state)
+        workflow.compiled_graph.aupdate_state = AsyncMock()
+        workflow.compiled_graph.ainvoke = AsyncMock(
+            return_value={"analysis_state": restored},
+        )
+
+        async def release_with_restored_state():
+            sessions[session_id] = restored
+
+        workflow.await_restore_safe_point = AsyncMock(
+            side_effect=release_with_restored_state,
+        )
+        try:
+            result = await workflow.resume(session_id, pre_restore)
+        finally:
+            sessions.pop(session_id, None)
+
+        workflow.compiled_graph.aupdate_state.assert_awaited_once_with(
+            {"configurable": {"thread_id": session_id}, "recursion_limit": 100},
+            {"analysis_state": restored},
+        )
+        assert result is restored
+
 
 class TestRestoreEntryPlan:
     """Tests for restore_entry.py: build_restore_entry_plan."""

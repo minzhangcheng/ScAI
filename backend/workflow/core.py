@@ -1431,6 +1431,18 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             logger.info(f"[{self.session_id}] Re-initializing workflow components for resume")
             await self.initialize()
 
+        # A restore Retry may reconstruct the workflow after its new job has
+        # already requested a safe point. Acknowledge before touching the
+        # checkpointer, then remain frozen until the restore owner releases it.
+        await self.await_restore_safe_point()
+        if analysis_state is not None:
+            from ..state import sessions as live_sessions
+
+            refreshed_state = live_sessions.get(self.session_id)
+            if refreshed_state is not None:
+                analysis_state = refreshed_state
+                self._state = refreshed_state
+
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": GRAPH_RECURSION_LIMIT}
 
         # Get current state

@@ -173,6 +173,7 @@ class SnapshotService:
         transaction_id: str,
         cancel_event: asyncio.Event | None = None,
         *,
+        job_transaction_id: str | None = None,
         status_callback: Any = None,
     ) -> SnapshotTransactionRecord:
         """Sole orchestration method for restore jobs.
@@ -292,6 +293,11 @@ class SnapshotService:
                 workflow_state=workflow_state,
                 analysis_state=analysis_state,
                 live_safe_point=live_sp,
+                # The apply transaction is an internal journal identifier.
+                # Retry lineage and every client-facing contract use the
+                # public restore-job identifier when the manager supplies it.
+                restore_transaction_id=job_transaction_id or transaction_id,
+                restore_request=request,
             )
 
             # pre_restore or confirmed forward-only audit
@@ -1328,31 +1334,6 @@ class SnapshotService:
         state.snapshot_transaction = None
         if state.wait_input_reason == "snapshot_failure":
             state.wait_input_reason = None
-
-    async def retry_capture(
-        self,
-        state: Any,
-        request: SnapshotCaptureRequest,
-        sandbox: Any = None,
-        workflow_state: dict[str, Any] | None = None,
-        *,
-        workspace_root: str | None = None,
-    ) -> SnapshotRecordV2:
-        """Re-enter required capture without unlocking the failure gate first.
-
-        Capture may run while still gated; ``capture_required_snapshot`` clears
-        ``snapshot_failure`` only on successful commit. On failure it re-applies
-        WAITING_INPUT / snapshot_failure and raises ``RequiredSnapshotBlocked``.
-
-        Raises ``RequiredSnapshotBlocked`` on failure (no Skip).
-        """
-        return await self.capture_required_snapshot(
-            state,
-            request,
-            sandbox=sandbox,
-            workflow_state=workflow_state,
-            workspace_root=workspace_root,
-        )
 
     # ── Internal capture implementation ──────────────────────────────
 

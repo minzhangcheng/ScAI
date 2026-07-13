@@ -113,6 +113,7 @@ export interface SnapshotTransactionRecord {
   status: 'queued' | 'waiting_safe_point' | 'staging' | 'staged' | 'applying' | 'committed' | 'failed' | 'cancelled' | 'timed_out'
   recovery_mode: 'rollback' | 'forward_only'
   failure: Record<string, unknown> | null
+  retry_of_transaction_id?: string | null
   /** Backend may signal client reconnect after commit */
   reconnect?: boolean
 }

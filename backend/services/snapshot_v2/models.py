@@ -386,6 +386,7 @@ class SnapshotTransactionRecord(BaseModel):
     ]
     recovery_mode: Literal["rollback", "forward_only"] = "rollback"
     failure: dict | None = None
+    retry_of_transaction_id: str | None = None
 
 
 _DEFAULT_RESUME_POLICY: dict[str, str] = {
@@ -413,6 +414,7 @@ class SnapshotRetryContext(BaseModel):
     previous_status: str = "waiting_input"
     report_generation_id: str | None = None
     restore_transaction_id: str | None = None
+    restore_request: dict[str, Any] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -434,6 +436,8 @@ class RetryOutcome(BaseModel):
     status: str | None = None
     wait_input_reason: str | None = None
     snapshot_failure: dict[str, Any] | None = None
+    transaction_id: str | None = None
+    snapshot_transaction: dict[str, Any] | None = None
 
 
 class SanitizedImportPlan(BaseModel):

@@ -427,9 +427,10 @@ def retry_workflow_boundary(state: Any) -> None:
 
 
 def retry_pre_restore(state: Any) -> None:
-    """Clear failure gate so the restore coordinator can retry."""
+    """Clear the HITL gate while a newly queued restore owns the session."""
     state.snapshot_failure = None
     state.wait_input_reason = None
+    state.status = TaskStatus.PAUSED
 
 
 def retry_chat(
@@ -717,71 +718,70 @@ async def default_retry_pre_restore_capture(
     state: Any,
     context: SnapshotRetryContext,
 ) -> RetryOutcome:
-    """Re-invoke pre-restore capture during the HTTP request.
+    """Queue a new restore job linked to the terminal failed transaction.
 
-    Capture runs while still gated. Gate is cleared only after a successful
-    capture commit. On failure the same retry context is restored and the
-    session remains WAITING_INPUT.
+    A pre-restore capture failure makes the original restore job terminal.
+    Retry therefore revalidates the preserved restore request and enqueues a
+    distinct job; it never publishes a standalone pre-restore snapshot or
+    resurrects the old journal.
     """
-    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
-    from backend.services.snapshot_v2.models import (
-        IdleCapsule,
-        SnapshotCaptureRequest,
-    )
+    from backend.services.snapshot_v2.jobs import RestoreJobManager
+    from backend.services.snapshot_v2.models import SnapshotRestoreRequest
     from backend.services.snapshot_v2.paths import SnapshotV2Paths
-    from backend.services.snapshot_v2.service import SnapshotService
+    from backend.services.snapshot_v2.preflight import RestorePreflight
 
     try:
-        req_data = dict(context.snapshot_request or {})
-        req_data.setdefault("session_id", session_id)
-        req_data.setdefault("reason", "pre_restore")
-        req_data.setdefault("phase", "pre_restore")
-        if not req_data.get("continuation") and not req_data.get("capsule"):
-            req_data["continuation"] = IdleCapsule(
-                graph_version="2.0",
-            ).model_dump(mode="json")
-        request = SnapshotCaptureRequest.model_validate(req_data)
+        if not context.restore_transaction_id or not context.restore_request:
+            return _reenter_gate_on_failure(
+                state,
+                code="MISSING_RESTORE_RETRY_CONTEXT",
+                message=(
+                    "Pre-restore Retry is missing the original restore "
+                    "transaction or request"
+                ),
+                context=context,
+            )
+        request = SnapshotRestoreRequest.model_validate(context.restore_request)
         paths = SnapshotV2Paths.for_session(session_id)
-        service = SnapshotService(session_id, paths)
-        await service.retry_capture(state, request)
-    except RequiredSnapshotBlocked as exc:
-        return _reenter_gate_on_failure(
-            state,
-            code=exc.code,
-            message=str(exc),
-            context=context,
-            snapshot_id=getattr(exc, "snapshot_id", None),
+        preflight = RestorePreflight(paths).run(request.snapshot_id, request)
+        if preflight.status != "ready":
+            return _reenter_gate_on_failure(
+                state,
+                code="RESTORE_RETRY_PREFLIGHT_FAILED",
+                message=str(
+                    preflight.compatibility_errors or preflight.status
+                ),
+                context=context,
+            )
+        manager = RestoreJobManager(paths=paths, session_id=session_id)
+        record = await manager.enqueue(
+            session_id,
+            preflight,
+            request,
+            retry_of_transaction_id=context.restore_transaction_id,
         )
     except Exception as exc:
         return _reenter_gate_on_failure(
             state,
-            code="REQUIRED_SNAPSHOT_RETRY_ERROR",
+            code="RESTORE_RETRY_ENQUEUE_FAILED",
             message=str(exc) or type(exc).__name__,
             context=context,
         )
 
-    if getattr(state, "snapshot_failure", None):
-        return _reenter_gate_on_failure(
-            state,
-            code=(state.snapshot_failure or {}).get(
-                "code", "REQUIRED_SNAPSHOT_BLOCKED",
-            ),
-            message=(state.snapshot_failure or {}).get(
-                "message", "Snapshot retry failed; still blocked",
-            ),
-            context=context,
-            snapshot_id=(state.snapshot_failure or {}).get("snapshot_id"),
-        )
-
-    # Success: clear gate after commit.
+    # Enqueue is the acceptance point. The new restore job reacquires its own
+    # safe point and re-enters the full preflight/capture/apply state machine.
+    transaction_payload = record.model_dump(mode="json")
     retry_pre_restore(state)
+    state.snapshot_transaction = transaction_payload
     return RetryOutcome(
         success=True,
         still_blocked=False,
-        message="Snapshot recaptured; restore retry ready",
+        message="Restore retry queued",
         status=_status_value(state),
         wait_input_reason=getattr(state, "wait_input_reason", None),
         snapshot_failure=None,
+        transaction_id=record.transaction_id,
+        snapshot_transaction=transaction_payload,
     )
 
 

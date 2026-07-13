@@ -772,6 +772,10 @@ async def snapshot_failure_retry(session_id: str, request: Request):
     }
     if outcome.still_blocked:
         data["still_blocked"] = True
+    if outcome.transaction_id is not None:
+        data["transaction_id"] = outcome.transaction_id
+    if outcome.snapshot_transaction is not None:
+        data["snapshot_transaction"] = outcome.snapshot_transaction
 
     return APIResponse(
         success=outcome.success,

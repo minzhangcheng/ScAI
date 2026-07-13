@@ -79,14 +79,14 @@ async def test_v2_capture_analysis_state_json_off_event_loop_friendly(tmp_path, 
         capsule=IdleCapsule(graph_version="2.0"),
     )
 
-    ref = await service._capture_analysis_state(req, state)
+    result = await service._capture_analysis_state(req, state)
 
     assert "thread" in recorded
     # put_bytes may run on the same thread when called directly from async;
     # the regression is that we no longer use V1 create_snapshot. Assert content.
     assert recorded["size"] > MIN_BLOB_LEN
-    assert ref.sha256
-    assert service.object_store.contains_verified(ref.sha256)
+    assert result.ref.sha256
+    assert service.object_store.contains_verified(result.ref.sha256)
 
     # Full required capture path also works without create_snapshot.
     # Provide a no-kernel sandbox so empty-complete is allowed without a

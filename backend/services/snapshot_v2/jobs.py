@@ -366,6 +366,7 @@ class RestoreJobManager:
         request: SnapshotRestoreRequest,
         *,
         timeout_seconds: int = 300,
+        retry_of_transaction_id: str | None = None,
     ) -> SnapshotTransactionRecord:
         """Create and start a background restore job.
 
@@ -381,6 +382,7 @@ class RestoreJobManager:
             session_id=session_id,
             snapshot_id=request.snapshot_id,
             status="queued",
+            retry_of_transaction_id=retry_of_transaction_id,
         )
 
         cancel_event = asyncio.Event()
@@ -509,7 +511,12 @@ class RestoreJobManager:
                     if rec.status != current:
                         return
                 # Keep job transaction_id stable for status polls / cancel.
-                mapped = rec.model_copy(update={"transaction_id": tx_id})
+                mapped = rec.model_copy(update={
+                    "transaction_id": tx_id,
+                    "retry_of_transaction_id": (
+                        handle.record.retry_of_transaction_id
+                    ),
+                })
                 handle.record = mapped
                 if self._state_hook is not None:
                     asyncio.ensure_future(self._state_hook(mapped))
@@ -519,11 +526,15 @@ class RestoreJobManager:
                 request,
                 apply_tx_id,
                 stop_event,
+                job_transaction_id=tx_id,
                 status_callback=_on_status,
             )
 
             # Final status on the in-memory handle (job id, not apply id).
-            handle.record = result.model_copy(update={"transaction_id": tx_id})
+            handle.record = result.model_copy(update={
+                "transaction_id": tx_id,
+                "retry_of_transaction_id": handle.record.retry_of_transaction_id,
+            })
             # Persist restore_job envelope; never overwrites restore_apply.
             failure = result.failure or {}
             recovery_required = bool(failure.get("recovery_required"))
@@ -532,8 +543,8 @@ class RestoreJobManager:
             ):
                 _persist_handle(handle)
             if self._state_hook is not None:
-                asyncio.ensure_future(self._state_hook(result))
-            asyncio.ensure_future(self._emit_state_sync(result, 0.0))
+                asyncio.ensure_future(self._state_hook(handle.record))
+            asyncio.ensure_future(self._emit_state_sync(handle.record, 0.0))
 
             await self._safe_point.release(session_id, owner_token)
 

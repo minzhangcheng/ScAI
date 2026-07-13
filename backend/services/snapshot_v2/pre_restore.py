@@ -38,6 +38,7 @@ from backend.services.snapshot_v2.models import (
     SnapshotFailureRecord,
     SnapshotManifestV2,
     SnapshotRecordV2,
+    SnapshotRestoreRequest,
 )
 from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
 from backend.services.snapshot_v2.paths import SnapshotV2Paths
@@ -62,6 +63,8 @@ class RestoreCaptureContext:
     analysis_state: Any = None
     prev_manifest: SnapshotManifestV2 | None = None
     live_safe_point: dict | None = None
+    restore_transaction_id: str | None = None
+    restore_request: SnapshotRestoreRequest | None = None
 
 
 class PreRestoreCapture:
@@ -175,6 +178,12 @@ class PreRestoreCapture:
                             getattr(state, "status", None)
                             and getattr(state.status, "value", str(state.status))
                             or "running"
+                        ),
+                        "restore_transaction_id": context.restore_transaction_id,
+                        "restore_request": (
+                            context.restore_request.model_dump(mode="json")
+                            if context.restore_request is not None
+                            else None
                         ),
                     },
                 )

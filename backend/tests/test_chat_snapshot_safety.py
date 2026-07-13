@@ -267,7 +267,12 @@ async def test_active_workflow_post_chat_uses_live_sandbox_and_graph_capsule(
                 "backend.services.snapshot_v2.paths.SnapshotV2Paths.for_session",
                 return_value=paths,
             ):
-                record = await capture_post_chat_snapshot(session_id, state)
+                with patch.object(
+                    SnapshotService,
+                    "_save_session_state",
+                    new=AsyncMock(),
+                ):
+                    record = await capture_post_chat_snapshot(session_id, state)
 
         assert record.failure is None, f"unexpected failure: {record.failure}"
         assert record.manifest.continuation.kind == "graph_node"
@@ -715,4 +720,3 @@ async def test_chat_gate_helper_persists_chat_retry_context():
     enter_chat_snapshot_failure_gate(state, error, TaskStatus.COMPLETED)
     assert state.snapshot_failure["retry_context"]["producer"] == "chat"
     assert state.snapshot_failure["retry_context"]["previous_status"] == "completed"
-

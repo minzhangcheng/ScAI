@@ -22,7 +22,15 @@ class _StatusOnlyService:
         self.session_id = session_id
         self.paths = paths
 
-    async def restore_snapshot(self, request, transaction_id, cancel_event, *, status_callback=None):
+    async def restore_snapshot(
+        self,
+        request,
+        transaction_id,
+        cancel_event,
+        *,
+        job_transaction_id=None,
+        status_callback=None,
+    ):
         from backend.services.snapshot_v2.models import SnapshotTransactionRecord
 
         def _emit(status):
@@ -179,6 +187,77 @@ class TestRestoreJobLifecycle:
         # All journal entries reflect final state
         journal_path = v2_paths.journals / f"{tx_id}.json"
         assert json.loads(journal_path.read_text())["status"] == "committed"
+
+    @pytest.mark.asyncio
+    async def test_restore_job_keeps_public_id_in_retry_context_and_final_events(
+        self, v2_paths, preflight_result, restore_request,
+    ):
+        """Internal apply journals must never replace the public job ID."""
+        from backend.services.snapshot_v2.models import SnapshotTransactionRecord
+
+        class RecordingService:
+            seen_apply_transaction_id = None
+            seen_job_transaction_id = None
+
+            async def restore_snapshot(
+                self,
+                request,
+                transaction_id,
+                cancel_event,
+                *,
+                job_transaction_id=None,
+                status_callback=None,
+            ):
+                self.seen_apply_transaction_id = transaction_id
+                self.seen_job_transaction_id = job_transaction_id
+                record = SnapshotTransactionRecord(
+                    transaction_id=transaction_id,
+                    session_id="sess-test",
+                    snapshot_id=request.snapshot_id,
+                    status="committed",
+                )
+                if status_callback is not None:
+                    status_callback(record)
+                return record
+
+        service = RecordingService()
+        mgr = make_mgr(v2_paths, snapshot_service=service)
+        final_events = []
+
+        async def on_state_change(record):
+            if record.status == "committed":
+                final_events.append(record)
+
+        mgr._state_hook = on_state_change
+        original = await mgr.enqueue(
+            "sess-test",
+            preflight_result,
+            restore_request,
+            retry_of_transaction_id="restore-job-parent",
+        )
+        generation = mgr._safe_point.get_pending_generation("sess-test")
+        while generation is None:
+            await asyncio.sleep(0)
+            generation = mgr._safe_point.get_pending_generation("sess-test")
+        await mgr._safe_point.acknowledge_safe_point_request(
+            "sess-test", generation, role="workflow",
+        )
+        await asyncio.wait_for(
+            self._wait_for_status(mgr, original.transaction_id, "committed"),
+            timeout=5,
+        )
+        await asyncio.sleep(0)
+
+        assert service.seen_apply_transaction_id == (
+            "restore-apply-" + original.transaction_id.removeprefix("restore-job-")
+        )
+        assert service.seen_job_transaction_id == original.transaction_id
+        assert final_events
+        assert all(event.transaction_id == original.transaction_id for event in final_events)
+        assert all(
+            event.retry_of_transaction_id == "restore-job-parent"
+            for event in final_events
+        )
 
     @pytest.mark.asyncio
     async def test_job_progresses_through_intermediate_states(
@@ -1902,6 +1981,165 @@ async def test_retry_invokes_exact_failed_producer(producer):
 
 
 @pytest.mark.asyncio
+async def test_pre_restore_retry_queues_linked_restore_job(monkeypatch, v2_paths):
+    """A failed pre-restore job is terminal; Retry must enqueue a new job."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.failure_gate import (
+        default_retry_pre_restore_capture,
+    )
+    from backend.services.snapshot_v2.jobs import RestoreJobManager
+    from backend.services.snapshot_v2.models import (
+        SnapshotRestoreRequest,
+        SnapshotRetryContext,
+        SnapshotTransactionRecord,
+    )
+    from backend.services.snapshot_v2.paths import SnapshotV2Paths
+    from backend.services.snapshot_v2.preflight import (
+        RestorePreflight,
+        RestorePreflightResult,
+    )
+
+    session_id = "sess-pre-restore-retry"
+    restore_request = SnapshotRestoreRequest(
+        snapshot_id="target-snapshot",
+        runtime_choice="reset",
+        current_state_choice="abort",
+    )
+    context = SnapshotRetryContext(
+        producer="pre_restore",
+        resume_policy="restore_transaction",
+        snapshot_request={"phase": "pre_restore"},
+        previous_status="running",
+        restore_transaction_id="restore-job-original",
+        restore_request=restore_request.model_dump(mode="json"),
+    )
+    state = AnalysisState(
+        id=session_id,
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={"code": "NO_SPACE", "message": "disk full"},
+    )
+
+    enqueue = AsyncMock(return_value=SnapshotTransactionRecord(
+        transaction_id="restore-job-retry",
+        session_id=session_id,
+        snapshot_id="target-snapshot",
+        status="queued",
+    ))
+    monkeypatch.setattr(SnapshotV2Paths, "for_session", lambda _sid: v2_paths)
+    monkeypatch.setattr(
+        RestorePreflight,
+        "run",
+        lambda self, snapshot_id, request: RestorePreflightResult(status="ready"),
+    )
+    monkeypatch.setattr(RestoreJobManager, "enqueue", enqueue)
+
+    outcome = await default_retry_pre_restore_capture(session_id, state, context)
+
+    assert outcome.success is True
+    assert outcome.message == "Restore retry queued"
+    assert outcome.transaction_id == "restore-job-retry"
+    assert state.snapshot_failure is None
+    assert state.wait_input_reason is None
+    assert state.status == TaskStatus.PAUSED
+    assert state.snapshot_transaction == {
+        "transaction_id": "restore-job-retry",
+        "session_id": session_id,
+        "snapshot_id": "target-snapshot",
+        "status": "queued",
+        "recovery_mode": "rollback",
+        "failure": None,
+        "retry_of_transaction_id": None,
+    }
+    enqueue.assert_awaited_once()
+    assert enqueue.await_args.kwargs["retry_of_transaction_id"] == (
+        "restore-job-original"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pre_restore_retry_route_returns_new_transaction_id(monkeypatch):
+    """The generic Retry route exposes the newly queued restore transaction."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+    from backend.services.snapshot_v2 import failure_gate
+    from backend.services.snapshot_v2.models import RetryOutcome
+    from backend.state import sessions
+
+    session_id = "sess-pre-restore-route"
+    state = AnalysisState(
+        id=session_id,
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "NO_SPACE",
+            "message": "disk full",
+            "retry_context": {
+                "producer": "pre_restore",
+                "resume_policy": "restore_transaction",
+                "snapshot_request": {"phase": "pre_restore"},
+                "previous_status": "running",
+                "restore_transaction_id": "restore-job-original",
+                "restore_request": {
+                    "snapshot_id": "target-snapshot",
+                    "runtime_choice": "reset",
+                    "current_state_choice": "abort",
+                    "discard_confirmation": False,
+                },
+            },
+        },
+    )
+    sessions[session_id] = state
+
+    async def fake_owner(session_id, user_id):
+        return state
+
+    async def noop(*args, **kwargs):
+        return None
+
+    retry = AsyncMock(return_value=RetryOutcome(
+        success=True,
+        message="Restore retry queued",
+        status=TaskStatus.PAUSED.value,
+        transaction_id="restore-job-retry",
+        snapshot_transaction={
+            "transaction_id": "restore-job-retry",
+            "session_id": session_id,
+            "snapshot_id": "target-snapshot",
+            "status": "queued",
+            "recovery_mode": "rollback",
+            "failure": None,
+            "retry_of_transaction_id": "restore-job-original",
+        },
+    ))
+    monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", noop)
+    monkeypatch.setattr(lifecycle, "async_save_session", noop)
+    monkeypatch.setattr(failure_gate, "retry_snapshot_producer", retry)
+
+    request = MagicMock()
+    request.state = MagicMock(user_id="u1")
+    try:
+        response = await lifecycle.snapshot_failure_retry(session_id, request)
+        assert response.success is True
+        assert response.data["transaction_id"] == "restore-job-retry"
+        assert response.data["snapshot_transaction"] == {
+            "transaction_id": "restore-job-retry",
+            "session_id": session_id,
+            "snapshot_id": "target-snapshot",
+            "status": "queued",
+            "recovery_mode": "rollback",
+            "failure": None,
+            "retry_of_transaction_id": "restore-job-original",
+        }
+    finally:
+        sessions.pop(session_id, None)
+
+
+@pytest.mark.asyncio
 async def test_retry_missing_context_returns_409_gate_intact(monkeypatch):
     """Missing/invalid retry_context must 409 and leave the gate intact."""
     from backend.models.schemas import AnalysisState, TaskStatus
@@ -2186,12 +2424,16 @@ async def test_workflow_boundary_retry_forwards_persisted_phase(monkeypatch):
     captured = {}
 
     class FakeWorkflow:
+        def __init__(self):
+            self.resume = AsyncMock()
+
         async def _create_auto_snapshot(self, analysis_state, phase):
             captured["phase"] = phase
             analysis_state.snapshot_failure = None
             analysis_state.wait_input_reason = None
 
-    workflows[session_id] = FakeWorkflow()
+    workflow = FakeWorkflow()
+    workflows[session_id] = workflow
     context = SnapshotRetryContext(
         producer="workflow_boundary",
         resume_policy="graph_checkpoint",
@@ -2206,8 +2448,48 @@ async def test_workflow_boundary_retry_forwards_persisted_phase(monkeypatch):
         assert outcome.still_blocked is False
         assert captured["phase"] == "pre_annotation"
         assert captured["phase"] != "workflow_boundary"
+        assert state.status == TaskStatus.RUNNING
+        workflow.resume.assert_not_awaited()
     finally:
         workflows.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_workflow_boundary_retry_without_live_workflow_stays_blocked():
+    """Exact workflow-boundary recapture must fail closed without live state."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.failure_gate import (
+        default_retry_workflow_boundary_capture,
+    )
+    from backend.services.snapshot_v2.models import SnapshotRetryContext
+    from backend.state import workflows
+
+    session_id = "wb-retry-no-workflow"
+    workflows.pop(session_id, None)
+    context = SnapshotRetryContext(
+        producer="workflow_boundary",
+        resume_policy="graph_checkpoint",
+        snapshot_request={"phase": "pre_annotation"},
+        previous_status="running",
+    )
+    state = AnalysisState(
+        id=session_id,
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={"code": "QUOTA", "message": "disk full"},
+    )
+
+    outcome = await default_retry_workflow_boundary_capture(
+        session_id, state, context,
+    )
+
+    assert outcome.success is False
+    assert outcome.still_blocked is True
+    assert state.status == TaskStatus.WAITING_INPUT
+    assert state.wait_input_reason == "snapshot_failure"
+    assert state.snapshot_failure is not None
+    assert state.snapshot_failure["code"] == "WORKFLOW_UNAVAILABLE"
 
 
 @pytest.mark.asyncio
@@ -2346,4 +2628,3 @@ async def test_retry_handlers_do_not_clear_gate_before_capture(monkeypatch):
         assert wb_seen["phase"] == "pre_direction"
     finally:
         workflows.pop(wb_sid, None)
-

@@ -1,8 +1,9 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
-import { useAppStore } from '../stores/appStore'
-import { useSession, useConfig, useUserConfig, generateId, apiFetch } from '../hooks/useApi'
+import { useAppStore, type TaskStatus } from '../stores/appStore'
+import { useSession, useConfig, useUserConfig, generateId, apiFetch, getSnapshotTransaction } from '../hooks/useApi'
 import { useTranslation } from '../i18n/translations'
 import type { RoundSummary } from '../types'
+import type { SnapshotTransactionRecord } from '../types/snapshotV2'
 import { roundKey } from '../utils/roundKey'
 import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
@@ -45,6 +46,14 @@ import {
 
 const API_BASE = '/api'
 const MAX_EXPLORATION_ROUND = 1
+const SNAPSHOT_RETRY_POLL_INTERVAL_MS = 2_000
+const SNAPSHOT_RETRY_MAX_POLLS = 150
+const SNAPSHOT_TERMINAL_STATUSES = new Set<SnapshotTransactionRecord['status']>([
+  'committed',
+  'failed',
+  'cancelled',
+  'timed_out',
+])
 
 // Content shape for annotation_confirmation HITL message from backend
 interface AnnotationData {
@@ -166,6 +175,11 @@ export function AnalysisPanel() {
 
   // Snapshot panel state
   const [showSnapshotPanel, setShowSnapshotPanel] = useState(false)
+  const snapshotRetryPollRef = useRef<{
+    cancelled: boolean
+    attempts: number
+    timer: ReturnType<typeof setTimeout> | null
+  } | null>(null)
 
   // Snapshot cleanup reminder state
   const snapshotCount = useAppStore(state => state.snapshotCount)
@@ -178,6 +192,63 @@ export function AnalysisPanel() {
   const runtimeRestoreStatus = useAppStore(s => s.runtimeRestoreStatus)
   const runtimeRestoreWarning = useAppStore(s => s.runtimeRestoreWarning)
   const isForwardResumeBlocked = useAppStore(s => s.isForwardResumeBlocked)
+
+  const stopSnapshotRetryPolling = useCallback(() => {
+    const poll = snapshotRetryPollRef.current
+    if (poll) {
+      poll.cancelled = true
+      if (poll.timer) clearTimeout(poll.timer)
+    }
+    snapshotRetryPollRef.current = null
+  }, [])
+
+  const monitorSnapshotRetry = useCallback((
+    sessionId: string,
+    seed: SnapshotTransactionRecord,
+  ) => {
+    stopSnapshotRetryPolling()
+    useAppStore.getState().setSnapshotTransaction(seed)
+    const pollState = { cancelled: false, attempts: 0, timer: null as ReturnType<typeof setTimeout> | null }
+    snapshotRetryPollRef.current = pollState
+
+    const poll = async () => {
+      if (pollState.cancelled) return
+      const current = useAppStore.getState().snapshotTransaction
+      if (
+        current?.transaction_id === seed.transaction_id &&
+        SNAPSHOT_TERMINAL_STATUSES.has(current.status)
+      ) {
+        stopSnapshotRetryPolling()
+        return
+      }
+      if (pollState.attempts >= SNAPSHOT_RETRY_MAX_POLLS) {
+        stopSnapshotRetryPolling()
+        return
+      }
+      pollState.attempts += 1
+      try {
+        const transaction = await getSnapshotTransaction(sessionId, seed.transaction_id)
+        if (pollState.cancelled) return
+        useAppStore.getState().setSnapshotTransaction(transaction)
+        if (SNAPSHOT_TERMINAL_STATUSES.has(transaction.status)) {
+          stopSnapshotRetryPolling()
+          return
+        }
+      } catch (error) {
+        console.error('Failed to poll snapshot retry transaction:', error)
+      }
+      if (!pollState.cancelled) {
+        pollState.timer = setTimeout(poll, SNAPSHOT_RETRY_POLL_INTERVAL_MS)
+      }
+    }
+
+    void poll()
+  }, [stopSnapshotRetryPolling])
+
+  useEffect(
+    () => stopSnapshotRetryPolling,
+    [stopSnapshotRetryPolling, currentSession?.id],
+  )
   const isRerunEnabled = useAppStore(s => s.isRerunEnabled)
 
   // Reset message refs when session changes so dialogs can re-trigger after page reload
@@ -701,9 +772,12 @@ export function AnalysisPanel() {
       const resp = await apiFetch<{
         success?: boolean
         data?: {
+          status?: TaskStatus
           still_blocked?: boolean
           snapshot_failure?: Record<string, unknown> | null
           snapshot_failure_allowed_actions?: Array<'retry' | 'manage' | 'terminate'>
+          transaction_id?: string
+          snapshot_transaction?: SnapshotTransactionRecord
         }
       }>(`/session/${currentSession.id}/snapshot-failure/retry`, {
         method: 'POST',
@@ -723,6 +797,13 @@ export function AnalysisPanel() {
         // else leave existing snapshotFailure intact
         return
       }
+      const transaction = resp?.data?.snapshot_transaction
+      if (transaction) {
+        monitorSnapshotRetry(currentSession.id, transaction)
+      }
+      if (resp?.data?.status) {
+        useAppStore.getState().updateSession({ status: resp.data.status })
+      }
       clearSnapshotFailure()
       if (!wsConnected) {
         setTimeout(() => wsConnect?.(), 100)
@@ -730,7 +811,7 @@ export function AnalysisPanel() {
     } catch (e) {
       console.error('Snapshot failure retry failed:', e)
     }
-  }, [currentSession, clearSnapshotFailure, wsConnected, wsConnect])
+  }, [currentSession, clearSnapshotFailure, monitorSnapshotRetry, wsConnected, wsConnect])
 
   const handleSnapshotFailureManage = useCallback(() => {
     setShowSnapshotPanel(true)

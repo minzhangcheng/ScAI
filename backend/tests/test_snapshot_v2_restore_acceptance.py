@@ -1427,7 +1427,15 @@ class TestConcurrencySerialize:
         events: list[str] = []
 
         class CountingService(SnapshotService):
-            async def restore_snapshot(self, request, transaction_id, cancel_event, *, status_callback=None):
+            async def restore_snapshot(
+                self,
+                request,
+                transaction_id,
+                cancel_event,
+                *,
+                job_transaction_id=None,
+                status_callback=None,
+            ):
                 nonlocal applying_count, max_applying
                 from backend.services.snapshot_v2.models import SnapshotTransactionRecord
 
