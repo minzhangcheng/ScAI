@@ -39,13 +39,13 @@ def _publish_valid_manifest(v2_paths, **overrides):
     state_ref = store.put_bytes(
         json.dumps({"round": 1, "status": "running"}).encode(),
         "application/json",
-    )
-    notebook_ref = store.put_bytes(b'{"cells":[]}', "application/x-ipynb+json")
-    plot_ref = store.put_bytes(b"fake_png_data", "image/png")
+    ).ref
+    notebook_ref = store.put_bytes(b'{"cells":[]}', "application/x-ipynb+json").ref
+    plot_ref = store.put_bytes(b"fake_png_data", "image/png").ref
 
     runtime_payload = complete_runtime(required={}, captured={})
     # Mark runtime as present for choice support tests that expect True by default
-    residual = store.put_bytes(b"residual-bytes", "application/octet-stream")
+    residual = store.put_bytes(b"residual-bytes", "application/octet-stream").ref
     runtime_payload = complete_runtime(
         required={"results": "dill"},
         residual_names=["results"],
@@ -274,11 +274,11 @@ class TestRestorePreflight:
         from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
 
         store = ObjectStore(v2_paths)
-        bad_state_ref = store.put_bytes(b"not valid json {{{", "application/json")
-        plot_ref = store.put_bytes(b"fake_png_data", "image/png")
+        bad_state_ref = store.put_bytes(b"not valid json {{{", "application/json").ref
+        plot_ref = store.put_bytes(b"fake_png_data", "image/png").ref
 
         from backend.tests.snapshot_v2_fixtures import make_snapshot_v2_manifest
-        nb = store.put_bytes(b'{"cells":[]}', "application/x-ipynb+json")
+        nb = store.put_bytes(b'{"cells":[]}', "application/x-ipynb+json").ref
         manifest = make_snapshot_v2_manifest(
             session_id="sess-test",
             snapshot_id="snap-bad-state",

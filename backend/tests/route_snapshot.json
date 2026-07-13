@@ -313,6 +313,18 @@
     ]
   ],
   [
+    "/api/session/{session_id}/snapshot-failure/retry",
+    [
+      "POST"
+    ]
+  ],
+  [
+    "/api/session/{session_id}/snapshot-failure/terminate",
+    [
+      "POST"
+    ]
+  ],
+  [
     "/api/session/{session_id}/figure/{figure_id}/pdf",
     [
       "GET"

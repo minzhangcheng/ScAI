@@ -8,6 +8,15 @@ from enum import Enum
 VERSION = "0.33.1"
 
 
+# ── Authoritative graph node registry — single source of truth ─────
+WORKFLOW_GRAPH_NODES: frozenset[str] = frozenset({
+    "restore_entry", "initialize_round", "pi_planning", "planning_dialogue",
+    "user_review_gate", "pathology_analysis", "bioinformatics_analysis",
+    "biochemistry_analysis", "literature_research", "pi_synthesis",
+    "wait_for_user_input", "check_convergence", "generate_final_report",
+    "generate_graphic_abstract", "generate_detailed_report", "integration_synthesis",
+})
+
 # ── Node → Agent mapping ───────────────────────────────────────────
 NODE_TO_AGENT: dict[str, str] = {
     "pi_planning": "pi",

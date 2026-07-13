@@ -25,6 +25,7 @@ from backend.services.session_store import (
 from backend.utils.auth import require_session_ownership
 from backend.utils.runtime_apply import is_forward_resume_blocked
 from backend.services.snapshot_v2.errors import (
+    SNAPSHOT_FAILURE_ACTIONS,
     SnapshotTransactionError,
     is_snapshot_failure_blocked,
 )
@@ -120,6 +121,17 @@ async def run_analysis(session_id: str, request: Request):
             ),
         )
 
+    # Idle-restored session: signal explicit_start so the graph node
+    # preserves the restored round and plan rather than auto-incrementing.
+    if (
+        getattr(state, "restore_resume_kind", None) is None
+        and getattr(state, "restore_branch_id", None)
+    ):
+        state.restore_start_intent = "explicit_start"
+
+    # Fresh rerun clears any snapshot restore state — new kernel will be built.
+    state.runtime_restore_status = "complete"
+    state.runtime_restore_warning = None
     state.status = TaskStatus.RUNNING
     await async_save_session(session_id, state)
 
@@ -236,11 +248,16 @@ async def _resume_analysis_locked(session_id: str, user_id: str):
         # Re-analysis: tear down the terminated checkpoint so the WS
         # reconnect triggers a fresh run (core.py "no checkpoint" path)
         # instead of resuming a graph already at END (infinite loop).
+        from backend.workflow.provenance import consume_restore_provenance
+
         await teardown_running_workflow(session_id)
         state.status = TaskStatus.RUNNING
         state.max_rounds = state.current_round + 1
-        state.last_restored_snapshot_id = None
+        # Clear both durable restore fields so the next run cannot mis-tag
+        # plan/RoundResult from a prior restore (terminal/idle leave provenance).
+        consume_restore_provenance(state)
         state.runtime_restore_status = "complete"  # re-run recomputes kernel state
+        state.runtime_restore_warning = None  # fresh rerun clears any restore warning
         await _update_session_cache(session_id, state)
         await async_save_session(session_id, state)
         return APIResponse(
@@ -678,3 +695,125 @@ async def resume_bioinformatics(session_id: str, request: Request):
     except Exception as e:
         logger.exception("Error reading checkpoint")
         raise HTTPException(status_code=500, detail=f"Error reading checkpoint: {str(e)}")
+
+
+@router.post("/{session_id}/snapshot-failure/retry")
+async def snapshot_failure_retry(session_id: str, request: Request):
+    """Retry a snapshot failure by re-invoking the exact failed capture producer.
+
+    Validates ``SnapshotRetryContext`` from the failure gate. Missing or
+    invalid context returns 409 and leaves the gate intact. Never defaults
+    a missing producer to workflow-boundary.
+    """
+    from pydantic import ValidationError
+
+    from backend.services.snapshot_v2.failure_gate import (
+        default_snapshot_retry_dependencies,
+        retry_snapshot_producer,
+    )
+    from backend.services.snapshot_v2.models import SnapshotRetryContext
+
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    if not is_snapshot_failure_blocked(state):
+        raise HTTPException(
+            status_code=409,
+            detail="Session is not blocked on a snapshot failure",
+        )
+
+    failure = getattr(state, "snapshot_failure", None) or {}
+    raw_context = failure.get("retry_context")
+    if not isinstance(raw_context, dict) or not raw_context:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Snapshot failure retry context is missing; "
+                "gate left intact"
+            ),
+        )
+    try:
+        context = SnapshotRetryContext.model_validate(raw_context)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Snapshot failure retry context is invalid; "
+                "gate left intact"
+            ),
+        ) from exc
+
+    outcome = await retry_snapshot_producer(
+        session_id,
+        state,
+        context,
+        default_snapshot_retry_dependencies(),
+    )
+
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state)
+
+    data = {
+        "status": outcome.status
+        if outcome.status is not None
+        else getattr(state.status, "value", str(state.status)),
+        "wait_input_reason": (
+            outcome.wait_input_reason
+            if outcome.wait_input_reason is not None
+            or outcome.still_blocked
+            else getattr(state, "wait_input_reason", None)
+        ),
+        "snapshot_failure": (
+            outcome.snapshot_failure
+            if outcome.still_blocked
+            else getattr(state, "snapshot_failure", None)
+        ),
+    }
+    if outcome.still_blocked:
+        data["still_blocked"] = True
+
+    return APIResponse(
+        success=outcome.success,
+        message=outcome.message,
+        data=data,
+    )
+
+
+@router.post("/{session_id}/snapshot-failure/terminate")
+async def snapshot_failure_terminate(session_id: str, request: Request):
+    """Terminate the session on snapshot failure.
+
+    Delegates to existing workflow teardown — does NOT create a second
+    kernel teardown. Clears the failure gate and stops the workflow.
+    """
+    from backend.services.snapshot_v2.failure_gate import (
+        terminate_snapshot_failure,
+    )
+
+    validate_session_id(session_id)
+    user_id = getattr(request.state, "user_id", "")
+    state = await require_session_ownership(session_id=session_id, user_id=user_id)
+
+    if not is_snapshot_failure_blocked(state):
+        raise HTTPException(
+            status_code=409,
+            detail="Session is not blocked on a snapshot failure",
+        )
+
+    terminate_snapshot_failure(state)
+
+    # After STOPPED + termination_reason: tear down workflow/kernel resources.
+    # Do NOT pause — pause would clobber STOPPED → PAUSED on the same state.
+    await teardown_running_workflow(session_id)
+
+    await _update_session_cache(session_id, state)
+    await async_save_session(session_id, state)
+
+    return APIResponse(
+        success=True,
+        message="Session terminated due to snapshot failure",
+        data={
+            "status": getattr(state.status, "value", str(state.status)),
+        },
+    )

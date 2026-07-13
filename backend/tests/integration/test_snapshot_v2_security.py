@@ -123,10 +123,12 @@ class TestHMACIntegrity:
         from backend.services.snapshot_v2.errors import SnapshotIntegrityError
 
         store = ObjectStore(paths)
-        ref = store.put_bytes(b"original-content", "text/plain")
+        ref = store.put_bytes(b"original-content", "text/plain").ref
 
         tampered_path = paths.objects / ref.sha256
         tampered_path.write_bytes(b"tampered-content")
+        # Clear evidence cache to force full streaming verification
+        store._evidence.clear()
 
         with pytest.raises(SnapshotIntegrityError) as exc:
             store.verify(ref)
@@ -154,7 +156,7 @@ class TestHMACIntegrity:
 
         store = ObjectStore(paths)
         data = b"correct-size-content"
-        ref = store.put_bytes(data, "text/plain")
+        ref = store.put_bytes(data, "text/plain").ref
 
         ref_with_bad_size = ObjectRef(
             sha256=ref.sha256,

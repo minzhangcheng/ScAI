@@ -31,3 +31,4 @@ backend/data/markers/*.tsv
 !backend/data/markers/README.md
 !backend/data/markers/LICENSE
 .superpowers/
+states/

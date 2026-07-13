@@ -63,8 +63,8 @@ def _write_pre_restore_manifest(v2_paths, session_id: str) -> str:
     from backend.services.snapshot_v2.object_store import ObjectStore
 
     store = ObjectStore(v2_paths)
-    state_ref = store.put_bytes(b'{"status":"idle"}', "application/json")
-    nb_ref = store.put_bytes(b'{"nbformat":4,"cells":[]}', "application/x-ipynb+json")
+    state_ref = store.put_bytes(b'{"status":"idle"}', "application/json").ref
+    nb_ref = store.put_bytes(b'{"nbformat":4,"cells":[]}', "application/x-ipynb+json").ref
     manifest = SnapshotManifestV2(
         format_version=2,
         snapshot_id="pre-restore-snap",

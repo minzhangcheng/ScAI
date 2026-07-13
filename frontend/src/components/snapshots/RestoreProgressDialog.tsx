@@ -1,6 +1,5 @@
+import { SNAPSHOT_TERMINAL_STATUSES } from '../../utils/snapshotV2'
 import type { SnapshotTransactionRecord } from '../../types/snapshotV2'
-
-const TERMINAL = new Set(['committed', 'failed', 'cancelled', 'timed_out'])
 
 interface RestoreProgressDialogProps {
   transaction: SnapshotTransactionRecord
@@ -18,7 +17,7 @@ export function RestoreProgressDialog({
   cancelling = false,
 }: RestoreProgressDialogProps) {
   const status = transaction.status
-  const isTerminal = TERMINAL.has(status)
+  const isTerminal = SNAPSHOT_TERMINAL_STATUSES.has(status)
   const failureMessage =
     transaction.failure && typeof transaction.failure === 'object'
       ? String((transaction.failure as { message?: string }).message || (transaction.failure as { code?: string }).code || '')

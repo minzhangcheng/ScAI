@@ -310,6 +310,12 @@ class SystemConfig(BaseModel):
     snapshot_v2_session_quota_bytes: int = 100 * 1024 ** 3
     snapshot_v2_free_space_reserve_bytes: int = 5 * 1024 ** 3
     snapshot_v1_restore_cutover: bool = True
+    snapshot_v2_import_compressed_bytes: int = 20 * 1024 ** 3
+    snapshot_v2_import_uncompressed_bytes: int = 100 * 1024 ** 3
+    snapshot_v2_import_single_member_bytes: int = 80 * 1024 ** 3
+    snapshot_v2_import_member_count: int = 200000
+    snapshot_v2_import_manifest_count: int = 10000
+    snapshot_v2_import_snapshot_count: int = 10000
 
     def get_snapshot_safe_point_timeout_seconds(self) -> int:
         if self.snapshot_safe_point_timeout_seconds is not None and self.snapshot_safe_point_timeout_seconds > 0:

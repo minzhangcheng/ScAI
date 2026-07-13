@@ -1,3 +1,4 @@
+import { parseSnapshotFailure } from './snapshotV2'
 import type {
   SessionLoadResponse,
   RawRoundResult,
@@ -184,27 +185,9 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
     storeUpdates.runtimeRestoreWarning = null
   }
 
-  if (data.snapshot_failure && typeof data.snapshot_failure === 'object') {
-    const f = data.snapshot_failure
-    const code = typeof f.code === 'string' ? f.code : ''
-    const message = typeof f.message === 'string' ? f.message : ''
-    if (code || message) {
-      const rawActions = Array.isArray(f.allowed_actions) ? f.allowed_actions : ['retry', 'manage', 'terminate']
-      storeUpdates.snapshotFailure = {
-        failure: {
-          snapshot_id: typeof f.snapshot_id === 'string' ? f.snapshot_id : '',
-          session_id: typeof f.session_id === 'string' ? f.session_id : '',
-          failed_at: typeof f.failed_at === 'string' ? f.failed_at : '',
-          code,
-          message,
-          details: f.details && typeof f.details === 'object' ? f.details : undefined,
-        },
-        allowed_actions: rawActions.filter(
-          (a): a is 'retry' | 'manage' | 'terminate' =>
-            a === 'retry' || a === 'manage' || a === 'terminate',
-        ),
-      }
-    }
+  const parsed = parseSnapshotFailure(data.snapshot_failure)
+  if (parsed) {
+    storeUpdates.snapshotFailure = parsed
   }
 
   if (data.literature_config && typeof data.literature_config === 'object') {

@@ -495,3 +495,117 @@ class TestSnapshotV2ExportRoute:
             assert "include_runtime" in called
         finally:
             sessions.pop(session_id, None)
+
+    def test_export_v2_returns_export_token(self, monkeypatch, tmp_path, app_db):
+        """V2 export response includes an export_token (not session_id key)."""
+        import backend.routes.export_import as exp_mod
+        from backend.middleware import auth as auth_mw
+        from backend.models.schemas import AnalysisState
+        from backend.state import sessions
+        from fastapi.testclient import TestClient
+        from backend.main import app
+
+        session_id = "sess-export-token"
+        state = AnalysisState(
+            id=session_id, user_id="owner", name="t",
+            initial_instruction="t", current_round=1, max_rounds=4,
+        )
+        sessions[session_id] = state
+
+        async def fake_owner(session_id, user_id=None):
+            return state
+
+        async def fake_export(self, *, include_runtime=True, snapshot_ids=None):
+            out = tmp_path / "fake-export-token.tar.gz"
+            import tarfile, io, json
+            with tarfile.open(out, "w:gz") as tf:
+                data = json.dumps({"format_version": 2}).encode()
+                info = tarfile.TarInfo(name="snapshot-v2-export.json")
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+            return out
+
+        monkeypatch.setattr(exp_mod, "require_session_ownership", fake_owner)
+        monkeypatch.setattr(
+            "backend.services.snapshot_v2.service.SnapshotService.export_snapshots",
+            fake_export,
+        )
+        monkeypatch.setattr(exp_mod, "UPLOAD_TEMP_DIR", tmp_path)
+
+        async def patched_dispatch(request, call_next):
+            request.state.user_id = "owner"
+            return await call_next(request)
+
+        client = TestClient(app)
+        mw = app.middleware_stack
+        while mw is not None:
+            if isinstance(mw, auth_mw.AuthMiddleware):
+                monkeypatch.setattr(mw, "dispatch_func", patched_dispatch)
+                break
+            mw = getattr(mw, "app", None)
+
+        try:
+            resp = client.post(f"/api/session/{session_id}/export-v2")
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert "export_token" in body, "Missing export_token in response"
+            assert isinstance(body["export_token"], str)
+            assert len(body["export_token"]) > 0
+            assert "download_url" in body
+            assert body["export_token"] in body["download_url"], "token should appear in download URL"
+        finally:
+            sessions.pop(session_id, None)
+
+    def test_export_v2_unknown_snapshot_ids_rejected(self, monkeypatch, tmp_path, app_db):
+        """Export with unknown snapshot_ids must fail with 422."""
+        import backend.routes.export_import as exp_mod
+        from backend.middleware import auth as auth_mw
+        from backend.models.schemas import AnalysisState
+        from backend.state import sessions
+        from fastapi.testclient import TestClient
+        from backend.main import app
+        from backend.services.snapshot_v2.exporter import ExportIntegrityError
+
+        session_id = "sess-export-unknown"
+        state = AnalysisState(
+            id=session_id, user_id="owner", name="u",
+            initial_instruction="t", current_round=1, max_rounds=4,
+        )
+        sessions[session_id] = state
+
+        async def fake_owner(session_id, user_id=None):
+            return state
+
+        async def fake_export(self, *, include_runtime=True, snapshot_ids=None):
+            raise ExportIntegrityError(
+                "UNKNOWN_SNAPSHOT_IDS",
+                "Snapshot IDs not found: snap-nonexistent",
+            )
+
+        monkeypatch.setattr(exp_mod, "require_session_ownership", fake_owner)
+        monkeypatch.setattr(
+            "backend.services.snapshot_v2.service.SnapshotService.export_snapshots",
+            fake_export,
+        )
+        monkeypatch.setattr(exp_mod, "UPLOAD_TEMP_DIR", tmp_path)
+
+        async def patched_dispatch(request, call_next):
+            request.state.user_id = "owner"
+            return await call_next(request)
+
+        client = TestClient(app)
+        mw = app.middleware_stack
+        while mw is not None:
+            if isinstance(mw, auth_mw.AuthMiddleware):
+                monkeypatch.setattr(mw, "dispatch_func", patched_dispatch)
+                break
+            mw = getattr(mw, "app", None)
+
+        try:
+            resp = client.post(
+                f"/api/session/{session_id}/export-v2",
+                params={"snapshot_ids": "snap-nonexistent"},
+            )
+            assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
+        finally:
+            sessions.pop(session_id, None)

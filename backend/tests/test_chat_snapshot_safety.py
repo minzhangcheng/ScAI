@@ -207,7 +207,7 @@ async def test_active_workflow_post_chat_uses_live_sandbox_and_graph_capsule(
         await sb.execute("pass")
         residual = self.object_store.put_bytes(
             b"results-payload", "application/octet-stream",
-        )
+        ).ref
         return RuntimeManifest(
             status="complete",
             dependencies=RuntimeDependencyManifest(
@@ -237,16 +237,19 @@ async def test_active_workflow_post_chat_uses_live_sandbox_and_graph_capsule(
     sp = get_snapshot_safe_point_manager()
     _orig_request = sp.request_safe_point
 
-    def _request_and_ack(sid: str) -> bool:
-        created = _orig_request(sid)
-        if sp.has_pending_request(sid):
-            sp.acknowledge_safe_point_request(
+    async def _request_and_ack(sid: str, owner_token: str = "test-owner", **kwargs):
+        created = await _orig_request(sid, owner_token)
+        gen = sp.get_pending_generation(sid)
+        if gen is not None:
+            await sp.acknowledge_safe_point_request(
                 sid,
+                gen,
                 {
                     "kernel_present": True,
                     "next_node": "pi_synthesis",
                     "current_round": 1,
                 },
+                role="workflow",
             )
         return created
 
@@ -273,8 +276,8 @@ async def test_active_workflow_post_chat_uses_live_sandbox_and_graph_capsule(
     finally:
         sessions.pop(session_id, None)
         workflows.pop(session_id, None)
-        sp.release(session_id)
-        sp.cancel_safe_point_request(session_id)
+        await sp.release(session_id, "test-owner")
+        await sp.cancel_safe_point_request(session_id, "test-owner")
 
 
 @pytest.mark.asyncio
@@ -331,10 +334,11 @@ async def test_idle_empty_complete_requires_acknowledged_no_kernel_descriptor(tm
 
     # Producer-owned trusted no-kernel + inactive descriptor may empty-complete.
     # Pre-hold makes _create_safe_point a no-op (idempotent) and keeps trust.
-    service.safe_point.acquire(
+    await service.safe_point.acquire(
         session_id,
         {"kernel_present": False, "inactive": True},
         eligibility_trusted=True,
+        owner_token="test-owner",
     )
     try:
         with patch.object(service, "_send_state_sync", new=AsyncMock()):
@@ -349,7 +353,7 @@ async def test_idle_empty_complete_requires_acknowledged_no_kernel_descriptor(tm
         assert record.manifest.runtime.status == "complete"
         assert record.manifest.runtime.dependencies.required == {}
     finally:
-        service.safe_point.release(session_id)
+        await service.safe_point.release(session_id, "test-owner")
 
 
 @pytest.mark.asyncio
@@ -371,10 +375,11 @@ async def test_terminal_empty_complete_with_no_kernel_descriptor(tmp_path):
         phase="post_report",
         capsule=TerminalCapsule(graph_version="2.0", status="completed"),
     )
-    service.safe_point.acquire(
+    await service.safe_point.acquire(
         session_id,
         {"kernel_present": False, "status": "completed"},
         eligibility_trusted=True,
+        owner_token="test-owner",
     )
     try:
         with patch.object(service, "_send_state_sync", new=AsyncMock()):
@@ -392,7 +397,7 @@ async def test_terminal_empty_complete_with_no_kernel_descriptor(tmp_path):
         assert record.manifest.runtime.dependencies.required == {}
         assert record.manifest.continuation.kind == "terminal"
     finally:
-        service.safe_point.release(session_id)
+        await service.safe_point.release(session_id, "test-owner")
 
 
 @pytest.mark.asyncio
@@ -415,10 +420,11 @@ async def test_active_pre_restore_never_accepts_empty_complete(tmp_path):
     workflows[session_id] = active_workflow
 
     # Contradictory trusted no-kernel descriptor must not authorize empty-complete.
-    service.safe_point.acquire(
+    await service.safe_point.acquire(
         session_id,
         {"kernel_present": False, "inactive": True},
         eligibility_trusted=True,
+        owner_token="test-owner",
     )
     request = SnapshotCaptureRequest(
         session_id=session_id,
@@ -444,7 +450,7 @@ async def test_active_pre_restore_never_accepts_empty_complete(tmp_path):
     finally:
         sessions.pop(session_id, None)
         workflows.pop(session_id, None)
-        service.safe_point.release(session_id)
+        await service.safe_point.release(session_id, "test-owner")
 
 
 @pytest.mark.asyncio
@@ -463,7 +469,7 @@ async def test_post_chat_does_not_cancel_foreign_safe_point_hold(tmp_path, monke
 
     # Pre-existing foreign hold (e.g. restore).
     foreign_desc = {"kernel_present": True, "holder": "restore"}
-    assert sp.acquire(session_id, foreign_desc)
+    assert await sp.acquire(session_id, foreign_desc, owner_token="foreign-owner")
     sessions[session_id] = state
     workflows[session_id] = MagicMock(session_id=session_id, sandbox=None)
 
@@ -487,8 +493,8 @@ async def test_post_chat_does_not_cancel_foreign_safe_point_hold(tmp_path, monke
     finally:
         sessions.pop(session_id, None)
         workflows.pop(session_id, None)
-        sp.release(session_id)
-        sp.cancel_safe_point_request(session_id)
+        await sp.release(session_id, "foreign-owner")
+        await sp.cancel_safe_point_request(session_id, "foreign-owner")
 
 
 @pytest.mark.asyncio
@@ -517,11 +523,11 @@ async def test_active_path_without_ack_fails_closed_no_force_acquire(
     # request succeeds but is cancelled before workflow acks (simulate race).
     _orig_request = sp.request_safe_point
 
-    def _request_then_drop(sid: str) -> bool:
-        created = _orig_request(sid)
+    async def _request_then_drop(sid: str, owner_token: str = "test-owner", **kwargs):
+        created = await _orig_request(sid, owner_token)
         if created:
             # Simulate cancel race: pending request withdrawn, never paused.
-            sp.cancel_safe_point_request(sid)
+            await sp.cancel_safe_point_request(sid, owner_token)
         return created
 
     monkeypatch.setattr(sp, "request_safe_point", _request_then_drop)
@@ -548,8 +554,8 @@ async def test_active_path_without_ack_fails_closed_no_force_acquire(
     finally:
         sessions.pop(session_id, None)
         workflows.pop(session_id, None)
-        sp.release(session_id)
-        sp.cancel_safe_point_request(session_id)
+        await sp.release(session_id, "test-owner")
+        await sp.cancel_safe_point_request(session_id, "test-owner")
 
 
 @pytest.mark.asyncio
@@ -569,7 +575,7 @@ async def test_raw_workflow_state_cannot_authorize_empty_complete(tmp_path):
     paths = _v2_paths(tmp_path)
     service = SnapshotService(session_id, paths)
     sp = get_snapshot_safe_point_manager()
-    sp.release(session_id)
+    await sp.release(session_id, "test-owner")
     (tmp_path / "ws").mkdir(exist_ok=True)
     request = SnapshotCaptureRequest(
         session_id=session_id,
@@ -639,8 +645,8 @@ async def test_trusted_post_chat_idle_empty_complete(tmp_path, monkeypatch):
     finally:
         sessions.pop(session_id, None)
         workflows.pop(session_id, None)
-        sp.release(session_id)
-        sp.cancel_safe_point_request(session_id)
+        await sp.release(session_id, "test-owner")
+        await sp.cancel_safe_point_request(session_id, "test-owner")
 
 
 @pytest.mark.asyncio
@@ -692,5 +698,21 @@ async def test_hitl_wait_statuses_allow_idle_empty_complete(tmp_path, monkeypatc
         finally:
             sessions.pop(session_id, None)
             workflows.pop(session_id, None)
-            sp.release(session_id)
-            sp.cancel_safe_point_request(session_id)
+            await sp.release(session_id, "test-owner")
+            await sp.cancel_safe_point_request(session_id, "test-owner")
+
+
+@pytest.mark.asyncio
+async def test_chat_gate_helper_persists_chat_retry_context():
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.snapshot_v2.failure_gate import (
+        enter_chat_snapshot_failure_gate,
+    )
+
+    state = AnalysisState(id="chat-retry", user_id="u1", status=TaskStatus.COMPLETED)
+    error = RequiredSnapshotBlocked("NO_SPACE", "disk full")
+    enter_chat_snapshot_failure_gate(state, error, TaskStatus.COMPLETED)
+    assert state.snapshot_failure["retry_context"]["producer"] == "chat"
+    assert state.snapshot_failure["retry_context"]["previous_status"] == "completed"
+

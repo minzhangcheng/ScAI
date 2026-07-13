@@ -25,35 +25,38 @@ class TestConcurrentLifecycle:
     async def test_safe_point_acquire_release(self):
         mgr = SafePointManager()
         sid = "conc-session"
+        token = "owner-conc-session"
 
-        acquired = mgr.acquire(sid)
+        acquired = await mgr.acquire(sid, owner_token=token)
         assert acquired is True
 
         assert mgr.is_paused(sid) is True
 
-        mgr.release(sid)
+        await mgr.release(sid, token)
         assert mgr.is_paused(sid) is False
 
     async def test_safe_point_idempotent_acquire(self):
         mgr = SafePointManager()
         sid = "conc-session2"
+        token = "owner-conc-session2"
 
-        first = mgr.acquire(sid)
-        second = mgr.acquire(sid)
+        first = await mgr.acquire(sid, owner_token=token)
+        second = await mgr.acquire(sid, owner_token=token)
         assert first is True
         assert second is False
 
-        mgr.release(sid)
+        await mgr.release(sid, token)
 
     async def test_safe_point_wait_unblocks(self):
         mgr = SafePointManager()
         sid = "conc-wait"
+        token = "owner-conc-wait"
 
-        mgr.acquire(sid)
+        await mgr.acquire(sid, owner_token=token)
 
         async def release_after_delay():
             await asyncio.sleep(0.05)
-            mgr.release(sid)
+            await mgr.release(sid, token)
 
         task = asyncio.create_task(release_after_delay())
         await mgr.wait_for(sid)
@@ -64,41 +67,58 @@ class TestConcurrentLifecycle:
     async def test_pending_request_acknowledge(self):
         mgr = SafePointManager()
         sid = "conc-pending"
+        token = "owner-conc-pending"
 
-        requested = mgr.request_safe_point(sid)
-        assert requested is True
+        requested = await mgr.request_safe_point(sid, token)
+        assert requested is not False and requested is not None
 
         assert mgr.has_pending_request(sid) is True
+        gen = mgr.get_pending_generation(sid)
+        assert gen is not None
 
-        acknowledged = mgr.acknowledge_safe_point_request(sid)
+        acknowledged = await mgr.acknowledge_safe_point_request(
+            sid, gen, role="workflow",
+        )
         assert acknowledged is True
 
         assert mgr.has_pending_request(sid) is False
         assert mgr.is_paused(sid) is True
 
-        mgr.release(sid)
+        await mgr.release(sid, token)
 
     async def test_cancel_safe_point_request(self):
         mgr = SafePointManager()
         sid = "conc-cancel"
 
-        mgr.request_safe_point(sid)
-        mgr.cancel_safe_point_request(sid)
+        await mgr.request_safe_point(sid, "owner-cancel")
+        await mgr.cancel_safe_point_request(sid, "owner-cancel")
 
         assert mgr.has_pending_request(sid) is False
         assert mgr.is_paused(sid) is False
 
+    async def test_foreign_owner_cannot_update_cancel_or_release(self):
+        manager = SafePointManager()
+        request = await manager.request_safe_point("s1", "owner-a")
+        assert await manager.acknowledge_safe_point_request(
+            "s1", request.generation, {}, role="workflow",
+        )
+        assert not await manager.update_descriptor("s1", "owner-b", {"next_node": "x"})
+        assert not await manager.cancel_safe_point_request("s1", "owner-b")
+        assert not await manager.release("s1", "owner-b")
+        assert await manager.release("s1", "owner-a")
+
     async def test_duplicate_request_returns_false(self):
         mgr = SafePointManager()
         sid = "conc-dup"
+        token = "owner-conc-dup"
 
-        first = mgr.request_safe_point(sid)
-        second = mgr.request_safe_point(sid)
+        first = await mgr.request_safe_point(sid, token)
+        second = await mgr.request_safe_point(sid, token)
 
-        assert first is True
+        assert first is not False and first is not None
         assert second is False
 
-        mgr.cancel_safe_point_request(sid)
+        await mgr.cancel_safe_point_request(sid, token)
 
     async def test_async_lock_serializes_capture(self, v2_paths, service):
         """Two concurrent capture attempts on the same session are serialized."""

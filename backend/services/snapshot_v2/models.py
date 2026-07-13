@@ -388,6 +388,54 @@ class SnapshotTransactionRecord(BaseModel):
     failure: dict | None = None
 
 
+_DEFAULT_RESUME_POLICY: dict[str, str] = {
+    "workflow_boundary": "graph_checkpoint",
+    "post_report": "complete",
+    "pre_restore": "restore_transaction",
+    "chat": "stable_status",
+}
+
+
+class SnapshotRetryContext(BaseModel):
+    """Context for retrying a snapshot failure after HITL intervention.
+
+    Carried in the ``snapshot_failure`` payload under ``retry_context`` so a
+    single retry/terminate route can dispatch the correct follow-up action.
+    """
+
+    producer: Literal[
+        "workflow_boundary", "post_report", "pre_restore", "chat"
+    ]
+    resume_policy: Literal[
+        "graph_checkpoint", "complete", "restore_transaction", "stable_status"
+    ] = "graph_checkpoint"
+    snapshot_request: dict[str, Any] = Field(default_factory=dict)
+    previous_status: str = "waiting_input"
+    report_generation_id: str | None = None
+    restore_transaction_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_resume_policy(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        producer = data.get("producer")
+        if data.get("resume_policy") is None and producer in _DEFAULT_RESUME_POLICY:
+            data = {**data, "resume_policy": _DEFAULT_RESUME_POLICY[producer]}
+        return data
+
+
+class RetryOutcome(BaseModel):
+    """Result of a producer-dispatched snapshot retry during the HTTP request."""
+
+    success: bool
+    still_blocked: bool = False
+    message: str = ""
+    status: str | None = None
+    wait_input_reason: str | None = None
+    snapshot_failure: dict[str, Any] | None = None
+
+
 class SanitizedImportPlan(BaseModel):
     """Plan of objects and rebound manifests allowed to reach the object store.
 

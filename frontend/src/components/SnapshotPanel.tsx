@@ -15,6 +15,7 @@ import { SnapshotPreview } from './snapshots/SnapshotPreview'
 import { DiscardCurrentDialog } from './snapshots/DiscardCurrentDialog'
 import { RestoreProgressDialog } from './snapshots/RestoreProgressDialog'
 import { RuntimeChoiceDialog, type RuntimeChoice } from './snapshots/RuntimeChoiceDialog'
+import { SNAPSHOT_TERMINAL_STATUSES } from '../utils/snapshotV2'
 import type {
   SnapshotRecordV2,
   SnapshotStoreStatus,
@@ -23,7 +24,6 @@ import type {
 } from '../types/snapshotV2'
 
 const POLL_INTERVAL_MS = 2000
-const TERMINAL_STATUSES = new Set(['committed', 'failed', 'cancelled', 'timed_out'])
 
 interface SnapshotPanelProps {
   sessionId: string
@@ -34,49 +34,12 @@ interface SnapshotPanelProps {
   activeTransactionId?: string | null
 }
 
-function extractErrorCode(err: unknown): string {
-  if (!err || typeof err !== 'object') return ''
-  const e = err as Record<string, unknown>
-  if (typeof e.code === 'string') return e.code
-  if (e.detail && typeof e.detail === 'object') {
-    const d = e.detail as Record<string, unknown>
-    if (typeof d.code === 'string') return d.code
+function asApiError(err: unknown): { status: number; code: string; runtimeStatus: string | null; message: string } | null {
+  if (err && typeof err === 'object' && 'code' in err) {
+    const e = err as { code: string; status?: number; runtimeStatus?: string | null; message?: string }
+    return { status: e.status ?? 500, code: e.code, runtimeStatus: e.runtimeStatus ?? null, message: e.message ?? '' }
   }
-  if (typeof e.message === 'string' && e.message.includes('pre_restore_unavailable')) {
-    return 'pre_restore_unavailable'
-  }
-  return ''
-}
-
-function extractRuntimeStatus(err: unknown): string {
-  if (!err || typeof err !== 'object') return 'missing'
-  const e = err as Record<string, unknown>
-  if (typeof e.runtime_status === 'string') return e.runtime_status
-  if (e.detail && typeof e.detail === 'object') {
-    const d = e.detail as Record<string, unknown>
-    if (typeof d.runtime_status === 'string') return d.runtime_status
-    if (typeof d.status === 'string') return d.status
-  }
-  return 'missing'
-}
-
-function isRuntimeChoiceRequired(code: string, err: unknown): boolean {
-  const upper = code.toUpperCase()
-  if (
-    upper === 'RUNTIME_CHOICE_REQUIRED' ||
-    upper === 'RUNTIME_UNAVAILABLE' ||
-    upper.includes('RUNTIME_CHOICE')
-  ) {
-    return true
-  }
-  if (err && typeof err === 'object') {
-    const e = err as Record<string, unknown>
-    if (typeof e.status === 'number' && e.status === 409) {
-      const msg = typeof e.message === 'string' ? e.message : ''
-      if (/runtime/i.test(msg) && /choice|required|unavailable/i.test(msg)) return true
-    }
-  }
-  return false
+  return null
 }
 
 export function SnapshotPanel({
@@ -175,7 +138,7 @@ export function SnapshotPanel({
         try {
           const txn = await getSnapshotTransaction(sessionId, transactionId)
           applyTxnUpdate(txn)
-          if (TERMINAL_STATUSES.has(txn.status)) {
+          if (SNAPSHOT_TERMINAL_STATUSES.has(txn.status)) {
             stopPolling()
           }
         } catch (e) {
@@ -219,14 +182,23 @@ export function SnapshotPanel({
       setConfirmRestoreId(null)
       setPendingRestoreId(null)
     } catch (e) {
-      const code = extractErrorCode(e)
-      if (code === 'pre_restore_unavailable' || code === 'PRE_RESTORE_UNAVAILABLE') {
-        setPendingRestoreId(snapshotId)
-        setShowDiscard(true)
-      } else if (isRuntimeChoiceRequired(code, e)) {
-        setPendingRuntimeRestoreId(snapshotId)
-        setRuntimeStatusHint(extractRuntimeStatus(e))
-        setShowRuntimeChoice(true)
+      const apiErr = asApiError(e)
+      if (apiErr) {
+        const upper = apiErr.code.toUpperCase()
+        if (upper === 'PRE_RESTORE_UNAVAILABLE' || apiErr.code === 'pre_restore_unavailable') {
+          setPendingRestoreId(snapshotId)
+          setShowDiscard(true)
+        } else if (
+          upper === 'RUNTIME_CHOICE_REQUIRED' ||
+          upper === 'RUNTIME_UNAVAILABLE' ||
+          (apiErr.status === 409 && /runtime/i.test(apiErr.message) && /choice|required|unavailable/i.test(apiErr.message))
+        ) {
+          setPendingRuntimeRestoreId(snapshotId)
+          setRuntimeStatusHint(apiErr.runtimeStatus || 'missing')
+          setShowRuntimeChoice(true)
+        } else {
+          setRestoreError(apiErr.message || (isZh ? '回退失败' : 'Restore failed'))
+        }
       } else {
         setRestoreError(e instanceof Error ? e.message : (isZh ? '回退失败' : 'Restore failed'))
       }
@@ -281,7 +253,7 @@ export function SnapshotPanel({
       await cancelSnapshotTransaction(sessionId, txnId)
       const reloaded = await getSnapshotTransaction(sessionId, txnId)
       applyTxnUpdate(reloaded)
-      if (TERMINAL_STATUSES.has(reloaded.status)) {
+      if (SNAPSHOT_TERMINAL_STATUSES.has(reloaded.status)) {
         stopPolling()
       }
     } catch (e) {
@@ -295,13 +267,7 @@ export function SnapshotPanel({
     return record.manifest.capsule.kind === 'terminal'
   }
 
-  const showProgress =
-    activeTxn &&
-    (!TERMINAL_STATUSES.has(activeTxn.status) ||
-      activeTxn.status === 'timed_out' ||
-      activeTxn.status === 'failed' ||
-      activeTxn.status === 'cancelled' ||
-      activeTxn.status === 'committed')
+  const showProgress = Boolean(activeTxn)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
@@ -466,10 +432,10 @@ export function SnapshotPanel({
           transaction={activeTxn}
           isZh={isZh}
           onCancel={
-            TERMINAL_STATUSES.has(activeTxn.status) ? undefined : handleCancelTxn
+            SNAPSHOT_TERMINAL_STATUSES.has(activeTxn.status) ? undefined : handleCancelTxn
           }
           onDismiss={
-            TERMINAL_STATUSES.has(activeTxn.status)
+            SNAPSHOT_TERMINAL_STATUSES.has(activeTxn.status)
               ? () => {
                   setLocalTxn(null)
                   lastStatusRef.current = null

@@ -319,11 +319,12 @@ class TestCaptureTransactionBoundary:
 
 class TestSafePoint:
 
-    def test_acquire_returns_true(self):
+    @pytest.mark.asyncio
+    async def test_acquire_returns_true(self):
         """Acquiring a safe point for a new session returns True."""
         from backend.services.snapshot_v2.safe_point import SafePointManager
         mgr = SafePointManager()
-        result = mgr.acquire("sess-sp-1", {})
+        result = await mgr.acquire("sess-sp-1", {}, owner_token="test-owner")
         assert result is True
 
     @pytest.mark.asyncio
@@ -331,37 +332,40 @@ class TestSafePoint:
         """Acquiring a safe point for an already-paused session returns False."""
         from backend.services.snapshot_v2.safe_point import SafePointManager
         mgr = SafePointManager()
-        first = mgr.acquire("sess-sp-2", {})
+        first = await mgr.acquire("sess-sp-2", {}, owner_token="test-owner")
         assert first is True
-        second = mgr.acquire("sess-sp-2", {})
+        second = await mgr.acquire("sess-sp-2", {}, owner_token="test-owner")
         assert second is False
 
-    def test_release_unblocks(self):
+    @pytest.mark.asyncio
+    async def test_release_unblocks(self):
         """Releasing a safe point sets the underlying event."""
         from backend.services.snapshot_v2.safe_point import SafePointManager
         mgr = SafePointManager()
-        mgr.acquire("sess-sp-3", {})
+        await mgr.acquire("sess-sp-3", {}, owner_token="test-owner")
         event = mgr._events.get("sess-sp-3")
         assert event is not None
         assert not event.is_set()
 
-        mgr.release("sess-sp-3")
+        await mgr.release("sess-sp-3", "test-owner")
         assert event.is_set()  # Event was set (not popped)
 
-    def test_release_nonexistent_is_noop(self):
+    @pytest.mark.asyncio
+    async def test_release_nonexistent_is_noop(self):
         """Releasing a non-existent session is a no-op."""
         from backend.services.snapshot_v2.safe_point import SafePointManager
         mgr = SafePointManager()
-        mgr.release("does-not-exist")  # Should not raise
+        await mgr.release("does-not-exist", "test-owner")  # Should not raise
 
-    def test_is_paused_true_after_acquire(self):
+    @pytest.mark.asyncio
+    async def test_is_paused_true_after_acquire(self):
         """is_paused returns True after acquire, False after release."""
         from backend.services.snapshot_v2.safe_point import SafePointManager
         mgr = SafePointManager()
         assert mgr.is_paused("sess-sp-4") is False
-        mgr.acquire("sess-sp-4", {})
+        await mgr.acquire("sess-sp-4", {}, owner_token="test-owner")
         assert mgr.is_paused("sess-sp-4") is True
-        mgr.release("sess-sp-4")
+        await mgr.release("sess-sp-4", "test-owner")
         assert mgr.is_paused("sess-sp-4") is False
 
     def test_is_paused_nonexistent(self):
@@ -370,16 +374,17 @@ class TestSafePoint:
         mgr = SafePointManager()
         assert mgr.is_paused("nonexistent") is False
 
-    def test_descriptor_stores_kernel_present(self):
+    @pytest.mark.asyncio
+    async def test_descriptor_stores_kernel_present(self):
         """acquire stores workflow_state descriptor for kernel_present lookup."""
         from backend.services.snapshot_v2.safe_point import SafePointManager
         mgr = SafePointManager()
-        mgr.acquire("sess-sp-desc", {"kernel_present": False, "checkpoint_dependencies": ["x"]})
+        await mgr.acquire("sess-sp-desc", {"kernel_present": False, "checkpoint_dependencies": ["x"]}, owner_token="test-owner")
         desc = mgr.get_descriptor("sess-sp-desc")
         assert desc is not None
         assert desc["kernel_present"] is False
         assert desc["checkpoint_dependencies"] == ["x"]
-        mgr.release("sess-sp-desc")
+        await mgr.release("sess-sp-desc", "test-owner")
         assert mgr.get_descriptor("sess-sp-desc") is None
 
 
@@ -789,7 +794,7 @@ class TestCaptureRequiredContent:
         manifest_store = ManifestStore(v2_paths)
         service = SnapshotService("sess-cap", v2_paths)
 
-        adata_ref = object_store.put_bytes(b"reuse-adata", "application/x-hdf5")
+        adata_ref = object_store.put_bytes(b"reuse-adata", "application/x-hdf5").ref
         gen = RuntimeGenerationManifest(
             capture_command="runtime_capture_v2",
             capture_timestamp="2025-01-01T00:00:00Z",
@@ -870,7 +875,7 @@ class TestCaptureRequiredContent:
         manifest_store = ManifestStore(v2_paths)
         service = SnapshotService("sess-cap", v2_paths)
 
-        adata_ref = object_store.put_bytes(b"dirty-adata", "application/x-hdf5")
+        adata_ref = object_store.put_bytes(b"dirty-adata", "application/x-hdf5").ref
         gen = RuntimeGenerationManifest(
             capture_command="runtime_capture_v2",
             capture_timestamp="2025-01-01T00:00:00Z",
@@ -1101,5 +1106,48 @@ class TestCaptureRequiredContent:
             assert any(s.id == record.snapshot_id for s in analysis_state.snapshots)
             rebuilt = service.rebuild_snapshots_from_manifests()
             assert any(s.id == record.snapshot_id for s in rebuilt)
+        finally:
+            sessions.pop("sess-cap", None)
+
+
+class TestCaptureTransactionEvidenceReuse:
+    """Capture must reuse put evidence and not re-verify transaction-local writes."""
+
+    @pytest.mark.asyncio
+    async def test_capture_skips_verify_for_transaction_local_puts(
+        self, v2_paths, sandbox, workspace_root, tmp_path, monkeypatch,
+    ):
+        from unittest.mock import Mock
+
+        from backend.services.snapshot_v2.service import SnapshotService
+        from backend.state import sessions
+        import json
+
+        analysis_state = make_analysis_state()
+        sessions["sess-cap"] = analysis_state
+        try:
+            states = tmp_path / "states"
+            states.mkdir()
+            (states / "sess-cap.ipynb").write_text(
+                json.dumps({
+                    "cells": [], "nbformat": 4, "nbformat_minor": 5, "metadata": {},
+                })
+            )
+            service = SnapshotService("sess-cap", v2_paths)
+            verify = Mock(side_effect=AssertionError("transaction-local reread"))
+            monkeypatch.setattr(service.object_store, "verify", verify)
+            with patch(
+                "backend.services.snapshot_v2.service.get_session_states",
+                return_value=states,
+            ):
+                record = await service.capture(
+                    make_capture_request(),
+                    sandbox=sandbox,
+                    workspace_root=str(workspace_root),
+                    analysis_state=analysis_state,
+                )
+            assert record.failure is None, f"Unexpected failure: {record.failure}"
+            # External-ref verify must not be required for pure transaction puts.
+            assert verify.call_count == 0
         finally:
             sessions.pop("sess-cap", None)

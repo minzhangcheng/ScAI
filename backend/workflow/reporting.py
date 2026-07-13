@@ -770,9 +770,11 @@ class ReportingMixin:
             "status", "Generating detailed report with figures and tables...", AgentType.PI
         )
 
-        # Generate a report_generation_id for capture idempotency
-        report_generation_id = str(uuid.uuid4())
-        analysis_state.report_generation_id = report_generation_id
+        # Reuse existing report_generation_id if present (R20 idempotency fix)
+        report_generation_id = getattr(analysis_state, "report_generation_id", None)
+        if not report_generation_id:
+            report_generation_id = str(uuid.uuid4())
+            analysis_state.report_generation_id = report_generation_id
 
         target_lineage_id = current_lineage_id(analysis_state)
         branch_id = None if target_lineage_id == "main" else target_lineage_id
@@ -938,8 +940,14 @@ class ReportingMixin:
         """Capture a required post-report snapshot (fail closed).
 
         Returns the SnapshotRecordV2. Raises RequiredSnapshotBlocked on failure.
+
+        When no live sandbox/kernel is present (e.g. post-teardown rebuild),
+        pre-acquire a trusted no-kernel safe-point descriptor so empty-complete
+        runtime is authorized. Capture-side ``_create_safe_point`` alone is
+        untrusted metadata and cannot authorize empty-complete.
         """
         from ..config import get_session_workspace
+        from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
         from ..services.snapshot_v2.service import SnapshotService
         from ..services.snapshot_v2.continuation import ContinuationRegistry
         from ..services.snapshot_v2.models import SnapshotCaptureRequest
@@ -951,38 +959,88 @@ class ReportingMixin:
             service = SnapshotService(self.session_id, paths)
             self.snapshot_service = service
 
+        sandbox = getattr(self, "sandbox", None)
+        kernel_present = (
+            sandbox is not None
+            and getattr(sandbox, "km", None) is not None
+        )
         workflow_state = {
             "analysis_state": analysis_state,
             "current_round": analysis_state.current_round,
-            "kernel_present": (
-                getattr(self, "sandbox", None) is not None
-                and getattr(getattr(self, "sandbox", None), "km", None) is not None
-            ),
+            "kernel_present": kernel_present,
         }
-        capsule = ContinuationRegistry(service.object_store).freeze(
-            "post_report", analysis_state, workflow_state,
-        )
-        request = SnapshotCaptureRequest(
-            session_id=self.session_id,
-            reason="post_report",
-            phase="post_report",
-            capsule=capsule,
-            round_number=analysis_state.current_round or 0,
-            idempotency_key=str(report_generation_id) if report_generation_id else None,
-        )
-        workspace_root = str(get_session_workspace(self.session_id))
-        record = await service.capture_required_snapshot(
-            analysis_state,
-            request,
-            sandbox=getattr(self, "sandbox", None),
-            workflow_state=workflow_state,
-            workspace_root=workspace_root,
-        )
-        logger.info(
-            "[%s] Post-report snapshot created: %s (gen_id=%s)",
-            self.session_id, record.snapshot_id, report_generation_id,
-        )
-        return record
+
+        # Idle / post-teardown: authorize empty-complete with a producer-owned
+        # trusted descriptor (mirrors chat idle path). Foreign holds fail closed
+        # so capture's release cannot steal another owner's pause.
+        owned_sp = False
+        sp = service.safe_point
+        owner_token = f"report:{self.session_id}:{id(self)}"
+        if not kernel_present:
+            if sp.is_paused(self.session_id) or sp.has_pending_request(self.session_id):
+                raise RequiredSnapshotBlocked(
+                    "LIVE_SANDBOX_REQUIRED",
+                    "Post-report capture cannot steal an existing safe-point hold",
+                )
+            if not sp.is_eligibility_trusted(self.session_id):
+                from ..models.schemas import TaskStatus
+
+                status = getattr(analysis_state, "status", None)
+                terminal = status in (
+                    TaskStatus.COMPLETED,
+                    getattr(TaskStatus, "FAILED", None),
+                ) or str(status) in ("completed", "failed")
+                descriptor = {
+                    "kernel_present": False,
+                    "current_round": analysis_state.current_round or 0,
+                    "inactive": True,
+                }
+                if terminal or status == TaskStatus.GENERATING_REPORT:
+                    descriptor["status"] = (
+                        "completed" if terminal else str(status or "generating_report")
+                    )
+                    if terminal:
+                        descriptor["continuation_kind"] = "terminal"
+                if not await sp.acquire(
+                    self.session_id, descriptor, owner_token=owner_token,
+                ):
+                    raise RequiredSnapshotBlocked(
+                        "LIVE_SANDBOX_REQUIRED",
+                        "Post-report capture failed to acquire idle safe point",
+                    )
+                owned_sp = True
+
+        try:
+            capsule = ContinuationRegistry(service.object_store).freeze(
+                "post_report", analysis_state, workflow_state,
+            )
+            request = SnapshotCaptureRequest(
+                session_id=self.session_id,
+                reason="post_report",
+                phase="post_report",
+                capsule=capsule,
+                round_number=analysis_state.current_round or 0,
+                idempotency_key=(
+                    str(report_generation_id) if report_generation_id else None
+                ),
+            )
+            workspace_root = str(get_session_workspace(self.session_id))
+            record = await service.capture_required_snapshot(
+                analysis_state,
+                request,
+                sandbox=sandbox,
+                workflow_state=workflow_state,
+                workspace_root=workspace_root,
+            )
+            logger.info(
+                "[%s] Post-report snapshot created: %s (gen_id=%s)",
+                self.session_id, record.snapshot_id, report_generation_id,
+            )
+            return record
+        finally:
+            if owned_sp:
+                # Match chat idle cleanup: cancel/release only holds we own.
+                await sp.cancel_safe_point_request(self.session_id, owner_token)
 
     async def _capture_required_snapshot(self, analysis_state, report_generation_id):
         """Retry a pending required snapshot using stored state (capture only)."""

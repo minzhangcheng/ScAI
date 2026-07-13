@@ -4,8 +4,6 @@ crash-recoverable journaled apply of a snapshot's kernel pkl to the live path.
 This module is intentionally free of workflow/route imports so it can be unit
 tested and reused by both the restore route and sandbox startup recovery.
 """
-import hashlib
-import hmac as _hmac
 import json
 import logging
 import os
@@ -93,23 +91,8 @@ def resolve_runtime_choice(
 
 
 def _journal_hmac(data: bytes) -> str:
-    from ..utils.crypto import get_integrity_secret
-    return _hmac.new(get_integrity_secret().encode(), data, hashlib.sha256).hexdigest()
-
-
-def _atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    dir_fd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    from ..utils.crypto import sign_hmac_sha256
+    return sign_hmac_sha256(data)
 
 
 def preflight_runtime_zst(session_id: str, snapshot, runtime_action: str) -> None:
@@ -169,14 +152,15 @@ def apply_runtime_pkl(session_id: str, snapshot_zst: Path) -> None:
     if had_sig:
         shutil.copy2(sig, bak_sig)
 
+    from backend.utils.files import atomic_write_bytes
     journal = {"state": "APPLYING", "had_live": had_live}
     pre_hmac = json.dumps(journal, sort_keys=True).encode()
     journal["hmac"] = _journal_hmac(pre_hmac)
-    _atomic_write(_journal_path(session_id), json.dumps(journal).encode())
+    atomic_write_bytes(_journal_path(session_id), json.dumps(journal).encode())
 
     try:
         os.replace(staged, live)
-        _atomic_write(sig, staged_sig_value.encode())
+        atomic_write_bytes(sig, staged_sig_value.encode())
         if not _verify_pkl_integrity(live, idir):
             raise RuntimeApplyError(f"[{session_id}] restored pkl failed integrity after apply")
     except Exception:
@@ -185,7 +169,7 @@ def apply_runtime_pkl(session_id: str, snapshot_zst: Path) -> None:
 
     journal["state"] = "COMMITTED"
     journal["hmac"] = _journal_hmac(json.dumps({"state": "COMMITTED", "had_live": had_live}, sort_keys=True).encode())
-    _atomic_write(_journal_path(session_id), json.dumps(journal).encode())
+    atomic_write_bytes(_journal_path(session_id), json.dumps(journal).encode())
     for p in (bak_pkl, bak_sig):
         p.unlink(missing_ok=True)
     _journal_path(session_id).unlink(missing_ok=True)
@@ -213,10 +197,11 @@ def recover_runtime_apply_journal(session_id: str) -> None:
         return
 
     # Verify HMAC (present on journals written after Stage 1 hardening).
+    from backend.utils.crypto import verify_hmac_sha256
     stored_hmac = journal.pop("hmac", None)
     if stored_hmac is not None:
         pre_hmac = json.dumps(journal, sort_keys=True).encode()
-        if not _hmac.compare_digest(_journal_hmac(pre_hmac), stored_hmac):
+        if not verify_hmac_sha256(pre_hmac, stored_hmac):
             quarantine = jp.with_suffix(".json.corrupt")
             logger.warning("[%s] journal HMAC mismatch; quarantining", session_id)
             os.replace(jp, quarantine)
@@ -325,8 +310,9 @@ def atomic_replace_pkl(session_id: str, src_pkl_path: str) -> str:
         os.close(dir_fd)
 
     # Re-sign HMAC
+    from backend.utils.files import atomic_write_bytes
     sig_value = _pkl_hmac_stream(live)
-    _atomic_write(sig, sig_value.encode())
+    atomic_write_bytes(sig, sig_value.encode())
 
     if not _verify_pkl_integrity(live, idir):
         raise RuntimeApplyError(

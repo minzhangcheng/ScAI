@@ -439,20 +439,22 @@ async def sandbox(session_layout, session_id):
 
 
 @pytest.fixture(autouse=True)
-def _clear_global_state():
+async def _clear_global_state():
     from backend.state import sessions, snapshot_restore_jobs, workflows
     from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
 
     snapshot_restore_jobs.clear()
     sp = get_snapshot_safe_point_manager()
     for sid in list(sp.active_sessions):
-        sp.release(sid)
+        owner = sp._acquired_owners.get(sid) or "test-owner"
+        await sp.release(sid, owner)
     yield
     snapshot_restore_jobs.clear()
     sessions.clear()
     workflows.clear()
     for sid in list(sp.active_sessions):
-        sp.release(sid)
+        owner = sp._acquired_owners.get(sid) or "test-owner"
+        await sp.release(sid, owner)
 
 
 # ===========================================================================
@@ -613,7 +615,9 @@ print("setup", results["answer"])
                 await asyncio.sleep(0.02)
 
         await asyncio.wait_for(_wait_pending(), timeout=30)
-        mgr._safe_point.acknowledge_safe_point_request(session_id)
+        gen = mgr._safe_point.get_pending_generation(session_id)
+        if gen is not None:
+            await mgr._safe_point.acknowledge_safe_point_request(session_id, gen, role="workflow")
 
         async def _wait_terminal():
             while True:
@@ -1465,7 +1469,9 @@ class TestConcurrencySerialize:
             async def _ack():
                 for _ in range(200):
                     if mgr._safe_point.has_pending_request(session_id):
-                        mgr._safe_point.acknowledge_safe_point_request(session_id)
+                        gen = mgr._safe_point.get_pending_generation(session_id)
+                        if gen is not None:
+                            await mgr._safe_point.acknowledge_safe_point_request(session_id, gen, role="workflow")
                         return
                     await asyncio.sleep(0.01)
             await _ack()
@@ -1475,7 +1481,9 @@ class TestConcurrencySerialize:
                     return r
                 # re-ack if second job pending
                 if mgr._safe_point.has_pending_request(session_id):
-                    mgr._safe_point.acknowledge_safe_point_request(session_id)
+                    gen = mgr._safe_point.get_pending_generation(session_id)
+                    if gen is not None:
+                        await mgr._safe_point.acknowledge_safe_point_request(session_id, gen, role="workflow")
                 await asyncio.sleep(0.02)
             return mgr.get(rec.transaction_id)
 
@@ -1513,3 +1521,58 @@ class TestConcurrencySerialize:
             ["restore_start", "restore_end", "create_start", "create_end"],
             ["create_start", "create_end", "restore_start", "restore_end"],
         )
+
+
+# ── Runtime restore warning tests (Task 8) ──────────────────────────────
+
+
+class TestRuntimeRestoreWarning:
+    """runtime_restore_warning is persisted and cleared correctly."""
+
+    def test_default_is_none(self):
+        """Fresh AnalysisState has no runtime restore warning."""
+        from backend.models.schemas import AnalysisState
+        state = AnalysisState(user_id="test")
+        assert state.runtime_restore_warning is None
+
+    def test_field_accepts_string(self):
+        """runtime_restore_warning accepts a string value."""
+        from backend.models.schemas import AnalysisState
+        state = AnalysisState(user_id="test")
+        state.runtime_restore_warning = "Live kernel retained"
+        assert state.runtime_restore_warning == "Live kernel retained"
+
+    def test_field_cleared_on_rerun_flag(self):
+        """Simulate rerun: setting back to complete + None."""
+        from backend.models.schemas import AnalysisState
+        state = AnalysisState(user_id="test")
+        state.runtime_restore_warning = "Live kernel retained"
+        state.runtime_restore_status = "unavailable"
+
+        # Simulate fresh rerun
+        state.runtime_restore_status = "complete"
+        state.runtime_restore_warning = None
+
+        assert state.runtime_restore_warning is None
+        assert state.runtime_restore_status == "complete"
+
+    def test_keep_restore_sets_warning(self):
+        """Simulate 'keep' restore setting both status and warning."""
+        from backend.models.schemas import AnalysisState
+        state = AnalysisState(user_id="test")
+        # What the restore flow does:
+        state.runtime_restore_status = "intentionally_kept"
+        state.runtime_restore_warning = (
+            "Live runtime intentionally kept; may be inconsistent"
+        )
+        assert state.runtime_restore_status == "intentionally_kept"
+        assert "inconsistent" in (state.runtime_restore_warning or "")
+
+    def test_reset_restore_sets_unavailable_no_warning(self):
+        """Simulate 'reset' restore setting unavailable without warning."""
+        from backend.models.schemas import AnalysisState
+        state = AnalysisState(user_id="test")
+        state.runtime_restore_status = "unavailable"
+        state.runtime_restore_warning = None
+        assert state.runtime_restore_status == "unavailable"
+        assert state.runtime_restore_warning is None

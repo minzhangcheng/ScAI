@@ -227,7 +227,7 @@ class TestObjectStoreContainsVerified:
         from backend.services.snapshot_v2.object_store import ObjectStore
 
         store = ObjectStore(v2_paths)
-        ref = store.put_bytes(b"hello-verified", "text/plain")
+        ref = store.put_bytes(b"hello-verified", "text/plain").ref
         assert store.contains_verified(ref.sha256) is True
 
     def test_contains_verified_false_for_missing(self, v2_paths):
@@ -240,7 +240,7 @@ class TestObjectStoreContainsVerified:
         from backend.services.snapshot_v2.object_store import ObjectStore
 
         store = ObjectStore(v2_paths)
-        ref = store.put_bytes(b"good-content", "text/plain")
+        ref = store.put_bytes(b"good-content", "text/plain").ref
         obj = v2_paths.objects / ref.sha256
         obj.write_bytes(b"tampered")
         assert store.contains_verified(ref.sha256) is False

@@ -310,7 +310,43 @@ class TestSweep:
 # ═════════════════════════════════════════════════════════════════════════
 
 
+@pytest.fixture
+def gc_with_two_snapshots(v2_paths):
+    """GC instance with two committed snapshots and one orphan object."""
+    from backend.services.snapshot_v2.gc import SnapshotGarbageCollector
+
+    hex_a = hashlib.sha256(b"a").hexdigest()
+    hex_b = hashlib.sha256(b"b").hexdigest()
+    orphan = hashlib.sha256(b"orphan").hexdigest()
+    ref_a = build_object_ref(sha256=hex_a, size=100)
+    ref_b = build_object_ref(sha256=hex_b, size=200)
+    write_object(v2_paths, hex_a, 100)
+    write_object(v2_paths, hex_b, 200)
+    write_object(v2_paths, orphan, 50)
+    m1 = build_manifest("s1", "snap-1", objects={hex_a: ref_a})
+    m2 = build_manifest("s1", "snap-2", objects={hex_b: ref_b})
+    write_manifest_to_store(m1, v2_paths.committed, v2_paths.integrity)
+    write_manifest_to_store(m2, v2_paths.committed, v2_paths.integrity)
+    return SnapshotGarbageCollector("s1", v2_paths)
+
+
 class TestRun:
+    def test_gc_run_verifies_committed_set_once_for_mark_and_count(
+        self, gc_with_two_snapshots, monkeypatch
+    ):
+        gc = gc_with_two_snapshots
+        calls = {"n": 0}
+        real = gc.manifest_store.verify_all_committed
+
+        def counting():
+            calls["n"] += 1
+            return real()
+
+        monkeypatch.setattr(gc.manifest_store, "verify_all_committed", counting)
+        gc.run()
+        # mark + count share one snapshot; sweep keeps its own fail-closed re-verify.
+        assert calls["n"] <= 2
+
     def test_run_mark_then_sweep(self, v2_paths):
         """run() marks and sweeps in one operation."""
         from backend.services.snapshot_v2.gc import SnapshotGarbageCollector

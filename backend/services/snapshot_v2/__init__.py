@@ -27,6 +27,7 @@ from backend.services.snapshot_v2.models import (
     SnapshotFailureRecord,
     SnapshotRecordV2,
     SnapshotRestoreRequest,
+    SnapshotRetryContext,
     SnapshotTransactionRecord,
     empty_complete_runtime,
     runtime_manifest_from_generation,

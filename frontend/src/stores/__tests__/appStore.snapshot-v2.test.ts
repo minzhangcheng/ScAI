@@ -222,8 +222,54 @@ describe('Snapshot V2 store actions', () => {
         allowed_actions: ['retry', 'manage', 'terminate'],
       })
 
-      expect(useAppStore.getState().isSnapshotFailureBlocked()).toBe(true)
+      expect(useAppStore.getState().snapshotFailure).not.toBeNull()
       expect(useAppStore.getState().isForwardResumeBlocked()).toBe(true)
+    })
+
+    it('hydrate clears snapshotFailure when payload.snapshot_failure is null', () => {
+      useAppStore.getState().setSnapshotFailure({
+        failure: {
+          snapshot_id: 'snap-1',
+          session_id: 's',
+          failed_at: '2025-01-01T00:00:00Z',
+          code: 'CAPTURE_FAILED',
+          message: 'fail',
+        },
+        allowed_actions: ['retry', 'manage', 'terminate'],
+      })
+
+      useAppStore.getState().hydrateRuntimeRestoreFromSession({
+        runtime_restore_status: 'complete',
+        snapshot_failure: null,
+      })
+
+      expect(useAppStore.getState().snapshotFailure).toBeNull()
+    })
+
+    it('hydrate sets snapshotFailure when payload includes a failure object', () => {
+      useAppStore.getState().hydrateRuntimeRestoreFromSession({
+        runtime_restore_status: 'complete',
+        snapshot_failure: {
+          snapshot_id: 'snap-2',
+          session_id: 's2',
+          failed_at: '2025-01-02T00:00:00Z',
+          code: 'QUOTA',
+          message: 'disk full',
+          allowed_actions: ['retry', 'manage', 'terminate'],
+        },
+      })
+
+      expect(useAppStore.getState().snapshotFailure).toEqual({
+        failure: {
+          snapshot_id: 'snap-2',
+          session_id: 's2',
+          failed_at: '2025-01-02T00:00:00Z',
+          code: 'QUOTA',
+          message: 'disk full',
+          details: undefined,
+        },
+        allowed_actions: ['retry', 'manage', 'terminate'],
+      })
     })
   })
 })

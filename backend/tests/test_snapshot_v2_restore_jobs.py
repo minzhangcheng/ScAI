@@ -5,8 +5,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from backend.services.snapshot_v2.errors import SnapshotTransactionError
+from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
+from backend.state import snapshot_restore_jobs
 
 
 class _StatusOnlyService:
@@ -89,31 +92,18 @@ def make_mgr(v2_paths, session_id="sess-test", *, real_service=False, snapshot_s
     )
 
 
-@pytest.fixture(autouse=True)
-def _clear_restore_job_registry():
-    """Isolate each test from process-wide restore job state."""
-    from backend.state import snapshot_restore_jobs
-    from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
-
+@pytest_asyncio.fixture(autouse=True)
+async def _clear_restore_job_registry():
     snapshot_restore_jobs.clear()
-    sp = get_snapshot_safe_point_manager()
-    for sid in list(sp.active_sessions):
-        sp.release(sid)
-    # Clear any pending requests by canceling known test session ids.
-    for sid in (
-        "sess-test", "sess-cross", "sess-wf-ack", "sess-a", "sess-b",
-        "sess-journal", "sess-live-effect",
-    ):
-        sp.cancel_safe_point_request(sid)
+    manager = get_snapshot_safe_point_manager()
+    for session_id in list(manager.active_sessions):
+        owner = manager._acquired_owners.get(session_id) or "test-owner"
+        await manager.release(session_id, owner)
     yield
     snapshot_restore_jobs.clear()
-    for sid in list(sp.active_sessions):
-        sp.release(sid)
-    for sid in (
-        "sess-test", "sess-cross", "sess-wf-ack", "sess-a", "sess-b",
-        "sess-journal", "sess-live-effect",
-    ):
-        sp.cancel_safe_point_request(sid)
+    for session_id in list(manager.active_sessions):
+        owner = manager._acquired_owners.get(session_id) or "test-owner"
+        await manager.release(session_id, owner)
 
 
 class TestRestoreJobLifecycle:
@@ -176,7 +166,8 @@ class TestRestoreJobLifecycle:
         assert mgr._safe_point.has_pending_request("sess-test")
 
         # Acknowledge safe point (simulate workflow)
-        mgr._safe_point.acknowledge_safe_point_request("sess-test")
+        gen = mgr._safe_point.get_pending_generation("sess-test")
+        await mgr._safe_point.acknowledge_safe_point_request("sess-test", gen, role="workflow")
 
         # Wait for committed
         await asyncio.wait_for(
@@ -211,7 +202,8 @@ class TestRestoreJobLifecycle:
         )
 
         # Acknowledge
-        mgr._safe_point.acknowledge_safe_point_request("sess-test")
+        gen = mgr._safe_point.get_pending_generation("sess-test")
+        await mgr._safe_point.acknowledge_safe_point_request("sess-test", gen, role="workflow")
 
         # Wait for committed
         await asyncio.wait_for(
@@ -270,7 +262,8 @@ class TestRestoreJobLifecycle:
         )
 
         # Acknowledge (workflow pauses)
-        mgr._safe_point.acknowledge_safe_point_request("sess-test")
+        gen = mgr._safe_point.get_pending_generation("sess-test")
+        await mgr._safe_point.acknowledge_safe_point_request("sess-test", gen, role="workflow")
         assert mgr._safe_point.is_paused("sess-test")
 
         # The job is now frozen at the "staging" barrier
@@ -588,7 +581,8 @@ class TestSharedRestoreJobRegistry:
             TestRestoreJobLifecycle()._wait_for_status(mgr, tx_id, "waiting_safe_point"),
             timeout=5,
         )
-        mgr._safe_point.acknowledge_safe_point_request("sess-test")
+        gen = mgr._safe_point.get_pending_generation("sess-test")
+        await mgr._safe_point.acknowledge_safe_point_request("sess-test", gen, role="workflow")
         await asyncio.wait_for(
             TestRestoreJobLifecycle()._wait_for_status(mgr, tx_id, "committed"),
             timeout=5,
@@ -822,7 +816,9 @@ class TestCommittedJobLiveSideEffects:
             return await mgr.enqueue(session_id, pf, req, timeout_seconds=30)
 
         async def acknowledge_from_workflow(sid):
-            mgr._safe_point.acknowledge_safe_point_request(sid)
+            gen = mgr._safe_point.get_pending_generation(sid)
+            if gen is not None:
+                await mgr._safe_point.acknowledge_safe_point_request(sid, gen, role='workflow')
 
         async def wait_terminal(tx_id):
             while True:
@@ -1365,8 +1361,8 @@ class TestSafePointRetainedDuringPreRestore:
         sessions[session_id] = state
 
         sp = get_snapshot_safe_point_manager()
-        sp.release(session_id)
-        assert sp.acquire(session_id, {"kernel_present": False}) is True
+        await sp.release(session_id, "test-owner")
+        assert await sp.acquire(session_id, {"kernel_present": False}, owner_token="test-owner") is True
         assert sp.is_paused(session_id)
 
         service = SnapshotService(session_id, paths)
@@ -1386,7 +1382,7 @@ class TestSafePointRetainedDuringPreRestore:
         assert record.failure is None, getattr(record.failure, "message", None)
         # Critical: restore-held safe point must still be paused after capture.
         assert sp.is_paused(session_id)
-        sp.release(session_id)
+        await sp.release(session_id, "test-owner")
         sessions.pop(session_id, None)
 
     @pytest.mark.asyncio
@@ -1442,8 +1438,8 @@ class TestSafePointRetainedDuringPreRestore:
         sessions[session_id] = state
 
         sp = get_snapshot_safe_point_manager()
-        sp.release(session_id)
-        assert sp.acquire(session_id, {"kernel_present": False}) is True
+        await sp.release(session_id, "test-owner")
+        assert await sp.acquire(session_id, {"kernel_present": False}, owner_token="test-owner") is True
 
         service = SnapshotService(session_id, paths)
         save = AsyncMock()
@@ -1464,5 +1460,890 @@ class TestSafePointRetainedDuringPreRestore:
         )
         assert record.failure is None, getattr(record.failure, "message", None)
         save.assert_not_awaited()
-        sp.release(session_id)
+        await sp.release(session_id, "test-owner")
         sessions.pop(session_id, None)
+
+
+# ---- post_report snapshot-failure retry re-invokes capture producer ---------
+
+
+@pytest.fixture
+def post_report_blocked_session():
+    """Session blocked on post_report snapshot failure with a fake workflow."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.state import sessions, workflows
+
+    session_id = "sess-post-report-retry"
+    state = AnalysisState(
+        id=session_id,
+        name="PostReportRetry",
+        user_id="u1",
+        initial_instruction="analyze",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "retry_context": {"producer": "post_report"},
+        },
+        pending_required_snapshot={"report_generation_id": "r1"},
+    )
+
+    async def _retry_ok():
+        # Real capture_required_snapshot clears failure only on commit.
+        state.pending_required_snapshot = None
+        state.snapshot_failure = None
+        if state.wait_input_reason == "snapshot_failure":
+            state.wait_input_reason = None
+        return {"snapshot_id": "snap-retry-ok"}
+
+    fake_workflow = MagicMock()
+    fake_workflow.retry_pending_required_snapshot = AsyncMock(side_effect=_retry_ok)
+    fake_workflow.stop = AsyncMock()
+    fake_workflow.pause = AsyncMock()
+
+    sessions[session_id] = state
+    workflows[session_id] = fake_workflow
+    try:
+        yield session_id, state, fake_workflow
+    finally:
+        sessions.pop(session_id, None)
+        workflows.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_post_report_retry_invokes_recapture(post_report_blocked_session, monkeypatch):
+    """post_report Retry recaptures then finalizes like normal post-report success."""
+    from backend.models.schemas import TaskStatus
+    from backend.routes import lifecycle
+
+    session_id, state, fake_workflow = post_report_blocked_session
+
+    async def fake_owner(session_id, user_id):
+        return state
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", noop)
+    monkeypatch.setattr(lifecycle, "async_save_session", noop)
+
+    req = MagicMock()
+    req.state = MagicMock(user_id="u1")
+    resp = await lifecycle.snapshot_failure_retry(session_id, req)
+
+    assert resp.success is True
+    fake_workflow.retry_pending_required_snapshot.assert_awaited_once()
+    assert state.status == TaskStatus.COMPLETED
+    assert state.wait_input_reason is None
+    assert state.snapshot_failure is None
+    assert getattr(state, "pending_required_snapshot", None) is None
+    assert resp.data["status"] == TaskStatus.COMPLETED.value
+    assert resp.data["wait_input_reason"] is None
+    assert resp.data["snapshot_failure"] is None
+
+
+@pytest.mark.asyncio
+async def test_post_report_retry_failure_reenters_gate(post_report_blocked_session, monkeypatch):
+    """Failed recapture re-enters the snapshot failure gate with post_report context."""
+    from backend.models.schemas import TaskStatus
+    from backend.routes import lifecycle
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+
+    session_id, state, fake_workflow = post_report_blocked_session
+    fake_workflow.retry_pending_required_snapshot.side_effect = RequiredSnapshotBlocked(
+        "REQUIRED_SNAPSHOT_INCOMPLETE", "still failing",
+    )
+
+    async def fake_owner(session_id, user_id):
+        return state
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", noop)
+    monkeypatch.setattr(lifecycle, "async_save_session", noop)
+
+    req = MagicMock()
+    req.state = MagicMock(user_id="u1")
+    resp = await lifecycle.snapshot_failure_retry(session_id, req)
+
+    assert resp.success is False
+    assert state.snapshot_failure is not None
+    assert state.snapshot_failure["retry_context"]["producer"] == "post_report"
+    assert state.wait_input_reason == "snapshot_failure"
+    assert state.status == TaskStatus.WAITING_INPUT
+
+
+@pytest.mark.asyncio
+async def test_post_report_retry_generic_exception_reenters_gate(
+    post_report_blocked_session, monkeypatch,
+):
+    """Broad Exception after gate clear must re-enter gate with success=False."""
+    from backend.models.schemas import TaskStatus
+    from backend.routes import lifecycle
+
+    session_id, state, fake_workflow = post_report_blocked_session
+    fake_workflow.retry_pending_required_snapshot.side_effect = RuntimeError(
+        "sandbox gone",
+    )
+
+    async def fake_owner(session_id, user_id):
+        return state
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", noop)
+    monkeypatch.setattr(lifecycle, "async_save_session", noop)
+
+    req = MagicMock()
+    req.state = MagicMock(user_id="u1")
+    resp = await lifecycle.snapshot_failure_retry(session_id, req)
+
+    assert resp.success is False
+    assert state.snapshot_failure is not None
+    assert state.snapshot_failure["retry_context"]["producer"] == "post_report"
+    assert state.wait_input_reason == "snapshot_failure"
+    assert state.status == TaskStatus.WAITING_INPUT
+
+
+@pytest.mark.asyncio
+async def test_terminate_stops_and_records_reason(post_report_blocked_session, monkeypatch):
+    """Terminate must STOPPED + audit reason; teardown, not pause."""
+    from backend.models.schemas import TaskStatus
+    from backend.routes import lifecycle
+
+    session_id, state, fake_workflow = post_report_blocked_session
+
+    async def fake_owner(session_id, user_id):
+        return state
+
+    async def noop(*a, **k):
+        return None
+
+    async def fake_pause(sid):
+        # Would clobber STOPPED → PAUSED if terminate used pause.
+        state.status = TaskStatus.PAUSED
+
+    fake_workflow.pause = AsyncMock(side_effect=fake_pause)
+    teardown = AsyncMock()
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", noop)
+    monkeypatch.setattr(lifecycle, "async_save_session", noop)
+    monkeypatch.setattr(lifecycle, "teardown_running_workflow", teardown)
+
+    req = MagicMock()
+    req.state = MagicMock(user_id="u1")
+    resp = await lifecycle.snapshot_failure_terminate(session_id, req)
+
+    assert resp.success is True
+    assert state.status == TaskStatus.STOPPED
+    assert state.snapshot_failure is None
+    assert getattr(state, "wait_input_reason", None) is None
+    assert getattr(state, "termination_reason", None) == "snapshot_failure"
+    assert getattr(state, "pending_required_snapshot", "missing") is None
+    teardown.assert_awaited_once_with(session_id)
+    fake_workflow.pause.assert_not_awaited()
+    fake_workflow.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_report_retry_rebuilds_workflow_when_missing(monkeypatch):
+    """After WS teardown, rebuild capture-only workflow via _build_workflow_for_session."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+    from backend.state import sessions, workflows
+
+    session_id = "sess-post-report-rebuild"
+    state = AnalysisState(
+        id=session_id,
+        name="PostReportRebuild",
+        user_id="u1",
+        initial_instruction="analyze",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "retry_context": {"producer": "post_report"},
+        },
+        pending_required_snapshot={"report_generation_id": "r1"},
+    )
+    sessions[session_id] = state
+    workflows.pop(session_id, None)
+
+    async def _retry_ok():
+        # Real capture_required_snapshot clears failure only on commit.
+        state.pending_required_snapshot = None
+        state.snapshot_failure = None
+        if state.wait_input_reason == "snapshot_failure":
+            state.wait_input_reason = None
+        return {"snapshot_id": "snap-rebuild-ok"}
+
+    rebuilt = MagicMock()
+    rebuilt.retry_pending_required_snapshot = AsyncMock(side_effect=_retry_ok)
+    rebuilt.close = AsyncMock()
+
+    async def fake_build(sid, **kwargs):
+        assert sid == session_id
+        assert kwargs.get("fail_on_missing_config") is False
+        return rebuilt, state
+
+    async def fake_owner(session_id, user_id):
+        return state
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", noop)
+    monkeypatch.setattr(lifecycle, "async_save_session", noop)
+    monkeypatch.setattr(
+        "backend.services.workflow_runner._build_workflow_for_session",
+        fake_build,
+    )
+
+    req = MagicMock()
+    req.state = MagicMock(user_id="u1")
+    try:
+        resp = await lifecycle.snapshot_failure_retry(session_id, req)
+        assert resp.success is True
+        rebuilt.retry_pending_required_snapshot.assert_awaited_once()
+        assert state.status == TaskStatus.COMPLETED
+        assert state.snapshot_failure is None
+        assert state.wait_input_reason is None
+        assert getattr(state, "pending_required_snapshot", None) is None
+        # Temporary workflow must not remain registered
+        assert session_id not in workflows
+        rebuilt.close.assert_awaited()
+    finally:
+        sessions.pop(session_id, None)
+        workflows.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_post_report_retry_missing_workflow_keeps_gate(monkeypatch):
+    """When rebuild also fails, leave gate intact and return 409."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+    from backend.state import sessions, workflows
+    from fastapi import HTTPException
+
+    session_id = "sess-post-report-no-wf"
+    state = AnalysisState(
+        id=session_id,
+        name="PostReportNoWf",
+        user_id="u1",
+        initial_instruction="analyze",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "retry_context": {"producer": "post_report"},
+        },
+        pending_required_snapshot={"report_generation_id": "r1"},
+    )
+    sessions[session_id] = state
+    workflows.pop(session_id, None)
+
+    async def fake_build(sid, **kwargs):
+        assert kwargs.get("fail_on_missing_config") is False
+        return None, None
+
+    async def fake_owner(session_id, user_id):
+        return state
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", noop)
+    monkeypatch.setattr(lifecycle, "async_save_session", noop)
+    monkeypatch.setattr(
+        "backend.services.workflow_runner._build_workflow_for_session",
+        fake_build,
+    )
+
+    req = MagicMock()
+    req.state = MagicMock(user_id="u1")
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await lifecycle.snapshot_failure_retry(session_id, req)
+        assert exc_info.value.status_code in (409, 503)
+        assert state.snapshot_failure is not None
+        assert state.wait_input_reason == "snapshot_failure"
+        assert state.status == TaskStatus.WAITING_INPUT
+        assert state.pending_required_snapshot is not None
+        assert session_id not in workflows
+    finally:
+        sessions.pop(session_id, None)
+        workflows.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_post_report_retry_missing_config_keeps_waiting_not_failed(monkeypatch):
+    """Capture-only rebuild must not mark session FAILED when config is missing."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+    from backend.services import workflow_runner
+    from backend.state import sessions, workflows
+    from fastapi import HTTPException
+
+    session_id = "sess-post-report-no-cfg"
+    state = AnalysisState(
+        id=session_id,
+        name="PostReportNoCfg",
+        user_id="u1",
+        initial_instruction="analyze",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "retry_context": {"producer": "post_report"},
+        },
+        pending_required_snapshot={"report_generation_id": "r1"},
+    )
+    sessions[session_id] = state
+    workflows.pop(session_id, None)
+
+    async def no_config(user_id):
+        return None
+
+    async def fake_owner(session_id, user_id):
+        return state
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", noop)
+    monkeypatch.setattr(lifecycle, "async_save_session", noop)
+    monkeypatch.setattr(workflow_runner, "async_save_session", noop)
+    monkeypatch.setattr(workflow_runner, "resolve_config_for_user", no_config)
+
+    req = MagicMock()
+    req.state = MagicMock(user_id="u1")
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await lifecycle.snapshot_failure_retry(session_id, req)
+        assert exc_info.value.status_code == 409
+        assert state.status == TaskStatus.WAITING_INPUT
+        assert state.status != TaskStatus.FAILED
+        assert state.wait_input_reason == "snapshot_failure"
+        assert state.snapshot_failure is not None
+        assert state.snapshot_failure["code"] == "QUOTA"
+        assert state.pending_required_snapshot is not None
+        assert session_id not in workflows
+    finally:
+        sessions.pop(session_id, None)
+        workflows.pop(session_id, None)
+
+# ---- producer-dispatched retry (Task 5) -----
+
+
+@pytest.mark.parametrize("producer", ["chat", "pre_restore", "workflow_boundary"])
+@pytest.mark.asyncio
+async def test_retry_invokes_exact_failed_producer(producer):
+    from unittest.mock import AsyncMock
+
+    from backend.models.schemas import AnalysisState
+    from backend.services.snapshot_v2.failure_gate import (
+        SnapshotRetryDependencies,
+        retry_snapshot_producer,
+    )
+    from backend.services.snapshot_v2.models import SnapshotRetryContext
+
+    callbacks = {
+        "post_report": AsyncMock(),
+        "chat": AsyncMock(),
+        "pre_restore": AsyncMock(),
+        "workflow_boundary": AsyncMock(),
+    }
+    dependencies = SnapshotRetryDependencies(
+        retry_post_report=callbacks["post_report"],
+        retry_chat_capture=callbacks["chat"],
+        retry_pre_restore_capture=callbacks["pre_restore"],
+        retry_workflow_boundary_capture=callbacks["workflow_boundary"],
+    )
+    state = AnalysisState(id="retry-s1", user_id="u1")
+    context = SnapshotRetryContext(
+        producer=producer,
+        resume_policy={
+            "chat": "stable_status",
+            "pre_restore": "restore_transaction",
+            "workflow_boundary": "graph_checkpoint",
+        }[producer],
+        snapshot_request={},
+        previous_status="waiting_input",
+    )
+    await retry_snapshot_producer("retry-s1", state, context, dependencies)
+    callbacks[producer].assert_awaited_once()
+    for name, callback in callbacks.items():
+        if name != producer:
+            callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_missing_context_returns_409_gate_intact(monkeypatch):
+    """Missing/invalid retry_context must 409 and leave the gate intact."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.routes import lifecycle
+    from backend.state import sessions
+    from fastapi import HTTPException
+
+    session_id = "sess-retry-missing-ctx"
+    state = AnalysisState(
+        id=session_id,
+        name="MissingCtx",
+        user_id="u1",
+        initial_instruction="analyze",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "allowed_actions": ["retry", "manage", "terminate"],
+            # no retry_context
+        },
+    )
+    sessions[session_id] = state
+
+    async def fake_owner(session_id, user_id):
+        return state
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(lifecycle, "require_session_ownership", fake_owner)
+    monkeypatch.setattr(lifecycle, "validate_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_update_session_cache", noop)
+    monkeypatch.setattr(lifecycle, "async_save_session", noop)
+
+    req = MagicMock()
+    req.state = MagicMock(user_id="u1")
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await lifecycle.snapshot_failure_retry(session_id, req)
+        assert exc_info.value.status_code == 409
+        assert state.snapshot_failure is not None
+        assert state.wait_input_reason == "snapshot_failure"
+        assert state.status == TaskStatus.WAITING_INPUT
+    finally:
+        sessions.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_workflow_boundary_gate_persists_real_phase():
+    """workflow_boundary gate entry must store the real capture phase."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.snapshot_v2.failure_gate import (
+        enter_snapshot_failure_gate,
+        workflow_boundary_retry_context,
+    )
+
+    state = AnalysisState(
+        id="wb-phase",
+        user_id="u1",
+        status=TaskStatus.RUNNING,
+    )
+    exc = RequiredSnapshotBlocked(
+        "QUOTA",
+        "disk full",
+        details={"phase": "pre_direction"},
+    )
+    enter_snapshot_failure_gate(
+        state,
+        {
+            "code": exc.code,
+            "message": str(exc),
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "snapshot_id": None,
+        },
+        retry_context=workflow_boundary_retry_context(exc),
+    )
+    rc = state.snapshot_failure["retry_context"]
+    assert rc["producer"] == "workflow_boundary"
+    assert rc["snapshot_request"]["phase"] == "pre_direction"
+    assert rc["snapshot_request"]["phase"] != "workflow_boundary"
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_boundary_upgrades_bare_service_gate():
+    """Service bare gate + RequiredSnapshotBlocked must gain typed phase."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.snapshot_v2.failure_gate import (
+        ensure_workflow_boundary_retry_context,
+    )
+
+    state = AnalysisState(
+        id="wb-bare-gate",
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        # Service-style bare failure: no retry_context
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "snapshot_id": "snap-bare-1",
+        },
+    )
+    exc = RequiredSnapshotBlocked(
+        "QUOTA",
+        "disk full",
+        phase="pre_annotation",
+        snapshot_id="snap-bare-1",
+    )
+    ensure_workflow_boundary_retry_context(
+        state,
+        exc,
+        previous_status="running",
+    )
+    assert state.snapshot_failure is not None
+    rc = state.snapshot_failure["retry_context"]
+    assert rc["producer"] == "workflow_boundary"
+    assert rc["snapshot_request"]["phase"] == "pre_annotation"
+    assert rc["snapshot_request"]["phase"] != "workflow_boundary"
+    assert rc["previous_status"] == "running"
+    assert state.snapshot_failure["code"] == "QUOTA"
+    assert state.snapshot_failure["snapshot_id"] == "snap-bare-1"
+
+
+@pytest.mark.asyncio
+async def test_ensure_post_report_bare_gate_keeps_post_report_producer():
+    """Bare service gate + post_report block must not become workflow_boundary."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.snapshot_v2.failure_gate import (
+        ensure_workflow_boundary_retry_context,
+    )
+
+    state = AnalysisState(
+        id="pr-bare-gate",
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "snapshot_id": "snap-pr-1",
+        },
+    )
+    exc = RequiredSnapshotBlocked(
+        "QUOTA",
+        "disk full",
+        phase="post_report",
+        snapshot_id="snap-pr-1",
+    )
+    # run/resume catch always calls this helper
+    ensure_workflow_boundary_retry_context(
+        state,
+        exc,
+        previous_status="running",
+    )
+    assert state.snapshot_failure is not None
+    rc = state.snapshot_failure["retry_context"]
+    assert rc["producer"] == "post_report"
+    assert rc["snapshot_request"]["phase"] == "post_report"
+    assert rc["snapshot_request"]["phase"] != "workflow_boundary"
+    assert rc["producer"] != "workflow_boundary"
+
+
+@pytest.mark.asyncio
+async def test_ensure_does_not_overwrite_correct_post_report_context():
+    """Correct post_report retry_context must survive ensure_workflow_boundary."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.snapshot_v2.failure_gate import (
+        ensure_workflow_boundary_retry_context,
+    )
+
+    original_rc = {
+        "producer": "post_report",
+        "resume_policy": "complete",
+        "snapshot_request": {"phase": "post_report"},
+        "previous_status": "generating_report",
+    }
+    state = AnalysisState(
+        id="pr-keep",
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "snapshot_id": "snap-pr-2",
+            "retry_context": dict(original_rc),
+        },
+    )
+    exc = RequiredSnapshotBlocked(
+        "QUOTA",
+        "disk full",
+        phase="post_report",
+        snapshot_id="snap-pr-2",
+    )
+    ensure_workflow_boundary_retry_context(
+        state,
+        exc,
+        previous_status="running",
+    )
+    rc = state.snapshot_failure["retry_context"]
+    assert rc["producer"] == "post_report"
+    assert rc["resume_policy"] == "complete"
+    assert rc["snapshot_request"]["phase"] == "post_report"
+    assert rc["previous_status"] == "generating_report"
+
+
+@pytest.mark.asyncio
+async def test_generate_report_upgrades_bare_post_report_gate():
+    """generate_report bare gate must merge typed post_report retry_context."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.workflow.core import SingleCellAnalysisWorkflow
+
+    state = AnalysisState(
+        id="gen-report-bare",
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        # Service-style bare post_report failure (no retry_context)
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full after report",
+            "allowed_actions": ["retry", "manage", "terminate"],
+            "snapshot_id": "snap-gen-1",
+        },
+    )
+
+    workflow = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+    workflow.session_id = "gen-report-bare"
+    workflow._send_state_sync = AsyncMock()
+
+    result = await SingleCellAnalysisWorkflow.generate_report(
+        workflow, state, "gen-report-bare",
+    )
+    assert result is state
+    assert state.snapshot_failure is not None
+    rc = state.snapshot_failure["retry_context"]
+    assert rc["producer"] == "post_report"
+    assert rc["snapshot_request"]["phase"] == "post_report"
+    assert rc["previous_status"] == "generating_report"
+    workflow._send_state_sync.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_workflow_boundary_retry_forwards_persisted_phase(monkeypatch):
+    """Retry must call _create_auto_snapshot with the persisted real phase."""
+    from unittest.mock import AsyncMock
+
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.failure_gate import (
+        default_retry_workflow_boundary_capture,
+    )
+    from backend.services.snapshot_v2.models import SnapshotRetryContext
+    from backend.state import workflows
+
+    session_id = "wb-retry-phase"
+    state = AnalysisState(
+        id=session_id,
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "retry_context": {
+                "producer": "workflow_boundary",
+                "resume_policy": "graph_checkpoint",
+                "snapshot_request": {"phase": "pre_annotation"},
+                "previous_status": "running",
+            },
+        },
+    )
+    captured = {}
+
+    class FakeWorkflow:
+        async def _create_auto_snapshot(self, analysis_state, phase):
+            captured["phase"] = phase
+            analysis_state.snapshot_failure = None
+            analysis_state.wait_input_reason = None
+
+    workflows[session_id] = FakeWorkflow()
+    context = SnapshotRetryContext(
+        producer="workflow_boundary",
+        resume_policy="graph_checkpoint",
+        snapshot_request={"phase": "pre_annotation"},
+        previous_status="running",
+    )
+    try:
+        outcome = await default_retry_workflow_boundary_capture(
+            session_id, state, context,
+        )
+        assert outcome.success is True
+        assert outcome.still_blocked is False
+        assert captured["phase"] == "pre_annotation"
+        assert captured["phase"] != "workflow_boundary"
+    finally:
+        workflows.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_chat_retry_still_blocked_when_failure_remains(monkeypatch):
+    """Chat retry must report still_blocked when snapshot_failure remains."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.failure_gate import default_retry_chat_capture
+    from backend.services.snapshot_v2.models import SnapshotRetryContext
+
+    session_id = "chat-retry-blocked"
+    state = AnalysisState(
+        id=session_id,
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={
+            "code": "QUOTA",
+            "message": "disk full",
+            "retry_context": {
+                "producer": "chat",
+                "resume_policy": "stable_status",
+                "snapshot_request": {"phase": "post_chat"},
+                "previous_status": "completed",
+            },
+        },
+    )
+    context = SnapshotRetryContext(
+        producer="chat",
+        resume_policy="stable_status",
+        snapshot_request={"phase": "post_chat"},
+        previous_status="completed",
+    )
+
+    async def fake_capture(sid, st):
+        # Capture "succeeds" without raising but leaves failure set
+        st.snapshot_failure = {
+            "code": "QUOTA",
+            "message": "still full",
+        }
+        st.wait_input_reason = "snapshot_failure"
+        st.status = TaskStatus.WAITING_INPUT
+
+    monkeypatch.setattr(
+        "backend.routes.chat.capture_post_chat_snapshot",
+        fake_capture,
+    )
+    outcome = await default_retry_chat_capture(session_id, state, context)
+    assert outcome.success is False
+    assert outcome.still_blocked is True
+    assert state.snapshot_failure is not None
+    assert state.status == TaskStatus.WAITING_INPUT
+
+
+@pytest.mark.asyncio
+async def test_retry_handlers_do_not_clear_gate_before_capture(monkeypatch):
+    """Handlers must not clear the gate before capture returns success."""
+    from backend.models.schemas import AnalysisState, TaskStatus
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.snapshot_v2.failure_gate import (
+        default_retry_chat_capture,
+        default_retry_workflow_boundary_capture,
+    )
+    from backend.services.snapshot_v2.models import SnapshotRetryContext
+    from backend.state import workflows
+
+    # Chat: capture raises; gate must remain / re-enter WAITING_INPUT
+    chat_state = AnalysisState(
+        id="gate-order-chat",
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={"code": "QUOTA", "message": "full"},
+    )
+    chat_ctx = SnapshotRetryContext(
+        producer="chat",
+        resume_policy="stable_status",
+        snapshot_request={"phase": "post_chat"},
+        previous_status="completed",
+    )
+    seen_status_during_capture = {}
+
+    async def chat_capture_observing(sid, st):
+        seen_status_during_capture["status"] = st.status
+        seen_status_during_capture["failure"] = st.snapshot_failure
+        raise RequiredSnapshotBlocked("QUOTA", "still full")
+
+    monkeypatch.setattr(
+        "backend.routes.chat.capture_post_chat_snapshot",
+        chat_capture_observing,
+    )
+    outcome = await default_retry_chat_capture(
+        "gate-order-chat", chat_state, chat_ctx,
+    )
+    assert outcome.success is False
+    assert outcome.still_blocked is True
+    # Prefer: gate still present during capture (or at least re-entered after)
+    assert chat_state.status == TaskStatus.WAITING_INPUT
+    assert chat_state.snapshot_failure is not None
+    assert chat_state.wait_input_reason == "snapshot_failure"
+    # Critical: do not clear before capture — failure must still be set when capture runs
+    assert seen_status_during_capture["failure"] is not None
+
+    # Workflow boundary: same guarantee
+    wb_sid = "gate-order-wb"
+    wb_state = AnalysisState(
+        id=wb_sid,
+        user_id="u1",
+        status=TaskStatus.WAITING_INPUT,
+        wait_input_reason="snapshot_failure",
+        snapshot_failure={"code": "QUOTA", "message": "full"},
+    )
+    wb_ctx = SnapshotRetryContext(
+        producer="workflow_boundary",
+        resume_policy="graph_checkpoint",
+        snapshot_request={"phase": "pre_direction"},
+        previous_status="running",
+    )
+    wb_seen = {}
+
+    class ObservingWorkflow:
+        async def _create_auto_snapshot(self, analysis_state, phase):
+            wb_seen["failure"] = analysis_state.snapshot_failure
+            wb_seen["phase"] = phase
+            raise RequiredSnapshotBlocked("QUOTA", "still full")
+
+    workflows[wb_sid] = ObservingWorkflow()
+    try:
+        outcome = await default_retry_workflow_boundary_capture(
+            wb_sid, wb_state, wb_ctx,
+        )
+        assert outcome.success is False
+        assert outcome.still_blocked is True
+        assert wb_state.status == TaskStatus.WAITING_INPUT
+        assert wb_state.snapshot_failure is not None
+        assert wb_seen["failure"] is not None
+        assert wb_seen["phase"] == "pre_direction"
+    finally:
+        workflows.pop(wb_sid, None)
+

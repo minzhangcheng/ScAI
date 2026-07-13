@@ -45,6 +45,7 @@ class TaskStatus(str, Enum):
     WAITING_PLAN_REVIEW = "waiting_plan_review"  # Paused for user plan review/approval
     WAITING_SPECIES_INPUT = "waiting_species_input"  # Paused for user species input
     PAUSED = "paused"
+    STOPPED = "stopped"
     GENERATING_REPORT = "generating_report"
 
 class AnalysisPhase(str, Enum):
@@ -899,11 +900,17 @@ class AnalysisState(BaseModel):
     # Snapshots for debugging rollback
     snapshots: List[Snapshot] = Field(default_factory=list)
     last_restored_snapshot_id: Optional[str] = None  # Tracks which snapshot was last restored (for parent chain)
+    # Durable first-round restore provenance; survives routing consume until
+    # the canonical RoundResult records it (then consume_restore_provenance).
+    restore_provenance_snapshot_id: Optional[str] = None
     last_snapshot_id: Optional[str] = None  # Lineage head: id of the most recently created/restored snapshot, used as the forward parent
+    restore_start_intent: Optional[Literal["explicit_start"]] = None
     restore_resume_phase: Optional[str] = None
     restore_resume_kind: Optional[Literal["graph_node", "semantic_gate", "terminal"]] = None
     restore_resume_node: Optional[str] = None
     restore_resume_gate: Optional[str] = None
+    # Verified frozen WorkflowState for graph-node restore (internal; excluded from API)
+    restore_resume_workflow_state: Optional[Dict[str, Any]] = None
     restore_branch_id: Optional[str] = None
     restore_branch_label: Optional[str] = None
 
@@ -912,6 +919,10 @@ class AnalysisState(BaseModel):
     # "unavailable": restored without a consistent runtime; forward resume is blocked.
     # "intentionally_kept": user override kept a mismatched live runtime (risk accepted).
     runtime_restore_status: Literal["complete", "unavailable", "intentionally_kept"] = "complete"
+    runtime_restore_warning: Optional[str] = None
+
+    # Audit reason when a session is terminated (e.g. snapshot_failure).
+    termination_reason: Optional[str] = None
 
     # Snapshot V2: failure and transaction tracking
     snapshot_failure: Optional[Dict[str, Any]] = None
@@ -1086,6 +1097,8 @@ class AnalysisState(BaseModel):
         "species_input_info": "species_input_info",
         "literature_config": "literature_config",
         "runtime_restore_status": "runtime_restore_status",
+        "runtime_restore_warning": "runtime_restore_warning",
+        "termination_reason": "termination_reason",
         "snapshot_failure": "snapshot_failure",
         "snapshot_transaction": "snapshot_transaction",
         "pending_required_snapshot": "pending_required_snapshot",

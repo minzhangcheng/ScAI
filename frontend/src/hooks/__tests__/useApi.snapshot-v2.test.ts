@@ -316,16 +316,20 @@ describe('Snapshot V2 API methods', () => {
 
   describe('importSnapshotsV2', () => {
     it('sends file as gzip with x-trust header', async () => {
-      const responseData = {
-        import_id: 'import-1',
-        snapshot_count: 3,
-        status: 'completed',
+      const mockResult = {
+        success: true,
+        dest_session_id: 'sess-2',
+        imported_snapshot_ids: ['snap-a'],
+        committed_count: 1,
+        skipped_runtime_snapshot_ids: [],
+        errors: [],
+        warnings: [],
       }
       mockFetch.mockResolvedValueOnce({
         ok: true,
         status: 200,
         headers: new Map(),
-        json: () => Promise.resolve(responseData),
+        json: () => Promise.resolve(mockResult),
       })
 
       const { importSnapshotsV2 } = await import('../useApi')
@@ -340,7 +344,8 @@ describe('Snapshot V2 API methods', () => {
       expect(callOptions.headers['X-Filename']).toBe('export.tar.gz')
       expect(callOptions.headers['X-Trust']).toBe('true')
       expect(callOptions.body).toBe(file)
-      expect(result.import_id).toBe('import-1')
+      expect(result.imported_snapshot_ids).toEqual(['snap-a'])
+      expect(result.committed_count).toBe(1)
     })
 
     it('defaults trust to false when not provided', async () => {
@@ -348,7 +353,16 @@ describe('Snapshot V2 API methods', () => {
         ok: true,
         status: 200,
         headers: new Map(),
-        json: () => Promise.resolve({ import_id: 'import-2', snapshot_count: 1, status: 'completed' }),
+        json: () =>
+          Promise.resolve({
+            success: true,
+            dest_session_id: 'sess-2',
+            imported_snapshot_ids: ['snap-b'],
+            committed_count: 1,
+            skipped_runtime_snapshot_ids: [],
+            errors: [],
+            warnings: [],
+          }),
       })
 
       const { importSnapshotsV2 } = await import('../useApi')

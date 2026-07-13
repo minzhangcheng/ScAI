@@ -11,16 +11,15 @@ raises ``RecoveryFailure("LEGACY_UNSIGNED_JOURNAL")`` and is never mutated.
 
 from __future__ import annotations
 
-import hashlib
-import hmac as _hmac
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any, Iterator
 
 from backend.services.snapshot_v2.errors import SnapshotIntegrityError
 from backend.services.snapshot_v2.models import JournalKind, SnapshotJournalEnvelope
+from backend.utils.crypto import sign_hmac_sha256, verify_hmac_sha256
+from backend.utils.files import atomic_write_bytes as _atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +58,6 @@ _RESTORE_REQUIRED = (
 )
 
 
-def _secret_bytes() -> bytes:
-    from backend.utils.crypto import get_integrity_secret
-
-    secret = get_integrity_secret()
-    if isinstance(secret, bytes):
-        return secret
-    return secret.encode()
-
-
 def canonicalize_envelope_body(body: dict[str, Any]) -> bytes:
     """Canonical JSON of envelope body with hmac removed (sorted, compact)."""
     payload = {k: v for k, v in body.items() if k != "hmac"}
@@ -77,30 +67,11 @@ def canonicalize_envelope_body(body: dict[str, Any]) -> bytes:
 
 
 def sign_envelope_body(body: dict[str, Any]) -> str:
-    return _hmac.new(
-        _secret_bytes(), canonicalize_envelope_body(body), hashlib.sha256
-    ).hexdigest()
+    return sign_hmac_sha256(canonicalize_envelope_body(body))
 
 
 def _journal_path(paths, transaction_id: str) -> Path:
     return Path(str(paths.journals)) / f"{transaction_id}.json"
-
-
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    tmp.write_bytes(data)
-    fd = os.open(str(tmp), os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(str(tmp), str(path))
-    dfd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
 
 
 def _is_schema_v1_envelope(payload: dict[str, Any]) -> bool:
@@ -318,8 +289,7 @@ class JournalStore:
                 details={"transaction_id": transaction_id},
             )
         # Sign over the full on-disk body (including mirrored top-level fields).
-        expected = sign_envelope_body(payload)
-        if not _hmac.compare_digest(expected, stored_hmac):
+        if not verify_hmac_sha256(canonicalize_envelope_body(payload), stored_hmac):
             raise SnapshotIntegrityError(
                 "JOURNAL_HMAC",
                 f"Journal HMAC mismatch: {transaction_id}",

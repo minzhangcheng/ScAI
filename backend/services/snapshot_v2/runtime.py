@@ -182,6 +182,7 @@ def validate_runtime_dependency_proof(runtime: RuntimeManifest) -> RuntimeManife
 def _validate_h5ad_file(path: Path) -> None:
     """Ensure *path* is a readable, structurally valid h5ad before put_file.
 
+    Uses ``backed="r"`` mode for memory-efficient structural validation.
     Raises SnapshotCaptureError with code ``required_runtime_unpersistable`` on failure.
     """
     if not path.exists() or path.stat().st_size == 0:
@@ -193,8 +194,8 @@ def _validate_h5ad_file(path: Path) -> None:
     try:
         import anndata as ad
 
-        # read_h5ad backed=False validates structure; close immediately
-        _ = ad.read_h5ad(path, backed=False)
+        # backed="r" validates structure without loading data into memory
+        _ = ad.read_h5ad(path, backed="r")
     except SnapshotCaptureError:
         raise
     except Exception as e:
@@ -338,7 +339,8 @@ class RuntimeCapture:
             )
         _validate_h5ad_file(h5ad_path)
         try:
-            ref = self._object_store.put_file(h5ad_path, "application/x-hdf5")
+            put_result = self._object_store.put_file(h5ad_path, "application/x-hdf5")
+            ref = put_result.ref
         except SnapshotCaptureError:
             raise
         except Exception as e:
@@ -390,7 +392,8 @@ class RuntimeCapture:
             # Older kernel output without structural saved list: infer from skip.
             skipped = skipped or []
             saved = [n for n in var_names if n not in skipped]
-        ref = self._object_store.put_file(dill_path, "application/octet-stream")
+        put_result = self._object_store.put_file(dill_path, "application/octet-stream")
+        ref = put_result.ref
         dill_path.unlink(missing_ok=True)
         return ref, saved, skipped
 
@@ -419,13 +422,10 @@ class RuntimeCapture:
         kernel_present: bool | None = None,
         *,
         exec_lock_held: bool = False,
-    ) -> RuntimeManifest | RuntimeGenerationManifest:
+    ) -> RuntimeManifest:
         """Capture required runtime dependencies from a live sandbox.
 
-        Returns a :class:`RuntimeManifest` for the complete/empty no-kernel case
-        and for full captures. Legacy :class:`RuntimeGenerationManifest` fields
-        are still populated on the bridge path for callers that have not yet
-        migrated (Task 3).
+        Returns a :class:`RuntimeManifest` directly (no transitional wrapper).
 
         ``kernel_present``:
           - ``False``: empty required set is accepted as complete (no runtime refs).
@@ -613,12 +613,8 @@ class RuntimeCapture:
                 captured_residual_ref=captured_residual_ref,
                 warnings=manifest_warnings,
             )
-            # Prefer RuntimeManifest as the authoritative return value.
-            # Expose generation fields via duck-typing helpers used by older tests.
-            object.__setattr__(runtime, "_generation", generation)  # type: ignore[attr-defined]
-            # Compatibility: older tests assert on generation-style attributes.
-            # RuntimeManifest does not have these fields; wrap for transition.
-            return _RuntimeCaptureResult(runtime, generation)
+            # Return RuntimeManifest directly.
+            return runtime
         finally:
             try:
                 if capture_dir.exists():
@@ -627,85 +623,3 @@ class RuntimeCapture:
                     capture_dir.rmdir()
             except OSError:
                 pass
-
-
-
-class _RuntimeCaptureResult:
-    """Transitional wrapper exposing both RuntimeManifest and generation fields.
-
-    Task 3 will drop the generation surface once all producers consume
-    RuntimeManifest exclusively. Attribute access prefers RuntimeManifest
-    fields, then falls through to the generation record for legacy names.
-    """
-
-    def __init__(
-        self, runtime: RuntimeManifest, generation: RuntimeGenerationManifest
-    ):
-        self._runtime = runtime
-        self._generation = generation
-
-    # --- RuntimeManifest surface ---
-    @property
-    def status(self):
-        return self._runtime.status
-
-    @property
-    def dependencies(self):
-        return self._runtime.dependencies
-
-    @property
-    def residual_ref(self):
-        return self._runtime.residual_ref
-
-    @property
-    def captured_residual_names(self):
-        return self._runtime.captured_residual_names
-
-    @property
-    def adata_refs(self):
-        return self._runtime.adata_refs
-
-    # --- Legacy generation surface ---
-    @property
-    def capture_command(self):
-        return self._generation.capture_command
-
-    @property
-    def capture_timestamp(self):
-        return self._generation.capture_timestamp
-
-    @property
-    def kernel_id(self):
-        return self._generation.kernel_id
-
-    @property
-    def captured_adata_vars(self):
-        return self._generation.captured_adata_vars
-
-    @property
-    def captured_residual_vars(self):
-        return self._generation.captured_residual_vars
-
-    @property
-    def captured_adata_refs(self):
-        return self._generation.captured_adata_refs
-
-    @property
-    def captured_residual_ref(self):
-        return self._generation.captured_residual_ref
-
-    @property
-    def warnings(self):
-        return self._generation.warnings
-
-    def to_runtime_manifest(self) -> RuntimeManifest:
-        return self._runtime
-
-    def to_generation_manifest(self) -> RuntimeGenerationManifest:
-        return self._generation
-
-    def __getattr__(self, name: str):
-        # Pydantic-style model_dump if needed
-        if hasattr(self._runtime, name):
-            return getattr(self._runtime, name)
-        raise AttributeError(name)

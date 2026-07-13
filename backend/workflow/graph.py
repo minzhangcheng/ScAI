@@ -22,6 +22,7 @@ class GraphMixin:
         self.graph = StateGraph(WorkflowState)
 
         # Add nodes
+        self.graph.add_node("restore_entry", self._restore_entry)
         self.graph.add_node("initialize_round", self._initialize_round)
         self.graph.add_node("pi_planning", self._pi_planning)
         self.graph.add_node("planning_dialogue", self._planning_dialogue)
@@ -41,23 +42,6 @@ class GraphMixin:
         # Add edges - sequential execution (with early-stop check after init)
         # The _restore_resume_node field in workflow state can trigger
         # graph-node restore routing via "_should_continue_after_init".
-        _ROUTE_NAMES = {
-            "route_initialize_round",
-            "route_pi_planning",
-            "route_planning_dialogue",
-            "route_user_review_gate",
-            "route_pathology_analysis",
-            "route_bioinformatics_analysis",
-            "route_biochemistry_analysis",
-            "route_literature_research",
-            "route_pi_synthesis",
-            "route_wait_for_user_input",
-            "route_check_convergence",
-            "route_generate_final_report",
-            "route_generate_graphic_abstract",
-            "route_generate_detailed_report",
-            "route_integration_synthesis",
-        }
         self.graph.add_conditional_edges(
             "initialize_round",
             self._should_continue_after_init,
@@ -169,8 +153,31 @@ class GraphMixin:
         self.graph.add_edge("generate_graphic_abstract", "generate_detailed_report")
         self.graph.add_edge("generate_detailed_report", END)
 
-        # Set entry point
-        self.graph.set_entry_point("initialize_round")
+        # Entry point — restore_entry routes based on intent
+        self.graph.set_entry_point("restore_entry")
+        self.graph.add_conditional_edges(
+            "restore_entry",
+            self._route_from_restore_entry,
+            {
+                **{f"route_{n}": n for n in [
+                    "initialize_round", "pi_planning", "planning_dialogue",
+                    "user_review_gate", "pathology_analysis", "bioinformatics_analysis",
+                    "biochemistry_analysis", "literature_research", "pi_synthesis",
+                    "wait_for_user_input", "check_convergence",
+                    "generate_final_report", "generate_graphic_abstract",
+                    "generate_detailed_report", "integration_synthesis",
+                ]},
+                "hold": END,
+            },
+        )
+
+        # Drift guard: the graph must register exactly the authoritative set.
+        from backend.constants import WORKFLOW_GRAPH_NODES
+        _registered = set(self.graph.nodes.keys())
+        assert _registered == set(WORKFLOW_GRAPH_NODES), (
+            f"Graph node drift: registered-only={_registered - set(WORKFLOW_GRAPH_NODES)}, "
+            f"registry-only={set(WORKFLOW_GRAPH_NODES) - _registered}"
+        )
 
         # Compile
         self.compiled_graph = self.graph.compile(checkpointer=self.checkpointer)

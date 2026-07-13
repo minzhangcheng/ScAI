@@ -27,6 +27,8 @@ class GCResult:
     removed_count: int
     removed_bytes: int
     surviving_count: int
+    verified_manifest_count: int = 0
+    verified_batch_snapshot_count: int = 0
 
 
 class SnapshotGarbageCollector:
@@ -44,7 +46,7 @@ class SnapshotGarbageCollector:
         self.manifest_store = manifest_store or ManifestStore(paths)
         self.object_store = object_store or ObjectStore(paths)
 
-    def mark(self) -> set[str]:
+    def mark(self, verified_manifests=None) -> set[str]:
         """Collect all object hashes referenced by surviving manifests.
 
         Returns the set of all hash strings referenced by every
@@ -54,6 +56,9 @@ class SnapshotGarbageCollector:
         Restore journals are HMAC-verified via
         ``read_verified_restore_journal``. Tampered or unreadable restore
         journals fail closed with ``SnapshotIntegrityError`` (no sweep).
+
+        If *verified_manifests* is provided, reuse that pre-verified list
+        instead of calling ``verify_all_committed()`` again.
         """
         from backend.services.snapshot_v2.journal_store import JournalStore
         from backend.services.snapshot_v2.recovery import RecoveryFailure
@@ -61,7 +66,20 @@ class SnapshotGarbageCollector:
         marked: set[str] = set()
 
         # 1. Collect from every verified committed manifest (raises on corrupt)
-        for manifest in self.manifest_store.verify_all_committed():
+        if verified_manifests is None:
+            verified_manifests = self.manifest_store.verify_all_committed()
+        for manifest in verified_manifests:
+            marked.update(manifest.objects.keys())
+
+        # 1b. Collect from pending-import manifests (committed but invisible
+        # until their batch record publishes).  These objects must be protected
+        # from sweep even though the manifests are excluded by
+        # _iter_committed_json_stems.
+        pending_ids = ManifestStore.list_pending_import_ids(
+            Path(str(self.paths.committed)),
+        )
+        for sid in pending_ids:
+            manifest = self.manifest_store.load(sid)
             marked.update(manifest.objects.keys())
 
         # 2. Collect from active transaction journals (verified envelopes)
@@ -138,6 +156,34 @@ class SnapshotGarbageCollector:
         )
 
     def run(self) -> GCResult:
-        """Mark then sweep — one operation."""
-        marked = self.mark()
-        return self.sweep(marked)
+        """Mark then sweep — one operation.
+
+        Returns verified manifest count and batch snapshot count along
+        with sweep statistics.
+
+        Mark and count share one verified snapshot; sweep keeps its own
+        fail-closed re-verify.
+        """
+        # One verified snapshot shared by mark + count
+        verified_manifests = list(self.manifest_store.verify_all_committed())
+        verified_manifest_count = len(verified_manifests)
+
+        # Count batch snapshots (ImportBatchStore)
+        verified_batch_count = 0
+        try:
+            from backend.services.snapshot_v2.batch_store import ImportBatchStore
+            batch_store = ImportBatchStore(self.paths.root)
+            batch_records = batch_store.list()
+            verified_batch_count = len(batch_records) if batch_records else 0
+        except Exception:
+            pass
+
+        marked = self.mark(verified_manifests)
+        sweep_result = self.sweep(marked)
+        return GCResult(
+            removed_count=sweep_result.removed_count,
+            removed_bytes=sweep_result.removed_bytes,
+            surviving_count=sweep_result.surviving_count,
+            verified_manifest_count=verified_manifest_count,
+            verified_batch_snapshot_count=verified_batch_count,
+        )

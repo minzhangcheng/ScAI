@@ -1,11 +1,5 @@
 import type { SnapshotStoreStatus } from '../../types/snapshotV2'
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
+import { formatBytes } from '../../utils/snapshotV2'
 
 interface StorageSummaryProps {
   status: SnapshotStoreStatus
@@ -22,15 +16,15 @@ export function StorageSummary({ status }: StorageSummaryProps) {
       <div className="flex items-center gap-4 text-xs text-slate-600">
         <div>
           <span className="font-medium text-slate-800">Logical: </span>
-          {formatSize(status.logical_bytes)}
+          {formatBytes(status.logical_bytes)}
         </div>
         <div>
           <span className="font-medium text-slate-800">Physical: </span>
-          {formatSize(status.physical_bytes)}
+          {formatBytes(status.physical_bytes)}
         </div>
         <div>
           <span className="font-medium text-slate-800">Saved: </span>
-          {formatSize(status.dedup_savings)}
+          {formatBytes(status.dedup_savings)}
         </div>
       </div>
       <div className="flex items-center gap-3">

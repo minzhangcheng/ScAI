@@ -5,7 +5,12 @@ session's V2 store, with all IDs rebinding through a deterministic mapping
 and a fresh HMAC computed for the destination session.
 
 Object-store mutation is gated by ``build_import_plan`` → ``SanitizedImportPlan``:
-only ``plan.object_hashes`` may reach ``put_bytes``.
+only ``plan.object_hashes`` may reach ``put_stream``.
+
+Two-pass streaming:
+1. First pass: hash and record metadata only (ArchiveObjectMeta)
+2. Build sanitized plan from metadata inventory
+3. Second pass: stream approved members through ObjectStore
 """
 
 import hashlib
@@ -21,6 +26,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from backend.services.snapshot_v2.batch_store import ImportBatchRecord, ImportBatchStore
 from backend.services.snapshot_v2.errors import (
     SnapshotIntegrityError,
     SnapshotStorageError,
@@ -30,10 +36,13 @@ from backend.services.snapshot_v2.models import (
     RuntimeManifest,
     SanitizedImportPlan,
     SnapshotManifestV2,
+    ObjectRef,
 )
 from backend.services.snapshot_v2.object_store import (
+    ArchiveObjectMeta,
     ManifestStore,
     ObjectStore,
+    SnapshotImportLimits,
     canonical_json,
 )
 from backend.services.snapshot_v2.paths import SnapshotV2Paths
@@ -41,6 +50,7 @@ from backend.services.snapshot_v2.paths import SnapshotV2Paths
 logger = logging.getLogger(__name__)
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_CHUNK_SIZE = 1 * 1024 * 1024
 
 
 def _now_iso() -> str:
@@ -48,39 +58,13 @@ def _now_iso() -> str:
 
 
 def _rebind_id(source_id: str | None, dest_session_id: str) -> str | None:
-    """Deterministic one-way ID mapping for snapshot/lineage IDs.
-
-    The mapping is ``sha256(source_id | dest_session)[:16]`` so that
-    the same source ID always maps to the same destination ID for a
-    given target session, but different target sessions produce
-    different results.
-    """
     if source_id is None:
         return None
     material = f"{source_id}|{dest_session_id}"
     return hashlib.sha256(material.encode()).hexdigest()[:16]
 
 
-def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write a JSON dict atomically (tmp + fsync + rename)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data, sort_keys=True, ensure_ascii=False))
-    fd = os.open(str(tmp), os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(str(tmp), str(path))
-    dfd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
-
-
 def _collect_runtime_hashes(manifest: SnapshotManifestV2) -> set[str]:
-    """Hashes referenced as runtime payload refs (adata / residual)."""
     rt = manifest.runtime
     hashes: set[str] = set()
     for ref in (rt.adata_refs or {}).values():
@@ -91,7 +75,6 @@ def _collect_runtime_hashes(manifest: SnapshotManifestV2) -> set[str]:
 
 
 def _nullify_runtime_inplace(manifest: SnapshotManifestV2) -> set[str]:
-    """Clear runtime payload refs; return orphaned runtime hashes removed from objects."""
     rt = manifest.runtime
     orphan_hashes = _collect_runtime_hashes(manifest)
     for h in orphan_hashes:
@@ -110,7 +93,6 @@ def _rebind_manifest_inplace(
     manifest: SnapshotManifestV2,
     dest_session_id: str,
 ) -> None:
-    """Rebind session, snapshot, and lineage IDs to the destination."""
     if manifest.session_id == dest_session_id:
         return
 
@@ -118,13 +100,12 @@ def _rebind_manifest_inplace(
     source_branch_id = manifest.branch_id
 
     manifest.session_id = dest_session_id
-    manifest.snapshot_id = _rebind_id(manifest.snapshot_id, dest_session_id)  # type: ignore[assignment]
+    manifest.snapshot_id = _rebind_id(manifest.snapshot_id, dest_session_id)
     if manifest.parent_id is not None:
         manifest.parent_id = _rebind_id(manifest.parent_id, dest_session_id)
     if source_branch_id and source_branch_id != "main":
-        manifest.branch_id = _rebind_id(source_branch_id, dest_session_id)  # type: ignore[assignment]
+        manifest.branch_id = _rebind_id(source_branch_id, dest_session_id)
     if source_branch_label and source_branch_label != "main":
-        # Rebind non-default labels so source-session lineage identity does not leak
         if source_branch_label == source_branch_id:
             manifest.branch_label = manifest.branch_id
         else:
@@ -139,7 +120,7 @@ def _rebind_manifest_inplace(
 
 def build_import_plan(
     manifests: list[SnapshotManifestV2],
-    archive_inventory: dict[str, bytes] | set[str],
+    archive_inventory: dict[str, ArchiveObjectMeta] | set[str],
     include_runtime: bool,
     trust_runtime: bool,
     *,
@@ -147,9 +128,9 @@ def build_import_plan(
 ) -> SanitizedImportPlan:
     """Build a sanitized write plan before any object-store mutation.
 
-    Filters runtime hashes when ``trust_runtime`` is false (or runtime was not
-    included in the archive). Rebinds all lineage IDs for the destination session.
-    ``SanitizedImportPlan.object_hashes`` is the only set allowed to reach ``put_bytes``.
+    ``archive_inventory`` maps hash → ArchiveObjectMeta (from first pass).
+    ``SanitizedImportPlan.object_hashes`` is the only set allowed to reach
+    ``put_stream`` in the second pass.
     """
     if isinstance(archive_inventory, dict):
         inventory_hashes = set(archive_inventory.keys())
@@ -178,7 +159,6 @@ def build_import_plan(
         _rebind_manifest_inplace(manifest, dest_session_id)
         planned.append(manifest)
 
-    # Surviving ref closure: only hashes still referenced by planned manifests
     surviving: set[str] = set()
     for manifest in planned:
         surviving.update(manifest.objects.keys())
@@ -201,7 +181,6 @@ def build_import_plan(
         if hasattr(cont, "payload_ref") and cont.payload_ref is not None:
             surviving.add(cont.payload_ref.sha256)
 
-    # Only hashes present in the archive inventory and not skipped runtime
     object_hashes = (surviving & inventory_hashes) - skipped_runtime_hashes
 
     return SanitizedImportPlan(
@@ -213,8 +192,6 @@ def build_import_plan(
 
 
 class ImportResult(BaseModel):
-    """Result of a V2 snapshot import operation."""
-
     success: bool = False
     dest_session_id: str = ""
     imported_snapshot_ids: list[str] = Field(default_factory=list)
@@ -249,12 +226,10 @@ def _write_import_journal(
 
 def _remove_import_journal(paths, transaction_id: str) -> None:
     from backend.services.snapshot_v2.journal_store import JournalStore
-
     JournalStore(paths).remove(transaction_id)
 
 
 def load_active_import_protected_ids(paths, session_id: str | None = None) -> set[str]:
-    """Return snapshot IDs protected by any active (non-terminal) import journal."""
     protected: set[str] = set()
     journals_dir = Path(str(paths.journals))
     if not journals_dir.exists():
@@ -290,12 +265,12 @@ def load_active_import_protected_ids(paths, session_id: str | None = None) -> se
 
 
 class SnapshotImporter:
-    """Import a V2 export tar.gz archive into a destination session store.
+    """Two-pass streaming import for V2 export tar.gz archives.
 
-    Usage::
+    Pass 1: scan metadata only (hash + size), validate, build plan.
+    Pass 2: re-open archive, stream approved members through ObjectStore.
 
-        importer = SnapshotImporter(dest_session_id, paths)
-        result = importer.import_bundle("/path/to/export.tar.gz", trust_runtime=False)
+    Limits are enforced via ``SnapshotImportLimits``.
     """
 
     def __init__(
@@ -304,11 +279,13 @@ class SnapshotImporter:
         paths: SnapshotV2Paths,
         object_store: Optional[ObjectStore] = None,
         manifest_store: Optional[ManifestStore] = None,
+        limits: Optional[SnapshotImportLimits] = None,
     ) -> None:
         self.dest_session_id = dest_session_id
         self.paths = paths
         self.object_store = object_store or ObjectStore(paths)
         self.manifest_store = manifest_store or ManifestStore(paths)
+        self.limits = limits or SnapshotImportLimits()
 
     def import_bundle(
         self,
@@ -316,18 +293,12 @@ class SnapshotImporter:
         *,
         trust_runtime: bool = False,
     ) -> ImportResult:
-        """Import a V2 export archive.
+        """Import a V2 export archive with batch-atomic visibility.
 
-        Args:
-            archive_path: Path to the ``.tar.gz`` archive produced by
-                ``SnapshotExporter.export()``.
-            trust_runtime: When ``True``, restore runtime objects (dill
-                pickles, adata h5ad).  When ``False`` (default), mark
-                runtime as unavailable and skip writing dill objects into
-                the destination store.
-
-        Returns:
-            An ``ImportResult`` with status, committed count, errors/warnings.
+        Two-pass streaming:
+        - Pass 1: scan archive members, record ArchiveObjectMeta,
+          validate all manifests, build SanitizedImportPlan.
+        - Pass 2: re-open archive, stream only plan.object_hashes.
         """
         archive_path = Path(archive_path)
         result = ImportResult(dest_session_id=self.dest_session_id)
@@ -335,7 +306,6 @@ class SnapshotImporter:
         txn_id = f"import-{uuid.uuid4().hex[:12]}"
 
         try:
-            # Write STAGING journal before any mutation
             _write_import_journal(
                 self.paths,
                 transaction_id=txn_id,
@@ -344,75 +314,103 @@ class SnapshotImporter:
                 payload={"created_at": _now_iso()},
             )
 
+            # ── Pass 1: scan metadata ──────────────────────────────
+            archive_size = archive_path.stat().st_size
+            if archive_size > self.limits.max_compressed_bytes:
+                raise SnapshotStorageError(
+                    "ARCHIVE_TOO_LARGE",
+                    f"Archive size {archive_size} exceeds limit "
+                    f"{self.limits.max_compressed_bytes}",
+                )
+
             with tarfile.open(str(archive_path), "r:gz") as tf:
                 members = tf.getmembers()
 
-                # Step 1: Verify archive safety (no symlinks, devices)
                 self._verify_archive_safety(members)
+                self._check_member_limits(members)
 
-                # Step 2: Read metadata inventory
                 meta = self._read_metadata(tf, members)
                 runtime_included = meta.get("runtime_included", True)
 
-                # Step 3: Read objects from archive, verifying hashes
-                archive_objects = self._read_archive_objects(tf, members)
+                # First pass: scan objects (metadata only)
+                archive_inventory = self._scan_archive_objects(tf, members)
 
-                # Step 4: Read and validate manifests from archive
+                # Read and validate manifests (small, full content in memory)
                 manifests = self._read_manifests(tf, members)
 
-                # Step 5: Verify all manifest-referenced objects exist in archive
-                # (before trust filtering — archive must be self-consistent)
+                # Verify all manifest-referenced objects exist in archive
                 for manifest in manifests:
-                    self._verify_manifest_objects(manifest, archive_objects)
+                    self._verify_manifest_objects_meta(manifest, archive_inventory)
 
-                # Step 6: Build sanitized plan BEFORE any put_bytes
-                # Filters untrusted runtime hashes; rebinds lineage IDs.
-                plan = build_import_plan(
-                    manifests,
-                    archive_objects,
-                    include_runtime=bool(runtime_included),
-                    trust_runtime=trust_runtime,
-                    dest_session_id=self.dest_session_id,
-                )
+            # Build sanitized plan from metadata inventory
+            plan = build_import_plan(
+                manifests,
+                archive_inventory,
+                include_runtime=bool(runtime_included),
+                trust_runtime=trust_runtime,
+                dest_session_id=self.dest_session_id,
+            )
 
-                # Step 7: Write ONLY plan.object_hashes to destination store
-                for h in plan.object_hashes:
-                    data = archive_objects.get(h)
-                    if data is None:
-                        raise SnapshotIntegrityError(
-                            "MISSING_OBJECT",
-                            f"Planned object {h} missing from archive inventory",
-                        )
-                    self.object_store.put_bytes(data, "application/octet-stream")
+            # ── Pass 2: stream approved objects through ObjectStore ─
+            write_proofs: dict[str, ObjectRef] = {}
+            with tarfile.open(str(archive_path), "r:gz") as tf:
+                for m in tf.getmembers():
+                    if not m.isfile():
+                        continue
+                    if not m.name.startswith("objects/") or m.name.count("/") != 1:
+                        continue
+                    obj_hash = m.name.split("/")[1]
+                    if obj_hash not in plan.object_hashes:
+                        continue
 
-                # Update journal to STAGED (approved objects written)
-                _write_import_journal(
-                    self.paths,
-                    transaction_id=txn_id,
-                    session_id=self.dest_session_id,
-                    status="STAGED",
-                    payload={
-                        "created_at": _now_iso(),
-                        "object_hashes": sorted(plan.object_hashes),
-                        "protected_snapshot_ids": [
-                            m.snapshot_id for m in plan.manifests
-                        ],
-                    },
-                )
+                    f = tf.extractfile(m)
+                    if f is None:
+                        continue
 
-                # Step 8: Stage, verify, and publish each rebound manifest
-                # (re-signs with host integrity secret via ManifestStore)
-                for manifest in plan.manifests:
-                    staging_path = self.manifest_store.write_staging(
-                        manifest, prefix=f"{txn_id}_",
+                    meta = archive_inventory[obj_hash]
+                    put_result = self.object_store.put_stream(
+                        f,
+                        expected_sha256=obj_hash,
+                        expected_size=meta.size,
+                        media_type="application/octet-stream",
                     )
-                    self._verify_destination_objects(manifest)
-                    self.manifest_store.publish_staging(staging_path)
+                    write_proofs[obj_hash] = put_result.ref
 
-                    result.imported_snapshot_ids.append(manifest.snapshot_id)
-                    result.committed_count += 1
+            # Update journal to STAGED
+            _write_import_journal(
+                self.paths,
+                transaction_id=txn_id,
+                session_id=self.dest_session_id,
+                status="STAGED",
+                payload={
+                    "created_at": _now_iso(),
+                    "object_hashes": sorted(plan.object_hashes),
+                    "protected_snapshot_ids": [
+                        m.snapshot_id for m in plan.manifests
+                    ],
+                },
+            )
 
-            # Step 9: Reconcile staging directory (fail-closed on corrupt)
+            # Mark ALL target manifests pending BEFORE publishing any of them,
+            # so a crash mid-loop leaves every published manifest invisible
+            # until the batch record commits (design §6.2 batch atomicity).
+            planned_ids = [m.snapshot_id for m in plan.manifests]
+            ManifestStore.mark_pending_imports(self.paths.committed, planned_ids)
+
+            # Stage and publish each rebound manifest (write proofs only)
+            manifest_roots: dict[str, str] = {}
+            for manifest in plan.manifests:
+                staging_path = self.manifest_store.write_staging(
+                    manifest, prefix=f"{txn_id}_",
+                )
+                self._assert_manifest_write_proofs(manifest, write_proofs)
+                self.manifest_store.publish_staging(staging_path)
+                manifest_roots[manifest.snapshot_id] = manifest.root_hash
+                result.imported_snapshot_ids.append(manifest.snapshot_id)
+                result.committed_count += 1
+
+
+            # Reconcile staging directory
             reconcile_result = self.manifest_store.reconcile()
             if reconcile_result.corrupt_ids:
                 logger.error(
@@ -425,11 +423,23 @@ class SnapshotImporter:
                     f"{reconcile_result.corrupt_ids}",
                 )
 
-            # Step 10: Run safe GC
+            # Publish batch record
+            batch_store = ImportBatchStore(self.paths.root)
+            batch_record = ImportBatchRecord(
+                batch_id=txn_id,
+                session_id=self.dest_session_id,
+                manifest_roots=manifest_roots,
+            )
+            batch_store.publish(batch_record)
+
+            ManifestStore.clear_pending_imports(
+                self.paths.committed,
+                list(manifest_roots.keys()),
+            )
+
+            # Run safe GC
             self._run_safe_gc()
 
-            # Write COMMITTED journal as durable proof; removed below after
-            # full reconciliation succeeds.
             _write_import_journal(
                 self.paths,
                 transaction_id=txn_id,
@@ -441,14 +451,11 @@ class SnapshotImporter:
                 },
             )
 
-            # Remove COMMITTED journal — import fully succeeded.
-            # Failed journals remain visible; STAGING/STAGED recovery still
-            # works for crashes mid-import.
             _remove_import_journal(self.paths, txn_id)
 
             result.success = True
             result.skipped_runtime_snapshot_ids = [
-                _rebind_id(sid, self.dest_session_id)  # type: ignore[misc]
+                _rebind_id(sid, self.dest_session_id)
                 for sid in sorted(plan.omitted_runtime_src_ids)
             ]
 
@@ -482,10 +489,61 @@ class SnapshotImporter:
 
         return result
 
-    # ── Internal helpers ────────────────────────────────────────────────
+    # ── Limit checks ──────────────────────────────────────────────────
+
+    def _check_member_limits(self, members: list) -> None:
+        """Enforce member count and size limits from import bounds."""
+        obj_count = 0
+        manifest_count = 0
+        snapshot_ids: set[str] = set()
+        total_uncompressed = 0
+
+        for m in members:
+            if not m.isfile():
+                continue
+            if m.size > self.limits.max_single_member_bytes:
+                raise SnapshotStorageError(
+                    "MEMBER_TOO_LARGE",
+                    f"Tar member {m.name} size {m.size} exceeds "
+                    f"single-member limit {self.limits.max_single_member_bytes}",
+                )
+            if m.name.startswith("objects/") and m.name.count("/") == 1:
+                obj_count += 1
+                total_uncompressed += m.size
+                if obj_count > self.limits.max_member_count:
+                    raise SnapshotStorageError(
+                        "TOO_MANY_OBJECTS",
+                        f"Object count {obj_count} exceeds limit "
+                        f"{self.limits.max_member_count}",
+                    )
+            if m.name.startswith("manifests/") and m.name.endswith(".json"):
+                manifest_count += 1
+                sid = m.name[len("manifests/"):-len(".json")]
+                if sid:
+                    snapshot_ids.add(sid)
+                if manifest_count > self.limits.max_manifest_count:
+                    raise SnapshotStorageError(
+                        "TOO_MANY_MANIFESTS",
+                        f"Manifest count {manifest_count} exceeds limit "
+                        f"{self.limits.max_manifest_count}",
+                    )
+
+        if total_uncompressed > self.limits.max_uncompressed_bytes:
+            raise SnapshotStorageError(
+                "TOTAL_UNCOMPRESSED_TOO_LARGE",
+                f"Total uncompressed object data {total_uncompressed} exceeds "
+                f"limit {self.limits.max_uncompressed_bytes}",
+            )
+        if len(snapshot_ids) > self.limits.max_snapshot_count:
+            raise SnapshotStorageError(
+                "TOO_MANY_SNAPSHOTS",
+                f"Snapshot count {len(snapshot_ids)} exceeds limit "
+                f"{self.limits.max_snapshot_count}",
+            )
+
+    # ── Pass 1 helpers ────────────────────────────────────────────────
 
     def _verify_archive_safety(self, members: list) -> None:
-        """Reject archives with symlinks, hardlinks, device files, or FIFOs."""
         bad: list[str] = []
         for member in members:
             if member.issym():
@@ -501,7 +559,6 @@ class SnapshotImporter:
             )
 
     def _read_metadata(self, tf: tarfile.TarFile, members: list) -> dict:
-        """Read and return the snapshot-v2-export.json metadata."""
         for m in members:
             if m.name == "snapshot-v2-export.json":
                 f = tf.extractfile(m)
@@ -522,7 +579,6 @@ class SnapshotImporter:
     def _read_manifests(
         self, tf: tarfile.TarFile, members: list,
     ) -> list[SnapshotManifestV2]:
-        """Read and validate ``manifests/<snapshot_id>.json`` entries."""
         manifests: list[SnapshotManifestV2] = []
         seen_ids: set[str] = set()
 
@@ -531,7 +587,6 @@ class SnapshotImporter:
                 continue
             if not m.name.startswith("manifests/") or not m.name.endswith(".json"):
                 continue
-            # Reject path traversal
             if ".." in m.name or m.name.startswith("/"):
                 raise SnapshotStorageError(
                     "SUSPICIOUS_PATH",
@@ -558,7 +613,6 @@ class SnapshotImporter:
                 )
             seen_ids.add(manifest.snapshot_id)
 
-            # Verify root_hash is correct
             raw = canonical_json(manifest)
             expected_root = hashlib.sha256(raw).hexdigest()
             if manifest.root_hash != expected_root:
@@ -578,11 +632,11 @@ class SnapshotImporter:
 
         return manifests
 
-    def _read_archive_objects(
+    def _scan_archive_objects(
         self, tf: tarfile.TarFile, members: list,
-    ) -> dict[str, bytes]:
-        """Read ``objects/<sha256>`` entries, verifying content hash."""
-        objects: dict[str, bytes] = {}
+    ) -> dict[str, ArchiveObjectMeta]:
+        """Pass 1: hash and record metadata only (no full content in memory)."""
+        inventory: dict[str, ArchiveObjectMeta] = {}
         for m in members:
             if not m.isfile():
                 continue
@@ -600,8 +654,16 @@ class SnapshotImporter:
             if f is None:
                 continue
 
-            data = f.read()
-            actual_hash = hashlib.sha256(data).hexdigest()
+            hasher = hashlib.sha256()
+            size = 0
+            while True:
+                chunk = f.read(_CHUNK_SIZE)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                size += len(chunk)
+
+            actual_hash = hasher.hexdigest()
             if actual_hash != obj_hash:
                 raise SnapshotIntegrityError(
                     "OBJECT_HASH_MISMATCH",
@@ -609,44 +671,52 @@ class SnapshotImporter:
                     f"(actual: {actual_hash})",
                 )
 
-            if obj_hash not in objects:
-                objects[obj_hash] = data
+            if obj_hash not in inventory:
+                inventory[obj_hash] = ArchiveObjectMeta(sha256=obj_hash, size=size)
 
-        return objects
+        return inventory
 
-    def _verify_manifest_objects(
+    def _verify_manifest_objects_meta(
         self,
         manifest: SnapshotManifestV2,
-        archive_objects: dict[str, bytes],
+        archive_inventory: dict[str, ArchiveObjectMeta],
     ) -> None:
-        """Every object referenced by *manifest* must exist in the archive."""
+        """Every object referenced by *manifest* must exist in archive inventory."""
         for h, ref in manifest.objects.items():
-            data = archive_objects.get(h)
-            if data is None:
+            meta = archive_inventory.get(h)
+            if meta is None:
                 raise SnapshotIntegrityError(
                     "MISSING_OBJECT",
                     f"Object {h} referenced by manifest "
                     f"{manifest.snapshot_id} not found in archive",
                 )
-            if len(data) != ref.size:
+            if meta.size != ref.size:
                 raise SnapshotIntegrityError(
                     "OBJECT_SIZE_MISMATCH",
-                    f"Object {h} size {len(data)} != expected {ref.size}",
+                    f"Object {h} size {meta.size} != expected {ref.size}",
                 )
 
-    def _rebind_manifest(self, manifest: SnapshotManifestV2) -> None:
-        """Rebind session, snapshot, and lineage IDs to the destination."""
-        _rebind_manifest_inplace(manifest, self.dest_session_id)
+    # ── Post-plan helpers ─────────────────────────────────────────────
 
-    def _nullify_runtime(self, manifest: SnapshotManifestV2) -> None:
-        """Mark runtime objects as unavailable by clearing their refs."""
-        _nullify_runtime_inplace(manifest)
-
-    def _verify_destination_objects(
-        self, manifest: SnapshotManifestV2,
+    def _assert_manifest_write_proofs(
+        self,
+        manifest: SnapshotManifestV2,
+        write_proofs: dict[str, ObjectRef],
     ) -> None:
-        """Every object referenced by *manifest* must exist in dest store."""
+        """Require each manifest object in write_proofs or verified pre-existing evidence.
+
+        Never rereads destination objects written in this import transaction.
+        """
         for h, ref in manifest.objects.items():
+            proof = write_proofs.get(h)
+            if proof is not None:
+                if proof.size != ref.size:
+                    raise SnapshotIntegrityError(
+                        "OBJECT_SIZE_MISMATCH",
+                        f"Object {h} write proof size {proof.size} != expected {ref.size}",
+                    )
+                continue
+            # Pre-existing object: full verify once (not a same-transaction write)
             try:
                 self.object_store.verify(ref)
             except SnapshotV2Error as exc:
@@ -656,7 +726,6 @@ class SnapshotImporter:
                 )
 
     def _run_safe_gc(self) -> None:
-        """Run garbage collection to clean up orphaned objects."""
         try:
             from backend.services.snapshot_v2.gc import SnapshotGarbageCollector
 

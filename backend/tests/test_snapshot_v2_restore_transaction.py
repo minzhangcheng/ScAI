@@ -3,12 +3,14 @@
 Nine parameterised fault points, each tested in rollback mode (assert
 original content restored) and forward-only mode (assert target content applied).
 """
+import asyncio
 import json
 import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import pytest_asyncio
 
 
 # ---- Fault point constants ------------------------------------------------
@@ -1492,10 +1494,25 @@ class TestRuntimeApplyHelpers:
 
 # ---- Session store integration tests ---------------------------------------
 
+@pytest_asyncio.fixture
+async def assert_clean_async_teardown():
+    """Fail if the test leaves pending async tasks (task leaks)."""
+    yield
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task(loop=loop)
+    pending = [
+        task for task in asyncio.all_tasks(loop)
+        if task is not current and not task.done()
+    ]
+    assert not pending, [repr(task) for task in pending]
+
+
 class TestSessionStoreIntegration:
 
     @pytest.mark.asyncio
-    async def test_load_session_calls_recovery(self, tmp_path, monkeypatch):
+    async def test_load_session_calls_recovery(
+        self, tmp_path, monkeypatch, assert_clean_async_teardown,
+    ):
         """load_session calls recover_snapshot_transactions at start."""
         import backend.services.session_store as ss_mod
 

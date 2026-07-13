@@ -37,6 +37,7 @@ from .reporting import ReportingMixin
 from .integration import IntegrationMixin
 
 from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
+from ..services.snapshot_v2.restore_entry import build_restore_entry_plan
 
 from ..models.schemas import (
     AnalysisState, AgentType, TaskStatus, RoundResult, AnalysisPhase,
@@ -77,12 +78,81 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         else:
             state.waiting_input_started_at = None
     
-    def _consume_restore_resume_metadata(self, analysis_state: AnalysisState) -> None:
+    def _consume_restore_routing_metadata(self, analysis_state: AnalysisState) -> None:
+        """Clear one-shot restore routing fields only (not provenance).
+
+        Clears: restore_resume_phase/kind/node/gate/workflow_state and
+        restore_start_intent. Does not clear last_restored_snapshot_id or
+        other provenance fields owned by Task 4.
+        """
         analysis_state.restore_resume_phase = None
         analysis_state.restore_resume_kind = None
         analysis_state.restore_resume_node = None
         analysis_state.restore_resume_gate = None
-        analysis_state.last_restored_snapshot_id = None
+        analysis_state.restore_resume_workflow_state = None
+        analysis_state.restore_start_intent = None
+
+    def _consume_restore_resume_metadata(self, analysis_state: AnalysisState) -> None:
+        """Clear restore routing metadata only (not provenance).
+
+        Provenance is consumed only after the canonical first restored
+        RoundResult is recorded in synthesis/integration. Prefer
+        ``_consume_restore_routing_metadata`` for new call sites.
+        """
+        self._consume_restore_routing_metadata(analysis_state)
+
+    def _restore_entry(self, state: WorkflowState) -> WorkflowState:
+        """Graph entry node that determines and applies the restore entry plan.
+
+        Uses ``restore_entry_loader`` (injectable for testing, defaults to
+        ``build_restore_entry_plan``) to produce a ``RestoreEntryPlan`` from
+        the analysis state's restore metadata, then:
+        - Deep-copies AnalysisState and consumes routing metadata only on the copy
+        - Seeds exact frozen WorkflowState for graph_node resumes
+        - Sets ``_restore_entry_plan`` for the routing method
+        - Handles ``preserve_round_on_initialize`` for explicit_start
+
+        The original input AnalysisState is not mutated before node success so
+        loader/validation failures leave metadata intact for retry.
+        """
+        import copy
+
+        analysis_state = state["analysis_state"]
+        loader = self.restore_entry_loader or build_restore_entry_plan
+
+        # Pass restore_start_intent to the plan builder (read-only on original).
+        start_intent = getattr(analysis_state, "restore_start_intent", None)
+        plan = loader(analysis_state, restore_start_intent=start_intent)
+
+        logger.info(
+            f"[{self.session_id}] _restore_entry: intent={plan.intent} "
+            f"target={plan.target_node} preserve_round={plan.preserve_round_on_initialize}"
+        )
+
+        # Deep-copy AnalysisState before clearing routing metadata so the
+        # original input object remains intact until LangGraph checkpoints
+        # the successful node return.
+        returned_analysis = analysis_state.model_copy(deep=True)
+        self._consume_restore_routing_metadata(returned_analysis)
+
+        returned: WorkflowState = {**state, "analysis_state": returned_analysis}
+
+        # Graph-node restore: seed exact frozen WorkflowState (not initialize_round).
+        if plan.intent == "graph_node" and plan.target_node:
+            returned["_restore_resume_node"] = plan.target_node
+
+        for key, value in plan.workflow_state.items():
+            if key not in {"analysis_state", "messages"}:
+                returned[key] = copy.deepcopy(value)
+
+        # Explicit-start restore: signal initialize to preserve the round.
+        if plan.preserve_round_on_initialize:
+            returned["_preserve_round_on_initialize"] = True
+
+        # Store the plan for the routing method.
+        returned["_restore_entry_plan"] = plan.model_dump(mode="json")
+
+        return returned
 
     async def resume_restored_wait_state(self, analysis_state: AnalysisState) -> AnalysisState:
         logger.info("[%s] Continuing restored wait-state snapshot", self.session_id)
@@ -213,6 +283,11 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
 
         # Technique agent (optional, created in initialize())
         self.technique_agent: Optional[TechniqueAgent] = None
+
+        # Restore entry loader — injectable callable for testing; defaults
+        # to build_restore_entry_plan.  Called by _restore_entry() to
+        # determine the graph entry plan.
+        self.restore_entry_loader: Optional[Callable] = None
 
     def _next_generation(self, node: str) -> int:
         """Increment and return the generation counter for a given node."""
@@ -454,6 +529,10 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         if not sp.has_pending_request(self.session_id):
             return False
 
+        generation = sp.get_pending_generation(self.session_id)
+        if generation is None:
+            return False
+
         graph_state = dict(getattr(self, "_current_graph_state", None) or {})
         sb = getattr(self, "sandbox", None)
         if "kernel_present" not in graph_state:
@@ -469,10 +548,13 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                     getattr(analysis, "current_round", 0) or 0
                 )
 
-        acked = sp.acknowledge_safe_point_request(self.session_id, graph_state)
+        acked = await sp.acknowledge_safe_point_request(
+            self.session_id, generation, graph_state, role="workflow",
+        )
         if acked:
             logger.info(
-                f"[{self.session_id}] Acknowledged safe-point at boundary"
+                f"[{self.session_id}] Acknowledged safe-point at boundary "
+                f"(generation {generation})"
             )
         return acked
 
@@ -828,7 +910,6 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         from ..config import get_session_workspace
         from ..services.snapshot_v2.service import SnapshotService
         from ..services.snapshot_v2.continuation import ContinuationRegistry
-        from ..services.snapshot_v2.errors import RequiredSnapshotBlocked
         from ..services.snapshot_v2.models import SnapshotCaptureRequest
         from ..services.snapshot_v2.paths import SnapshotV2Paths
         from ..services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
@@ -1008,13 +1089,21 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 f"(current_round={initial_state.current_round})"
             )
             self._set_status(initial_state, TaskStatus.COMPLETED)
+            self._consume_restore_resume_metadata(initial_state)
             return initial_state
 
         # Guard: idle restore (branch_id set but no resume kind) → persist only.
         # The session was restored from a manual snapshot with no continuation
         # target; the user must explicitly start analysis from the UI.
-        if initial_state.restore_resume_kind is None and (
-            initial_state.restore_branch_id or initial_state.last_restored_snapshot_id
+        # Exception: restore_start_intent="explicit_start" means the user clicked
+        # Start — let the graph run (restore_entry will preserve round/plan).
+        if (
+            initial_state.restore_resume_kind is None
+            and (
+                initial_state.restore_branch_id
+                or initial_state.last_restored_snapshot_id
+            )
+            and getattr(initial_state, "restore_start_intent", None) != "explicit_start"
         ):
             logger.info(
                 f"[{self.session_id}] Idle restore — no auto-start "
@@ -1024,6 +1113,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             # offers a "Start" / "Resume" button rather than "Analysis running".
             if initial_state.status == TaskStatus.RUNNING:
                 self._set_status(initial_state, TaskStatus.PAUSED)
+            self._consume_restore_resume_metadata(initial_state)
             return initial_state
 
         # Store state for settings provider initialization
@@ -1092,15 +1182,15 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             logger.warning(
                 f"[{self.session_id}] Required snapshot blocked workflow: {e}"
             )
-            self._set_status(initial_state, TaskStatus.WAITING_INPUT)
-            initial_state.wait_input_reason = "snapshot_failure"
-            if not initial_state.snapshot_failure:
-                initial_state.snapshot_failure = {
-                    "code": e.code,
-                    "message": str(e),
-                    "allowed_actions": ["retry", "manage", "terminate"],
-                    "snapshot_id": getattr(e, "snapshot_id", None),
-                }
+            from ..services.snapshot_v2.failure_gate import (
+                ensure_workflow_boundary_retry_context,
+            )
+
+            ensure_workflow_boundary_retry_context(
+                initial_state,
+                e,
+                previous_status="running",
+            )
             try:
                 await self._send_state_sync(initial_state, "snapshot_failure")
             except Exception:
@@ -1142,17 +1232,40 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 f"pending_required_snapshot={pending is not None}; "
                 "holding WAITING_INPUT without re-running report generators"
             )
-            self._set_status(initial_state, TaskStatus.WAITING_INPUT)
-            initial_state.wait_input_reason = "snapshot_failure"
-            if not initial_state.snapshot_failure and pending is not None:
-                initial_state.snapshot_failure = {
-                    "code": "pending_required_snapshot",
-                    "message": (
-                        "Post-report snapshot is pending; use Retry to "
-                        "re-enter capture only (reports will not re-run)."
+            from ..services.snapshot_v2.failure_gate import (
+                ensure_post_report_retry_context,
+                enter_snapshot_failure_gate,
+            )
+
+            if pending is not None and not initial_state.snapshot_failure:
+                enter_snapshot_failure_gate(
+                    initial_state,
+                    {
+                        "code": "pending_required_snapshot",
+                        "message": (
+                            "Post-report snapshot is pending; use Retry to "
+                            "re-enter capture only (reports will not re-run)."
+                        ),
+                        "allowed_actions": ["retry", "manage", "terminate"],
+                    },
+                    retry_context={
+                        "producer": "post_report",
+                        "resume_policy": "complete",
+                        "snapshot_request": dict(pending),
+                        "previous_status": "generating_report",
+                        "report_generation_id": pending.get("report_generation_id"),
+                    },
+                )
+            else:
+                # Always merge typed post_report context (service bare gate
+                # may have snapshot_failure without retry_context).
+                ensure_post_report_retry_context(
+                    initial_state,
+                    previous_status="generating_report",
+                    snapshot_request=(
+                        dict(pending) if isinstance(pending, dict) else {"phase": "post_report"}
                     ),
-                    "allowed_actions": ["retry", "manage", "terminate"],
-                }
+                )
             try:
                 await self._send_state_sync(initial_state, "snapshot_failure")
             except Exception:
@@ -1224,15 +1337,17 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             logger.warning(
                 f"[{self.session_id}] Required snapshot blocked during report generation: {e}"
             )
-            self._set_status(initial_state, TaskStatus.WAITING_INPUT)
-            initial_state.wait_input_reason = "snapshot_failure"
-            if not initial_state.snapshot_failure:
-                initial_state.snapshot_failure = {
-                    "code": e.code,
-                    "message": str(e),
-                    "allowed_actions": ["retry", "manage", "terminate"],
-                    "snapshot_id": getattr(e, "snapshot_id", None),
-                }
+            from ..services.snapshot_v2.failure_gate import (
+                ensure_post_report_retry_context,
+            )
+
+            # Always merge typed post_report context (bare service gate may
+            # already set snapshot_failure without retry_context).
+            ensure_post_report_retry_context(
+                initial_state,
+                e,
+                previous_status="generating_report",
+            )
             try:
                 await self._send_state_sync(initial_state, "snapshot_failure")
             except Exception:
@@ -1245,6 +1360,22 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             await self._send_message("error", f"Report generation failed: {str(e)}")
             self._set_status(initial_state, TaskStatus.FAILED)
             return initial_state
+
+    async def _invoke_restore_entry(
+        self, analysis_state: AnalysisState, thread_id: str,
+    ) -> AnalysisState:
+        self._set_status(analysis_state, TaskStatus.RUNNING)
+        self._current_analysis_state = analysis_state
+        workflow_state = self._make_initial_workflow_state(
+            analysis_state,
+            current_round=analysis_state.current_round,
+        )
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+        }
+        final_state = await self.compiled_graph.ainvoke(workflow_state, config)
+        return final_state["analysis_state"]
 
     async def resume(
         self,
@@ -1289,6 +1420,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 f"(round={analysis_state.current_round})"
             )
             self._set_status(analysis_state, TaskStatus.COMPLETED)
+            self._consume_restore_resume_metadata(analysis_state)
             return analysis_state
 
         # Re-initialize agents and components if not already initialized
@@ -1358,17 +1490,17 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 logger.warning(
                     f"[{self.session_id}] Required snapshot blocked on resume: {e}"
                 )
+                from ..services.snapshot_v2.failure_gate import (
+                    ensure_workflow_boundary_retry_context,
+                )
+
                 effective = analysis_state or state.values.get("analysis_state")
                 if effective:
-                    self._set_status(effective, TaskStatus.WAITING_INPUT)
-                    effective.wait_input_reason = "snapshot_failure"
-                    if not effective.snapshot_failure:
-                        effective.snapshot_failure = {
-                            "code": e.code,
-                            "message": str(e),
-                            "allowed_actions": ["retry", "manage", "terminate"],
-                            "snapshot_id": getattr(e, "snapshot_id", None),
-                        }
+                    ensure_workflow_boundary_retry_context(
+                        effective,
+                        e,
+                        previous_status="running",
+                    )
                 return effective or analysis_state
 
         # No checkpoint found. Exact continuation only — never fall back to a
@@ -1400,6 +1532,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             try:
                 final_state = await self.compiled_graph.ainvoke(workflow_state, config)
                 logger.info(f"[{self.session_id}] Exact graph-node continuation completed")
+                self._consume_restore_resume_metadata(final_state["analysis_state"])
                 return final_state["analysis_state"]
             except WorkflowTerminatedError as e:
                 logger.warning(f"[{self.session_id}] Workflow terminated by user: {e}")
@@ -1411,16 +1544,16 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
                 logger.warning(
                     f"[{self.session_id}] Required snapshot blocked after restore: {e}"
                 )
+                from ..services.snapshot_v2.failure_gate import (
+                    ensure_workflow_boundary_retry_context,
+                )
+
                 if analysis_state:
-                    self._set_status(analysis_state, TaskStatus.WAITING_INPUT)
-                    analysis_state.wait_input_reason = "snapshot_failure"
-                    if not analysis_state.snapshot_failure:
-                        analysis_state.snapshot_failure = {
-                            "code": e.code,
-                            "message": str(e),
-                            "allowed_actions": ["retry", "manage", "terminate"],
-                            "snapshot_id": getattr(e, "snapshot_id", None),
-                        }
+                    ensure_workflow_boundary_retry_context(
+                        analysis_state,
+                        e,
+                        previous_status="running",
+                    )
                 return analysis_state
 
         if analysis_state.status in (TaskStatus.WAITING_INPUT, TaskStatus.WAITING_ANNOTATION):
@@ -1430,6 +1563,9 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
             )
             return analysis_state
 
+        if getattr(analysis_state, "restore_start_intent", None) == "explicit_start":
+            return await self._invoke_restore_entry(analysis_state, thread_id)
+
         # Idle / unknown: do not invent a fresh initialize_round run.
         logger.info(
             f"[{self.session_id}] No checkpoint and no exact continuation target "
@@ -1438,6 +1574,7 @@ class SingleCellAnalysisWorkflow(RoutingMixin, ContextMixin, MessagingMixin, Cal
         )
         if analysis_state.status == TaskStatus.RUNNING:
             self._set_status(analysis_state, TaskStatus.PAUSED)
+        self._consume_restore_resume_metadata(analysis_state)
         return analysis_state
 
     async def pause(self, thread_id: str):

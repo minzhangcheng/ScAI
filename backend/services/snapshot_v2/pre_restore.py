@@ -158,22 +158,30 @@ class PreRestoreCapture:
         if context.analysis_state is not None:
             record = await self._capture_for_restore(req, context, sandbox=sandbox)
             if record.failure is not None:
-                from backend.models.schemas import TaskStatus
-                from backend.services.snapshot_v2.errors import SNAPSHOT_FAILURE_ACTIONS
+                from backend.services.snapshot_v2.failure_gate import (
+                    enter_snapshot_failure_gate,
+                )
 
                 state = context.analysis_state
                 failure_payload = record.failure.model_dump(mode="json")
-                failure_payload["allowed_actions"] = list(SNAPSHOT_FAILURE_ACTIONS)
-                state.snapshot_failure = failure_payload
+                enter_snapshot_failure_gate(
+                    state,
+                    failure_payload,
+                    retry_context={
+                        "producer": "pre_restore",
+                        "resume_policy": "restore_transaction",
+                        "snapshot_request": req.model_dump(mode="json"),
+                        "previous_status": (
+                            getattr(state, "status", None)
+                            and getattr(state.status, "value", str(state.status))
+                            or "running"
+                        ),
+                    },
+                )
                 state.snapshot_transaction = {
                     "snapshot_id": record.snapshot_id,
                     "status": "failed",
                 }
-                state.wait_input_reason = "snapshot_failure"
-                try:
-                    state.status = TaskStatus.WAITING_INPUT
-                except Exception:
-                    pass
                 raise RequiredSnapshotBlocked(
                     record.failure.code,
                     record.failure.message,

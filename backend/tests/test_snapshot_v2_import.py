@@ -736,6 +736,12 @@ class TestSnapshotV2ImportTrustFilter:
                 self.put_hashes.append(sha)
                 return super().put_bytes(data, media_type)
 
+            def put_stream(self, reader, expected_sha256, expected_size, media_type):
+                self.put_hashes.append(expected_sha256)
+                return super().put_stream(
+                    reader, expected_sha256, expected_size, media_type,
+                )
+
         spy = SpyStore(dest_paths)
         importer = SnapshotImporter(
             SESSION_ID_DST, dest_paths, object_store=spy,
@@ -792,6 +798,12 @@ class TestSnapshotV2ImportTrustFilter:
                 self.put_hashes.append(sha)
                 return super().put_bytes(data, media_type)
 
+            def put_stream(self, reader, expected_sha256, expected_size, media_type):
+                self.put_hashes.append(expected_sha256)
+                return super().put_stream(
+                    reader, expected_sha256, expected_size, media_type,
+                )
+
         spy = SpyStore(dest_paths)
         importer = SnapshotImporter(
             SESSION_ID_DST, dest_paths,
@@ -833,22 +845,170 @@ class TestSnapshotV2ImportInterrupted:
 class TestSnapshotV2ImportRoute:
     """Route-level tests for the V2 import endpoint (auth-enforcement only)."""
 
-    def test_import_v2_route_requires_auth(self, tmp_path):
-        """POST /{session_id}/import-v2 without auth returns 401."""
-        from fastapi.testclient import TestClient
-        from backend.main import app
+    @pytest.mark.asyncio
+    async def test_import_v2_route_requires_auth(self, tmp_path):
+        """import_v2 without auth returns 401 (no app lifespan/TestClient)."""
+        from unittest.mock import MagicMock
 
-        archive = tmp_path / "empty.tar.gz"
-        with tarfile.open(archive, "w:gz"):
-            pass
+        from fastapi import HTTPException
 
-        client = TestClient(app)
-        response = client.post(
-            "/api/session/nonexistent/import-v2",
-            content=archive.read_bytes(),
-            headers={
-                "Content-Type": "application/gzip",
-                "X-Filename": "v2-export.tar.gz",
-            },
+        from backend.routes.export_import import import_v2
+
+        request = MagicMock()
+        request.state.user_id = ""
+        with pytest.raises(HTTPException) as caught:
+            await import_v2("nonexistent", request)
+        assert caught.value.status_code == 401
+
+
+class TestSnapshotV2ImportBatchAtomic:
+    """Batch-atomic visibility and recovery tests."""
+
+    def test_imported_manifests_stay_hidden_until_batch_record_commits(self, tmp_path, dest_paths):
+        """Manifests are written to committed/ but hidden until batch record publishes."""
+        from backend.services.snapshot_v2.importer import SnapshotImporter
+        from backend.services.snapshot_v2.object_store import ManifestStore
+
+        data, h = _make_obj_data()
+        ref = _make_ref(h)
+        m1 = _build_manifest(SESSION_ID_SRC, "snap-a", objects={h: ref})
+        m2 = _build_manifest(SESSION_ID_SRC, "snap-b", objects={h: ref})
+        archive = _build_archive(
+            tmp_path / "batch.tar.gz", [m1, m2], {h: data}, SESSION_ID_SRC,
         )
-        assert response.status_code in (401, 403, 404)
+
+        importer = SnapshotImporter(SESSION_ID_DST, dest_paths)
+        result = importer.import_bundle(archive)
+        assert result.success
+
+        # All manifests should be visible after successful batch import
+        committed = _list_committed(dest_paths)
+        assert len(committed) == 2
+
+    def test_import_crash_after_first_manifest_never_exposes_partial_batch(
+        self, tmp_path, dest_paths, monkeypatch,
+    ):
+        """Crash after first manifest publish should not leave visible manifests."""
+        from backend.services.snapshot_v2.importer import SnapshotImporter
+        from backend.services.snapshot_v2.object_store import ManifestStore
+
+        data, h = _make_obj_data()
+        ref = _make_ref(h)
+        m1 = _build_manifest(SESSION_ID_SRC, "snap-a", objects={h: ref})
+        m2 = _build_manifest(SESSION_ID_SRC, "snap-b", objects={h: ref})
+        archive = _build_archive(
+            tmp_path / "crash.tar.gz", [m1, m2], {h: data}, SESSION_ID_SRC,
+        )
+
+        calls = 0
+        original_publish = ManifestStore.publish_staging
+
+        def fail_second(self, staging_path):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("crash after first staged manifest")
+            return original_publish(self, staging_path)
+
+        monkeypatch.setattr(ManifestStore, "publish_staging", fail_second)
+        importer = SnapshotImporter(SESSION_ID_DST, dest_paths)
+        result = importer.import_bundle(archive)
+        assert not result.success
+
+        # After recovery, no manifests should remain visible
+        from backend.services.snapshot_v2.batch_store import ImportBatchStore
+        batch_store = ImportBatchStore(dest_paths.root)
+        assert batch_store.list_batch_ids() == []
+
+    def test_import_crash_between_manifests_exposes_nothing(
+        self, tmp_path, dest_paths, monkeypatch,
+    ):
+        """If publishing the 2nd manifest raises, the 1st must stay invisible."""
+        from backend.services.snapshot_v2.errors import SnapshotIntegrityError
+        from backend.services.snapshot_v2.importer import SnapshotImporter, _rebind_id
+        from backend.services.snapshot_v2.object_store import ManifestStore
+
+        data, h = _make_obj_data()
+        ref = _make_ref(h)
+        m1 = _build_manifest(SESSION_ID_SRC, "snap-a", objects={h: ref})
+        m2 = _build_manifest(SESSION_ID_SRC, "snap-b", objects={h: ref})
+        archive = _build_archive(
+            tmp_path / "crash_between.tar.gz", [m1, m2], {h: data}, SESSION_ID_SRC,
+        )
+        planned_ids = {
+            _rebind_id("snap-a", SESSION_ID_DST),
+            _rebind_id("snap-b", SESSION_ID_DST),
+        }
+
+        original_publish = ManifestStore.publish_staging
+        calls = {"n": 0}
+
+        def flaky_publish(self, path):
+            calls["n"] += 1
+            result = original_publish(self, path)
+            if calls["n"] == 1:
+                raise RuntimeError("crash after first publish")
+            return result
+
+        monkeypatch.setattr(ManifestStore, "publish_staging", flaky_publish)
+
+        importer = SnapshotImporter(SESSION_ID_DST, dest_paths)
+        result = importer.import_bundle(archive)
+        assert not result.success
+        assert calls["n"] == 1
+
+        # No imported manifest is visible in the authoritative inventory.
+        store = ManifestStore(dest_paths)
+        visible_ids = {m.snapshot_id for m in store.list_committed()}
+        assert visible_ids.isdisjoint(planned_ids)
+        for sid in planned_ids:
+            with pytest.raises(SnapshotIntegrityError) as exc:
+                store.load(sid)
+            assert exc.value.code == "MANIFEST_NOT_FOUND"
+
+
+class TestSnapshotV2ImportStreamProof:
+    """Bounded streaming and write-proof reuse (no put_bytes / no destination reread)."""
+
+    def test_import_second_pass_never_calls_put_bytes(self, tmp_path, dest_paths, monkeypatch):
+        from unittest.mock import Mock
+
+        from backend.services.snapshot_v2.importer import SnapshotImporter
+
+        data, h = _make_obj_data(64 * 1024)
+        ref = _make_ref(h, len(data))
+        m = _build_manifest(SESSION_ID_SRC, "snap-stream", objects={h: ref})
+        large_archive = _build_archive(
+            tmp_path / "stream_large.tar.gz", [m], {h: data}, SESSION_ID_SRC,
+        )
+        importer = SnapshotImporter(SESSION_ID_DST, dest_paths)
+        monkeypatch.setattr(
+            importer.object_store,
+            "put_bytes",
+            Mock(side_effect=AssertionError("streamed object buffered")),
+        )
+        assert importer.import_bundle(large_archive).success
+
+    def test_import_write_proof_skips_destination_verify(self, tmp_path, dest_paths, monkeypatch):
+        from unittest.mock import Mock
+
+        from backend.services.snapshot_v2.importer import SnapshotImporter
+
+        data, h = _make_obj_data(512)
+        ref = _make_ref(h, len(data))
+        m = _build_manifest(SESSION_ID_SRC, "snap-proof", objects={h: ref})
+        archive = _build_archive(
+            tmp_path / "proof.tar.gz", [m], {h: data}, SESSION_ID_SRC,
+        )
+        importer = SnapshotImporter(SESSION_ID_DST, dest_paths)
+        verify = Mock(side_effect=AssertionError("destination reread"))
+        monkeypatch.setattr(importer.object_store, "verify", verify)
+        assert importer.import_bundle(archive).success
+
+    def test_evidence_fingerprint_includes_ctime(self, tmp_path):
+        from backend.services.snapshot_v2.object_store import VerifiedObjectEvidence
+
+        object_path = tmp_path / ("a" * 64)
+        object_path.write_bytes(b"fingerprint-ctime")
+        evidence = VerifiedObjectEvidence.from_path(object_path, object_path.name)
+        assert str(object_path.stat().st_ctime_ns) in evidence.stat_fingerprint

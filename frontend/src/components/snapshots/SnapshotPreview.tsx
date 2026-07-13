@@ -1,11 +1,5 @@
+import { formatBytes } from '../../utils/snapshotV2'
 import type { SnapshotRecordV2, ContinuationCapsule } from '../../types/snapshotV2'
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
 
 function capsuleDetail(capsule: ContinuationCapsule): string {
   if (capsule.kind === 'graph_node') return `Next: ${capsule.next_node} (${capsule.planning_stage})`
@@ -72,7 +66,7 @@ export function SnapshotPreview({ record }: SnapshotPreviewProps) {
               <div key={entry.path} className="flex items-center justify-between text-xs text-slate-600">
                 <div className="flex items-center gap-1 min-w-0">
                   <span className="truncate font-mono text-[10px]">{entry.path}</span>
-                  <span className="text-slate-400">({formatSize(entry.size)})</span>
+                  <span className="text-slate-400">({formatBytes(entry.size)})</span>
                 </div>
                 <code className="text-[10px] text-slate-400 ml-2 shrink-0">{entry.object_hash}</code>
               </div>
@@ -90,7 +84,7 @@ export function SnapshotPreview({ record }: SnapshotPreviewProps) {
             {Object.entries(m.objects).map(([hash, obj]) => (
               <div key={hash} className="flex items-center justify-between text-xs text-slate-600">
                 <code className="text-[10px] truncate">{hash}</code>
-                <span className="shrink-0 ml-2">{formatSize(obj.size)}</span>
+                <span className="shrink-0 ml-2">{formatBytes(obj.size)}</span>
               </div>
             ))}
           </div>

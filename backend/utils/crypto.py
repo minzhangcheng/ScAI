@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac as _hmac
 import logging
 import os
 import secrets
@@ -156,3 +157,35 @@ def decrypt_value(ciphertext: str) -> str:
         )
     fernet = _fernet
     return fernet.decrypt(ciphertext.encode()).decode()
+
+
+# ── HMAC-SHA256 signing and verification ────────────────────────────
+
+
+def _hmac_secret(secret: bytes | None = None) -> bytes:
+    """Return the HMAC key — from *secret* when given, else the module-level secret."""
+    if secret is not None:
+        return secret
+    s = _get_or_create_secret()
+    if s is None:
+        raise ConfigEncryptionUnavailable("No secret available for HMAC signing")
+    return s.encode()
+
+
+def sign_hmac_sha256(data: bytes, *, secret: bytes | None = None) -> str:
+    """Return the HMAC-SHA256 hex digest of *data*.
+
+    When *secret* is None the module-level config secret is used,
+    matching the behaviour of :func:`get_integrity_secret`.
+    """
+    key = _hmac_secret(secret)
+    return _hmac.new(key, data, hashlib.sha256).hexdigest()
+
+
+def verify_hmac_sha256(data: bytes, signature: str, *, secret: bytes | None = None) -> bool:
+    """Verify *signature* against *data* using constant-time comparison.
+
+    Returns True when the signature matches, False otherwise.
+    """
+    expected = sign_hmac_sha256(data, secret=secret)
+    return _hmac.compare_digest(expected, signature)

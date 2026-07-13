@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from backend.constants import WORKFLOW_GRAPH_NODES
 from backend.models.schemas import SnapshotPhase
 from backend.services.snapshot_v2.errors import SnapshotCaptureError
 from backend.services.snapshot_v2.models import (
@@ -92,25 +93,12 @@ _PHASE_TO_GATE: dict[str, str] = {
     "pre_major_revision": "plan_revision",
 }
 
-# ── Known graph node names (from workflow/graph.py) ───────────────────────────
+# ── Known graph node names (from authoritative WORKFLOW_GRAPH_NODES) ────────
 
-_KNOWN_GRAPH_NODES: frozenset[str] = frozenset({
-    "initialize_round",
-    "pi_planning",
-    "planning_dialogue",
-    "user_review_gate",
-    "pathology_analysis",
-    "bioinformatics_analysis",
-    "biochemistry_analysis",
-    "literature_research",
-    "pi_synthesis",
-    "wait_for_user_input",
-    "check_convergence",
-    "generate_final_report",
-    "generate_graphic_abstract",
-    "generate_detailed_report",
-    "integration_synthesis",
-})
+# Capsule targets exclude the restore_entry node (internal graph entry point).
+_KNOWN_GRAPH_NODES: frozenset[str] = frozenset(
+    n for n in WORKFLOW_GRAPH_NODES if n != "restore_entry"
+)
 
 
 class ContinuationRegistry:
@@ -176,10 +164,11 @@ class ContinuationRegistry:
                 "source": "live_safe_point",
                 "current_round": desc.get("current_round", 0),
             }
-            ref = self._object_store.put_bytes(
+            put_result = self._object_store.put_bytes(
                 json.dumps(payload, sort_keys=True, ensure_ascii=False).encode(),
                 "application/json",
             )
+            ref = put_result.ref
             return SemanticGateCapsule(
                 graph_version=GRAPH_VERSION,
                 gate=str(gate),
@@ -190,10 +179,11 @@ class ContinuationRegistry:
         next_node = desc.get("graph_node") or desc.get("next_node")
         if next_node and next_node in _KNOWN_GRAPH_NODES:
             serialized = self._serialize_workflow_state(desc)
-            ref = self._object_store.put_bytes(
+            put_result = self._object_store.put_bytes(
                 json.dumps(serialized, sort_keys=True, ensure_ascii=False).encode(),
                 "application/json",
             )
+            ref = put_result.ref
             return GraphNodeCapsule(
                 graph_version=GRAPH_VERSION,
                 next_node=str(next_node),
@@ -216,10 +206,11 @@ class ContinuationRegistry:
 
         planning_stage = _PHASE_TO_PLANNING_STAGE.get(phase, "full")
         serialized = self._serialize_workflow_state(workflow_state)
-        ref = self._object_store.put_bytes(
+        put_result = self._object_store.put_bytes(
             json.dumps(serialized, sort_keys=True, ensure_ascii=False).encode(),
             "application/json",
         )
+        ref = put_result.ref
 
         return GraphNodeCapsule(
             graph_version=GRAPH_VERSION,
@@ -243,10 +234,11 @@ class ContinuationRegistry:
             "integration_next": workflow_state.get("integration_next"),
         }
 
-        ref = self._object_store.put_bytes(
+        put_result = self._object_store.put_bytes(
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode(),
             "application/json",
         )
+        ref = put_result.ref
 
         return SemanticGateCapsule(
             graph_version=GRAPH_VERSION,

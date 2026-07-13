@@ -44,7 +44,8 @@ class _FakeCompiledGraph:
     async def ainvoke(self, workflow_state, config):
         self.calls.append((workflow_state, config))
         state = workflow_state["analysis_state"]
-        assert state.last_restored_snapshot_id is None
+        # Routing metadata is consumed before graph continue; provenance may
+        # still be present until the first restored RoundResult is recorded.
         assert state.restore_resume_kind is None
         state.current_round += 1
         return {"analysis_state": state}
@@ -89,7 +90,9 @@ async def test_resume_restored_wait_state_clears_restore_flags_before_next_round
 
     assert len(workflow.compiled_graph.calls) == 1
     assert result.current_round == 4
-    assert result.last_restored_snapshot_id is None
+    assert result.restore_resume_kind is None
+    # Provenance survives wait-state resume until canonical round recording.
+    assert result.last_restored_snapshot_id == "snap-1"
 
 
 @pytest.mark.asyncio

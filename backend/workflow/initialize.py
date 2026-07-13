@@ -22,12 +22,19 @@ class InitializeMixin:
     async def _initialize_round(self, state: WorkflowState) -> WorkflowState:
         """Initialize a new analysis round, processing any pending user input"""
         analysis_state = state["analysis_state"]
+        # Restore semantics may arrive via last_restored_snapshot_id OR via the
+        # one-shot _preserve_round_on_initialize flag (set by restore_entry for
+        # explicit_start after the marker was already consumed at handoff).
+        preserve_restore = bool(
+            analysis_state.last_restored_snapshot_id
+            or state.get("_preserve_round_on_initialize")
+        )
         # P1-1: commit the previously peeked direction. If current_round_direction
         # matches the head of the queue, the prior round completed successfully
         # (otherwise LangGraph would have replayed from checkpoint without
         # current_round_direction set) → consume it now.
         if (
-            not analysis_state.last_restored_snapshot_id
+            not preserve_restore
             and
             analysis_state.current_round_direction
             and analysis_state.directions_queue
@@ -38,7 +45,7 @@ class InitializeMixin:
                 f"[{self.session_id}] Direction consumed at round entry: "
                 f"{consumed.get('direction', '')[:80]} (remaining queue: {len(analysis_state.directions_queue)})"
             )
-        if not analysis_state.last_restored_snapshot_id:
+        if not preserve_restore:
             analysis_state.current_round_direction = ""
 
         # P3-5: business default — if resuming in INNOVATION after round 1 with
@@ -180,8 +187,11 @@ class InitializeMixin:
             analysis_state.pending_uploaded_files = []
         
         # Increment round counter (skip if resuming from snapshot restore,
-        # since current_round is already correct from the snapshot)
-        if not analysis_state.last_restored_snapshot_id:
+        # since current_round is already correct from the snapshot).
+        # Also skip when _preserve_round_on_initialize is True (explicit_start
+        # on an idle-restored session — the user clicked "Start" and we must
+        # not advance the round that was preserved during restore).
+        if not preserve_restore:
             analysis_state.current_round += 1
             # Clear the previous round's approved plan so the new round
             # actually runs planning_dialogue. Without this, _pi_planning's
@@ -190,6 +200,10 @@ class InitializeMixin:
             analysis_state.current_plan = None
             # Snapshot-restore path preserves it by skipping this whole block.
             analysis_state.current_round_cache = None
+
+        # Consume the one-shot preserve_round flag after first use.
+        state.pop("_preserve_round_on_initialize", None)
+
         self._set_status(analysis_state, TaskStatus.RUNNING)
 
         # Clear residual should_continue from previous convergence check
@@ -227,15 +241,14 @@ class InitializeMixin:
             "planning_context": None,
             # Reset plan approval so the new round runs planning_dialogue;
             # paired with clearing analysis_state.current_plan above.
-            # On snapshot restore, current_plan is preserved but plan_approved
-            # was unconditionally reset — causing planning_dialogue to re-run
-            # for an already-approved plan.  Guard: if current_plan exists and
-            # is approved on snapshot restore, preserve plan_approved = True.
+            # On snapshot restore (marker or preserve flag after consume), keep
+            # plan_approved=True when the restored plan is already approved.
             "plan_approved": (
-                bool(analysis_state.last_restored_snapshot_id
-                     and analysis_state.current_plan
-                     and analysis_state.current_plan.status == "approved")
-                if analysis_state.last_restored_snapshot_id
+                bool(
+                    analysis_state.current_plan
+                    and analysis_state.current_plan.status == "approved"
+                )
+                if preserve_restore
                 else False
             ),
             "plan_revision_needed": False,

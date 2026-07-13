@@ -10,37 +10,26 @@ The caller (e.g. restore coordinator or snapshot route) stages the checkpoint
 against the current WorkflowState, then activates it to mutate AnalysisState.
 """
 
+import copy
 import json
 import logging
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from backend.constants import WORKFLOW_GRAPH_NODES
 from backend.services.snapshot_v2.errors import SnapshotCaptureError
 from backend.services.snapshot_v2.object_store import ObjectStore
 
 logger = logging.getLogger(__name__)
 
 
-# ── Known graph node names (must match workflow/graph.py) ─────────────────────
+# ── Known graph node names (must match WORKFLOW_GRAPH_NODES) ──────────────────
 
-_KNOWN_GRAPH_NODES: frozenset[str] = frozenset({
-    "initialize_round",
-    "pi_planning",
-    "planning_dialogue",
-    "user_review_gate",
-    "pathology_analysis",
-    "bioinformatics_analysis",
-    "biochemistry_analysis",
-    "literature_research",
-    "pi_synthesis",
-    "wait_for_user_input",
-    "check_convergence",
-    "generate_final_report",
-    "generate_graphic_abstract",
-    "generate_detailed_report",
-    "integration_synthesis",
-})
+# Capsule targets exclude the restore_entry node (internal graph entry point).
+_KNOWN_GRAPH_NODES: frozenset[str] = frozenset(
+    n for n in WORKFLOW_GRAPH_NODES if n != "restore_entry"
+)
 
 # ── Known semantic gate names (must match constants.py) ───────────────────────
 
@@ -171,6 +160,9 @@ class ContinuationDispatcher:
             analysis_state.restore_resume_kind = "graph_node"
             analysis_state.restore_resume_node = staged.next_node
             analysis_state.restore_resume_gate = None
+            analysis_state.restore_resume_workflow_state = (
+                copy.deepcopy(staged.workflow_state) if staged.workflow_state else {}
+            )
             if staged.planning_stage is not None and hasattr(analysis_state, "sandbox_state"):
                 ss = dict(getattr(analysis_state, "sandbox_state", None) or {})
                 ss["planning_stage"] = staged.planning_stage
@@ -260,6 +252,8 @@ class ContinuationDispatcher:
         analysis_state.restore_branch_id = staged.branch_id
         analysis_state.restore_branch_label = staged.branch_label
         analysis_state.last_restored_snapshot_id = staged.parent_snapshot_id
+        from backend.workflow.provenance import seed_restore_provenance
+        seed_restore_provenance(analysis_state)
 
         # Invalidate report paths
         self._invalidate_report_paths(analysis_state)

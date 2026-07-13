@@ -290,8 +290,8 @@ def active_context(request, paths, monkeypatch):
             json.dumps(journal, sort_keys=True)
         )
     elif reason == "import":
-        from backend.services.snapshot_v2.importer import _atomic_write_json
-        _atomic_write_json(
+        from backend.utils.files import atomic_write_json
+        atomic_write_json(
             paths.journals / "import-protect.json",
             {
                 "transaction_id": "import-protect",

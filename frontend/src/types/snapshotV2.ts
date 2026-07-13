@@ -152,9 +152,13 @@ export interface ExportV2Result {
 }
 
 export interface ImportV2Result {
-  import_id: string
-  snapshot_count: number
-  status: string
+  success: boolean
+  dest_session_id: string
+  imported_snapshot_ids: string[]
+  committed_count: number
+  skipped_runtime_snapshot_ids: string[]
+  errors: string[]
+  warnings: string[]
 }
 
 export interface SnapshotV2ListResult {

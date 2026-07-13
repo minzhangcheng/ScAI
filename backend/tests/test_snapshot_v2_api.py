@@ -4,13 +4,23 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from backend.models.api_requests import (
     SnapshotTransactionResponse,
 )
+from backend.models.schemas import AnalysisState
+from backend.routes.export_import import export_v2
+from backend.services.snapshot_v2.errors import (
+    SnapshotCompatibilityError,
+    SnapshotStorageError,
+    snapshot_error_detail,
+)
+from backend.services.snapshot_v2.service import SnapshotService
 
 
 class TestSnapshotV2ResponseModels:
@@ -136,55 +146,56 @@ class TestSnapshotV2ResponseModels:
 
 
 class TestSnapshotV2ErrorMapping:
-    """Error-to-status-code mapping is centralized and correct."""
+    """Error-to-status-code mapping is centralized via snapshot_error_detail / _v2_http_exc."""
 
     def test_map_snapshot_compatibility_error_to_422(self):
         from backend.services.snapshot_v2.errors import SnapshotCompatibilityError
-        from backend.routes.snapshots import _map_v2_error
+        from backend.routes.snapshots import _v2_http_exc
         exc = SnapshotCompatibilityError("COMPAT", "incompatible version")
-        code = _map_v2_error(exc, {"snapshot_id": "s1"})
-        assert code == 422
+        http_exc = _v2_http_exc(exc)
+        assert http_exc.status_code == 422
+        assert http_exc.detail["code"] == "COMPAT"
 
     def test_map_snapshot_integrity_error_to_422(self):
         from backend.services.snapshot_v2.errors import SnapshotIntegrityError
-        from backend.routes.snapshots import _map_v2_error
+        from backend.routes.snapshots import _v2_http_exc
         exc = SnapshotIntegrityError("HASH", "hash mismatch")
-        code = _map_v2_error(exc, {"snapshot_id": "s1"})
-        assert code == 422
+        http_exc = _v2_http_exc(exc)
+        assert http_exc.status_code == 422
+        assert http_exc.detail["code"] == "HASH"
 
     def test_map_snapshot_storage_error_to_507(self):
         from backend.services.snapshot_v2.errors import SnapshotStorageError
-        from backend.routes.snapshots import _map_v2_error
+        from backend.routes.snapshots import _v2_http_exc
         exc = SnapshotStorageError("QUOTA", "disk full")
-        code = _map_v2_error(exc, {"snapshot_id": "s1"})
-        assert code == 507
+        http_exc = _v2_http_exc(exc)
+        assert http_exc.status_code == 507
+        assert http_exc.detail["code"] == "QUOTA"
 
     def test_map_snapshot_delete_conflict_to_409(self):
         from backend.services.snapshot_v2.errors import SnapshotDeleteConflict
-        from backend.routes.snapshots import _map_v2_error
+        from backend.routes.snapshots import _v2_http_exc
         exc = SnapshotDeleteConflict("HAS_CHILDREN", "has children")
-        code = _map_v2_error(exc, {"snapshot_id": "s1"})
-        assert code == 409
+        http_exc = _v2_http_exc(exc)
+        assert http_exc.status_code == 409
+        assert http_exc.detail["code"] == "HAS_CHILDREN"
 
     def test_map_snapshot_transaction_error_to_503(self):
         from backend.services.snapshot_v2.errors import SnapshotTransactionError
-        from backend.routes.snapshots import _map_v2_error
+        from backend.routes.snapshots import _v2_http_exc
         exc = SnapshotTransactionError("ENQUEUE_FAILED", "queue full")
-        code = _map_v2_error(exc, {"snapshot_id": "s1"})
-        assert code == 503
+        http_exc = _v2_http_exc(exc)
+        assert http_exc.status_code == 503
+        assert http_exc.detail["code"] == "ENQUEUE_FAILED"
 
-    def test_map_unknown_error_to_500(self):
-        from backend.routes.snapshots import _map_v2_error
-        exc = ValueError("something unexpected")
-        code = _map_v2_error(exc, {"snapshot_id": "s1"})
-        assert code == 500
-
-    def test_map_snapshot_integrity_error_not_found_to_410(self):
+    def test_map_snapshot_integrity_error_not_found_to_404(self):
         from backend.services.snapshot_v2.errors import SnapshotIntegrityError
-        from backend.routes.snapshots import _map_v2_error
+        from backend.routes.snapshots import _v2_http_exc
         exc = SnapshotIntegrityError("MANIFEST_NOT_FOUND", "not found")
-        code = _map_v2_error(exc, {"snapshot_id": "s1"})
-        assert code == 410
+        http_exc = _v2_http_exc(exc)
+        assert http_exc.status_code == 404
+        assert http_exc.detail["code"] == "MANIFEST_NOT_FOUND"
+        assert "message" in http_exc.detail
 
 
 class TestAnalysisStateV2Fields:
@@ -253,6 +264,116 @@ class TestAnalysisStateV2Fields:
         state.pending_required_snapshot = {"snap": "s1"}
         api = state.to_api_dict()
         json.dumps(api)
+
+
+class TestSnapshotErrorDetailFunction:
+    """snapshot_error_detail() maps SnapshotV2Error types to correct status codes."""
+
+    def test_not_found_404(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotIntegrityError,
+            snapshot_error_detail,
+        )
+        exc = SnapshotIntegrityError("MANIFEST_NOT_FOUND", "not found")
+        result = snapshot_error_detail(exc)
+        assert result["status_code"] == 404
+
+    def test_snapshot_not_found_404(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotIntegrityError,
+            snapshot_error_detail,
+        )
+        exc = SnapshotIntegrityError("SNAPSHOT_NOT_FOUND", "snap gone")
+        result = snapshot_error_detail(exc)
+        assert result["status_code"] == 404
+
+    def test_compatibility_422(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotCompatibilityError,
+            snapshot_error_detail,
+        )
+        exc = SnapshotCompatibilityError("COMPAT", "version mismatch")
+        result = snapshot_error_detail(exc)
+        assert result["status_code"] == 422
+
+    def test_integrity_hash_422(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotIntegrityError,
+            snapshot_error_detail,
+        )
+        exc = SnapshotIntegrityError("HASH_MISMATCH", "hash differs")
+        result = snapshot_error_detail(exc)
+        assert result["status_code"] == 422
+
+    def test_delete_conflict_409(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotDeleteConflict,
+            snapshot_error_detail,
+        )
+        exc = SnapshotDeleteConflict("HAS_CHILDREN", "has children")
+        result = snapshot_error_detail(exc)
+        assert result["status_code"] == 409
+
+    def test_storage_507(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotStorageError,
+            snapshot_error_detail,
+        )
+        exc = SnapshotStorageError("QUOTA", "disk full")
+        result = snapshot_error_detail(exc)
+        assert result["status_code"] == 507
+
+    def test_transaction_503(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotTransactionError,
+            snapshot_error_detail,
+        )
+        exc = SnapshotTransactionError("ENQUEUE_FAILED", "queue full")
+        result = snapshot_error_detail(exc)
+        assert result["status_code"] == 503
+
+    def test_unknown_v2_error_500(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotCaptureError,
+            snapshot_error_detail,
+        )
+        exc = SnapshotCaptureError("UNKNOWN", "unexpected")
+        result = snapshot_error_detail(exc)
+        assert result["status_code"] == 500
+
+
+def test_snapshot_error_detail_preserves_details_and_context():
+    exc = SnapshotCompatibilityError(
+        "RUNTIME_UNAVAILABLE",
+        "runtime choice required",
+        details={"choices": ["reset", "keep"]},
+    )
+    detail = snapshot_error_detail(exc, {"runtime_status": "missing"})
+    assert detail == {
+        "status_code": 422,
+        "code": "RUNTIME_UNAVAILABLE",
+        "message": "RUNTIME_UNAVAILABLE: runtime choice required",
+        "details": {"choices": ["reset", "keep"]},
+        "runtime_status": "missing",
+    }
+
+
+@pytest.mark.asyncio
+async def test_export_v2_errors_are_structured(monkeypatch):
+    request = MagicMock()
+    request.state.user_id = "u1"
+    monkeypatch.setattr(
+        "backend.routes.export_import.require_session_ownership",
+        AsyncMock(return_value=AnalysisState(id="s1", user_id="u1")),
+    )
+    monkeypatch.setattr(
+        SnapshotService,
+        "export_snapshots",
+        AsyncMock(side_effect=SnapshotStorageError("NO_SPACE", "disk full")),
+    )
+    with pytest.raises(HTTPException) as caught:
+        await export_v2("s1", request, include_runtime=True, snapshot_ids=None)
+    assert caught.value.detail == {"code": "NO_SPACE", "message": "NO_SPACE: disk full"}
 
 
 # ── Route-level restore job control (Batch 2 Task 5) ───────────────────────
@@ -460,6 +581,14 @@ class TestSnapshotV2RestoreJobRoutes:
         }
         body.update(extra)
         return body
+
+    def test_get_snapshot_missing_returns_404_structured(self, client, route_env):
+        session_id = route_env["session_id"]
+        resp = client.get(f"/api/session/{session_id}/snapshots-v2/does-not-exist")
+        assert resp.status_code == 404
+        detail = resp.json()["detail"]
+        assert isinstance(detail, dict)
+        assert detail["code"] == "MANIFEST_NOT_FOUND"
 
     def test_restore_v2_returns_202_and_status_url_is_callable(
         self, client, route_env, monkeypatch,

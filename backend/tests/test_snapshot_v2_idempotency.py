@@ -62,10 +62,11 @@ async def test_session_save_failure_after_publish_returns_committed_snapshot(
         idempotency_key="round-7-wait",
     )
 
-    service.safe_point.acquire(
+    await service.safe_point.acquire(
         session_id,
         {"kernel_present": False, "status": "completed"},
         eligibility_trusted=True,
+        owner_token="test-owner",
     )
     try:
         with patch.object(service, "_get_session_state", new=AsyncMock(return_value=state)):
@@ -83,7 +84,7 @@ async def test_session_save_failure_after_publish_returns_committed_snapshot(
                         workspace_root=str(workspace),
                     )
     finally:
-        service.safe_point.release(session_id)
+        await service.safe_point.release(session_id, "test-owner")
 
     assert result.manifest is not None
     assert result.failure is None
@@ -113,10 +114,11 @@ async def test_idempotent_retry_after_session_save_failure(tmp_path, v2_paths):
             idempotency_key="round-7-wait",
         )
 
-    service.safe_point.acquire(
+    await service.safe_point.acquire(
         session_id,
         {"kernel_present": False, "status": "completed"},
         eligibility_trusted=True,
+        owner_token="test-owner",
     )
     try:
         with patch.object(service, "_get_session_state", new=AsyncMock(return_value=state)):
@@ -138,7 +140,7 @@ async def test_idempotent_retry_after_session_save_failure(tmp_path, v2_paths):
                         workspace_root=str(workspace),
                     )
     finally:
-        service.safe_point.release(session_id)
+        await service.safe_point.release(session_id, "test-owner")
 
     assert first.failure is None
     assert first.session_reconciliation_pending is True

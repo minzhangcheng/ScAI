@@ -70,6 +70,7 @@ class RestoreJobHandle:
     task: asyncio.Task | None
     cancel_event: asyncio.Event
     paths: Any = None  # SnapshotV2Paths-like; journals directory for load_transaction
+    owner_token: str = ""  # Safe-point requester token for this job
 
 
 def get_restore_job(transaction_id: str) -> RestoreJobHandle | None:
@@ -184,8 +185,11 @@ async def cancel_restore_job(
     handle.record = updated
     _persist_handle(handle)
 
-    # Release safe point if pending or acquired
-    get_snapshot_safe_point_manager().cancel_safe_point_request(record.session_id)
+    # Release safe point if pending or acquired (must use job owner token).
+    owner_token = handle.owner_token or f"restore:{record.transaction_id}"
+    await get_snapshot_safe_point_manager().cancel_safe_point_request(
+        record.session_id, owner_token,
+    )
 
     handle.cancel_event.set()
     if handle.task is not None and not handle.task.done():
@@ -380,11 +384,13 @@ class RestoreJobManager:
         )
 
         cancel_event = asyncio.Event()
+        owner_token = f"restore:{tx_id}"
         handle = RestoreJobHandle(
             record=record,
             task=None,
             cancel_event=cancel_event,
             paths=self.paths,
+            owner_token=owner_token,
         )
         # Persist before registering so status polls never see a missing journal
         _persist_handle(handle)
@@ -443,13 +449,16 @@ class RestoreJobManager:
         record = handle.record
         session_id = record.session_id
         tx_id = record.transaction_id
+        owner_token = handle.owner_token or f"restore:{tx_id}"
+        if not handle.owner_token:
+            handle.owner_token = owner_token
         stop_event = handle.cancel_event
         t0 = time.monotonic()
 
         try:
             # ── queued → waiting_safe_point ──────────────────────
             record = self._update(handle, "waiting_safe_point")
-            self._safe_point.request_safe_point(session_id)
+            await self._safe_point.request_safe_point(session_id, owner_token)
 
             # Wait for safe-point acknowledgment, cancellation, or timeout
             ack_event = self._safe_point.get_pending_event(session_id)
@@ -462,7 +471,9 @@ class RestoreJobManager:
                 except asyncio.TimeoutError:
                     elapsed = time.monotonic() - t0
                     record = self._update(handle, "timed_out")
-                    self._safe_point.cancel_safe_point_request(session_id)
+                    await self._safe_point.cancel_safe_point_request(
+                        session_id, owner_token,
+                    )
                     logger.info(
                         "[snapshot-v2] Restore job %s timed out after %.1fs",
                         tx_id, elapsed,
@@ -471,14 +482,16 @@ class RestoreJobManager:
 
             if stop_event.is_set():
                 record = self._update(handle, "cancelled")
-                self._safe_point.cancel_safe_point_request(session_id)
+                await self._safe_point.cancel_safe_point_request(
+                    session_id, owner_token,
+                )
                 return
 
             # Test barriers: allow freeze before orchestration (legacy hooks).
             await self._yield_for_barrier("staging")
             if stop_event.is_set():
                 record = self._update(handle, "cancelled")
-                self._safe_point.release(session_id)
+                await self._safe_point.release(session_id, owner_token)
                 return
 
             # ── Sole orchestration: SnapshotService.restore_snapshot ──
@@ -522,7 +535,7 @@ class RestoreJobManager:
                 asyncio.ensure_future(self._state_hook(result))
             asyncio.ensure_future(self._emit_state_sync(result, 0.0))
 
-            self._safe_point.release(session_id)
+            await self._safe_point.release(session_id, owner_token)
 
             elapsed = time.monotonic() - t0
             logger.info(
@@ -533,12 +546,12 @@ class RestoreJobManager:
         except asyncio.CancelledError:
             if handle.record.status not in ("cancelled", "committed", "failed", "timed_out"):
                 self._update(handle, "cancelled")
-            self._safe_point.cancel_safe_point_request(session_id)
+            await self._safe_point.cancel_safe_point_request(session_id, owner_token)
             raise
         except Exception as exc:
             logger.exception("[snapshot-v2] Restore job %s failed: %s", tx_id, exc)
             self._update(handle, "failed", failure={"message": str(exc)})
-            self._safe_point.cancel_safe_point_request(session_id)
+            await self._safe_point.cancel_safe_point_request(session_id, owner_token)
 
     # ── Helpers ──────────────────────────────────────────────────────
 

@@ -22,7 +22,7 @@ import nbformat
 from nbformat.v4 import new_notebook, new_code_cell, new_output
 from jupyter_client import KernelManager
 
-from backend.utils.crypto import get_integrity_secret
+from backend.utils.crypto import get_integrity_secret, sign_hmac_sha256
 from backend.config._config import DATA_BASE_DIR
 
 # Cap on a single iopub poll so the wall-clock deadline is re-checked at least
@@ -39,9 +39,7 @@ def _sig_path(pkl: Path, integrity_dir: Path) -> Path:
 
 
 def _pkl_hmac(data: bytes) -> str:
-    return hmac.new(
-        get_integrity_secret().encode(), data, hashlib.sha256
-    ).hexdigest()
+    return sign_hmac_sha256(data)
 
 
 def _pkl_hmac_stream(path: Path, chunk_size: int = 1024 * 1024) -> str:

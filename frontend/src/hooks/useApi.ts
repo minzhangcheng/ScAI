@@ -29,6 +29,28 @@ import type {
   ImportV2Result,
 } from '../types/snapshotV2'
 
+export class ApiError extends Error {
+  status: number
+  code: string
+  runtimeStatus: string | null
+  details: Record<string, unknown> | null
+
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    runtimeStatus?: string | null,
+    details?: Record<string, unknown> | null,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.runtimeStatus = runtimeStatus ?? null
+    this.details = details ?? null
+  }
+}
+
 const API_BASE = '/api'
 export const WS_CONNECT_TIMEOUT_MS = 10_000
 
@@ -64,11 +86,6 @@ export function applyStoreUpdates(updates: StoreUpdates): void {
       snapshot_failure: updates.snapshotFailure?.failure ?? (updates.snapshotFailure === null ? null : undefined),
       snapshot_failure_allowed_actions: updates.snapshotFailure?.allowed_actions,
     })
-    if (updates.snapshotFailure === null) {
-      store.clearSnapshotFailure()
-    } else if (updates.snapshotFailure) {
-      store.setSnapshotFailure(updates.snapshotFailure)
-    }
   }
 }
 
@@ -129,16 +146,24 @@ export async function apiFetch<T>(
     const isAuthFailure = response.headers.has('WWW-Authenticate')
     if (isAuthFailure) {
       clearToken()
-      throw new Error('Authentication failed. Please log in again.')
+      throw new ApiError(401, 'AUTH_FAILED', 'Authentication failed. Please log in again.')
     }
     // Non-auth 401 — treat as a regular error
     const error = await response.json().catch(() => ({ detail: 'Unauthorized' }))
-    throw new Error(error.detail || 'Unauthorized')
+    const detail = typeof error.detail === 'object' ? error.detail : { message: error.detail || 'Unauthorized' }
+    throw new ApiError(401, detail.code || 'UNAUTHORIZED', detail.message || error.detail || 'Unauthorized', detail.runtime_status || null, detail)
   }
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Unknown error' }))
-    throw new Error(error.detail || 'API request failed')
+    const body = await response.json().catch(() => ({ detail: 'Unknown error' }))
+    const detail = typeof body.detail === 'object' ? body.detail : { message: body.detail || 'API request failed' }
+    throw new ApiError(
+      response.status,
+      detail.code || `HTTP_${response.status}`,
+      detail.message || body.detail || 'API request failed',
+      detail.runtime_status || null,
+      detail,
+    )
   }
 
   if (response.status === 204) return undefined as T

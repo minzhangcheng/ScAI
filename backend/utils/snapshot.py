@@ -145,16 +145,19 @@ class SnapshotManager:
         # P2-4: do NOT use snapshots[-1] as fallback — it picks by time, not by
         # branch, which mis-parents across branches. Instead chain onto the lineage
         # head (last_snapshot_id), which advances on every create and points at the
-        # restore target after a restore. A fresh restore (last_restored_snapshot_id)
+        # restore target after a restore. A fresh restore (restore provenance)
         # takes precedence so the new snapshot anchors on the restored node and forms
         # a diverging branch.
-        parent_id = state.last_restored_snapshot_id or state.last_snapshot_id
+        from backend.workflow.provenance import restore_provenance_id
 
-        if state.last_restored_snapshot_id:
+        restored_from = restore_provenance_id(state)
+        parent_id = restored_from or state.last_snapshot_id
+
+        if restored_from:
             # Diverging off a restore point: allocate a new branch label.
             existing_branches = sum(
                 1 for s in state.snapshots
-                if s.parent_id == state.last_restored_snapshot_id
+                if s.parent_id == restored_from
                 and s.branch_label and s.branch_label != "main"
             )
             branch_letter = chr(ord('A') + existing_branches) if existing_branches < 26 else str(existing_branches)
@@ -195,8 +198,10 @@ class SnapshotManager:
         state.snapshots.append(snapshot)
         # Advance the lineage head so the next forward snapshot chains onto this one.
         state.last_snapshot_id = snapshot.id
-        if state.last_restored_snapshot_id:
-            state.last_restored_snapshot_id = None
+        # Do not consume restore provenance here. Parent selection still reads
+        # restore_provenance_id() while the first restored round is in flight;
+        # synthesis/integration consume only after the canonical RoundResult.
+        # Forward chain uses last_snapshot_id once provenance is consumed.
         # Runtime consistency is decided by the producer that owns the runtime
         # save attempt. Registration alone cannot prove that snapshot runtime
         # belongs to the same logical state.

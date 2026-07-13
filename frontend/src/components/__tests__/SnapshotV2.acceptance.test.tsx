@@ -11,7 +11,6 @@ import { SnapshotPanel } from '../SnapshotPanel'
 import { SnapshotFailureDialog } from '../snapshots/SnapshotFailureDialog'
 import { RuntimeChoiceDialog } from '../snapshots/RuntimeChoiceDialog'
 import { RuntimeWarningBanner } from '../snapshots/RuntimeWarningBanner'
-import { LegacySnapshotInventory, type LegacySnapshotItem } from '../snapshots/LegacySnapshotInventory'
 import { useAppStore } from '../../stores/appStore'
 import type { SnapshotRecordV2, SnapshotStoreStatus, SnapshotTransactionRecord } from '../../types/snapshotV2'
 
@@ -614,28 +613,7 @@ describe('Gate D acceptance: snapshot-failure no-Skip', () => {
       },
       allowed_actions: ['retry', 'manage', 'terminate'],
     })
-    expect(useAppStore.getState().isSnapshotFailureBlocked()).toBe(true)
-  })
-})
-
-// ── V1 unsupported inventory ──────────────────────────────────────
-
-describe('Gate D acceptance: V1 unsupported inventory', () => {
-  it('legacy inventory is unsupported, non-restorable, no restore action', () => {
-    const legacy: LegacySnapshotItem = {
-      id: 'v1-1',
-      name: 'Auto: pre_round_wait',
-      phase: 'pre_round_wait',
-      format_version: 1,
-      restorable: false,
-      unsupported: true,
-    }
-    render(
-      <LegacySnapshotInventory snapshots={[legacy]} warningVersion="0.33.1" />,
-    )
-    expect(screen.getByTestId('legacy-warning')).toHaveTextContent(/unsupported for restore/i)
-    expect(screen.getByText(/not restorable/i)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /restore/i })).not.toBeInTheDocument()
+    expect(useAppStore.getState().snapshotFailure).not.toBeNull()
   })
 })
 

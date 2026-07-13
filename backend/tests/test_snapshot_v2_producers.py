@@ -341,6 +341,14 @@ async def test_post_report_retry_only_retries_capture():
     workflow.snapshot_service = MagicMock()
     workflow.snapshot_service.object_store = MagicMock()
     workflow.snapshot_service.capture_required_snapshot = AsyncMock(side_effect=_capture)
+    # No-sandbox path pre-acquires a trusted safe point; mock must look free.
+    sp = MagicMock()
+    sp.is_paused.return_value = False
+    sp.has_pending_request.return_value = False
+    sp.is_eligibility_trusted.return_value = False
+    sp.acquire = AsyncMock(return_value=True)
+    sp.cancel_safe_point_request = AsyncMock(return_value=True)
+    workflow.snapshot_service.safe_point = sp
 
     with patch(
         "backend.services.snapshot_v2.continuation.ContinuationRegistry.freeze",
@@ -359,6 +367,8 @@ async def test_post_report_retry_only_retries_capture():
     workflow.report_generator.assert_not_awaited()
     assert state.pending_required_snapshot is None
     assert call_n["n"] == 2
+    assert sp.acquire.call_count >= 1
+    assert sp.cancel_safe_point_request.call_count >= 1
 
 
 @pytest.mark.asyncio
@@ -405,10 +415,11 @@ async def test_same_post_report_idempotency_key_returns_original_manifest(tmp_pa
         )
 
     # Trusted idle descriptor (producer path); raw workflow_state alone is not enough.
-    service.safe_point.acquire(
+    await service.safe_point.acquire(
         session_id,
         {"kernel_present": False, "status": "completed"},
         eligibility_trusted=True,
+        owner_token="test-owner",
     )
     try:
         with patch.object(service, "_get_session_state", new=AsyncMock(return_value=state)):
@@ -425,12 +436,113 @@ async def test_same_post_report_idempotency_key_returns_original_manifest(tmp_pa
                         workspace_root=str(workspace),
                     )
     finally:
-        service.safe_point.release(session_id)
+        await service.safe_point.release(session_id, "test-owner")
 
     assert first.failure is None
     assert second.failure is None
     assert second.snapshot_id == first.snapshot_id
     assert len(service.list_snapshots()) == 1
+
+
+@pytest.mark.asyncio
+async def test_post_report_no_sandbox_acquires_trusted_safe_point(tmp_path):
+    """ReportingMixin no-sandbox path must trust empty-complete (post-teardown).
+
+    After WS teardown the rebuilt workflow has sandbox=None. Capture must
+    pre-acquire a trusted no-kernel descriptor so empty-complete is allowed;
+    untrusted _create_safe_point seeding alone must not be sufficient.
+    """
+    from backend.models.schemas import TaskStatus
+    from backend.services.snapshot_v2.errors import RequiredSnapshotBlocked
+    from backend.services.snapshot_v2.service import SnapshotService
+    from backend.state import sessions, workflows
+    from backend.workflow.reporting import ReportingMixin
+
+    session_id = "sess-post-report-no-sandbox"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    class FakePaths:
+        root = tmp_path / "v2"
+        objects = tmp_path / "objects"
+        staging = tmp_path / "staging"
+        journals = tmp_path / "journals"
+        integrity = tmp_path / "integrity"
+        committed = tmp_path / "committed"
+
+        def ensure_dirs(self):
+            for d in [
+                self.root, self.objects, self.staging,
+                self.journals, self.integrity, self.committed,
+            ]:
+                d.mkdir(parents=True, exist_ok=True)
+
+    paths = FakePaths()
+    paths.ensure_dirs()
+    service = SnapshotService(session_id, paths)
+    state = _make_analysis_state(id=session_id)
+    state.status = TaskStatus.GENERATING_REPORT
+    state.current_round = 1
+    state.pending_required_snapshot = {
+        "report_generation_id": "report-ns-1",
+        "phase": "post_report",
+        "attempts": 1,
+    }
+
+    workflow = MagicMock()
+    workflow.session_id = session_id
+    workflow.sandbox = None  # post-teardown rebuild
+    workflow.snapshot_service = service
+    workflow.state = state
+    workflow._current_analysis_state = state
+    workflow._capture_post_report_snapshot = (
+        ReportingMixin._capture_post_report_snapshot.__get__(
+            workflow, type(workflow),
+        )
+    )
+    workflow._capture_required_snapshot = (
+        ReportingMixin._capture_required_snapshot.__get__(
+            workflow, type(workflow),
+        )
+    )
+    workflow.retry_pending_required_snapshot = (
+        ReportingMixin.retry_pending_required_snapshot.__get__(
+            workflow, type(workflow),
+        )
+    )
+
+    sessions[session_id] = state
+    workflows[session_id] = workflow  # active ownership like rebuild path
+    try:
+        with patch(
+            "backend.config.get_session_workspace",
+            return_value=workspace,
+        ):
+            with patch.object(
+                service, "_get_session_state", new=AsyncMock(return_value=state),
+            ):
+                with patch.object(service, "_save_session_state", new=AsyncMock()):
+                    with patch.object(service, "_send_state_sync", new=AsyncMock()):
+                        # Must NOT raise LIVE_SANDBOX_REQUIRED solely due to
+                        # untrusted safe-point seed.
+                        record = await workflow._capture_post_report_snapshot(
+                            state, "report-ns-1",
+                        )
+        assert record.failure is None
+        assert record.manifest.runtime.status == "complete"
+        assert record.manifest.runtime.dependencies.required == {}
+        # Producer-owned hold must be released after capture.
+        assert not service.safe_point.is_paused(session_id)
+        assert not service.safe_point.is_eligibility_trusted(session_id)
+    except RequiredSnapshotBlocked as exc:
+        pytest.fail(
+            f"no-sandbox post_report capture must authorize empty-complete; "
+            f"got {exc}"
+        )
+    finally:
+        sessions.pop(session_id, None)
+        workflows.pop(session_id, None)
+        await service.safe_point.release(session_id, "test-owner")
 
 
 @pytest.mark.asyncio

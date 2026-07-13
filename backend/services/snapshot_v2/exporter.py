@@ -2,8 +2,12 @@
 
 Produces a tar.gz archive of verified snapshot objects.  Base/workspace
 objects always export; runtime objects only with ``include_runtime=True``.
+
+Stream tar emission (no full buffer). Uses ``open_verified`` context
+manager for memory-efficient object streaming.
 """
 
+import contextlib
 import hashlib
 import io
 import json
@@ -14,6 +18,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from backend.services.snapshot_v2.errors import SnapshotV2Error
 from backend.services.snapshot_v2.object_store import ManifestStore, ObjectStore
@@ -22,6 +27,8 @@ from backend.services.snapshot_v2.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CHUNK_SIZE = 1 * 1024 * 1024
 
 
 class ExportIntegrityError(SnapshotV2Error):
@@ -45,7 +52,6 @@ def _write_export_protection(
     session_id: str,
     protected_ids: list[str],
 ) -> None:
-    """Write a signed export_protection journal so deletion honours the lock."""
     from backend.services.snapshot_v2.journal_store import JournalStore, make_envelope
 
     tx_id = f"export-{export_id}"
@@ -65,18 +71,15 @@ def _write_export_protection(
 
 def _remove_export_protection(paths, export_id: str) -> None:
     from backend.services.snapshot_v2.journal_store import JournalStore
-
     JournalStore(paths).remove(f"export-{export_id}")
 
 
 def load_active_export_protected_ids(paths) -> set[str]:
-    """Return set of snapshot IDs protected by any active V2 export."""
     protected: set[str] = set()
     journals_dir = Path(str(paths.journals))
     if not journals_dir.exists():
         return protected
     from backend.services.snapshot_v2.journal_store import JournalStore
-    from backend.services.snapshot_v2.errors import SnapshotIntegrityError
     from backend.services.snapshot_v2.recovery import RecoveryFailure
 
     store = JournalStore(paths)
@@ -98,8 +101,78 @@ def load_active_export_protected_ids(paths) -> set[str]:
 
 
 def load_active_export_protected_by_reason(paths) -> set[str]:
-    """Alias used by protection aggregation (export reason)."""
     return load_active_export_protected_ids(paths)
+
+
+# ── Streaming verified reader ────────────────────────────────────────────
+
+
+@contextlib.contextmanager
+def open_verified(path: Path, sha256: str):
+    """Context manager: yield a file-like reader that validates SHA-256 at EOF.
+
+    Usage::
+
+        with open_verified(obj_path, expected_hash) as reader:
+            while True:
+                chunk = reader.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                # process chunk
+
+    Raises ``SnapshotIntegrityError`` with code ``OBJECT_HASH_MISMATCH``
+    if the hash does not match *sha256* upon exhaustion.
+    """
+    if not path.exists() or not path.is_file():
+        raise ExportIntegrityError(
+            "OBJECT_NOT_FOUND",
+            f"Object {sha256} not found at {path}",
+        )
+
+    class _HashingReader(io.RawIOBase):
+        def __init__(self, filepath: Path):
+            self._fp = open(filepath, "rb")
+            self._hasher = hashlib.sha256()
+            self._exhausted = False
+
+        def readable(self) -> bool:
+            return True
+
+        def readinto(self, b: bytearray) -> int | None:
+            n = self._fp.readinto(b)
+            if n is None or n == 0:
+                if not self._exhausted:
+                    self._exhausted = True
+                    actual = self._hasher.hexdigest()
+                    if actual != sha256:
+                        raise ExportIntegrityError(
+                            "OBJECT_HASH_MISMATCH",
+                            f"Object {sha256} hash mismatch (actual: {actual})",
+                        )
+                return n
+            self._hasher.update(b[:n])
+            return n
+
+        def close(self) -> None:
+            if not self._exhausted and not self._fp.closed:
+                remaining = self._fp.read()
+                if remaining:
+                    self._hasher.update(remaining)
+                self._exhausted = True
+                actual = self._hasher.hexdigest()
+                if actual != sha256:
+                    raise ExportIntegrityError(
+                        "OBJECT_HASH_MISMATCH",
+                        f"Object {sha256} hash mismatch on close (actual: {actual})",
+                    )
+            self._fp.close()
+
+    reader = _HashingReader(path)
+    try:
+        yield reader
+    finally:
+        if not reader.closed:
+            reader.close()
 
 
 # ── Object classification ───────────────────────────────────────────────
@@ -108,12 +181,6 @@ def load_active_export_protected_by_reason(paths) -> set[str]:
 def _classify_manifest_and_collect(
     manifest: SnapshotManifestV2,
 ) -> tuple[set[str], set[str]]:
-    """Return (base_hashes, runtime_only_hashes) for one manifest.
-
-    Base hashes are those referenced by workspace entries, analysis state,
-    notebook, and checkpoint refs. Runtime-only hashes are those referenced
-    exclusively by ``runtime`` (adata refs, residual ref).
-    """
     workspace_hashes: set[str] = set()
     for we in manifest.workspace:
         workspace_hashes.add(we.object_hash)
@@ -144,12 +211,15 @@ def _classify_manifest_and_collect(
 
 
 class SnapshotExporter:
-    """Export verified snapshot V2 objects into a tar.gz archive.
+    """Export verified snapshot V2 objects into a tar.gz archive (streaming).
 
     Usage::
 
         exporter = SnapshotExporter(session_id, paths)
         path = exporter.export(session_id, include_runtime=False)
+
+    Objects are streamed into the archive via ``open_verified`` context
+    manager — no full object data is buffered in memory.
     """
 
     def __init__(self, session_id: str, paths) -> None:
@@ -165,12 +235,11 @@ class SnapshotExporter:
         include_runtime: bool = True,
         snapshot_ids: list[str] | None = None,
     ) -> Path:
-        """Build a tar.gz archive of verified snapshot objects.
+        """Build a tar.gz archive of verified snapshot objects (streaming).
 
         Returns the path to the archive on disk.  The caller is responsible
         for cleaning up the returned file.
         """
-        # 1. Freeze the verified manifest set (raises on corrupt)
         manifests = self.manifest_store.verify_all_committed()
         if snapshot_ids is not None:
             snapshot_set = set(snapshot_ids)
@@ -179,7 +248,15 @@ class SnapshotExporter:
         if not manifests:
             raise ExportIntegrityError("NO_MANIFESTS", "No snapshots to export")
 
-        # 2. Classify objects across all exported manifests
+        if snapshot_ids is not None:
+            found_ids = {m.snapshot_id for m in manifests}
+            missing = [sid for sid in snapshot_ids if sid not in found_ids]
+            if missing:
+                raise ExportIntegrityError(
+                    "UNKNOWN_SNAPSHOT_IDS",
+                    f"Snapshot IDs not found: {', '.join(missing)}",
+                )
+
         base_hashes: set[str] = set()
         runtime_only_hashes: set[str] = set()
         all_snapshot_ids: list[str] = []
@@ -190,22 +267,19 @@ class SnapshotExporter:
             base_hashes.update(bh)
             runtime_only_hashes.update(ro)
 
-        # 3. Decide final inclusion sets
         included_hashes: set[str] = set(base_hashes)
         omitted_runtime_hashes: list[str] = sorted(runtime_only_hashes)
 
         if include_runtime:
             included_hashes.update(runtime_only_hashes)
 
-        # Hashes that are in runtime_only but NOT included
         omitted_runtime = sorted(runtime_only_hashes) if not include_runtime else []
 
-        # 4. Write protection record
         export_id = _new_export_id()
         _write_export_protection(self.paths, export_id, session_id, all_snapshot_ids)
 
         try:
-            # 5. Verify all included objects
+            # Verify all included objects (uses evidence cache when available)
             for m in manifests:
                 all_included = {h for h in m.objects if h in included_hashes}
                 for h in all_included:
@@ -219,24 +293,29 @@ class SnapshotExporter:
                             f"snapshot {m.snapshot_id}: {exc}",
                         ) from exc
 
-            # 6. Build tar.gz archive
+            # Build tar.gz archive with streaming emission
             fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz", prefix=f"v2-export-{export_id}-")
             os.close(fd)
 
+            total_object_size = 0
+            object_count = 0
+
             with tarfile.open(tmp_path, mode="w:gz") as tf:
-                # 6a. Add object files (by hash)
+                # 6a. Stream object files (by hash) using open_verified
                 for h in sorted(included_hashes):
-                    try:
-                        data = self.object_store.get_bytes(h)
-                    except SnapshotV2Error as exc:
+                    obj_path = self.paths.objects / h
+                    if not obj_path.exists():
                         raise ExportIntegrityError(
                             "OBJECT_NOT_FOUND",
-                            f"Object {h} not found in store: {exc}",
-                        ) from exc
+                            f"Object {h} not found in store",
+                        )
 
-                    info = tarfile.TarInfo(name=f"objects/{h}")
-                    info.size = len(data)
-                    tf.addfile(info, io.BytesIO(data))
+                    with open_verified(obj_path, h) as reader:
+                        info = tarfile.TarInfo(name=f"objects/{h}")
+                        info.size = obj_path.stat().st_size
+                        tf.addfile(info, reader)
+                    total_object_size += info.size
+                    object_count += 1
 
                 # 6b. Add manifest files
                 for manifest in manifests:
@@ -250,10 +329,6 @@ class SnapshotExporter:
                     tf.addfile(m_info, io.BytesIO(m_bytes))
 
                 # 6c. Write metadata
-                total_size = sum(
-                    info.size for info in tf.getmembers()
-                    if info.name.startswith("objects/")
-                )
                 metadata = {
                     "format_version": 2,
                     "session_id": session_id,
@@ -263,11 +338,13 @@ class SnapshotExporter:
                     "included_snapshot_ids": all_snapshot_ids,
                     "included_hashes": sorted(included_hashes),
                     "omitted_runtime_hashes": omitted_runtime,
-                    "object_count": len(included_hashes),
+                    "object_count": object_count,
                     "manifest_count": len(manifests),
-                    "total_size_bytes": total_size,
+                    "total_size_bytes": total_object_size,
                 }
-                meta_bytes = json.dumps(metadata, sort_keys=True, ensure_ascii=False).encode()
+                meta_bytes = json.dumps(
+                    metadata, sort_keys=True, ensure_ascii=False,
+                ).encode()
                 meta_info = tarfile.TarInfo(name="snapshot-v2-export.json")
                 meta_info.size = len(meta_bytes)
                 tf.addfile(meta_info, io.BytesIO(meta_bytes))

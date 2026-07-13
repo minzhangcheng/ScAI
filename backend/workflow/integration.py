@@ -93,14 +93,18 @@ class IntegrationMixin:
         )
         derive_round_completion_status({"analysis_state": analysis_state}, integration_result)
         lineage_id = current_lineage_id(analysis_state)
+        from .provenance import consume_restore_provenance, restore_provenance_id
+        restored_from = restore_provenance_id(analysis_state)
         _upsert_round_result(
             analysis_state.round_results,
             integration_result,
             lineage_id=lineage_id,
             branch_id=None if lineage_id == "main" else lineage_id,
             branch_label=analysis_state.restore_branch_label,
-            restored_from_snapshot_id=analysis_state.last_restored_snapshot_id,
+            restored_from_snapshot_id=restored_from,
         )
+        if restored_from is not None:
+            consume_restore_provenance(analysis_state)
 
         # Send round_summary so the frontend shows this integration round
         effective_max_rounds = analysis_state.max_rounds if analysis_state.max_rounds > 0 else self.config.max_rounds

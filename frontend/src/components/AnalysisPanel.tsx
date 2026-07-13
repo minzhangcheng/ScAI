@@ -698,10 +698,31 @@ export function AnalysisPanel() {
     if (!currentSession) return
     try {
       // Capture-only retry — must not regenerate completed reports
-      await apiFetch(`/session/${currentSession.id}/snapshot-failure/retry`, {
+      const resp = await apiFetch<{
+        success?: boolean
+        data?: {
+          still_blocked?: boolean
+          snapshot_failure?: Record<string, unknown> | null
+          snapshot_failure_allowed_actions?: Array<'retry' | 'manage' | 'terminate'>
+        }
+      }>(`/session/${currentSession.id}/snapshot-failure/retry`, {
         method: 'POST',
         body: JSON.stringify({ regenerate_reports: false }),
       })
+      const ok = resp?.success === true
+      if (!ok) {
+        // HTTP 200 with success:false / still_blocked must keep the HITL gate
+        const data = resp?.data
+        const rawFailure = data?.snapshot_failure
+        if (rawFailure && typeof rawFailure === 'object') {
+          useAppStore.getState().hydrateRuntimeRestoreFromSession({
+            snapshot_failure: rawFailure,
+            snapshot_failure_allowed_actions: data?.snapshot_failure_allowed_actions,
+          })
+        }
+        // else leave existing snapshotFailure intact
+        return
+      }
       clearSnapshotFailure()
       if (!wsConnected) {
         setTimeout(() => wsConnect?.(), 100)

@@ -427,5 +427,74 @@ class DeletionService:
             surviving_manifests=surviving_ids,
         )
 
+    def delete_pending_import_manifests(
+        self,
+        snapshot_ids: list[str],
+    ) -> DeleteResult:
+        """Delete manifests that were imported but never made visible.
+
+        These manifests exist in ``committed/`` with ``.pending-import-*``
+        markers but were never confirmed by a batch record.  Reads the
+        committed JSON directly (bypassing :meth:`ManifestStore.load` which
+        would work for valid manifests, but we need to handle the case
+        where signatures are missing or the batch was never published).
+
+        Only removes objects that are **not** referenced by any surviving
+        visible manifest.
+        """
+        # Collect all surviving object hashes from visible manifests
+        surviving_objects: set[str] = set()
+        for manifest in self.manifest_store.verify_all_committed():
+            surviving_objects.update(manifest.objects.keys())
+
+        freed_bytes = 0
+        deleted_ids: list[str] = []
+
+        for sid in snapshot_ids:
+            committed_path = Path(str(self.paths.committed)) / f"{sid}.json"
+            if not committed_path.exists():
+                continue
+
+            try:
+                manifest = SnapshotManifestV2.model_validate_json(
+                    committed_path.read_bytes(),
+                )
+            except Exception:
+                continue  # skip unreadable; sweep will handle orphan objects
+
+            # Remove only objects unique to this pending manifest
+            for sha256 in manifest.objects.keys():
+                if sha256 not in surviving_objects:
+                    obj_path = Path(str(self.paths.objects)) / sha256
+                    if obj_path.exists():
+                        freed_bytes += obj_path.stat().st_size
+                        obj_path.unlink()
+
+            # Remove committed JSON
+            committed_path.unlink(missing_ok=True)
+
+            # Remove signature
+            sig_path = Path(str(self.paths.integrity)) / f"{sid}.sig"
+            sig_path.unlink(missing_ok=True)
+
+            # Remove pending-import marker
+            marker_path = ManifestStore._pending_marker_path(
+                self.paths.committed, sid,
+            )
+            marker_path.unlink(missing_ok=True)
+
+            deleted_ids.append(sid)
+
+        surviving_ids = [
+            m.snapshot_id
+            for m in self.manifest_store.verify_all_committed()
+        ]
+
+        return DeleteResult(
+            deleted_ids=deleted_ids,
+            freed_bytes=freed_bytes,
+            surviving_manifests=surviving_ids,
+        )
+
     def _load_all_committed(self) -> list[SnapshotManifestV2]:
         return self.manifest_store.verify_all_committed()

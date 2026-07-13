@@ -231,10 +231,34 @@ async def touch_session(session_id: str) -> None:
         session_access_times[session_id] = time.time()
 
 
+async def _get_cached_session(session_id: str) -> Optional[AnalysisState]:
+    """Quick lock to read from the in-memory cache."""
+    async with state_lock:
+        cached = sessions.get(session_id)
+        if cached is not None:
+            session_access_times[session_id] = time.time()
+        return cached
+
+
+async def _install_loaded_session(
+    session_id: str,
+    loaded: AnalysisState,
+) -> AnalysisState:
+    """Atomically install a loaded state if not already cached."""
+    async with state_lock:
+        existing = sessions.get(session_id)
+        if existing is not None:
+            session_access_times[session_id] = time.time()
+            return existing
+        sessions[session_id] = loaded
+        session_access_times[session_id] = time.time()
+        return loaded
+
+
 async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
     validate_session_id(session_id)
 
-    # Run journal recovery before any session mutation
+    # Run journal recovery before any session mutation (outside state_lock)
     recovery_blocked = False
     recovery_failure: Optional[Dict[str, Any]] = None
     gc_result = None
@@ -300,86 +324,76 @@ async def ensure_session_loaded(session_id: str) -> Optional[AnalysisState]:
             "message": "Snapshot recovery left mutations blocked",
         }
 
-    async def _apply_recovery_outcome(cached: AnalysisState | None) -> None:
-        """Mark blocked or clear after clean recovery; persist when state mutates."""
+    # Check cache before disk load
+    cached = await _get_cached_session(session_id)
+    if cached is not None:
+        # Apply recovery outcome to cached state and return
         if recovery_blocked:
-            if cached is not None:
-                mark_recovery_blocked(session_id, cached, recovery_failure)
-                await _persist_recovery_marker(session_id, cached)
-            else:
-                mark_recovery_blocked(session_id, None, recovery_failure)
-            return
-        # Clean recovery: drop session-level block and clear persisted flags.
-        if clear_recovery_blocked(session_id, cached) and cached is not None:
+            mark_recovery_blocked(session_id, cached, recovery_failure)
             await _persist_recovery_marker(session_id, cached)
+        else:
+            if clear_recovery_blocked(session_id, cached):
+                await _persist_recovery_marker(session_id, cached)
+        return cached
 
-    if session_id in sessions:
-        async with state_lock:
-            session_access_times[session_id] = time.time()
-            cached = sessions.get(session_id)
-            await _apply_recovery_outcome(cached)
-            return sessions.get(session_id)
-    async with state_lock:
-        if session_id in sessions:
-            session_access_times[session_id] = time.time()
-            cached = sessions.get(session_id)
-            # Same persist path as the first cache branch (shared helper).
-            await _apply_recovery_outcome(cached)
-            return sessions[session_id]
-        state = await asyncio.to_thread(load_session_from_disk, session_id)
-        if state:
-            # Clean up stale LLM failure state from a previous process
-            if state.wait_input_reason in (
-                WaitInputReason.LLM_FAILURE.value,
-                WaitInputReason.MARKER_DB_MISSING.value,
-            ):
-                logger.warning(
-                    f"Session {session_id}: clearing stale LLM failure state from previous process"
-                )
-                info = state.llm_failure_info
-                if info:
-                    node_name = info.get("node_name", "")
-                    logger.info(
-                        f"Session {session_id}: LLM failure for node '{node_name}' "
-                        f"was not resolved before server restart. Node marked as failed."
-                    )
-                state.wait_input_reason = None
-                state.llm_failure_info = None
-                state.status = TaskStatus.PAUSED
-                logger.info(
-                    f"Session {session_id}: Analysis paused due to unresolved LLM failure before restart."
-                )
-                # Save the cleaned-up state so PAUSED status persists
-                dumped = state.model_dump(mode="json")
-                await asyncio.to_thread(_externalize_and_write, session_id, dumped)
-            if recovery_blocked:
-                mark_recovery_blocked(session_id, state, recovery_failure)
-                await _persist_recovery_marker(session_id, state)
-            else:
-                if clear_recovery_blocked(session_id, state):
-                    await _persist_recovery_marker(session_id, state)
-            # Reconcile AnalysisState.snapshots from verified V2 manifests
-            # (skip when recovery is blocked — read-only display only)
-            if not recovery_blocked:
-                try:
-                    from backend.services.snapshot_v2.paths import SnapshotV2Paths
-                    from backend.services.snapshot_v2.service import SnapshotService
-                    svc = SnapshotService(session_id, SnapshotV2Paths.for_session(session_id))
-                    state.snapshots = svc.rebuild_snapshots_from_manifests()
-                except Exception:
-                    logger.debug(
-                        "Session %s: snapshot listing reconcile skipped",
-                        session_id, exc_info=True,
-                    )
-            sessions[session_id] = state
-            session_access_times[session_id] = time.time()
-            return state
+    # Load from disk (outside state_lock via to_thread)
+    state = await asyncio.to_thread(load_session_from_disk, session_id)
+    if state is None:
         if recovery_blocked:
-            # State cannot be loaded — keep session-level marker for guards.
             mark_recovery_blocked(session_id, None, recovery_failure)
         else:
             clear_recovery_blocked(session_id, None)
-    return None
+        return None
+
+    # Clean up stale LLM failure state from a previous process
+    if state.wait_input_reason in (
+        WaitInputReason.LLM_FAILURE.value,
+        WaitInputReason.MARKER_DB_MISSING.value,
+    ):
+        logger.warning(
+            f"Session {session_id}: clearing stale LLM failure state from previous process"
+        )
+        info = state.llm_failure_info
+        if info:
+            node_name = info.get("node_name", "")
+            logger.info(
+                f"Session {session_id}: LLM failure for node '{node_name}' "
+                f"was not resolved before server restart. Node marked as failed."
+            )
+        state.wait_input_reason = None
+        state.llm_failure_info = None
+        state.status = TaskStatus.PAUSED
+        logger.info(
+            f"Session {session_id}: Analysis paused due to unresolved LLM failure before restart."
+        )
+        # Save the cleaned-up state so PAUSED status persists
+        dumped = state.model_dump(mode="json")
+        await asyncio.to_thread(_externalize_and_write, session_id, dumped)
+
+    # Apply recovery outcome (outside state_lock)
+    if recovery_blocked:
+        mark_recovery_blocked(session_id, state, recovery_failure)
+        await _persist_recovery_marker(session_id, state)
+    else:
+        if clear_recovery_blocked(session_id, state):
+            await _persist_recovery_marker(session_id, state)
+
+    # Reconcile AnalysisState.snapshots from verified V2 manifests
+    # (skip when recovery is blocked — read-only display only)
+    if not recovery_blocked:
+        try:
+            from backend.services.snapshot_v2.paths import SnapshotV2Paths
+            from backend.services.snapshot_v2.service import SnapshotService
+            svc = SnapshotService(session_id, SnapshotV2Paths.for_session(session_id))
+            state.snapshots = svc.rebuild_snapshots_from_manifests()
+        except Exception:
+            logger.debug(
+                "Session %s: snapshot listing reconcile skipped",
+                session_id, exc_info=True,
+            )
+
+    # Install into cache atomically (short lock)
+    return await _install_loaded_session(session_id, state)
 
 
 def list_saved_sessions() -> List[Dict[str, Any]]:

@@ -5,9 +5,9 @@ transaction calls ``acquire()`` to block the workflow, and the workflow
 checks ``is_paused()`` / ``wait_for()`` at safe points.  When the capture
 finishes (or fails) ``release()`` unblocks the workflow.
 
-``acquire(session_id, workflow_state)`` stores a shallow descriptor copy
-so capture can read fields such as ``kernel_present`` without relying on
-the live sandbox alone.
+``acquire(session_id, workflow_state, owner_token=...)`` stores a shallow
+descriptor copy so capture can read fields such as ``kernel_present``
+without relying on the live sandbox alone.
 
 Empty-complete eligibility only trusts descriptors produced by cooperative
 acknowledgement or an explicit producer acquire
@@ -18,12 +18,48 @@ authorize empty-complete.
 Process-wide access: use ``get_snapshot_safe_point_manager()`` so every
 SnapshotService and restore coordinator share one coordinator keyed by
 session_id.
+
+Ownership enforcement:
+- ``SafePointRequest`` is a frozen dataclass with ``owner_token``,
+  ``generation``, ``event``.
+- Requester mutations (``request_safe_point`` / ``acquire`` /
+  ``update_descriptor`` / ``cancel_safe_point_request`` / ``release``)
+  require a non-empty ``owner_token`` and reject foreign owners.
+- ``acknowledge_safe_point_request(session_id, generation, descriptor,
+  role="workflow")`` checks generation for workflow acknowledgements
+  (never requires the requester token).
+- Empty tokens remain allowed only via explicitly named test adapters.
+- No filesystem I/O, workflow calls, or message emission is performed
+  while holding ``SafePointManager._lock`` (the lock only protects the
+  internal data structures).
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class SafePointRequest:
+    """A pending safe-point request with ownership and generation handshake.
+
+    Attributes:
+        owner_token: Non-empty token identifying the requester.
+        generation: Monotonic counter for acknowledge handshake.
+        event: Set when the request is acknowledged by the workflow.
+    """
+    owner_token: str
+    generation: int
+    event: asyncio.Event
+
+
+def _normalize_owner_token(owner_token: str | None) -> str:
+    """Return a stripped owner token; empty/None become ``\"\"``."""
+    if owner_token is None:
+        return ""
+    return str(owner_token).strip()
 
 
 class SafePointManager:
@@ -36,11 +72,11 @@ class SafePointManager:
         mgr = get_snapshot_safe_point_manager()
 
         # Capture transaction acquires the safe point (pauses workflow):
-        ok = mgr.acquire("session-1", workflow_state)
+        ok = await mgr.acquire("session-1", workflow_state, owner_token="capture:1")
         try:
             ...  # do capture work
         finally:
-            mgr.release("session-1")
+            await mgr.release("session-1", "capture:1")
 
         # Workflow checks at safe points:
         if mgr.is_paused("session-1"):
@@ -49,88 +85,164 @@ class SafePointManager:
 
     def __init__(self) -> None:
         self._events: dict[str, asyncio.Event] = {}
-        self._pending_events: dict[str, asyncio.Event] = {}
+        self._pending_requests: dict[str, SafePointRequest] = {}
         self._descriptors: dict[str, dict[str, Any]] = {}
         # Descriptors may be stored for metadata without authorizing
         # empty-complete. Only cooperative ack / producer acquires set this.
         self._eligibility_trusted: dict[str, bool] = {}
+        self._acquired_owners: dict[str, str] = {}
+        self._generation_counters: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
-    def request_safe_point(self, session_id: str) -> bool:
+    async def request_safe_point(
+        self, session_id: str, owner_token: str,
+    ) -> SafePointRequest | bool:
         """Signal the workflow to pause for an upcoming restore operation.
 
         The workflow checks ``has_pending_request()`` at its next safe
         point and calls ``acknowledge_safe_point_request()`` to confirm.
 
-        Returns ``True`` if the request was newly created, ``False`` if
-        one was already pending or the workflow is already paused.
-        """
-        if session_id in self._events:
-            return False
-        if session_id in self._pending_events:
-            return False
-        self._pending_events[session_id] = asyncio.Event()
-        return True
+        *owner_token* must be non-empty. It is stored in the pending
+        request and must match on subsequent ``cancel_safe_point_request``,
+        ``update_descriptor``, or ``release`` calls.
 
-    def cancel_safe_point_request(self, session_id: str) -> None:
+        Returns the new ``SafePointRequest`` if created, ``False`` if
+        one was already pending, the workflow is already paused, or the
+        token is empty.
+        """
+        token = _normalize_owner_token(owner_token)
+        if not token:
+            return False
+        async with self._lock:
+            if session_id in self._events:
+                return False
+            if session_id in self._pending_requests:
+                return False
+            gen = self._generation_counters.get(session_id, 0) + 1
+            self._generation_counters[session_id] = gen
+            event = asyncio.Event()
+            req = SafePointRequest(
+                owner_token=token,
+                generation=gen,
+                event=event,
+            )
+            self._pending_requests[session_id] = req
+            return req
+
+    async def cancel_safe_point_request(
+        self, session_id: str, owner_token: str,
+    ) -> bool:
         """Withdraw a pending safe-point request.
+
+        *owner_token* must be non-empty and must match the stored owner
+        on the pending request or acquired hold; otherwise returns
+        ``False``.
 
         If the workflow has already acknowledged the request (and thus
         paused), the safe point is released to unblock it.  No teardown
         is performed — the workflow simply continues.
+
+        Returns ``True`` when the request was resolved (cancelled or
+        already free under matching ownership), ``False`` on ownership
+        mismatch or empty token.
         """
-        event = self._pending_events.pop(session_id, None)
-        if event is not None:
-            event.set()  # unblock the job if it was waiting
-        self.release(session_id)
+        token = _normalize_owner_token(owner_token)
+        if not token:
+            return False
+        async with self._lock:
+            req = self._pending_requests.get(session_id)
+            if req is not None:
+                if req.owner_token != token:
+                    return False
+                self._pending_requests.pop(session_id, None)
+                req.event.set()  # unblock the job if it was waiting
+            return self._release_unlocked(session_id, token)
 
     def has_pending_request(self, session_id: str) -> bool:
         """Return ``True`` if a safe-point request is pending."""
-        return session_id in self._pending_events
+        return session_id in self._pending_requests
 
-    def acknowledge_safe_point_request(
+    def get_pending_generation(self, session_id: str) -> int | None:
+        """Return the generation counter for a pending request, or ``None``."""
+        req = self._pending_requests.get(session_id)
+        if req is None:
+            return None
+        return req.generation
+
+    def get_pending_observation(
+        self, session_id: str,
+    ) -> SafePointRequest | None:
+        """Return the pending request for bioinformatics step boundaries."""
+        return self._pending_requests.get(session_id)
+
+    async def acknowledge_safe_point_request(
         self,
         session_id: str,
+        generation: int,
         workflow_state: dict[str, Any] | None = None,
+        role: str = "workflow",
     ) -> bool:
         """Transition a pending request to an acquired safe point.
 
         Called by the workflow when it reaches a safe point and sees a
-        pending request.  Optionally stores *workflow_state* as the
-        safe-point descriptor (``kernel_present``, ``next_node``, etc.).
-        The descriptor is eligibility-trusted for empty-complete.
+        pending request.  *generation* must match the generation stored
+        in the pending request.
+
+        Workflow acknowledgements (``role="workflow"``) never require
+        the requester token.
+
+        Optionally stores *workflow_state* as the safe-point descriptor
+        (``kernel_present``, ``next_node``, etc.).  The descriptor is
+        eligibility-trusted for empty-complete.
 
         Returns ``True`` if the request was acknowledged, ``False`` if
-        none was pending.
+        none was pending or if the generation doesn't match.
         """
-        event = self._pending_events.pop(session_id, None)
-        if event is None:
-            return False
-        self.acquire(session_id, workflow_state, eligibility_trusted=True)
-        event.set()  # unblock the job
-        return True
+        async with self._lock:
+            req = self._pending_requests.pop(session_id, None)
+            if req is None:
+                return False
+            if req.generation != generation:
+                self._pending_requests[session_id] = req
+                return False
+            self._acquire_unlocked(
+                session_id, workflow_state,
+                eligibility_trusted=True,
+                owner_token=req.owner_token,
+            )
+            req.event.set()  # unblock the job
+            return True
 
-    def update_descriptor(
+    async def update_descriptor(
         self,
         session_id: str,
+        owner_token: str,
         workflow_state: dict[str, Any],
         *,
         eligibility_trusted: bool | None = None,
     ) -> bool:
         """Update the descriptor for an already-acquired safe point.
 
+        *owner_token* must be non-empty and match the acquired owner.
         When *eligibility_trusted* is provided, updates the trust flag;
         otherwise the existing trust state is preserved.
 
-        Returns ``True`` if the session is paused and the descriptor was
-        replaced, ``False`` otherwise.
+        Returns ``True`` if the session is paused under matching ownership
+        and the descriptor was replaced, ``False`` otherwise.
         """
-        if session_id not in self._events:
+        token = _normalize_owner_token(owner_token)
+        if not token:
             return False
-        self._descriptors[session_id] = dict(workflow_state)
-        if eligibility_trusted is not None:
-            self._eligibility_trusted[session_id] = bool(eligibility_trusted)
-        return True
+        async with self._lock:
+            if session_id not in self._events:
+                return False
+            stored = self._acquired_owners.get(session_id)
+            if stored is None or stored != token:
+                return False
+            self._descriptors[session_id] = dict(workflow_state)
+            if eligibility_trusted is not None:
+                self._eligibility_trusted[session_id] = bool(eligibility_trusted)
+            return True
 
     def get_pending_event(self, session_id: str) -> asyncio.Event | None:
         """Return the asyncio.Event associated with a pending request.
@@ -139,14 +251,18 @@ class SafePointManager:
         has acknowledged the safe point.  Returns ``None`` if no request
         is pending.
         """
-        return self._pending_events.get(session_id)
+        req = self._pending_requests.get(session_id)
+        if req is None:
+            return None
+        return req.event
 
-    def acquire(
+    async def acquire(
         self,
         session_id: str,
         workflow_state: dict[str, Any] | None = None,
         *,
         eligibility_trusted: bool = True,
+        owner_token: str,
     ) -> bool:
         """Request a cooperative pause for *session_id*.
 
@@ -158,15 +274,44 @@ class SafePointManager:
         seeding must pass ``eligibility_trusted=False`` so raw
         ``workflow_state`` cannot invent idle/no-kernel authority.
 
+        *owner_token* must be non-empty. It is stored and must match on
+        subsequent ``update_descriptor`` / ``release`` /
+        ``cancel_safe_point_request`` calls.
+
         Returns ``True`` if the safe point was newly acquired, ``False``
-        if one is already held (idempotent guard — existing trust/descriptor
-        are left unchanged).
+        if one is already held, the token is empty, or acquisition is
+        refused (idempotent guard — existing trust/descriptor are left
+        unchanged when already held).
         """
+        token = _normalize_owner_token(owner_token)
+        if not token:
+            return False
+        async with self._lock:
+            return self._acquire_unlocked(
+                session_id,
+                workflow_state,
+                eligibility_trusted=eligibility_trusted,
+                owner_token=token,
+            )
+
+    def _acquire_unlocked(
+        self,
+        session_id: str,
+        workflow_state: dict[str, Any] | None = None,
+        *,
+        eligibility_trusted: bool = True,
+        owner_token: str,
+    ) -> bool:
+        """Acquire without taking the lock (caller must hold ``_lock``)."""
         if session_id in self._events:
+            return False
+        token = _normalize_owner_token(owner_token)
+        if not token:
             return False
         event = asyncio.Event()
         event.clear()
         self._events[session_id] = event
+        self._acquired_owners[session_id] = token
         if workflow_state is not None:
             self._descriptors[session_id] = dict(workflow_state)
             self._eligibility_trusted[session_id] = bool(eligibility_trusted)
@@ -190,13 +335,47 @@ class SafePointManager:
             return None
         return self.get_descriptor(session_id)
 
-    def release(self, session_id: str) -> None:
-        """Release the safe point for *session_id*, unblocking any waiter."""
+    async def release(self, session_id: str, owner_token: str) -> bool:
+        """Release the safe point for *session_id*, unblocking any waiter.
+
+        *owner_token* must be non-empty and match the stored owner
+        token or the operation returns ``False``.
+
+        Returns ``True`` if the safe point was released (or already free
+        with no conflicting owner), ``False`` on ownership mismatch or
+        empty token.
+        """
+        token = _normalize_owner_token(owner_token)
+        if not token:
+            return False
+        async with self._lock:
+            return self._release_unlocked(session_id, token)
+
+    def _release_unlocked(self, session_id: str, owner_token: str) -> bool:
+        """Release without taking the lock (caller must hold ``_lock``)."""
+        token = _normalize_owner_token(owner_token)
+        if not token:
+            return False
+        stored = self._acquired_owners.get(session_id)
+        if stored is not None and stored != token:
+            return False
+        pending = self._pending_requests.get(session_id)
+        if (
+            pending is not None
+            and pending.owner_token
+            and pending.owner_token != token
+        ):
+            return False
+        pending = self._pending_requests.pop(session_id, None)
+        if pending is not None:
+            pending.event.set()
         event = self._events.pop(session_id, None)
         self._descriptors.pop(session_id, None)
         self._eligibility_trusted.pop(session_id, None)
+        self._acquired_owners.pop(session_id, None)
         if event is not None:
             event.set()
+        return True
 
     def is_paused(self, session_id: str) -> bool:
         """Return ``True`` if a safe-point is active (workflow should pause)."""
@@ -215,6 +394,109 @@ class SafePointManager:
     def active_sessions(self) -> set[str]:
         """Return the set of session IDs with active safe points."""
         return set(self._events.keys())
+
+
+class EmptyTokenSafePointAdapter:
+    """Test-only adapter that allows empty-token mutations.
+
+    Production callers must never use this. Tests that still seed or
+    clear holds without an explicit owner may wrap a manager with this
+    adapter.
+    """
+
+    def __init__(self, manager: SafePointManager) -> None:
+        self._manager = manager
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._manager, name)
+
+    async def request_safe_point(
+        self, session_id: str, owner_token: str = "test-empty-adapter",
+    ) -> SafePointRequest | bool:
+        token = _normalize_owner_token(owner_token) or "test-empty-adapter"
+        return await self._manager.request_safe_point(session_id, token)
+
+    async def cancel_safe_point_request(
+        self, session_id: str, owner_token: str = "test-empty-adapter",
+    ) -> bool:
+        token = _normalize_owner_token(owner_token)
+        if token:
+            return await self._manager.cancel_safe_point_request(session_id, token)
+        # Allow teardown by matching whatever owner is present (test only).
+        async with self._manager._lock:
+            pending = self._manager._pending_requests.get(session_id)
+            acquired = self._manager._acquired_owners.get(session_id)
+            owner = (
+                pending.owner_token if pending is not None else None
+            ) or acquired or "test-empty-adapter"
+            return self._manager._release_unlocked(session_id, owner)
+
+    async def acquire(
+        self,
+        session_id: str,
+        workflow_state: dict[str, Any] | None = None,
+        *,
+        eligibility_trusted: bool = True,
+        owner_token: str = "test-empty-adapter",
+    ) -> bool:
+        token = _normalize_owner_token(owner_token) or "test-empty-adapter"
+        return await self._manager.acquire(
+            session_id,
+            workflow_state,
+            eligibility_trusted=eligibility_trusted,
+            owner_token=token,
+        )
+
+    async def update_descriptor(
+        self,
+        session_id: str,
+        owner_token_or_state: str | dict[str, Any],
+        workflow_state: dict[str, Any] | None = None,
+        *,
+        eligibility_trusted: bool | None = None,
+    ) -> bool:
+        # Support both new (token, state) and legacy (state-only) call shapes.
+        if isinstance(owner_token_or_state, dict) and workflow_state is None:
+            async with self._manager._lock:
+                if session_id not in self._manager._events:
+                    return False
+                self._manager._descriptors[session_id] = dict(owner_token_or_state)
+                if eligibility_trusted is not None:
+                    self._manager._eligibility_trusted[session_id] = bool(
+                        eligibility_trusted
+                    )
+                return True
+        token = _normalize_owner_token(str(owner_token_or_state))
+        if not token:
+            async with self._manager._lock:
+                if session_id not in self._manager._events:
+                    return False
+                self._manager._descriptors[session_id] = dict(workflow_state or {})
+                if eligibility_trusted is not None:
+                    self._manager._eligibility_trusted[session_id] = bool(
+                        eligibility_trusted
+                    )
+                return True
+        return await self._manager.update_descriptor(
+            session_id,
+            token,
+            workflow_state or {},
+            eligibility_trusted=eligibility_trusted,
+        )
+
+    async def release(
+        self, session_id: str, owner_token: str = "test-empty-adapter",
+    ) -> bool:
+        token = _normalize_owner_token(owner_token)
+        if token:
+            return await self._manager.release(session_id, token)
+        async with self._manager._lock:
+            pending = self._manager._pending_requests.get(session_id)
+            acquired = self._manager._acquired_owners.get(session_id)
+            owner = (
+                pending.owner_token if pending is not None else None
+            ) or acquired or "test-empty-adapter"
+            return self._manager._release_unlocked(session_id, owner)
 
 
 _PROCESS_SAFE_POINT_MANAGER: SafePointManager | None = None

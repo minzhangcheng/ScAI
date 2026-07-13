@@ -37,43 +37,17 @@ from backend.services.snapshot_v2.errors import (
     SnapshotStorageError,
     SnapshotTransactionError,
     SnapshotV2Error,
+    snapshot_error_detail,
 )
 
 
-def _map_v2_error(exc: Exception, _context: dict | None = None) -> int:
-    """Map a V2 snapshot operation exception to an HTTP status code.
-
-    Centralised so every V2 route returns the same codes for the same
-    error types.  The canonical mapping is:
-
-    ==================================  ====
-    Exception type                      Code
-    ==================================  ====
-    SnapshotCompatibilityError          422
-    SnapshotIntegrityError              422  (found → 422, not-found → 410)
-    SnapshotStorageError                507
-    SnapshotDeleteConflict              409
-    SnapshotTransactionError            503  (or 500 for apply-phase)
-    Any other SnapshotV2Error           500
-    Any other Exception                 500
-    ==================================  ====
-    """
-    # SnapshotIntegrityError with MANIFEST_NOT_FOUND → 410 Gone
-    if isinstance(exc, SnapshotIntegrityError):
-        if exc.code in ("MANIFEST_NOT_FOUND", "SNAPSHOT_NOT_FOUND"):
-            return 410
-        return 422
-    if isinstance(exc, SnapshotCompatibilityError):
-        return 422
-    if isinstance(exc, SnapshotStorageError):
-        return 507
-    if isinstance(exc, SnapshotDeleteConflict):
-        return 409
-    if isinstance(exc, SnapshotTransactionError):
-        return 503
-    if isinstance(exc, SnapshotV2Error):
-        return 500
-    return 500
+def _v2_http_exc(exc) -> HTTPException:
+    """Build an HTTPException with the canonical status + structured detail."""
+    d = snapshot_error_detail(exc)
+    return HTTPException(
+        status_code=d["status_code"],
+        detail={"code": d["code"], "message": d["message"]},
+    )
 
 
 @router.get("/{session_id}/snapshots")
@@ -255,7 +229,7 @@ async def list_snapshots_v2(session_id: str, request: Request):
         snapshots = service.list_snapshots()
         store_status = service.store_status()
     except SnapshotV2Error as exc:
-        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+        raise _v2_http_exc(exc) from exc
 
     return APIResponse(
         success=True,
@@ -280,12 +254,8 @@ async def get_snapshot_v2(session_id: str, snapshot_id: str, request: Request):
     service = SnapshotService(session_id, paths)
     try:
         data = service.preview_snapshot(snapshot_id)
-    except SnapshotIntegrityError as exc:
-        if exc.code in ("MANIFEST_NOT_FOUND", "SNAPSHOT_NOT_FOUND"):
-            raise HTTPException(status_code=404, detail="Snapshot not found") from exc
-        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
     except SnapshotV2Error as exc:
-        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+        raise _v2_http_exc(exc) from exc
 
     return APIResponse(
         success=True,
@@ -317,14 +287,8 @@ async def delete_snapshot_v2(session_id: str, snapshot_id: str, request: Request
             result = await service.delete_branch(snapshot_id)
         else:
             result = await service.delete_leaf(snapshot_id)
-    except SnapshotDeleteConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except SnapshotStorageError as exc:
-        raise HTTPException(status_code=507, detail=str(exc)) from exc
-    except SnapshotIntegrityError as exc:
-        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
     except SnapshotV2Error as exc:
-        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+        raise _v2_http_exc(exc) from exc
 
     return APIResponse(
         success=True,
@@ -383,14 +347,8 @@ async def restore_snapshot_v2(session_id: str, snapshot_id: str, request: Reques
                 f"or 'keep'."
             ),
         ) from exc
-    except SnapshotStorageError as exc:
-        raise HTTPException(status_code=507, detail=str(exc)) from exc
-    except SnapshotIntegrityError as exc:
-        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
-    except SnapshotCompatibilityError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except SnapshotV2Error as exc:
-        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+        raise _v2_http_exc(exc) from exc
 
     if preflight.status != "ready":
         if preflight.status == "incompatible":
@@ -409,12 +367,8 @@ async def restore_snapshot_v2(session_id: str, snapshot_id: str, request: Reques
     try:
         mgr = RestoreJobManager(paths=paths, session_id=session_id)
         record = await mgr.enqueue(session_id, preflight, v2_req)
-    except SnapshotStorageError as exc:
-        raise HTTPException(status_code=507, detail=str(exc)) from exc
-    except SnapshotTransactionError as exc:
-        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
     except SnapshotV2Error as exc:
-        raise HTTPException(status_code=_map_v2_error(exc), detail=str(exc)) from exc
+        raise _v2_http_exc(exc) from exc
 
     status_url, cancel_url = _transaction_urls(request, session_id, record.transaction_id)
     return SnapshotTransactionResponse(
@@ -460,8 +414,12 @@ async def cancel_restore_v2(session_id: str, transaction_id: str, request: Reque
     try:
         await cancel_restore_job(transaction_id, session_id=session_id)
     except SnapshotTransactionError as exc:
-        if exc.code == "TRANSACTION_NOT_FOUND":
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Cancel keeps leak-oracle-safe 404 for missing tx; other cancel
+        # failures stay 400 (not the generic transaction 503 mapping).
+        status = 404 if exc.code == "TRANSACTION_NOT_FOUND" else 400
+        raise HTTPException(
+            status_code=status,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
 
     return APIResponse(success=True, message="Restore cancelled")

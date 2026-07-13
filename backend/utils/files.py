@@ -1,10 +1,12 @@
-"""File path safety utilities — no imports from backend.main."""
+"""File path safety, durable I/O, and atomic write utilities — no imports from backend.main."""
 import logging
 import os
 import re
+import shutil
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Dict, List, Optional, Set
+from typing import Any, AsyncIterator, Dict, List, Optional, Set
 
 from fastapi import HTTPException
 
@@ -95,3 +97,65 @@ def resolve_figure_in_workspace(
     if len(matches) > 1:
         logger.warning("Multiple workspace files named %s; using %s", basename, matches[0])
     return matches[0]
+
+
+# ── Durable atomic I/O primitives ───────────────────────────────────
+
+
+def fsync_directory(path: Path) -> None:
+    """Fsync *path* (must be a directory) to ensure its metadata is durable."""
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> None:
+    """Atomically write *data* to *path* using a unique temp file and fsync(dir).
+
+    On failure the temp file is removed.  Creates parent directories as needed.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+        fsync_directory(path.parent)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Atomically write UTF-8 text to *path*."""
+    atomic_write_bytes(path, text.encode(encoding))
+
+
+def atomic_write_json(path: Path, payload: Any, *, canonical: bool = False) -> None:
+    """Atomically write JSON to *path*.
+
+    When *canonical* is True, use sorted keys and compact separators
+    (matching the canonical manifest serialisation pattern).
+    """
+    import json
+    if canonical:
+        data = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    else:
+        data = json.dumps(payload)
+    atomic_write_text(path, data)
+
+
+def atomic_copy_file(src: Path, dst: Path) -> None:
+    """Atomically copy *src* to *dst*, fsyncing the destination directory.
+
+    Reads *src*, writes to a unique temp next to *dst*, then renames.
+    """
+    data = src.read_bytes()
+    atomic_write_bytes(dst, data)

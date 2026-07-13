@@ -16,6 +16,7 @@ from ..services.interaction_record_capture import (
 from ..utils.llm_client import UpstreamExhaustedError
 from .direction_coverage import current_lineage_id, normalize_direction_key
 from .helpers import _diff_plan_steps, _get_task_text, _normalize_tasks, _DIFF_LABELS, wait_with_skip_time
+from .provenance import restore_provenance_id
 from .retry import MAX_NODE_RETRIES, _retry_backoff_delay, with_retry
 
 if TYPE_CHECKING:
@@ -62,7 +63,7 @@ def populate_plan_scope(plan: AnalysisPlan, state: AnalysisState) -> AnalysisPla
     plan.direction_key = normalize_direction_key(direction)
     lineage_id = current_lineage_id(state)
     plan.branch_id = None if lineage_id == "main" else lineage_id
-    plan.created_from_snapshot_id = state.last_restored_snapshot_id
+    plan.created_from_snapshot_id = restore_provenance_id(state)
     return plan
 
 

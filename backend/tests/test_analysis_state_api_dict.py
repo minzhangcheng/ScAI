@@ -77,6 +77,8 @@ class TestAnalysisStateApiDictRoundTrip:
             "species", "species_resolved", "species_genes_validated",
             "species_input_info",
             "runtime_restore_status",
+            "runtime_restore_warning",
+            "termination_reason",
             "snapshot_failure",
             "snapshot_transaction",
             "pending_required_snapshot",
@@ -156,3 +158,18 @@ class TestAnalysisStateApiDictRoundTrip:
 
         api = state.to_api_dict(strip_message_base64=stripper)
         assert api["messages"][0]["content"] == "stripped this"
+
+    def test_runtime_warning_is_serialized(self):
+        """to_api_dict() must include runtime_restore_warning when set, default to None."""
+        state = AnalysisState(user_id="test")
+        api = state.to_api_dict()
+        # Default should be absent (None)
+        assert api.get("runtime_restore_warning") is None
+
+        state.runtime_restore_warning = "Live runtime intentionally kept"
+        api = state.to_api_dict()
+        assert api["runtime_restore_warning"] == "Live runtime intentionally kept"
+
+        state.runtime_restore_warning = None
+        api = state.to_api_dict()
+        assert api.get("runtime_restore_warning") is None

@@ -28,6 +28,7 @@ from .direction_coverage import (
     normalize_legacy_round_result,
 )
 from .helpers import wait_with_skip_time
+from .provenance import consume_restore_provenance, restore_provenance_id
 
 if TYPE_CHECKING:
     from .state import WorkflowState
@@ -622,14 +623,17 @@ class SynthesisMixin:
         round_result.data_driven_mechanism_programs = (state.get("bioinformatics_result") or {}).get("mechanism_programs", [])
         derive_round_completion_status(state, round_result)
         lineage_id = current_lineage_id(analysis_state)
+        restored_from = restore_provenance_id(analysis_state)
         _upsert_round_result(
             analysis_state.round_results,
             round_result,
             lineage_id=lineage_id,
             branch_id=None if lineage_id == "main" else lineage_id,
             branch_label=analysis_state.restore_branch_label,
-            restored_from_snapshot_id=analysis_state.last_restored_snapshot_id,
+            restored_from_snapshot_id=restored_from,
         )
+        if restored_from is not None:
+            consume_restore_provenance(analysis_state)
         from .direction_coverage import active_batch_complete
         if (
             analysis_state.analysis_phase == AnalysisPhase.INNOVATION

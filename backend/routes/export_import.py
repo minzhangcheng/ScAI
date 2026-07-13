@@ -377,9 +377,10 @@ async def export_prepare(session_id: str, request: Request, include_runtime: boo
 
     size_bytes = tar_path.stat().st_size
 
-    # Store reference for the download endpoint
+    # Store reference for the download endpoint (V1-specific key)
+    v1_key = f"v1-{session_id}"
     async with _prepared_exports_lock:
-        _prepared_exports[session_id] = {
+        _prepared_exports[v1_key] = {
             "path": str(tar_path),
             "filename": filename,
             "size": size_bytes,
@@ -393,17 +394,23 @@ async def export_prepare(session_id: str, request: Request, include_runtime: boo
 
 
 @router.get("/api/session/{session_id}/export/download")
-async def export_download(session_id: str, request: Request):
+async def export_download(session_id: str, request: Request, token: str | None = None):
     """Phase 2: Stream the pre-built tar.gz to the browser.
 
     The file is deleted after the response is fully sent.
+
+    Query params:
+        token: Export token from POST /export-v2. When absent, falls back
+            to legacy session_id key (V1 prepared export path).
     """
     validate_session_id(session_id)
     user_id = getattr(request.state, "user_id", "")
     await require_session_ownership(session_id=session_id, user_id=user_id)
 
+    # Token-based (V2) or legacy session_id key (V1 with v1- prefix)
+    key = token or f"v1-{session_id}"
     async with _prepared_exports_lock:
-        info = _prepared_exports.pop(session_id, None)
+        info = _prepared_exports.pop(key, None)
     if not info or not os.path.exists(info["path"]):
         raise HTTPException(status_code=404, detail="Export not prepared. Call POST /export/prepare first.")
 
@@ -440,7 +447,10 @@ async def export_v2(
 
     from backend.services.snapshot_v2.paths import SnapshotV2Paths
     from backend.services.snapshot_v2.service import SnapshotService
-    from backend.services.snapshot_v2.errors import SnapshotV2Error
+    from backend.services.snapshot_v2.errors import (
+        SnapshotV2Error,
+        snapshot_error_detail,
+    )
 
     paths = SnapshotV2Paths.for_session(session_id)
 
@@ -456,29 +466,37 @@ async def export_v2(
             snapshot_ids=parsed_ids,
         )
     except SnapshotV2Error as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        err = snapshot_error_detail(exc)
+        raise HTTPException(
+            status_code=err["status_code"],
+            detail={key: value for key, value in err.items() if key != "status_code"},
+        ) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # Move to stable location for download
     export_dir = UPLOAD_TEMP_DIR
     export_dir.mkdir(parents=True, exist_ok=True)
+    export_token = uuid.uuid4().hex[:24]
     filename = f"v2-export-{session_id[:8]}-{uuid.uuid4().hex[:8]}.tar.gz"
     final_path = export_dir / filename
     shutil.move(str(export_path), str(final_path))
 
     size_bytes = final_path.stat().st_size
 
+    # Token-keyed prepared export prevents V1/V2 collisions
     async with _prepared_exports_lock:
-        _prepared_exports[session_id] = {
+        _prepared_exports[export_token] = {
             "path": str(final_path),
             "filename": filename,
             "size": size_bytes,
+            "session_id": session_id,
         }
 
     return {
         "status": "ready",
-        "download_url": f"/api/session/{session_id}/export/download",
+        "export_token": export_token,
+        "download_url": f"/api/session/{session_id}/export/download?token={export_token}",
         "filename": filename,
         "size_bytes": size_bytes,
     }
@@ -534,14 +552,21 @@ async def import_v2(
 
         from backend.services.snapshot_v2.paths import SnapshotV2Paths
         from backend.services.snapshot_v2.service import SnapshotService
-        from backend.services.snapshot_v2.errors import SnapshotV2Error
+        from backend.services.snapshot_v2.errors import (
+            SnapshotV2Error,
+            snapshot_error_detail,
+        )
 
         paths = SnapshotV2Paths.for_session(session_id)
         service = SnapshotService(session_id, paths)
         try:
             result = await service.import_snapshots(tmp_path, trust_runtime=trust)
         except SnapshotV2Error as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            err = snapshot_error_detail(exc)
+            raise HTTPException(
+                status_code=err["status_code"],
+                detail={key: value for key, value in err.items() if key != "status_code"},
+            ) from exc
 
         if not result.success:
             raise HTTPException(

@@ -66,20 +66,13 @@ def _make_graph_node_capsule(next_node="bioinformatics_analysis", planning_stage
     from backend.services.snapshot_v2.models import GraphNodeCapsule, ObjectRef
     import json
     if object_store is not None and workflow_state is not None:
-        # Extract only serializable fields (same as ContinuationRegistry._serialize_workflow_state)
-        carried = (
-            "current_round", "pi_instructions", "planning_stage", "plan_approved",
-            "planning_result", "planning_context", "user_plan_feedback",
-            "plan_revision_needed", "plan_revision_context", "plan_revision_resume",
-            "report_blocked", "integration_next", "failed_node", "skip_nodes",
-            "node_retry_count", "node_errors", "adjusted_instructions",
-        )
-        serialized = {}
-        for key in carried:
-            if key in workflow_state:
-                serialized[key] = workflow_state[key]
+        # Persist provided workflow_state keys (except non-serializable graph carriers)
+        serialized = {
+            k: v for k, v in workflow_state.items()
+            if k not in {"analysis_state", "messages"}
+        }
         data = json.dumps(serialized, sort_keys=True, ensure_ascii=False).encode()
-        ref = object_store.put_bytes(data, "application/json")
+        ref = object_store.put_bytes(data, "application/json").ref
     else:
         ref = ObjectRef(
             sha256="ab" * 32,
@@ -99,7 +92,7 @@ def _make_semantic_gate_capsule(gate="round_wait", *, object_store=None, payload
     import json
     if object_store is not None and payload is not None:
         data = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
-        ref = object_store.put_bytes(data, "application/json")
+        ref = object_store.put_bytes(data, "application/json").ref
     else:
         ref = ObjectRef(
             sha256="cd" * 32,
@@ -580,6 +573,78 @@ class TestActivate:
         assert analysis_state.last_restored_snapshot_id == "snap-parent-1"
 
 
+def test_dispatcher_activation_persists_frozen_workflow_state(v2_paths):
+    from backend.services.snapshot_v2.object_store import ObjectStore
+    from backend.services.snapshot_v2.dispatcher import ContinuationDispatcher
+
+    frozen = {
+        "planning_stage": "stage2",
+        "plan_approved": True,
+        "bioinformatics_result": {"status": "complete"},
+        "node_retry_count": {"bioinformatics_analysis": 2},
+    }
+    store = ObjectStore(v2_paths)
+    capsule = _make_graph_node_capsule(
+        object_store=store,
+        workflow_state=frozen,
+    )
+    state = _make_analysis_state()
+    dispatcher = ContinuationDispatcher(store)
+    staged = dispatcher.stage_checkpoint(
+        capsule,
+        frozen,
+        state,
+        snapshot_id="snap-frozen",
+        transaction_id="tx-frozen",
+    )
+    dispatcher.activate(state, staged)
+    assert state.restore_resume_workflow_state == frozen
+
+
+@pytest.fixture
+def workflow():
+    from backend.workflow.core import SingleCellAnalysisWorkflow
+    from backend.workflow.routing import RoutingMixin
+
+    wf = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+    wf.session_id = "test-restore-entry"
+    wf.restore_entry_loader = None
+    wf._restore_entry = SingleCellAnalysisWorkflow._restore_entry.__get__(wf)
+    if hasattr(SingleCellAnalysisWorkflow, "_consume_restore_routing_metadata"):
+        wf._consume_restore_routing_metadata = (
+            SingleCellAnalysisWorkflow._consume_restore_routing_metadata.__get__(wf)
+        )
+    if hasattr(SingleCellAnalysisWorkflow, "_consume_restore_resume_metadata"):
+        wf._consume_restore_resume_metadata = (
+            SingleCellAnalysisWorkflow._consume_restore_resume_metadata.__get__(wf)
+        )
+    wf._route_from_restore_entry = RoutingMixin._route_from_restore_entry.__get__(wf)
+    return wf
+
+
+@pytest.mark.asyncio
+async def test_restore_entry_returns_consumed_copy_without_mutating_input(workflow):
+    original = _make_analysis_state(
+        restore_resume_kind="graph_node",
+        restore_resume_node="bioinformatics_analysis",
+        last_restored_snapshot_id="snap-frozen",
+    )
+    original.restore_resume_workflow_state = {"plan_approved": True}
+    result = workflow._restore_entry({"analysis_state": original})
+    assert original.restore_resume_kind == "graph_node"
+    returned = result["analysis_state"]
+    assert returned is not original
+    assert returned.restore_resume_kind is None
+    assert result["plan_approved"] is True
+
+
+def test_idle_restore_entry_routes_to_end(workflow):
+    route = workflow._route_from_restore_entry({
+        "_restore_entry_plan": {"intent": "idle", "target_node": None},
+    })
+    assert route == "hold"
+
+
 # ── Branch identity tests ─────────────────────────────────────────────────────
 
 class TestBranchIdentity:
@@ -959,3 +1024,187 @@ class TestWorkflowCoreDispatch:
 
         result = await workflow.run(state, "s3")
         workflow.initialize.assert_not_awaited()
+
+
+class TestRestoreEntryPlan:
+    """Tests for restore_entry.py: build_restore_entry_plan."""
+
+    def test_normal_intent(self):
+        from backend.models.schemas import AnalysisState
+        from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+
+        state = AnalysisState(id="t1", user_id="u1", initial_instruction="test")
+        plan = build_restore_entry_plan(state)
+        assert plan.intent == "normal"
+        assert plan.target_node is None
+        assert plan.preserve_round_on_initialize is False
+
+    def test_explicit_start_intent(self):
+        from backend.models.schemas import AnalysisState
+        from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+
+        state = AnalysisState(id="t2", user_id="u1", initial_instruction="test")
+        plan = build_restore_entry_plan(state, restore_start_intent="explicit_start")
+        assert plan.intent == "explicit_start"
+        assert plan.target_node == "initialize_round"
+        assert plan.preserve_round_on_initialize is True
+
+    def test_graph_node_intent(self):
+        from backend.models.schemas import AnalysisState
+        from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+
+        state = AnalysisState(
+            id="t3", user_id="u1", initial_instruction="test",
+            restore_resume_kind="graph_node",
+            restore_resume_node="bioinformatics_analysis",
+        )
+        plan = build_restore_entry_plan(state)
+        assert plan.intent == "graph_node"
+        assert plan.target_node == "bioinformatics_analysis"
+
+    def test_semantic_gate_intent(self):
+        from backend.models.schemas import AnalysisState
+        from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+
+        state = AnalysisState(
+            id="t4", user_id="u1", initial_instruction="test",
+            restore_resume_kind="semantic_gate",
+            restore_resume_gate="round_wait",
+        )
+        plan = build_restore_entry_plan(state)
+        assert plan.intent == "semantic_gate"
+        assert plan.target_node == "wait_for_user_input"
+
+    def test_terminal_intent(self):
+        from backend.models.schemas import AnalysisState
+        from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+
+        state = AnalysisState(
+            id="t5", user_id="u1", initial_instruction="test",
+            restore_resume_kind="terminal",
+        )
+        plan = build_restore_entry_plan(state)
+        assert plan.intent == "terminal"
+        assert plan.target_node == "generate_final_report"
+
+    def test_idle_intent(self):
+        from backend.models.schemas import AnalysisState
+        from backend.services.snapshot_v2.restore_entry import build_restore_entry_plan
+
+        state = AnalysisState(
+            id="t6", user_id="u1", initial_instruction="test",
+            restore_resume_kind=None,
+            restore_branch_id="restore-tx-6",
+        )
+        plan = build_restore_entry_plan(state)
+        assert plan.intent == "idle"
+        assert plan.target_node is None
+
+
+class TestRestoreEntryWorkflow:
+    """Tests for the restore_entry graph node integration."""
+
+    @pytest.mark.asyncio
+    async def test_idle_reconnect_does_not_invoke_graph(self):
+        """Idle-restored session on reconnect should not invoke the graph forward."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from backend.models.schemas import AnalysisState, TaskStatus
+        from backend.workflow.core import SingleCellAnalysisWorkflow
+
+        state = AnalysisState(
+            id="idle-reconnect", user_id="u1", initial_instruction="test",
+            status=TaskStatus.RUNNING,
+            current_round=2, max_rounds=4,
+            restore_resume_kind=None,
+            restore_branch_id="restore-tx-7",
+        )
+
+        workflow = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+        workflow.session_id = "idle-reconnect"
+        workflow._state = state
+        workflow._send_message = AsyncMock()
+        workflow._send_state_sync = AsyncMock()
+        workflow.initialize = AsyncMock()
+        workflow.compiled_graph = None
+        workflow._set_status = MagicMock(wraps=SingleCellAnalysisWorkflow._set_status)
+
+        result = await workflow.run(state, "idle-reconnect")
+        workflow.initialize.assert_not_awaited()
+        assert result.status == TaskStatus.PAUSED
+
+    @pytest.mark.asyncio
+    async def test_graph_restore_pre_handoff_failure_retains_metadata(self):
+        """When a graph-node restore fails before handing off, metadata is retained."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from backend.models.schemas import AnalysisState, TaskStatus
+        from backend.workflow.core import SingleCellAnalysisWorkflow
+
+        state = AnalysisState(
+            id="handoff-fail", user_id="u1", initial_instruction="test",
+            status=TaskStatus.RUNNING,
+            current_round=2, max_rounds=4,
+            restore_resume_kind="graph_node",
+            restore_resume_node="bioinformatics_analysis",
+            restore_branch_id="restore-tx-8",
+        )
+
+        workflow = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+        workflow.session_id = "handoff-fail"
+        workflow._state = state
+        workflow._send_message = AsyncMock()
+        workflow._send_state_sync = AsyncMock()
+        workflow.initialize = AsyncMock()
+        workflow.compiled_graph = None
+        workflow._set_status = MagicMock()
+
+        # Compile graph to trigger a failure
+        workflow._build_graph = MagicMock(side_effect=RuntimeError("graph build failed"))
+
+        result = await workflow.run(state, "handoff-fail")
+        # Metadata should still be present on the state
+        assert state.restore_resume_kind == "graph_node"
+        assert state.restore_resume_node == "bioinformatics_analysis"
+        assert state.restore_branch_id == "restore-tx-8"
+
+    @pytest.mark.asyncio
+    async def test_graph_restore_target_failure_uses_consumed_checkpoint(self):
+        """When the target node fails after restore entry, the checkpoint is consumed."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from backend.models.schemas import AnalysisState, TaskStatus
+        from backend.workflow.core import SingleCellAnalysisWorkflow
+
+        state = AnalysisState(
+            id="target-fail", user_id="u1", initial_instruction="test",
+            status=TaskStatus.RUNNING,
+            current_round=2, max_rounds=4,
+            restore_resume_kind="graph_node",
+            restore_resume_node="bioinformatics_analysis",
+            restore_branch_id="restore-tx-9",
+            last_restored_snapshot_id=None,
+        )
+
+        workflow = SingleCellAnalysisWorkflow.__new__(SingleCellAnalysisWorkflow)
+        workflow.session_id = "target-fail"
+        workflow._state = state
+        workflow._send_message = AsyncMock()
+        workflow._send_state_sync = AsyncMock()
+        workflow.initialize = AsyncMock()
+        workflow.compiled_graph = None
+        workflow._set_status = MagicMock(wraps=SingleCellAnalysisWorkflow._set_status)
+
+        # Simulate initialize then run
+        workflow._build_graph = MagicMock()
+
+        with patch.object(
+            workflow, "_make_initial_workflow_state",
+            return_value={"analysis_state": state, "current_round": 2},
+        ):
+            with patch.object(
+                workflow, "initialize",
+                return_value=None,
+            ):
+                result = await workflow.run(state, "target-fail")
+
+        # The run should proceed through initialize and attempt graph execution
+        # which will fail because compiled_graph is None.
+        assert result.status == TaskStatus.FAILED

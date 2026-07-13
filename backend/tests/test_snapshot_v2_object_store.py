@@ -101,18 +101,20 @@ class TestObjectStore:
         from backend.services.snapshot_v2.object_store import ObjectStore
 
         store = ObjectStore(v2_paths)
-        ref = store.put_bytes(b"hello world", "text/plain")
+        result = store.put_bytes(b"hello world", "text/plain")
+        ref = result.ref
         assert ref.sha256
         assert len(ref.sha256) == 64
         assert ref.size == len(b"hello world")
         assert ref.media_type == "text/plain"
+        assert result.created is True
 
     def test_put_bytes_creates_file(self, v2_paths):
         from backend.services.snapshot_v2.object_store import ObjectStore
 
         store = ObjectStore(v2_paths)
-        ref = store.put_bytes(b"hello world", "text/plain")
-        obj_path = v2_paths.objects / ref.sha256
+        result = store.put_bytes(b"hello world", "text/plain")
+        obj_path = v2_paths.objects / result.ref.sha256
         assert obj_path.exists()
         assert obj_path.read_bytes() == b"hello world"
 
@@ -122,23 +124,27 @@ class TestObjectStore:
         store = ObjectStore(v2_paths)
         one = store.put_bytes(b"same", "application/octet-stream")
         two = store.put_bytes(b"same", "application/octet-stream")
-        assert one == two
+        assert one.ref == two.ref
+        assert two.created is False
         assert len(list(v2_paths.objects.iterdir())) == 1
 
     def test_put_bytes_verify_success(self, v2_paths):
         from backend.services.snapshot_v2.object_store import ObjectStore
 
         store = ObjectStore(v2_paths)
-        ref = store.put_bytes(b"verify me", "text/plain")
-        store.verify(ref)
+        result = store.put_bytes(b"verify me", "text/plain")
+        store.verify(result.ref)
 
     def test_verify_corrupted_hash_raises(self, v2_paths):
         from backend.services.snapshot_v2.object_store import ObjectStore
 
         store = ObjectStore(v2_paths)
-        ref = store.put_bytes(b"original", "text/plain")
+        result = store.put_bytes(b"original data", "text/plain")
+        ref = result.ref
         obj_path = v2_paths.objects / ref.sha256
-        obj_path.write_bytes(b"tampered")
+        # Clear evidence cache to force full streaming verification
+        store._evidence.clear()
+        obj_path.write_bytes(b"tampered data that is different")
         with pytest.raises(SnapshotIntegrityError):
             store.verify(ref)
 
@@ -156,7 +162,8 @@ class TestObjectStore:
         from backend.services.snapshot_v2.object_store import ObjectStore
 
         store = ObjectStore(v2_paths)
-        ref = store.put_bytes(b"exact content", "text/plain")
+        result = store.put_bytes(b"exact content", "text/plain")
+        ref = result.ref
         from backend.services.snapshot_v2.models import ObjectRef
 
         bad_ref = ObjectRef(sha256=ref.sha256, size=9999, media_type=ref.media_type)
@@ -187,10 +194,44 @@ class TestObjectStore:
         store = ObjectStore(v2_paths)
         src = v2_paths.staging / "real_file.bin"
         src.write_bytes(b"file content data")
-        ref = store.put_file(src, "application/octet-stream")
-        assert ref.size == len(b"file content data")
-        obj_path = v2_paths.objects / ref.sha256
+        result = store.put_file(src, "application/octet-stream")
+        assert result.ref.size == len(b"file content data")
+        assert result.created is True
+        obj_path = v2_paths.objects / result.ref.sha256
         assert obj_path.exists()
+
+
+def test_put_file_dedup_detects_same_size_corruption(tmp_path):
+    from backend.services.snapshot_v2.object_store import ObjectStore
+    from backend.services.snapshot_v2.errors import SnapshotIntegrityError
+
+    # SnapshotV2Paths.for_session() uses import-time DATA_BASE_DIR; use tmp FakePaths for isolation.
+    class FakePaths:
+        root = tmp_path / "v2"
+        objects = tmp_path / "objects"
+        staging = tmp_path / "staging"
+        journals = tmp_path / "journals"
+        integrity = tmp_path / "integrity"
+        committed = tmp_path / "committed"
+
+    paths = FakePaths()
+    for d in (paths.root, paths.objects, paths.staging, paths.journals, paths.integrity, paths.committed):
+        d.mkdir(parents=True, exist_ok=True)
+    store = ObjectStore(paths)
+
+    src = tmp_path / "obj.bin"
+    src.write_bytes(b"AAAA")
+    ref = store.put_file(src, "application/octet-stream").ref
+
+    # Corrupt the stored object to the SAME length, different content.
+    dest = store._objects_dir / ref.sha256
+    dest.write_bytes(b"BBBB")
+
+    # A fresh store has no cached evidence, so the dedup path runs.
+    fresh = ObjectStore(paths)
+    with pytest.raises(SnapshotIntegrityError) as exc:
+        fresh.put_file(src, "application/octet-stream")
+    assert exc.value.code == "OBJECT_HASH_MISMATCH"
 
 
 class TestManifestStore:
@@ -369,3 +410,56 @@ class TestManifestStore:
         raw = canonical_json(manifest)
         expected = hashlib.sha256(raw).hexdigest()
         assert data["root_hash"] == expected
+
+    def test_committed_bytes_are_canonical_document(self, v2_paths, manifest):
+        from backend.services.snapshot_v2.object_store import (
+            ManifestStore, canonical_manifest_body_bytes,
+            canonical_manifest_document_bytes,
+        )
+
+        store = ManifestStore(v2_paths)
+        path = store.write_staging(manifest)
+        published = store.publish_staging(path)
+        committed = v2_paths.committed / f"{published.snapshot_id}.json"
+        assert committed.read_bytes() == canonical_manifest_document_bytes(published)
+
+    def test_crash_before_manifest_commit_never_exposes_manifest(self, v2_paths, manifest, monkeypatch):
+        from backend.services.snapshot_v2.object_store import ManifestStore
+        from unittest.mock import Mock
+        import os
+
+        store = ManifestStore(v2_paths)
+        path = store.write_staging(manifest)
+        monkeypatch.setattr(os, "replace", Mock(side_effect=OSError("crash")))
+        store._sign = Mock(return_value="sig-placeholder")
+        with pytest.raises(OSError, match="crash"):
+            store.publish_staging(path)
+        assert not (v2_paths.committed / f"{manifest.snapshot_id}.json").exists()
+
+    def test_load_rejects_pending_import_manifest(self, v2_paths, manifest):
+        from backend.services.snapshot_v2.object_store import ManifestStore
+
+        store = ManifestStore(v2_paths)
+        staging = store.write_staging(manifest)
+        store.publish_staging(staging)
+
+        # Mark as pending — must become invisible to load().
+        ManifestStore.mark_pending_imports(v2_paths.committed, [manifest.snapshot_id])
+        with pytest.raises(SnapshotIntegrityError) as exc:
+            store.load(manifest.snapshot_id)
+        assert exc.value.code == "MANIFEST_NOT_FOUND"
+
+        # Clearing the marker restores visibility.
+        ManifestStore.clear_pending_imports(v2_paths.committed, [manifest.snapshot_id])
+        assert store.load(manifest.snapshot_id).snapshot_id == manifest.snapshot_id
+
+    def test_mark_pending_imports_creates_committed_dir_when_missing(self, tmp_path):
+        """First import may run before committed/ exists; markers must still land."""
+        from backend.services.snapshot_v2.object_store import ManifestStore
+
+        committed = tmp_path / "committed"
+        assert not committed.exists()
+        ManifestStore.mark_pending_imports(committed, ["snap-new"])
+        assert committed.is_dir()
+        assert (committed / ".pending-import-snap-new").is_file()
+        assert ManifestStore.list_pending_import_ids(committed) == {"snap-new"}

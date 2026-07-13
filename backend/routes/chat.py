@@ -299,6 +299,8 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
     workflow = workflows.get(session_id)
     # True only when THIS call created the pending request or acquired the pause.
     owned = False
+    # Requester token retained through finally for cancel/release ownership.
+    owner_token = f"chat:{session_id}:{uuid.uuid4().hex[:12]}"
 
     try:
         if workflow is not None:
@@ -309,7 +311,8 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
                     "Post-chat capture cannot steal an existing safe-point hold",
                 )
 
-            owned = sp.request_safe_point(session_id)
+            req = await sp.request_safe_point(session_id, owner_token)
+            owned = req is not False and req is not None
             if not owned:
                 raise RequiredSnapshotBlocked(
                     "LIVE_SANDBOX_REQUIRED",
@@ -359,7 +362,7 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
                 }
 
             # Refresh descriptor under the held (owned) safe point for capture.
-            if not sp.update_descriptor(session_id, live_sp):
+            if not await sp.update_descriptor(session_id, owner_token, live_sp):
                 raise RequiredSnapshotBlocked(
                     "LIVE_SANDBOX_REQUIRED",
                     "Post-chat safe point was released before descriptor refresh",
@@ -429,7 +432,7 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
                 "Post-chat capture cannot steal an existing safe-point hold",
             )
 
-        if not sp.acquire(session_id, descriptor):
+        if not await sp.acquire(session_id, descriptor, owner_token=owner_token):
             raise RequiredSnapshotBlocked(
                 "LIVE_SANDBOX_REQUIRED",
                 "Post-chat capture failed to acquire idle safe point",
@@ -459,7 +462,7 @@ async def capture_post_chat_snapshot(session_id: str, state: AnalysisState):
         )
     finally:
         if owned:
-            sp.cancel_safe_point_request(session_id)
+            await sp.cancel_safe_point_request(session_id, owner_token)
 
 
 async def _create_chat_snapshot(session_id: str, state: AnalysisState) -> None:
@@ -783,6 +786,7 @@ async def _run_chat_delegation(
     llm_manager = None
     start_time = time.time()
     _delegation_extra_clients: List[Any] = []
+    pre_snapshot_status = None
     try:
         # 1. Send started notification
         delegates = delegation.get("delegates", [])
@@ -1010,6 +1014,14 @@ async def _run_chat_delegation(
         await async_save_session(session_id, state)
 
         # Auto-snapshot after chat delegation completes
+        from backend.models.schemas import TaskStatus as _TaskStatus
+
+        pre_snapshot_status = getattr(state, "status", _TaskStatus.COMPLETED)
+        if not isinstance(pre_snapshot_status, _TaskStatus):
+            try:
+                pre_snapshot_status = _TaskStatus(str(pre_snapshot_status))
+            except Exception:
+                pre_snapshot_status = _TaskStatus.COMPLETED
         await _create_chat_snapshot(session_id, state)
 
         duration = time.time() - start_time
@@ -1037,23 +1049,23 @@ async def _run_chat_delegation(
     except RequiredSnapshotBlocked as e:
         # Coherent HITL: structured snapshot_failure, not generic chat_error.
         from backend.models.schemas import TaskStatus
-        from backend.services.snapshot_v2.errors import SNAPSHOT_FAILURE_ACTIONS
+        from backend.services.snapshot_v2.failure_gate import (
+            enter_chat_snapshot_failure_gate,
+        )
 
         logger.warning(
             f"[{session_id}] Post-chat snapshot blocked after delegation: {e}"
         )
-        if not getattr(state, "snapshot_failure", None):
-            state.snapshot_failure = {
-                "code": e.code,
-                "message": str(e),
-                "allowed_actions": list(SNAPSHOT_FAILURE_ACTIONS),
-                "snapshot_id": getattr(e, "snapshot_id", None),
-            }
-        state.wait_input_reason = "snapshot_failure"
-        try:
-            state.status = TaskStatus.WAITING_INPUT
-        except Exception:
-            pass
+        previous_status = pre_snapshot_status
+        if previous_status is None:
+            previous_status = getattr(state, "status", TaskStatus.COMPLETED)
+        if not isinstance(previous_status, TaskStatus):
+            try:
+                previous_status = TaskStatus(str(previous_status))
+            except Exception:
+                previous_status = TaskStatus.COMPLETED
+        # Always set chat retry_context (service may have written a bare failure).
+        enter_chat_snapshot_failure_gate(state, e, previous_status)
         for i in range(len(state.chat_messages) - 1, -1, -1):
             if state.chat_messages[i].get("delegation_active"):
                 state.chat_messages[i] = {
@@ -1136,6 +1148,15 @@ async def chat_with_pi(
 
     if config is None:
         raise HTTPException(status_code=400, detail="No API key configured. Please configure your LLM API key in Settings before sending a message.")
+
+    # Reject chat while a snapshot/restore safe point is active
+    from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
+    _sp = get_snapshot_safe_point_manager()
+    if _sp.is_paused(session_id) or _sp.has_pending_request(session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot chat while a snapshot or restore operation is in progress",
+        )
 
     # Parse per-file metadata arrays
     def _parse_json_list(raw: str) -> list:
@@ -1438,26 +1459,25 @@ async def chat_with_pi(
         result["figures"] = assistant_msg["figures"]
 
     # Auto-snapshot after chat exchange (fail closed → coherent HITL)
+    from backend.models.schemas import TaskStatus as _TaskStatus
+
+    pre_snapshot_status = getattr(state, "status", _TaskStatus.COMPLETED)
+    if not isinstance(pre_snapshot_status, _TaskStatus):
+        try:
+            pre_snapshot_status = _TaskStatus(str(pre_snapshot_status))
+        except Exception:
+            pre_snapshot_status = _TaskStatus.COMPLETED
     try:
         await _create_chat_snapshot(session_id, state)
         await async_save_session(session_id, state)
     except RequiredSnapshotBlocked as e:
-        from backend.models.schemas import TaskStatus
-        from backend.services.snapshot_v2.errors import SNAPSHOT_FAILURE_ACTIONS
+        from backend.services.snapshot_v2.failure_gate import (
+            enter_chat_snapshot_failure_gate,
+        )
 
         logger.warning(f"[{session_id}] Post-chat snapshot blocked: {e}")
-        if not getattr(state, "snapshot_failure", None):
-            state.snapshot_failure = {
-                "code": e.code,
-                "message": str(e),
-                "allowed_actions": list(SNAPSHOT_FAILURE_ACTIONS),
-                "snapshot_id": getattr(e, "snapshot_id", None),
-            }
-        state.wait_input_reason = "snapshot_failure"
-        try:
-            state.status = TaskStatus.WAITING_INPUT
-        except Exception:
-            pass
+        # Always set chat retry_context (service may have written a bare failure).
+        enter_chat_snapshot_failure_gate(state, e, pre_snapshot_status)
         await async_save_session(session_id, state)
         result["snapshot_failure"] = state.snapshot_failure
         result["wait_input_reason"] = "snapshot_failure"

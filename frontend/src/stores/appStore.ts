@@ -6,7 +6,7 @@ import type { SnapshotRecordV2, SnapshotStoreStatus, SnapshotTransactionRecord, 
 
 // Types
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor' | 'technique'
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'waiting_input' | 'waiting_annotation' | 'waiting_plan_review' | 'waiting_species_input' | 'generating_report'
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'paused' | 'stopped' | 'waiting_input' | 'waiting_annotation' | 'waiting_plan_review' | 'waiting_species_input' | 'generating_report'
 export type FigureReviewStatus = 'pending' | 'approved' | 'accepted_with_reservations' | 'revision_requested'
 
 
@@ -423,7 +423,6 @@ export interface AppState {
   }) => void
   isForwardResumeBlocked: () => boolean
   isRerunEnabled: () => boolean
-  isSnapshotFailureBlocked: () => boolean
 
   // Session browser callback (set by Sidebar, invoked by ConfigPanel's Read Mode)
   openSessionBrowser: (() => void) | null
@@ -727,7 +726,10 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
           runtimeRestoreWarning: warning,
         }
         const rawFailure = payload.snapshot_failure
-        if (rawFailure && typeof rawFailure === 'object') {
+        if (rawFailure === null || rawFailure === undefined) {
+          // Explicit clear from session load / state_sync after gate release
+          updates.snapshotFailure = null
+        } else if (rawFailure && typeof rawFailure === 'object') {
           const f = rawFailure as Record<string, unknown>
           const code = typeof f.code === 'string' ? f.code : ''
           const message = typeof f.message === 'string' ? f.message : ''
@@ -770,8 +772,6 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
           s.runtimeRestoreStatus === 'intentionally_kept'
         )
       },
-      isSnapshotFailureBlocked: () => get().snapshotFailure != null,
-
       // Session browser callback
       openSessionBrowser: null,
       setOpenSessionBrowserCallback: (callback) => set({ openSessionBrowser: callback }),

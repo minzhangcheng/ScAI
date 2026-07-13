@@ -8,14 +8,31 @@ const mockDeleteSnapshotV2 = vi.fn()
 const mockCancelSnapshotTransaction = vi.fn()
 const mockGetSnapshotTransaction = vi.fn()
 
-vi.mock('../../hooks/useApi', () => ({
-  apiFetch: vi.fn(),
-  listSnapshotsV2: (...args: unknown[]) => mockListSnapshotsV2(...args),
-  deleteSnapshotV2: (...args: unknown[]) => mockDeleteSnapshotV2(...args),
-  restoreSnapshotV2: (...args: unknown[]) => mockRestoreSnapshotV2(...args),
-  cancelSnapshotTransaction: (...args: unknown[]) => mockCancelSnapshotTransaction(...args),
-  getSnapshotTransaction: (...args: unknown[]) => mockGetSnapshotTransaction(...args),
-}))
+vi.mock('../../hooks/useApi', () => {
+  class MockApiError extends Error {
+    status: number
+    code: string
+    runtimeStatus: string | null
+    details: Record<string, unknown> | null
+    constructor(status: number, code: string, message: string, runtimeStatus?: string | null, details?: Record<string, unknown> | null) {
+      super(message)
+      this.name = 'ApiError'
+      this.status = status
+      this.code = code
+      this.runtimeStatus = runtimeStatus ?? null
+      this.details = details ?? null
+    }
+  }
+  return {
+    ApiError: MockApiError,
+    apiFetch: vi.fn(),
+    listSnapshotsV2: (...args: unknown[]) => mockListSnapshotsV2(...args),
+    deleteSnapshotV2: (...args: unknown[]) => mockDeleteSnapshotV2(...args),
+    restoreSnapshotV2: (...args: unknown[]) => mockRestoreSnapshotV2(...args),
+    cancelSnapshotTransaction: (...args: unknown[]) => mockCancelSnapshotTransaction(...args),
+    getSnapshotTransaction: (...args: unknown[]) => mockGetSnapshotTransaction(...args),
+  }
+})
 
 vi.mock('../../stores/appStore', () => {
   const useAppStore = Object.assign(

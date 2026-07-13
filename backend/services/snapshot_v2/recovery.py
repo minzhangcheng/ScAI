@@ -611,6 +611,49 @@ def _recover_import_envelope(
         return
 
     if status == "STAGED":
+        # Collect snapshot IDs from the envelope payload so we can clean
+        # up any pending-import markers left over from the interrupted
+        # batch.  The batch was never committed, so these manifests are
+        # orphaned and must be removed.
+        payload = envelope.payload or {}
+        pending_ids = set(
+            str(sid) for sid in payload.get("protected_snapshot_ids") or []
+            if sid
+        )
+
+        # Remove the manifests directly if they have pending-import
+        # markers (the batch was never published).
+        if pending_ids:
+            from backend.services.snapshot_v2.deletion import DeletionService
+            from backend.services.snapshot_v2.object_store import ObjectStore
+
+            del_paths = paths
+            del_service = DeletionService(
+                session_id, del_paths,
+                manifest_store=ManifestStore(del_paths),
+                object_store=ObjectStore(del_paths),
+            )
+            try:
+                del_service.delete_pending_import_manifests(list(pending_ids))
+            except Exception as exc:
+                logger.warning(
+                    "Recovery [%s]: cleanup of pending-import manifests "
+                    "failed for %s: %s",
+                    session_id, tx_id, exc,
+                )
+
+        # Also remove any partial batch record
+        try:
+            from backend.services.snapshot_v2.batch_store import ImportBatchStore
+            batch_store = ImportBatchStore(paths.root)
+            batch_store.remove(tx_id)
+        except Exception as exc:
+            logger.warning(
+                "Recovery [%s]: cleanup of partial batch record "
+                "failed for %s: %s",
+                session_id, tx_id, exc,
+            )
+
         try:
             reconcile_result = ManifestStore(paths).reconcile()
         except Exception as exc:

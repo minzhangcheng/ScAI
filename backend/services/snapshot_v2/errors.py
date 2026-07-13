@@ -70,6 +70,9 @@ class RequiredSnapshotBlocked(SnapshotV2Error):
     Producers raise this after persisting WAITING_INPUT / snapshot_failure
     so the workflow stops forward mutation. Caught once at the workflow
     run/resume boundary — never converted into ordinary node retries.
+
+    When available, ``details["phase"]`` carries the real capture phase so
+    workflow-boundary retry can re-enter the same producer path.
     """
 
     def __init__(
@@ -79,6 +82,67 @@ class RequiredSnapshotBlocked(SnapshotV2Error):
         *,
         details: dict | None = None,
         snapshot_id: str | None = None,
+        phase: str | None = None,
     ):
-        super().__init__(code, message, details=details)
+        merged = dict(details or {})
+        if phase and not merged.get("phase"):
+            merged["phase"] = phase
+        super().__init__(code, message, details=merged)
         self.snapshot_id = snapshot_id
+        self.phase = merged.get("phase")
+
+
+def _snapshot_error_status(exc: SnapshotV2Error) -> int:
+    """Map a SnapshotV2Error type/code to an HTTP status code.
+
+    The canonical mapping is:
+
+    ==================================  ====
+    Exception type / code               Code
+    ==================================  ====
+    MANIFEST_NOT_FOUND /               404
+      SNAPSHOT_NOT_FOUND
+    V1 restore (no SnapshotV2Error)    410  (caller must handle separately)
+    SnapshotCompatibilityError         422
+    SnapshotIntegrityError (other)     422
+    SnapshotDeleteConflict             409
+    SnapshotTransactionError           503
+    SnapshotStorageError               507
+    ExportIntegrityError               422  (bad request / unknown snapshots)
+    Any other SnapshotV2Error          500
+    ==================================  ====
+
+    The order of checks matters: more specific (subclass) checks must come
+    before the generic ``SnapshotV2Error`` fallback.
+    """
+    if isinstance(exc, SnapshotIntegrityError):
+        if exc.code in ("MANIFEST_NOT_FOUND", "SNAPSHOT_NOT_FOUND"):
+            return 404
+        return 422
+    if isinstance(exc, SnapshotCompatibilityError):
+        return 422
+    if isinstance(exc, SnapshotStorageError):
+        return 507
+    if isinstance(exc, SnapshotDeleteConflict):
+        return 409
+    if isinstance(exc, SnapshotTransactionError):
+        return 503
+    # ExportIntegrityError lives in exporter.py but inherits SnapshotV2Error
+    if exc.__class__.__name__ == "ExportIntegrityError":
+        return 422
+    return 500
+
+
+def snapshot_error_detail(exc: SnapshotV2Error, context: dict | None = None) -> dict:
+    status_code = _snapshot_error_status(exc)
+    result = {
+        "status_code": status_code,
+        "code": getattr(exc, "code", "UNKNOWN"),
+        "message": str(exc),
+    }
+    if getattr(exc, "details", None):
+        result["details"] = dict(exc.details)
+    for key in ("runtime_status",):
+        if context and context.get(key) is not None:
+            result[key] = context[key]
+    return result

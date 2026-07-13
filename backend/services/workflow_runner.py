@@ -20,8 +20,17 @@ logger = logging.getLogger(__name__)
 _report_tasks: dict[str, asyncio.Task] = {}
 
 
-async def _build_workflow_for_session(session_id: str):
-    """Load state + resolve config + construct the workflow. Returns (workflow, state) or (None, None)."""
+async def _build_workflow_for_session(
+    session_id: str,
+    *,
+    fail_on_missing_config: bool = True,
+):
+    """Load state + resolve config + construct the workflow. Returns (workflow, state) or (None, state/None).
+
+    When ``fail_on_missing_config`` is False (capture-only rebuild), missing
+    config returns ``(None, state)`` without mutating status to FAILED or
+    persisting a failed session. Headless runners keep the default True.
+    """
     from backend.workflow import SingleCellAnalysisWorkflow
 
     state = sessions.get(session_id)
@@ -32,13 +41,15 @@ async def _build_workflow_for_session(session_id: str):
     cfg = await resolve_config_for_user(user_id)
     if cfg is None:
         logger.error("No global config available for session %s; aborting workflow", session_id)
-        state.status = TaskStatus.FAILED
-        state.llm_failure_info = {
-            "agent": "system",
-            "error": "No API key configured. Please configure your LLM API key in Settings.",
-        }
-        await async_save_session(session_id, state)
-        return None, None
+        if fail_on_missing_config:
+            state.status = TaskStatus.FAILED
+            state.llm_failure_info = {
+                "agent": "system",
+                "error": "No API key configured. Please configure your LLM API key in Settings.",
+            }
+            await async_save_session(session_id, state)
+            return None, None
+        return None, state
 
     def message_callback(msg):
         pass

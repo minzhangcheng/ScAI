@@ -46,6 +46,7 @@ from backend.services.snapshot_v2.models import (
     validate_system_commit,
 )
 from backend.services.snapshot_v2.object_store import (
+    ObjectPutResult,
     ObjectStore,
     ManifestStore,
     canonical_json,
@@ -774,11 +775,19 @@ class SnapshotService:
                 "snapshot_failure": failure_payload,
                 "snapshot_transaction": state.snapshot_transaction,
             })
+            phase = (
+                getattr(request, "phase", None)
+                or getattr(request, "reason", None)
+            )
+            details = dict(record.failure.details or {})
+            if phase and not details.get("phase"):
+                details["phase"] = phase
             raise RequiredSnapshotBlocked(
                 record.failure.code,
                 record.failure.message,
-                details=dict(record.failure.details or {}),
+                details=details,
                 snapshot_id=record.snapshot_id,
+                phase=phase,
             )
 
         state.snapshot_failure = None
@@ -832,7 +841,8 @@ class SnapshotService:
             head = getattr(state, "last_snapshot_id", None)
             if head:
                 protected["live_head"].add(str(head))
-            cont = getattr(state, "last_restored_snapshot_id", None)
+            from backend.workflow.provenance import restore_provenance_id
+            cont = restore_provenance_id(state)
             if cont:
                 protected["continuation_source"].add(str(cont))
 
@@ -1050,6 +1060,7 @@ class SnapshotService:
 
     async def delete_leaf(self, snapshot_id: str) -> Any:
         """Delete a leaf snapshot under the session lock; reconcile listings."""
+        self._guard_active_safe_point()
         lock = get_session_lock(self.session_id)
         async with lock:
             result = self.delete_snapshot(snapshot_id, branch=False)
@@ -1058,6 +1069,7 @@ class SnapshotService:
 
     async def delete_branch(self, snapshot_id: str) -> Any:
         """Delete a snapshot and descendants under the session lock."""
+        self._guard_active_safe_point()
         lock = get_session_lock(self.session_id)
         async with lock:
             result = self.delete_snapshot(snapshot_id, branch=True)
@@ -1083,6 +1095,22 @@ class SnapshotService:
                 snapshot_ids=snapshot_ids,
             )
 
+    def _guard_active_safe_point(self) -> None:
+        """Raise SnapshotTransactionError if a safe point is active.
+
+        Called by mutation methods (import, delete) before acquiring the
+        session lock to prevent concurrent snapshot/restore operations
+        from corrupting the session state.
+        """
+        from backend.services.snapshot_v2.errors import SnapshotTransactionError
+
+        if self.safe_point.is_paused(self.session_id):
+            raise SnapshotTransactionError(
+                "SAFE_POINT_ACTIVE",
+                f"A snapshot/restore operation is in progress for "
+                f"session {self.session_id}; rejecting mutation",
+            )
+
     async def import_snapshots(
         self,
         archive_path: str | Path,
@@ -1090,6 +1118,7 @@ class SnapshotService:
         trust_runtime: bool = False,
     ) -> Any:
         """Import a V2 export archive under the session lock; reconcile listings."""
+        self._guard_active_safe_point()
         from backend.services.snapshot_v2.importer import SnapshotImporter
 
         lock = get_session_lock(self.session_id)
@@ -1158,7 +1187,13 @@ class SnapshotService:
         skip_safe_point_lifecycle: bool = False,
         persist_session: bool = True,
     ) -> SnapshotRecordV2:
-        """Capture transaction (caller already holds the session lock)."""
+        """Capture transaction (caller already holds the session lock).
+
+        ``physical_added_bytes`` is computed from ``ObjectPutResult.created``
+        instead of a full-store pre-scan. Each ``put_bytes``/``put_file``
+        call returns a boolean ``created`` flag; references whose put
+        returned ``created=True`` are counted as physical additions.
+        """
         snapshot_id = snapshot_id_override or _new_snapshot_id()
         tx = transaction or snapshot_id
         try:
@@ -1294,6 +1329,31 @@ class SnapshotService:
         if state.wait_input_reason == "snapshot_failure":
             state.wait_input_reason = None
 
+    async def retry_capture(
+        self,
+        state: Any,
+        request: SnapshotCaptureRequest,
+        sandbox: Any = None,
+        workflow_state: dict[str, Any] | None = None,
+        *,
+        workspace_root: str | None = None,
+    ) -> SnapshotRecordV2:
+        """Re-enter required capture without unlocking the failure gate first.
+
+        Capture may run while still gated; ``capture_required_snapshot`` clears
+        ``snapshot_failure`` only on successful commit. On failure it re-applies
+        WAITING_INPUT / snapshot_failure and raises ``RequiredSnapshotBlocked``.
+
+        Raises ``RequiredSnapshotBlocked`` on failure (no Skip).
+        """
+        return await self.capture_required_snapshot(
+            state,
+            request,
+            sandbox=sandbox,
+            workflow_state=workflow_state,
+            workspace_root=workspace_root,
+        )
+
     # ── Internal capture implementation ──────────────────────────────
 
     async def _capture_impl(
@@ -1318,7 +1378,7 @@ class SnapshotService:
         # Restore path already holds the cooperative safe point; do not
         # create/release it or pre_restore capture would unpause the workflow.
         if not skip_safe_point_lifecycle:
-            self._create_safe_point(workflow_state or {})
+            await self._create_safe_point(workflow_state or {})
 
         try:
             # Consistency barrier: await pending saves before freezing execution.
@@ -1340,15 +1400,15 @@ class SnapshotService:
                 )
 
             async with exec_cm:
-                # Record hashes present before any put for physical_added_bytes.
-                self._pre_existing_hashes = self._snapshot_pre_existing_hashes()
+                # physical_added_bytes computed from ObjectPutResult.created
+                # instead of full-store pre-scan.
 
                 # Freeze AnalysisState, notebook, checkpoint while execution excluded.
-                analysis_state_ref = await self._capture_analysis_state(
+                analysis_state_result = await self._capture_analysis_state(
                     request, analysis_state,
                 )
-                notebook_ref = await self._capture_notebook(request)
-                checkpoint_ref = await self._capture_checkpoint(request)
+                notebook_result = await self._capture_notebook(request)
+                checkpoint_result = await self._capture_checkpoint(request)
 
                 # Re-freeze under lock in case revision moved before acquire.
                 if sandbox is not None:
@@ -1410,7 +1470,9 @@ class SnapshotService:
 
             # Mutable sources frozen — exec lock released.
 
-
+            analysis_state_ref = analysis_state_result.ref
+            notebook_ref = notebook_result.ref
+            checkpoint_ref = checkpoint_result.ref if checkpoint_result is not None else None
 
             continuation = request.continuation or request.capsule
             if continuation is None:
@@ -1420,49 +1482,78 @@ class SnapshotService:
 
             all_objects: dict[str, ObjectRef] = {}
             physical_added = 0
-            pre_existing: set[str] = getattr(self, "_pre_existing_hashes", set()) or set()
+            # Refs proven by put_file/put_bytes/put_stream in this transaction
+            # (or request-supplied external refs fully verified once).
+            transaction_evidence: dict[str, ObjectRef] = {}
 
-            def _add_ref(ref: ObjectRef, *, was_new: bool) -> None:
+            def _record_transaction_evidence(ref: ObjectRef) -> None:
+                transaction_evidence[ref.sha256] = ref
+
+            def _add_ref_with_result(put_result) -> ObjectRef:
+                """Add an ObjectPutResult to the manifest's objects dict.
+
+                Returns the ObjectRef. The ``created`` flag controls
+                whether the size counts toward physical_added_bytes.
+                """
                 nonlocal physical_added
+                ref = put_result.ref
+                _record_transaction_evidence(ref)
                 if ref.sha256 not in all_objects:
                     all_objects[ref.sha256] = ref
-                    if was_new:
+                    if put_result.created:
                         physical_added += ref.size
+                return ref
 
-            for ref in (analysis_state_ref, notebook_ref):
-                if ref is None:
-                    continue
-                _add_ref(ref, was_new=ref.sha256 not in pre_existing)
-            if checkpoint_ref is not None:
-                _add_ref(
-                    checkpoint_ref,
-                    was_new=checkpoint_ref.sha256 not in pre_existing,
-                )
+            _add_ref_with_result(analysis_state_result)
+            _add_ref_with_result(notebook_result)
+            if checkpoint_result is not None:
+                _add_ref_with_result(checkpoint_result)
             for we in workspace_entries:
                 ref = ObjectRef(
                     sha256=we.object_hash,
                     size=we.size,
                     media_type="application/octet-stream",
                 )
-                _add_ref(ref, was_new=we.object_hash not in pre_existing)
+                if ref.sha256 not in all_objects:
+                    all_objects[ref.sha256] = ref
+                    # Workspace entries were created in this transaction
+                    # if they weren't already in the store; use register_existing_ref
+                    # fast-path: if the object already existed, don't count it.
+                    if not self.object_store.register_existing_ref(ref):
+                        physical_added += ref.size
             for ref in runtime.adata_refs.values():
-                _add_ref(ref, was_new=ref.sha256 not in pre_existing)
+                if ref.sha256 not in all_objects:
+                    all_objects[ref.sha256] = ref
+                    if not self.object_store.register_existing_ref(ref):
+                        physical_added += ref.size
             if runtime.residual_ref is not None:
                 rref = runtime.residual_ref
-                _add_ref(rref, was_new=rref.sha256 not in pre_existing)
+                if rref.sha256 not in all_objects:
+                    all_objects[rref.sha256] = rref
+                    if not self.object_store.register_existing_ref(rref):
+                        physical_added += rref.size
             if runtime_snapshot is not None:
                 for ref in (runtime_snapshot.captured_adata_refs or {}).values():
-                    _add_ref(ref, was_new=ref.sha256 not in pre_existing)
+                    if ref.sha256 not in all_objects:
+                        all_objects[ref.sha256] = ref
+                        if not self.object_store.register_existing_ref(ref):
+                            physical_added += ref.size
                 if runtime_snapshot.captured_residual_ref is not None:
                     rref = runtime_snapshot.captured_residual_ref
-                    _add_ref(rref, was_new=rref.sha256 not in pre_existing)
+                    if rref.sha256 not in all_objects:
+                        all_objects[rref.sha256] = rref
+                        if not self.object_store.register_existing_ref(rref):
+                            physical_added += rref.size
 
             # Continuation payload/workflow-state refs must be declared in objects
             # so restore stage can verify them as first-class content.
             for attr in ("workflow_state_ref", "payload_ref"):
                 cref = getattr(continuation, attr, None)
                 if cref is not None:
-                    _add_ref(cref, was_new=cref.sha256 not in pre_existing)
+                    if cref.sha256 not in all_objects:
+                        all_objects[cref.sha256] = cref
+                        if not self.object_store.register_existing_ref(cref):
+                            physical_added += cref.size
 
             logical_size = sum(r.size for r in all_objects.values())
 
@@ -1492,27 +1583,67 @@ class SnapshotService:
                 idempotency_key=getattr(request, "idempotency_key", None),
             )
 
-            # Verify every required object exists before publish
-            self.object_store.verify(analysis_state_ref)
-            self.object_store.verify(notebook_ref)
-            if checkpoint_ref is not None:
-                self.object_store.verify(checkpoint_ref)
+            # Record workspace/runtime/continuation refs proven during this
+            # transaction's put_* calls (evidence already on the object store).
             for we in workspace_entries:
-                self.object_store.verify(
-                    ObjectRef(
-                        sha256=we.object_hash,
-                        size=we.size,
-                        media_type="application/octet-stream",
-                    )
+                ref = ObjectRef(
+                    sha256=we.object_hash,
+                    size=we.size,
+                    media_type="application/octet-stream",
                 )
+                if ref.sha256 not in transaction_evidence:
+                    # put_file during workspace capture registered store evidence
+                    if self.object_store._get_evidence(ref.sha256) is not None:
+                        _record_transaction_evidence(ref)
+                    elif self.object_store.register_existing_ref(ref):
+                        _record_transaction_evidence(ref)
             for ref in runtime.adata_refs.values():
-                self.object_store.verify(ref)
+                if ref.sha256 not in transaction_evidence:
+                    if self.object_store._get_evidence(ref.sha256) is not None:
+                        _record_transaction_evidence(ref)
+                    elif self.object_store.register_existing_ref(ref):
+                        _record_transaction_evidence(ref)
             if runtime.residual_ref is not None:
-                self.object_store.verify(runtime.residual_ref)
+                rref = runtime.residual_ref
+                if rref.sha256 not in transaction_evidence:
+                    if self.object_store._get_evidence(rref.sha256) is not None:
+                        _record_transaction_evidence(rref)
+                    elif self.object_store.register_existing_ref(rref):
+                        _record_transaction_evidence(rref)
             for attr in ("workflow_state_ref", "payload_ref"):
                 cref = getattr(continuation, attr, None)
-                if cref is not None:
-                    self.object_store.verify(cref)
+                if cref is not None and cref.sha256 not in transaction_evidence:
+                    if self.object_store._get_evidence(cref.sha256) is not None:
+                        _record_transaction_evidence(cref)
+                    elif self.object_store.register_existing_ref(cref):
+                        _record_transaction_evidence(cref)
+
+            # Fully verify only request-supplied external refs (not put in this txn).
+            external_refs: list[ObjectRef] = []
+            if request.analysis_state_ref is not None:
+                external_refs.append(request.analysis_state_ref)
+            if request.notebook_ref is not None:
+                external_refs.append(request.notebook_ref)
+            if request.checkpoint_ref is not None:
+                external_refs.append(request.checkpoint_ref)
+            if request.runtime is not None:
+                for ref in (request.runtime.adata_refs or {}).values():
+                    external_refs.append(ref)
+                if request.runtime.residual_ref is not None:
+                    external_refs.append(request.runtime.residual_ref)
+            for eref in external_refs:
+                if eref.sha256 in transaction_evidence:
+                    continue
+                self.object_store.verify(eref)
+                _record_transaction_evidence(eref)
+
+            # Every other manifest ref must already have transaction evidence.
+            for sha, ref in all_objects.items():
+                if sha not in transaction_evidence:
+                    raise SnapshotCaptureError(
+                        "MISSING_TRANSACTION_EVIDENCE",
+                        f"Object {sha} lacks put/verify evidence in this capture",
+                    )
 
             # Step 7 — compute root hash
             await self._compute_root_hash(manifest)
@@ -1585,50 +1716,37 @@ class SnapshotService:
             # Step 11 — release safe point (only on full success; skip when
             # restore already owns the cooperative safe point).
             if not skip_safe_point_lifecycle:
-                self._release_safe_point()
+                await self._release_safe_point()
 
             # Step 12 — return committed manifest + pending flag (no private attr)
             return reloaded, session_reconciliation_pending
 
         except SnapshotV2Error:
             if not skip_safe_point_lifecycle:
-                self._release_safe_point()
+                await self._release_safe_point()
             raise
         except Exception as exc:
             if not skip_safe_point_lifecycle:
-                self._release_safe_point()
+                await self._release_safe_point()
             raise SnapshotCaptureError("CAPTURE_FAILED", str(exc))
 
     # ── Content capture helpers ──────────────────────────────────────
-
-    def _snapshot_pre_existing_hashes(self) -> set[str]:
-        """Record verified object hashes present before this capture's puts."""
-        existing: set[str] = set()
-        objects_dir = self.paths.objects
-        if not objects_dir.exists():
-            return existing
-        try:
-            for entry in objects_dir.iterdir():
-                if entry.is_file() and len(entry.name) == 64:
-                    if self.object_store.contains_verified(entry.name):
-                        existing.add(entry.name)
-        except OSError:
-            pass
-        return existing
 
     async def _capture_analysis_state(
         self,
         request: SnapshotCaptureRequest,
         analysis_state: Any = None,
-    ) -> ObjectRef:
-        """Canonicalize + externalize AnalysisState into the object store."""
+    ) -> ObjectPutResult:
+        """Canonicalize + externalize AnalysisState into the object store.
+
+        Returns ObjectPutResult with ``created`` flag for physical_added accounting.
+        """
         if request.analysis_state_ref is not None:
             self.object_store.verify(request.analysis_state_ref)
-            return request.analysis_state_ref
-
-        # Snapshot pre-existing hashes once before first put of this capture.
-        if not hasattr(self, "_pre_existing_hashes") or self._pre_existing_hashes is None:
-            self._pre_existing_hashes = self._snapshot_pre_existing_hashes()
+            return ObjectPutResult(
+                ref=request.analysis_state_ref,
+                created=False,
+            )
 
         state = analysis_state
         if state is None:
@@ -1658,13 +1776,13 @@ class SnapshotService:
     async def _capture_notebook(
         self,
         request: SnapshotCaptureRequest,
-    ) -> ObjectRef:
+    ) -> ObjectPutResult:
         if request.notebook_ref is not None:
             self.object_store.verify(request.notebook_ref)
-            return request.notebook_ref
-
-        if not hasattr(self, "_pre_existing_hashes") or self._pre_existing_hashes is None:
-            self._pre_existing_hashes = self._snapshot_pre_existing_hashes()
+            return ObjectPutResult(
+                ref=request.notebook_ref,
+                created=False,
+            )
 
         states_dir = get_session_states(request.session_id)
         nb_path = Path(states_dir) / f"{request.session_id}.ipynb"
@@ -1685,13 +1803,14 @@ class SnapshotService:
     async def _capture_checkpoint(
         self,
         request: SnapshotCaptureRequest,
-    ) -> ObjectRef | None:
+    ) -> ObjectPutResult | None:
         if request.checkpoint_ref is not None:
             self.object_store.verify(request.checkpoint_ref)
-            return request.checkpoint_ref
+            return ObjectPutResult(
+                ref=request.checkpoint_ref,
+                created=False,
+            )
         # Optional: LangGraph checkpoint sqlite if present
-        if not hasattr(self, "_pre_existing_hashes") or self._pre_existing_hashes is None:
-            self._pre_existing_hashes = self._snapshot_pre_existing_hashes()
         states_dir = get_session_states(request.session_id)
         ckpt = Path(states_dir) / "checkpoints.sqlite"
         if not ckpt.exists() or not ckpt.is_file():
@@ -1701,8 +1820,6 @@ class SnapshotService:
     # ── Step helpers ─────────────────────────────────────────────────
 
     def _validate_state(self, request: SnapshotCaptureRequest) -> None:
-        # Reset per-capture pre-existing hash set
-        self._pre_existing_hashes = None
         if not request.session_id:
             raise SnapshotCaptureError(
                 "MISSING_SESSION_ID", "session_id is required",
@@ -1714,17 +1831,25 @@ class SnapshotService:
                 f"does not match service session_id '{self.session_id}'",
             )
 
-    def _create_safe_point(self, workflow_state: dict[str, Any] | None = None) -> None:
+    async def _create_safe_point(self, workflow_state: dict[str, Any] | None = None) -> None:
         # Capture lifecycle may store graph-position metadata, but must NOT
         # authorize empty-complete from untrusted capture args.
-        self.safe_point.acquire(
+        # Token is process-local for this service instance's lifecycle hold.
+        owner_token = f"capture:{self.session_id}:{id(self)}"
+        self._safe_point_owner_token = owner_token
+        await self.safe_point.acquire(
             self.session_id,
             workflow_state,
             eligibility_trusted=False,
+            owner_token=owner_token,
         )
 
-    def _release_safe_point(self) -> None:
-        self.safe_point.release(self.session_id)
+    async def _release_safe_point(self) -> None:
+        owner_token = getattr(self, "_safe_point_owner_token", None) or (
+            f"capture:{self.session_id}:{id(self)}"
+        )
+        await self.safe_point.release(self.session_id, owner_token)
+        self._safe_point_owner_token = None
 
     def _has_active_workflow_ownership(self) -> bool:
         """True when this session owns a live workflow in the process map."""
@@ -1803,8 +1928,6 @@ class SnapshotService:
     async def _capture_workspace(
         self, workspace_root: str,
     ) -> tuple[list[WorkspaceEntry], list[str]]:
-        if not hasattr(self, "_pre_existing_hashes") or self._pre_existing_hashes is None:
-            self._pre_existing_hashes = self._snapshot_pre_existing_hashes()
         warnings: list[str] = []
         entries, ws_warnings = self.workspace_capture.capture_scope(
             self.object_store, workspace_root,
@@ -1922,11 +2045,8 @@ class SnapshotService:
             kernel_present=kernel_present,
             exec_lock_held=exec_lock_held,
         )
-        if hasattr(result, "to_runtime_manifest"):
-            return result.to_runtime_manifest()
-        if isinstance(result, RuntimeManifest):
-            return result
-        return runtime_manifest_from_generation(result, status="complete")
+        # RuntimeCapture.capture returns RuntimeManifest directly
+        return result
 
     async def _compute_root_hash(self, manifest: SnapshotManifestV2) -> None:
         raw = canonical_json(manifest)

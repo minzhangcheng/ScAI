@@ -132,8 +132,8 @@ def _journal_path(paths, transaction_id: str):
 
 def _journal_hmac(data: bytes) -> str:
     """Legacy flat-body HMAC (Task 1 restore shape)."""
-    from backend.utils.crypto import get_integrity_secret
-    return _hmac.new(get_integrity_secret().encode(), data, hashlib.sha256).hexdigest()
+    from backend.utils.crypto import sign_hmac_sha256
+    return sign_hmac_sha256(data)
 
 
 def _canonicalize_journal_payload(payload: dict) -> bytes:
@@ -235,9 +235,9 @@ def _verify_flat_legacy_restore_hmac(payload: dict, transaction_id: str) -> dict
             f"Restore journal missing hmac: {transaction_id}",
             details={"transaction_id": transaction_id},
         )
+    from backend.utils.crypto import verify_hmac_sha256
     canonical = _canonicalize_journal_payload(payload)
-    expected = _journal_hmac(canonical)
-    if not _hmac.compare_digest(expected, stored_hmac):
+    if not verify_hmac_sha256(canonical, stored_hmac):
         raise SnapshotIntegrityError(
             "JOURNAL_HMAC",
             f"Restore journal HMAC mismatch: {transaction_id}",
@@ -349,8 +349,8 @@ def _write_journal_hmac_signed(paths, transaction_id: str, journal: dict) -> Non
         JournalStore,
         make_envelope,
         sign_envelope_body,
-        _atomic_write_bytes,
     )
+    from backend.utils.files import atomic_write_bytes as _atomic_write_bytes
 
     body = {k: v for k, v in journal.items() if k != "hmac"}
     status = str(body.get("status") or "")
@@ -417,18 +417,16 @@ def _stream_copy(src, dst) -> None:
 
 
 def _atomic_copy(src, dst) -> None:
-    _stream_copy(src, dst)
+    """Copy file using shared atomic primitive."""
+    from backend.utils.files import atomic_copy_file
+    atomic_copy_file(Path(src), Path(dst))
 
 
 def _atomic_replace(src, dst) -> None:
-    dst = Path(dst) if isinstance(dst, str) else dst
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(str(src), str(dst))
-    dfd = os.open(str(dst.parent), os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+    """Atomically replace dst with src using shared primitive."""
+    from backend.utils.files import atomic_write_bytes
+    data = Path(src).read_bytes()
+    atomic_write_bytes(Path(dst), data)
 
 
 def _require_declared_object(manifest, ref: ObjectRef, *, field: str) -> None:

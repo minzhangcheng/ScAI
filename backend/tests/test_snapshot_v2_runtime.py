@@ -526,8 +526,12 @@ class TestRuntimeCapture:
         sandbox.km = MagicMock()
 
         obj_store = MagicMock()
-        obj_store.put_file = MagicMock(return_value=ObjectRef(
-            sha256="a" * 64, size=3 * 1024 * 1024 * 1024, media_type="application/x-hdf5"
+        from backend.services.snapshot_v2.object_store import ObjectPutResult
+        obj_store.put_file = MagicMock(return_value=ObjectPutResult(
+            ref=ObjectRef(
+                sha256="a" * 64, size=3 * 1024 * 1024 * 1024, media_type="application/x-hdf5"
+            ),
+            created=True,
         ))
         paths = MagicMock()
         paths.staging = staging
@@ -536,3 +540,22 @@ class TestRuntimeCapture:
         with pytest.raises(SnapshotCaptureError) as exc_info:
             await capturer.capture(sandbox, declared_outputs={"adata"})
         assert "RUNTIME_CAPTURE_QUOTA_EXCEEDED" in str(exc_info.value.code)
+
+
+@pytest.mark.asyncio
+async def test_safe_point_methods_are_async_and_locked():
+    from backend.services.snapshot_v2.safe_point import SafePointManager
+    import inspect
+
+    mgr = SafePointManager()
+    for name in (
+        "request_safe_point", "acknowledge_safe_point_request", "acquire",
+        "update_descriptor", "cancel_safe_point_request", "release",
+    ):
+        assert inspect.iscoroutinefunction(getattr(mgr, name)), f"{name} must be async"
+
+    req = await mgr.request_safe_point("s1", "owner-1")
+    assert req is not None
+    # A different owner cannot release owner-1's hold.
+    assert await mgr.release("s1", "owner-2") is False
+    assert await mgr.release("s1", "owner-1") is True

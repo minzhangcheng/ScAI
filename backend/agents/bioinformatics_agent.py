@@ -2919,7 +2919,11 @@ If results significantly deviate from plan expectations, report via consult_pi i
 
                 sp = get_snapshot_safe_point_manager()
                 if sp.has_pending_request(session_id):
-                    sp.acknowledge_safe_point_request(session_id)
+                    gen = sp.get_pending_generation(session_id)
+                    if gen is not None:
+                        await sp.acknowledge_safe_point_request(
+                            session_id, gen, role="workflow",
+                        )
                 if sp.is_paused(session_id):
                     logger.info(
                         f"[Bioinformatics] Restore safe-point active at step "

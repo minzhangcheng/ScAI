@@ -116,7 +116,7 @@ def commit_manifest(mstore, manifest: SnapshotManifestV2) -> SnapshotManifestV2:
 def make_object_ref(object_store: "ObjectStore", content: bytes,
                     media_type: str = "application/x-hdf5") -> ObjectRef:
     """Store *content* in the object store and return its ObjectRef."""
-    return object_store.put_bytes(content, media_type)
+    return object_store.put_bytes(content, media_type).ref
 
 
 # ── Revision-Qualified Reuse Tests ────────────────────────────────────────────

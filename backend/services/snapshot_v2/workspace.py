@@ -196,7 +196,8 @@ class WorkspaceCapture:
                 )
 
             try:
-                ref = object_store.put_file(abs_path, _media_type(relative))
+                put_result = object_store.put_file(abs_path, _media_type(relative))
+                ref = put_result.ref
             except SnapshotCaptureError:
                 raise
             except Exception as e:

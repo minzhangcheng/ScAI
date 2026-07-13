@@ -143,6 +143,48 @@ class RoutingMixin:
         logger.info(f"[{self.session_id}] Continuing analysis (round {analysis_state.current_round}/{max_rounds})")
         return "continue"
 
+    def _route_from_restore_entry(self, state: "WorkflowState") -> str:
+        """Route from the ``restore_entry`` node based on the entry plan.
+
+        Reads the ``_restore_entry_plan`` field set by ``_restore_entry()``
+        in ``core.py`` to determine the target node.
+
+        Outgoing routes:
+        - ``route_initialize_round`` — normal / explicit_start → normal flow
+        - ``route_generate_final_report`` — terminal / idle stop
+        - ``route_<node>`` — graph_node → direct jump
+        - ``route_wait_for_user_input`` — semantic_gate → waiting state
+        """
+        plan = state.get("_restore_entry_plan", {})
+        intent = plan.get("intent", "normal")
+
+        if intent == "idle":
+            logger.info(
+                f"[{self.session_id}] restore_entry intent=idle → hold (END)"
+            )
+            return "hold"
+
+        if intent in ("normal", "explicit_start"):
+            logger.info(
+                f"[{self.session_id}] restore_entry intent={intent} → "
+                "initialize_round"
+            )
+            return "route_initialize_round"
+
+        target = plan.get("target_node", "")
+        if target:
+            logger.info(
+                f"[{self.session_id}] restore_entry intent={intent} → {target}"
+            )
+            return f"route_{target}"
+
+        # Fallback for terminal with no explicit target.
+        logger.info(
+            f"[{self.session_id}] restore_entry intent={intent} (no target) → "
+            "initialize_round"
+        )
+        return "route_initialize_round"
+
     def _check_convergence_condition(self, state: "WorkflowState") -> str:
         """Three-way routing for the integration loop (spec §9.2):
         integrate | continue | stop. Reuses shared predicates while preserving
