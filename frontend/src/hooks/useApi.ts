@@ -21,6 +21,7 @@ import type {
 import type {
   SnapshotV2ListResult,
   SnapshotV2PreviewResult,
+  SnapshotStoreStatus,
   SnapshotTransactionResponse,
   SnapshotTransactionRecord,
   RestoreSnapshotV2Request,
@@ -28,6 +29,7 @@ import type {
   ExportV2Result,
   ImportV2Result,
 } from '../types/snapshotV2'
+import { normalizeSnapshotRecordV2 } from '../utils/snapshotV2'
 
 export class ApiError extends Error {
   status: number
@@ -1479,10 +1481,14 @@ export function useUserConfig() {
 // ── Snapshot V2 API methods ────────────────────────────────────────
 
 export async function listSnapshotsV2(sessionId: string): Promise<SnapshotV2ListResult> {
-  const response = await apiFetch<{ success: boolean; data: SnapshotV2ListResult }>(
+  const response = await apiFetch<{ success: boolean; data: { snapshots: unknown[]; store_status: SnapshotStoreStatus } }>(
     `/session/${sessionId}/snapshots-v2`,
   )
-  return response.data
+  const raw = response.data
+  return {
+    snapshots: (Array.isArray(raw.snapshots) ? raw.snapshots : []).map(normalizeSnapshotRecordV2),
+    store_status: raw.store_status,
+  }
 }
 
 export async function previewSnapshotV2(sessionId: string, snapshotId: string): Promise<SnapshotV2PreviewResult> {

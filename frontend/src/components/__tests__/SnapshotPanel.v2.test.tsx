@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { SnapshotPanel } from '../SnapshotPanel'
+import { normalizeSnapshotRecordV2 } from '../../utils/snapshotV2'
 
 const mockListSnapshotsV2 = vi.fn()
 const mockDeleteSnapshotV2 = vi.fn()
@@ -277,6 +278,47 @@ describe('SnapshotPanel V2 integration', () => {
 
     await screen.findByText(/10.0 KB/)
     expect(mockListSnapshotsV2).toHaveBeenCalledWith('sess')
+  })
+
+  // Regression: opening the panel used to crash the whole app (top-level
+  // ErrorBoundary → "reset local data" screen) because listSnapshotsV2 returned
+  // the backend's flat manifest shape while the tree/preview read
+  // `record.manifest.*`. The adapter now normalizes it; the panel must render.
+  it('renders the real (adapter-normalized) backend manifest shape without crashing', async () => {
+    const normalized = normalizeSnapshotRecordV2({
+      format_version: 2,
+      snapshot_id: 'snap-real',
+      session_id: 'sess',
+      created_at: '2026-07-13T12:30:35Z',
+      round_number: 1,
+      parent_id: null,
+      branch_id: 'main',
+      branch_label: 'main',
+      root_hash: '752bee46',
+      continuation: {
+        graph_version: '2.0',
+        kind: 'graph_node',
+        next_node: 'bioinformatics_analysis',
+        planning_stage: 'stage1',
+        workflow_state_ref: { sha256: 'ws', size: 512, media_type: 'application/json' },
+      },
+      workspace: [],
+      objects: {},
+      status: 'ok',
+      integrity_status: 'ok',
+    })
+    mockListSnapshotsV2.mockResolvedValue({
+      snapshots: [normalized],
+      store_status: { logical_bytes: 0, physical_bytes: 0, dedup_savings: 0, object_count: 0, manifest_count: 1 },
+    })
+
+    render(<SnapshotPanel sessionId="sess" language="en" onClose={vi.fn()} onRestore={vi.fn()} />)
+
+    // Tree row + auto-selected preview both render for the same snapshot.
+    const ids = await screen.findAllByText('snap-real')
+    expect(ids.length).toBeGreaterThanOrEqual(1)
+    expect(await screen.findByText(/Graph Node/)).toBeInTheDocument()
+    expect(await screen.findAllByText(/bioinformatics_analysis/)).not.toHaveLength(0)
   })
 
   it('renders protected-delete disabled for in-use snapshots', async () => {

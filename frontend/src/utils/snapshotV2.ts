@@ -5,6 +5,62 @@
  * parsing across the frontend into a single source of truth.
  */
 
+import type {
+  SnapshotRecordV2,
+  SnapshotManifestV2,
+  SnapshotFailureRecord,
+  ContinuationCapsule,
+} from '../types/snapshotV2'
+
+/**
+ * Normalize one raw snapshot entry from the backend list endpoint into the
+ * wrapped {@link SnapshotRecordV2} shape the panel/tree/preview consume.
+ *
+ * The backend serves each committed snapshot as a *flat* manifest dump using
+ * the authoritative field names (`created_at`, `branch_id`, `continuation`) with
+ * no `manifest` envelope, and corrupt entries as `{ snapshot_id, status:
+ * 'corrupt', manifest: null, error_code, error_message }`. The UI reads
+ * `record.manifest.capsule.kind` / `.captured_at` / `.branch` unconditionally,
+ * so this adapter bridges the contract drift and stays defensive against
+ * missing fields (corrupt entries) to avoid crashing the render.
+ */
+export function normalizeSnapshotRecordV2(raw: unknown): SnapshotRecordV2 {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const snapshotId = typeof r.snapshot_id === 'string' ? r.snapshot_id : ''
+
+  // Tolerate a future wrapped shape (`r.manifest`) and today's flat dump (`r`).
+  const src = (r.manifest && typeof r.manifest === 'object' ? r.manifest : r) as Record<string, unknown>
+  const isCorrupt = r.status === 'corrupt' || r.manifest === null
+
+  const capsule = (src.capsule ?? src.continuation ?? { kind: 'idle', graph_version: '' }) as ContinuationCapsule
+
+  const manifest = {
+    ...src,
+    capsule,
+    captured_at: (src.captured_at ?? src.created_at ?? '') as string,
+    branch: (src.branch ?? src.branch_label ?? src.branch_id ?? 'main') as string,
+    generation: (src.generation ?? src.round_number ?? 0) as number,
+    workspace: Array.isArray(src.workspace) ? src.workspace : [],
+    objects: (src.objects && typeof src.objects === 'object' ? src.objects : {}),
+    snapshot_id: snapshotId,
+  } as unknown as SnapshotManifestV2
+
+  let failure: SnapshotFailureRecord | null = null
+  if (isCorrupt) {
+    failure = {
+      snapshot_id: snapshotId,
+      session_id: typeof src.session_id === 'string' ? src.session_id : '',
+      failed_at: '',
+      code: typeof r.error_code === 'string' ? r.error_code : 'corrupt',
+      message: typeof r.error_message === 'string' ? r.error_message : '',
+    }
+  } else if (r.failure && typeof r.failure === 'object') {
+    failure = r.failure as SnapshotFailureRecord
+  }
+
+  return { snapshot_id: snapshotId, manifest, failure }
+}
+
 /** Statuses that indicate a snapshot transaction has finished. */
 export const SNAPSHOT_TERMINAL_STATUSES = new Set([
   'committed',

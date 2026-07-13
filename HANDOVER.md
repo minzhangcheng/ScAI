@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.5.2 · **Last updated**: 2026-07-13
+**Version**: 0.33.5.3 · **Last updated**: 2026-07-13
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,12 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-13)**
+
+- `0.33.5.3` — Frontend Snapshot V2 manifest shape adapter (flat-backend → wrapped-panel); version bump (2026-07-13):
+  - **`normalizeSnapshotRecordV2` adapter (`frontend/src/utils/snapshotV2.ts`)**: New adapter that normalizes the backend's flat manifest dump (no `manifest` envelope, `continuation` instead of `capsule`, `created_at` instead of `captured_at`, `branch_id`/`branch_label` instead of `branch`) into the wrapped `SnapshotRecordV2` shape the panel/tree/preview consume. Defensively handles corrupt entries (missing manifest, error fields) to prevent crashing the render.
+  - **`listSnapshotsV2` normalization wiring (`frontend/src/hooks/useApi.ts`)**: Response type widened to accept `unknown[]` raw snapshots; each entry mapped through `normalizeSnapshotRecordV2` before returning.
+  - **New tests (`frontend/src/hooks/__tests__/useApi.snapshot-v2.test.ts`)**: 2 tests — real backend manifest shape (flat → wrapped) and corrupt entry without crashing manifest access.
+  - **Regression test (`frontend/src/components/__tests__/SnapshotPanel.v2.test.tsx`)**: Verifies the panel renders adapter-normalized backend manifest shape without crashing into ErrorBoundary.
 
 - `0.33.5.2` — Snapshot V2 quota check missing-v2-root regression fix; version bump (2026-07-13):
   - **Quota check missing-v2-root fix (`backend/services/snapshot_v2/service.py`)**: `_check_quota` now probes parent directories when `SnapshotV2Paths.root` does not exist, falling back to the nearest existing ancestor for `shutil.disk_usage`. Real captures never create the `v2/` root dir before the quota check, so `disk_usage` would raise `FileNotFoundError` and block the workflow at bioinformatics start.

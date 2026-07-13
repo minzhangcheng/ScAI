@@ -84,6 +84,112 @@ describe('Snapshot V2 API methods', () => {
       expect(result.snapshots[0].manifest.capsule.kind).toBe('idle')
       expect(result.store_status.manifest_count).toBe(1)
     })
+
+    it('normalizes the real backend manifest shape (flat, continuation/created_at/branch_id)', async () => {
+      // The backend serves each snapshot as a *flat* manifest dump using the
+      // authoritative field names — no `manifest` envelope, `continuation`
+      // instead of `capsule`, `created_at` instead of `captured_at`,
+      // `branch_id` instead of `branch`. The panel consumes the wrapped shape.
+      const responseData = {
+        success: true,
+        data: {
+          snapshots: [
+            {
+              format_version: 2,
+              snapshot_id: 'snap-real',
+              session_id: 'test-session',
+              name: 'snap-real',
+              description: '',
+              phase: 'pre_execution_stage1',
+              created_at: '2026-07-13T12:30:35Z',
+              round_number: 1,
+              parent_id: null,
+              branch_id: 'main',
+              branch_label: 'main',
+              root_hash: '752bee46',
+              continuation: {
+                graph_version: '2.0',
+                kind: 'graph_node',
+                next_node: 'bioinformatics_analysis',
+                planning_stage: 'stage1',
+                workflow_state_ref: { sha256: 'ws', size: 512, media_type: 'application/json' },
+              },
+              workspace: [],
+              objects: {},
+              status: 'ok',
+              integrity_status: 'ok',
+            },
+          ],
+          store_status: {
+            logical_bytes: 1000,
+            physical_bytes: 500,
+            dedup_savings: 500,
+            object_count: 3,
+            manifest_count: 1,
+          },
+        },
+      }
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Map(),
+        json: () => Promise.resolve(responseData),
+      })
+
+      const { listSnapshotsV2 } = await import('../useApi')
+      const result = await listSnapshotsV2('test-session')
+
+      const rec = result.snapshots[0]
+      expect(rec.snapshot_id).toBe('snap-real')
+      // Wrapped envelope + old field names the panel/tree/preview read.
+      expect(rec.manifest).toBeDefined()
+      expect(rec.manifest.capsule.kind).toBe('graph_node')
+      expect(rec.manifest.captured_at).toBe('2026-07-13T12:30:35Z')
+      expect(rec.manifest.branch).toBe('main')
+      expect(rec.failure).toBeNull()
+    })
+
+    it('maps a corrupt backend entry to a failure without crashing manifest access', async () => {
+      const responseData = {
+        success: true,
+        data: {
+          snapshots: [
+            {
+              snapshot_id: 'snap-bad',
+              status: 'corrupt',
+              integrity_status: 'corrupt',
+              error_code: 'HASH_MISMATCH',
+              error_message: 'root hash mismatch',
+              manifest: null,
+            },
+          ],
+          store_status: {
+            logical_bytes: 0,
+            physical_bytes: 0,
+            dedup_savings: 0,
+            object_count: 0,
+            manifest_count: 0,
+          },
+        },
+      }
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Map(),
+        json: () => Promise.resolve(responseData),
+      })
+
+      const { listSnapshotsV2 } = await import('../useApi')
+      const result = await listSnapshotsV2('test-session')
+
+      const rec = result.snapshots[0]
+      expect(rec.snapshot_id).toBe('snap-bad')
+      expect(rec.failure?.code).toBe('HASH_MISMATCH')
+      // Panel/tree/preview deref manifest fields unconditionally; must be safe.
+      expect(rec.manifest).toBeDefined()
+      expect(rec.manifest.capsule.kind).toBeDefined()
+      expect(() => new Date(rec.manifest.captured_at).getTime()).not.toThrow()
+    })
   })
 
   describe('previewSnapshotV2', () => {
