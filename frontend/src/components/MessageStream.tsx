@@ -226,7 +226,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
           : { text: message.content }
         return (
           <div className="space-y-3">
-            {content.findings && content.findings.length > 0 && (
+            {Array.isArray(content.findings) && content.findings.length > 0 && (
               <div className="space-y-2">
                 <span className="text-xs font-medium text-slate-600 flex items-center gap-1">
                   <CheckCircle2 className="w-3 h-3 text-green-500" />
@@ -486,7 +486,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                 <TrendingUp className="w-3 h-3" />
                 <span>{language === 'zh' ? '多方向相关性分析' : 'Multi-Direction Correlation Analysis'}</span>
               </div>
-              {directions.length > 0 && (
+              {Array.isArray(directions) && directions.length > 0 && (
                 <div className="flex flex-wrap gap-1.5 mb-1">
                   {directions.map((d: string, i: number) => (
                     <span key={i} className="px-2 py-0.5 bg-violet-100 text-violet-700 text-xs rounded-full">{d}</span>
@@ -577,7 +577,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                 {qd.context && (
                   <pre className="mt-2 text-xs text-violet-600 whitespace-pre-wrap">{qd.context}</pre>
                 )}
-                {qd.options && qd.options.length > 0 && (
+                {Array.isArray(qd.options) && qd.options.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1">
                     {qd.options.map((opt: string, i: number) => (
                       <span key={i} className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded">{opt}</span>
@@ -624,7 +624,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                 {fd.summary && (
                   <p className="text-sm text-green-800 font-medium mb-2">{fd.summary}</p>
                 )}
-                {fd.findings && fd.findings.length > 0 && (
+                {Array.isArray(fd.findings) && fd.findings.length > 0 && (
                   <ul className="space-y-1">
                     {fd.findings.map((f: unknown, i: number) => (
                       <li key={i} className="flex items-start gap-2 text-xs text-green-700">
@@ -634,7 +634,7 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
                     ))}
                   </ul>
                 )}
-                {fd.suggestions && fd.suggestions.length > 0 && (
+                {Array.isArray(fd.suggestions) && fd.suggestions.length > 0 && (
                   <div className="mt-2 pt-2 border-t border-green-200">
                     <span className="text-xs text-green-600 font-medium">{language === 'zh' ? '建议:' : 'Suggestions:'}</span>
                     <ul className="mt-1 space-y-1">

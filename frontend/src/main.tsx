@@ -10,11 +10,13 @@ import { Admin } from './pages/Admin'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { ProtectedAdminRoute } from './components/ProtectedAdminRoute'
 import { AuthInitializer } from './components/AuthInitializer'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import './styles/globals.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
       <AuthInitializer>
         <Routes>
         <Route path="/login" element={<Login />} />
@@ -25,6 +27,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <Route path="/*" element={<ProtectedRoute><App /></ProtectedRoute>} />
       </Routes>
       </AuthInitializer>
-    </BrowserRouter>
+      </BrowserRouter>
+    </ErrorBoundary>
   </React.StrictMode>,
 )

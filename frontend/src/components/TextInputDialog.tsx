@@ -86,7 +86,7 @@ export function TextInputDialog({
             <ReactMarkdown>{description}</ReactMarkdown>
           </div>
 
-          {suggestions && suggestions.length > 0 && (
+          {Array.isArray(suggestions) && suggestions.length > 0 && (
             <div className="bg-slate-50 rounded-lg p-3 space-y-1">
               <p className="text-xs font-medium text-slate-500 uppercase">
                 {language === 'zh' ? '建议选项' : 'Suggestions'}

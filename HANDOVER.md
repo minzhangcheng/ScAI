@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.4 · **Last updated**: 2026-07-13
+**Version**: 0.33.5 · **Last updated**: 2026-07-13
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,13 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-13)**
+
+- `0.33.5` — ErrorBoundary self-recovery (reset local data), Zustand persist migration, defensive array checks in MessageStream/TextInputDialog; version bump (2026-07-13):
+  - **ErrorBoundary self-recovery (`frontend/src/components/ErrorBoundary.tsx`)**: New "Reset local data" button that clears app-owned localStorage keys (`PERSIST_STORAGE_KEY`, `JWT_STORAGE_KEY`) and reloads, providing a recovery path when the app crashes on every load due to corrupted/legacy persisted state. Uses shared storage constants.
+  - **Top-level ErrorBoundary wrapper (`frontend/src/main.tsx`)**: Wrapped the entire React app root with `<ErrorBoundary>`, providing crash containment at the top level instead of only inside individual components.
+  - **Defensive array checks (`frontend/src/components/MessageStream.tsx`, `frontend/src/components/TextInputDialog.tsx`)**: Added `Array.isArray()` guards before `.length` checks on `content.findings`, `directions`, `qd.options`, `fd.findings`, `fd.suggestions`, and `suggestions` props, preventing rendering crashes when the backend returns truthy non-array values or null.
+  - **Zustand persist migration (`frontend/src/stores/appStore.ts`)**: `migratePersistedState()` drops volatile runtime fields (`messages`, `chatMessages`, `currentSession`) on version upgrade (v0 → v1), preventing crashes from legacy-shaped persisted data. Persist config now uses `PERSIST_VERSION` (1) and `PERSIST_STORAGE_KEY` constants instead of raw strings.
+  - **Frontend ErrorBoundary tests (`frontend/src/components/__tests__/ErrorBoundary.test.tsx`)**: New test verifying "Reset local data" clears both storage keys. `beforeAll` stubs `window.location.reload` for jsdom compatibility.
 
 - `0.33.4` — Safe-point availability queuing, restore job safe-point reservation, frontend retry polling dedup & auto-open; version bump (2026-07-13):
   - **Safe-point availability queuing (`backend/services/snapshot_v2/safe_point.py`)**: New `request_safe_point_when_available()` with `_availability_waiters` registry — when a safe point is held by another owner, callers can wait with timeout instead of immediately failing. `release()` wakes the next waiter via `_notify_available_unlocked()`. `_request_safe_point_unlocked()` extracted as atomic helper. Prevents safe-point conflicts when multiple restore jobs or chat snapshots target the same session concurrently.

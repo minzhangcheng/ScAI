@@ -2,6 +2,7 @@ import { create, type StateCreator } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { Language, getDefaultPrompts } from '../i18n/translations'
 import { getToken, setToken, clearToken } from '../utils/authStorage'
+import { PERSIST_STORAGE_KEY, PERSIST_VERSION } from '../constants/storage'
 import type { SnapshotRecordV2, SnapshotStoreStatus, SnapshotTransactionRecord, SnapshotFailureInfo } from '../types/snapshotV2'
 
 // Types
@@ -959,11 +960,35 @@ export function partialize(state: AppState) {
   }
 }
 
+/**
+ * Migrate persisted state across breaking shape changes.
+ *
+ * v0 (unversioned) storage may carry legacy, server-derived runtime state
+ * (`messages`, `chatMessages`, `currentSession`) whose array-shaped fields were
+ * stored differently by older releases and can crash rendering. Drop that
+ * volatile runtime state on upgrade; user settings are preserved and
+ * sessions/messages are reloaded from the backend on demand. Runs before
+ * `merge` (which then layers the migrated state over current defaults).
+ */
+export function migratePersistedState(persistedState: unknown, version: number): unknown {
+  const ps = (persistedState && typeof persistedState === 'object')
+    ? { ...(persistedState as Record<string, unknown>) }
+    : {}
+  if (version < 1) {
+    delete ps.messages
+    delete ps.chatMessages
+    delete ps.currentSession
+  }
+  return ps
+}
+
 export const useAppStore = create<AppState>()(
   persist(
     createAppState,
     {
-      name: 'scai-storage',
+      name: PERSIST_STORAGE_KEY,
+      version: PERSIST_VERSION,
+      migrate: migratePersistedState,
       onRehydrateStorage: () => {
         return (_state: unknown, error?: unknown) => {
           if (error) {
