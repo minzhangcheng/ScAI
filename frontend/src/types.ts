@@ -6,6 +6,7 @@
 
 import type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, BiochemistryIndicator, PublicationFigure, PublicationTable, RoundResult, GraphicAbstract, SpeciesInputInfo } from './stores/appStore'
 import type { TranslationKey } from './i18n/translations'
+import type { SnapshotTransactionRecord } from './types/snapshotV2'
 
 // Re-export for convenience
 export type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, BiochemistryIndicator, PublicationFigure, PublicationTable, RoundResult, GraphicAbstract, SpeciesInputInfo, TranslationKey }
@@ -64,6 +65,7 @@ export interface SessionLoadResponse {
     details?: Record<string, unknown>
     allowed_actions?: Array<'retry' | 'manage' | 'terminate' | string>
   } | null
+  snapshot_transaction?: SnapshotTransactionRecord | null
 }
 
 export interface RawTreatmentGroup {

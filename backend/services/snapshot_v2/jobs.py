@@ -33,9 +33,14 @@ from typing import Any
 from backend.services.snapshot_v2.errors import SnapshotTransactionError
 from backend.services.snapshot_v2.models import SnapshotRestoreRequest, SnapshotTransactionRecord
 from backend.services.snapshot_v2.preflight import RestorePreflightResult
-from backend.services.snapshot_v2.safe_point import get_snapshot_safe_point_manager
+from backend.services.snapshot_v2.safe_point import (
+    SafePointRequest,
+    get_snapshot_safe_point_manager,
+)
 
 logger = logging.getLogger(__name__)
+
+SAFE_POINT_RESERVATION_TIMEOUT_SECONDS = 5.0
 
 
 def _now_iso() -> str:
@@ -71,6 +76,7 @@ class RestoreJobHandle:
     cancel_event: asyncio.Event
     paths: Any = None  # SnapshotV2Paths-like; journals directory for load_transaction
     owner_token: str = ""  # Safe-point requester token for this job
+    safe_point_request: SafePointRequest | None = None
 
 
 def get_restore_job(transaction_id: str) -> RestoreJobHandle | None:
@@ -385,24 +391,52 @@ class RestoreJobManager:
             retry_of_transaction_id=retry_of_transaction_id,
         )
 
-        cancel_event = asyncio.Event()
         owner_token = f"restore:{tx_id}"
+        reservation = await self._safe_point.request_safe_point_when_available(
+            session_id,
+            owner_token,
+            timeout_seconds=min(
+                float(timeout_seconds), SAFE_POINT_RESERVATION_TIMEOUT_SECONDS
+            ),
+        )
+        if reservation is None:
+            raise SnapshotTransactionError(
+                "SAFE_POINT_BUSY",
+                "Another snapshot or restore operation owns the session safe point",
+                details={"session_id": session_id},
+            )
+
         handle = RestoreJobHandle(
             record=record,
             task=None,
-            cancel_event=cancel_event,
+            cancel_event=asyncio.Event(),
             paths=self.paths,
             owner_token=owner_token,
+            safe_point_request=reservation,
         )
-        # Persist before registering so status polls never see a missing journal
-        _persist_handle(handle)
-        snapshot_restore_jobs[tx_id] = handle
-
-        task = asyncio.create_task(
-            self._run_job(handle, preflight, request, timeout_seconds),
-        )
-        handle.task = task
-        task.add_done_callback(lambda _: self._on_task_done(tx_id))
+        try:
+            _persist_handle(handle)
+            snapshot_restore_jobs[tx_id] = handle
+            handle.task = asyncio.create_task(
+                self._run_job(handle, preflight, request, timeout_seconds)
+            )
+            handle.task.add_done_callback(lambda _: self._on_task_done(tx_id))
+        except BaseException as exc:
+            snapshot_restore_jobs.pop(tx_id, None)
+            journal_path = Path(self.paths.journals) / f"{tx_id}.json"
+            if journal_path.exists():
+                handle.record = handle.record.model_copy(
+                    update={
+                        "status": "failed",
+                        "failure": {
+                            "code": "RESTORE_JOB_START_FAILED",
+                            "message": str(exc) or type(exc).__name__,
+                        },
+                    }
+                )
+                _persist_handle(handle)
+            await self._safe_point.cancel_safe_point_request(session_id, owner_token)
+            raise
 
         logger.info(
             "[snapshot-v2] Restore job %s enqueued for session %s (snapshot %s)",
@@ -460,27 +494,29 @@ class RestoreJobManager:
         try:
             # ── queued → waiting_safe_point ──────────────────────
             record = self._update(handle, "waiting_safe_point")
-            await self._safe_point.request_safe_point(session_id, owner_token)
-
-            # Wait for safe-point acknowledgment, cancellation, or timeout
-            ack_event = self._safe_point.get_pending_event(session_id)
-            if ack_event is not None:
-                try:
-                    await asyncio.wait_for(
-                        self._race(ack_event, stop_event),
-                        timeout=timeout_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    elapsed = time.monotonic() - t0
-                    record = self._update(handle, "timed_out")
-                    await self._safe_point.cancel_safe_point_request(
-                        session_id, owner_token,
-                    )
-                    logger.info(
-                        "[snapshot-v2] Restore job %s timed out after %.1fs",
-                        tx_id, elapsed,
-                    )
-                    return
+            reservation = handle.safe_point_request
+            if reservation is None:
+                raise SnapshotTransactionError(
+                    "SAFE_POINT_REQUEST_MISSING",
+                    "Restore job started without an owned safe-point request",
+                    details={"transaction_id": tx_id},
+                )
+            try:
+                await asyncio.wait_for(
+                    self._race(reservation.event, stop_event),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - t0
+                record = self._update(handle, "timed_out")
+                await self._safe_point.cancel_safe_point_request(
+                    session_id, owner_token
+                )
+                logger.info(
+                    "[snapshot-v2] Restore job %s timed out after %.1fs",
+                    tx_id, elapsed,
+                )
+                return
 
             if stop_event.is_set():
                 record = self._update(handle, "cancelled")

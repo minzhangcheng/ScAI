@@ -1,5 +1,6 @@
 """Tests for Snapshot V2 cancellable restore jobs."""
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -100,18 +101,98 @@ def make_mgr(v2_paths, session_id="sess-test", *, real_service=False, snapshot_s
     )
 
 
+async def _clear_safe_points(manager) -> None:
+    session_ids = set(manager.active_sessions) | set(manager._pending_requests)
+    for session_id in session_ids:
+        pending = manager.get_pending_observation(session_id)
+        owner = (
+            pending.owner_token
+            if pending is not None
+            else manager._acquired_owners.get(session_id)
+        )
+        if owner:
+            await manager.cancel_safe_point_request(session_id, owner)
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _clear_restore_job_registry():
     snapshot_restore_jobs.clear()
     manager = get_snapshot_safe_point_manager()
-    for session_id in list(manager.active_sessions):
-        owner = manager._acquired_owners.get(session_id) or "test-owner"
-        await manager.release(session_id, owner)
+    await _clear_safe_points(manager)
     yield
+    for handle in list(snapshot_restore_jobs.values()):
+        if handle.task is not None and not handle.task.done():
+            handle.cancel_event.set()
+            handle.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await handle.task
     snapshot_restore_jobs.clear()
-    for session_id in list(manager.active_sessions):
-        owner = manager._acquired_owners.get(session_id) or "test-owner"
-        await manager.release(session_id, owner)
+    await _clear_safe_points(manager)
+
+
+@pytest.mark.asyncio
+async def test_enqueue_publishes_owned_request_before_return(
+    v2_paths, preflight_result, restore_request
+):
+    manager = make_mgr(v2_paths)
+    record = await manager.enqueue("sess-test", preflight_result, restore_request)
+    handle = snapshot_restore_jobs[record.transaction_id]
+
+    assert handle.safe_point_request is not None
+    assert handle.safe_point_request.owner_token == handle.owner_token
+    assert manager._safe_point.get_pending_observation(
+        "sess-test"
+    ) == handle.safe_point_request
+    await manager.cancel(record.transaction_id)
+
+
+@pytest.mark.asyncio
+async def test_enqueue_does_not_borrow_foreign_pending_event(
+    v2_paths, preflight_result, restore_request, monkeypatch
+):
+    manager = make_mgr(v2_paths)
+    foreign = await manager._safe_point.request_safe_point(
+        "sess-test", "restore:foreign"
+    )
+    assert foreign is not False
+    monkeypatch.setattr(
+        "backend.services.snapshot_v2.jobs.SAFE_POINT_RESERVATION_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    with pytest.raises(SnapshotTransactionError) as error:
+        await manager.enqueue("sess-test", preflight_result, restore_request)
+
+    assert error.value.code == "SAFE_POINT_BUSY"
+    assert manager._safe_point.get_pending_observation("sess-test") == foreign
+    assert snapshot_restore_jobs == {}
+    assert list(v2_paths.journals.glob("restore-job-*.json")) == []
+    assert await manager._safe_point.cancel_safe_point_request(
+        "sess-test", "restore:foreign"
+    )
+
+
+@pytest.mark.asyncio
+async def test_second_enqueue_waits_then_owns_new_generation(
+    v2_paths, preflight_result, restore_request
+):
+    first_manager = make_mgr(v2_paths)
+    second_manager = make_mgr(v2_paths)
+    first = await first_manager.enqueue(
+        "sess-test", preflight_result, restore_request
+    )
+    second_task = asyncio.create_task(
+        second_manager.enqueue("sess-test", preflight_result, restore_request)
+    )
+    await asyncio.sleep(0)
+    assert not second_task.done()
+
+    await first_manager.cancel(first.transaction_id)
+    second = await asyncio.wait_for(second_task, timeout=1.0)
+    handle = snapshot_restore_jobs[second.transaction_id]
+    assert handle.safe_point_request is not None
+    assert handle.safe_point_request.owner_token == handle.owner_token
+    await second_manager.cancel(second.transaction_id)
 
 
 class TestRestoreJobLifecycle:

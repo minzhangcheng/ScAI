@@ -87,6 +87,9 @@ export function applyStoreUpdates(updates: StoreUpdates): void {
       snapshot_failure_allowed_actions: updates.snapshotFailure?.allowed_actions,
     })
   }
+  if (updates.snapshotTransaction !== undefined) {
+    store.setSnapshotTransaction(updates.snapshotTransaction)
+  }
 }
 
 // Generate UUID using crypto API with fallback for non-HTTPS contexts

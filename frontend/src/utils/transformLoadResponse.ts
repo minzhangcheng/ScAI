@@ -9,6 +9,7 @@ import type {
   RawPublicationTable,
 } from '../types'
 import type { Session, RoundResult, FigureReviewStatus } from '../stores/appStore'
+import type { SnapshotTransactionRecord } from '../types/snapshotV2'
 
 const VALID_STATUSES: readonly Session['status'][] = [
   'pending', 'running', 'paused', 'waiting_input', 'waiting_annotation',
@@ -132,6 +133,7 @@ export type StoreUpdates = {
     }
     allowed_actions: Array<'retry' | 'manage' | 'terminate'>
   } | null
+  snapshotTransaction?: SnapshotTransactionRecord | null
 } & LiteratureConfigStoreUpdates
 
 export interface TransformedLoadResponse {
@@ -188,6 +190,10 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
   const parsed = parseSnapshotFailure(data.snapshot_failure)
   if (parsed) {
     storeUpdates.snapshotFailure = parsed
+  }
+
+  if ('snapshot_transaction' in data) {
+    storeUpdates.snapshotTransaction = data.snapshot_transaction ?? null
   }
 
   if (data.literature_config && typeof data.literature_config === 'object') {

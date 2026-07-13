@@ -251,6 +251,25 @@ describe('transformLoadResponse', () => {
     expect(result.sessionUpdates.speciesResolved).toBe(true)
     expect(result.sessionUpdates.speciesGenesValidated).toBe(false)
   })
+
+  it('preserves and clears snapshot transaction load state', () => {
+    const transaction = {
+      transaction_id: 'restore-job-reload',
+      session_id: 'session-1',
+      snapshot_id: 'snapshot-1',
+      status: 'waiting_safe_point' as const,
+      recovery_mode: 'rollback' as const,
+      failure: null,
+    }
+    expect(transformLoadResponse({
+      ...MINIMAL_RESPONSE,
+      snapshot_transaction: transaction,
+    }).storeUpdates.snapshotTransaction).toEqual(transaction)
+    expect(transformLoadResponse({
+      ...MINIMAL_RESPONSE,
+      snapshot_transaction: null,
+    }).storeUpdates.snapshotTransaction).toBeNull()
+  })
 })
 
 describe('transformRoundResults integration fields', () => {

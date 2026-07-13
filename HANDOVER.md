@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.1 · **Last updated**: 2026-07-12
+**Version**: 0.33.4 · **Last updated**: 2026-07-13
 
 ## 1. Runtime Architecture
 
@@ -194,24 +194,50 @@ scai/
 
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
-**0.33.x — (2026-07-12)**
+**0.33.x — (2026-07-13)**
 
-- `0.33.1` — Version bump to 0.33.1 across all version-bearing files; HANDOVER.md changelog updated (2026-07-12).
+- `0.33.4` — Safe-point availability queuing, restore job safe-point reservation, frontend retry polling dedup & auto-open; version bump (2026-07-13):
+  - **Safe-point availability queuing (`backend/services/snapshot_v2/safe_point.py`)**: New `request_safe_point_when_available()` with `_availability_waiters` registry — when a safe point is held by another owner, callers can wait with timeout instead of immediately failing. `release()` wakes the next waiter via `_notify_available_unlocked()`. `_request_safe_point_unlocked()` extracted as atomic helper. Prevents safe-point conflicts when multiple restore jobs or chat snapshots target the same session concurrently.
+  - **Restore job safe-point reservation (`backend/services/snapshot_v2/jobs.py`)**: `enqueue()` now reserves the safe point via `request_safe_point_when_available()` before persisting the journal (5s timeout). On reservation failure, raises `SAFE_POINT_BUSY` (HTTP 409). Rollback on start failure cleans up registry, journal, and cancels reservation. `_run_job()` uses the pre-reserved `safe_point_request` instead of calling `request_safe_point()` at runtime. `RestoreJobHandle` gains `safe_point_request` field.
+  - **`SAFE_POINT_BUSY` → HTTP 409 (`backend/services/snapshot_v2/errors.py`)**: `SnapshotTransactionError` with code `SAFE_POINT_BUSY` now returns 409 Conflict instead of 503, giving API callers a proper conflict signal for retry.
+  - **Frontend retry polling dedup & auto-open (`frontend/src/components/AnalysisPanel.tsx`)**: Poll dedup via `transactionId` ref prevents duplicate concurrent polls. Stale poll guard stops when `snapshotTransaction` changes. New `useEffect` resumes polling hydrated non-terminal transactions on mount/reload. Auto-opens `SnapshotPanel` when a retry-of (`retry_of_transaction_id`) transaction is detected, improving UX for retried restore jobs.
+  - **Frontend snapshot_transaction hydration (`frontend/src/hooks/useApi.ts`, `frontend/src/utils/transformLoadResponse.ts`, `frontend/src/types.ts`)**: `applyStoreUpdates()` and `transformLoadResponse()` now handle `snapshot_transaction` field end-to-end, preserving non-terminal transactions across page reloads.
+  - **New tests**: `test_snapshot_v2_safe_point.py` (3 tests: waiter reservation, waiter timeout preserves owner, cancelled waiter cleanup), `test_snapshot_v2_restore_jobs.py` (3 tests: owned request before return, foreign pending rejection, second enqueue waits), `test_snapshot_v2_api.py` (SAFE_POINT_BUSY → 409 mapping), frontend `AnalysisPanel.snapshot-failure-retry.test.tsx` (3 tests: hydration resume, stale poll guard, auto-open on retry), `useApi.test.ts` (snapshot transaction hydration), `transformLoadResponse.test.ts` (snapshot transaction roundtrip).
 
-**0.32.x — (2026-07-03)**
+- `0.33.3` — Snapshot V2 retry closure: pre-restore retry queues new job instead of inline capture, lifecycle route returns transaction metadata, safe-point active indicators in frontend (2026-07-13):
+  - **Pre-restore retry rework (`backend/services/snapshot_v2/failure_gate.py`)**: Pre-restore retry now queues a new restore job linked to the terminal transaction instead of re-invoking capture inline. `retry_pre_restore()` clears the HITL gate and sets `PAUSED` status. New `retry_of_transaction_id` propagation across retry attempts.
+  - **Restore job retry chain (`backend/services/snapshot_v2/jobs.py`)**: `RestoreJobManager.enqueue()` accepts `retry_of_transaction_id` parameter; status tracking preserves the retry chain across job records.
+  - **Lifecycle response enrichment (`backend/routes/lifecycle.py`)**: `snapshot_failure_retry` endpoint returns `transaction_id` and `snapshot_transaction` fields for frontend display.
+  - **Frontend retry UX (`frontend/src/components/AnalysisPanel.tsx`, `frontend/src/types/snapshotV2.ts`)**: Retry dialog shows transaction metadata; safe-point active indicators.
 
-- `0.32.13` — Snapshot V2 content-addressed lifecycle: fail-closed runtime capture, restore reset/keep semantics, import trust_runtime=false, V1 restore 410 cutover, continuation capsules, integrity verification, storage quota governance, per-session safe points (2026-07-12):
+- `0.33.2` — Snapshot V2 safe-point generation tracking, import quota enforcement, chat snapshot safety (owner token + pre-snapshot status preservation), WORKFLOW_GRAPH_NODES registry, STOPPED task status, termination_reason, V1 export key isolation, batch storage (2026-07-13):
+  - **Safe point generation tracking (`backend/services/snapshot_v2/safe_point.py`)**: Acknowledge/request/cancel all require owner token and generation parameter; prevents stale/overlapping safe-point holds across concurrent workflow/chat/restore paths.
+  - **Import quota limits (`backend/config/_config.py`)**: 6 new `snapshot_v2_import_*` config knobs (compressed/uncompressed/member/manifest/snapshot count caps) enforce per-import resource bounds.
+  - **Graph node registry (`backend/constants.py`)**: New `WORKFLOW_GRAPH_NODES` frozenset as authoritative single source of truth, replacing inline node lists across workflow construction and routing.
+  - **AnalysisState extensions (`backend/models/schemas.py`)**: New `STOPPED` task status; `restore_provenance_snapshot_id`, `restore_start_intent`, `restore_resume_workflow_state`, `runtime_restore_warning`, `termination_reason` fields for durable restore provenance tracking and audit logging.
+  - **Chat snapshot safety (`backend/routes/chat.py`)**: Safe-point owner token mechanism prevents cross-path conflicts; pre-snapshot status preserved for failure recovery; chat blocked during active snapshot/restore; centralized `enter_chat_snapshot_failure_gate()` for consistent HITL on snapshot failure.
+  - **V1 export key isolation (`backend/routes/export_import.py`)**: Export prepared state keyed as `v1-{session_id}` to prevent collision with V2 export job IDs.
+  - **Snapshot V2 module enhancements**: `batch_store.py` (batch storage), `deletion.py` (safe-point-aware deletion), `exporter.py` (V2 export with safe-point fencing), `importer.py` (quota enforcement), `dispatcher.py` (generation-aware dispatch), `object_store.py` (shutdown awareness), `recovery.py` (generation tracking), `runtime.py`/`workspace.py` (safe-point fencing).
+  - **Frontend snapshot V2 UX (`frontend/src/components/AnalysisPanel.tsx`, `frontend/src/components/SnapshotPanel.tsx`, `frontend/src/stores/appStore.ts`, `frontend/src/utils/snapshotV2.ts`)**: Transaction status display, restore progress with safe-point awareness, new utility helpers.
+  - **25+ new/modified test files**: Lifecycle, export, import, GC, continuation, idempotency, pre-restore, security, runtime, workspace, and V1 cutover coverage.
+
+- `0.33.1` — Snapshot V2 content-addressed lifecycle: fail-closed runtime capture, restore reset/keep semantics, import trust_runtime=false, V1 restore 410 cutover, continuation capsules, integrity verification, storage quota governance, per-session safe points; persistent_outputs tool field; bioinformatics safe-point integration; AGENTS.md/CLAUDE.md/README.md Snapshot V2 documentation (2026-07-12):
   - **Snapshot V2 module (`backend/services/snapshot_v2/`)**: 25 new files (10,710 lines) implementing a ground-up rewrite of the snapshot system — content-addressed object store (`objects/`), staging/committed lifecycle, journals for restore/delete, integrity material, safe-point descriptors, pre-restore validation, runtime capture/restore, GC, import/export, and multi-phase continuation capsules. Service layer (`service.py`, 2,082 lines) orchestrates capture → verify → commit with transactional staging.
   - **Fail-closed runtime capture**: When runtime exceeds quota or serialization fails, workflow pauses at HITL (Retry / Manage Snapshots / Terminate) — **no Skip**. `@with_retry` in `retry.py` routes `SnapshotCaptureError` to the V2 HITL handler with distinct action set.
   - **Restore reset/keep semantics**: `reset` quarantines runtime and forces re-run from inputs; `keep` retains current runtime with persistent risk acceptance. Import `trust_runtime=false` never materializes runtime objects from archives.
-  - **V1 cutover**: V1 restore returns HTTP 410. V1 inventory/export/delete remain for read-only management. `frontend/`: `LegacySnapshotInventory` component, `RestoreProgressDialog`, `RuntimeChoiceDialog`, `RuntimeWarningBanner`, `SnapshotFailureDialog`, `SnapshotPreview`, `SnapshotTree`, `StorageSummary`.
+  - **V1 cutover**: V1 restore returns HTTP 410. V1 inventory/export/delete remain for read-only management. Frontend: `LegacySnapshotInventory`, `RestoreProgressDialog`, `RuntimeChoiceDialog`, `RuntimeWarningBanner`, `SnapshotFailureDialog`, `SnapshotPreview`, `SnapshotTree`, `StorageSummary`.
   - **Integrity & storage governance**: Host-side `integrity/` material, `SNAPSHOT_V2_*` quota constants, `snapshot_v2_max_runtime_mb` / `snapshot_v2_integrity_verification_enabled` / `snapshot_v2_fail_closed_enabled` config knobs.
   - **Route refactors**: `POST /v2/capture`, `POST /v2/restore`, `GET /v2/inventory`, `POST /v2/import`, `GET /v2/export/{id}`. Session lifecycle routes check for active V2 staging before interrupting captures.
+  - **persistent_outputs tool field (`backend/agents/bioinformatics_agent.py`)**: New `persistent_outputs` field in `execute_code` tool schema (required) for namespace variable declarations critical to snapshot restore correctness.
+  - **Bioinformatics safe-point integration**: Safe-point request/pause/resume coordination in the bioinformatics agent step loop for snapshot-safe code execution.
+  - **Doc updates**: AGENTS.md Snapshot V2 lifecycle section, CLAUDE.md Snapshot V2 patterns section, README.md Snapshot V2 safety contract table.
   - **74+ new test files** across backend unit/integration and frontend Vitest suites, covering capture/restore transactions, fault matrix, portability, real-kernel value cycle, security, concurrency, journals, deletion, GC, export, import, pre-restore, continuation, runtime kernel, structural boundary, storage acceptance, and V1 cutover.
   - **AnnData alias disclaimer**: Snapshot V2 does not guarantee Python object alias identity when the same AnnData object is embedded inside arbitrary nested containers (`nested["adata"] is adata` may not hold after restore).
 
+**0.32.x — (2026-07-03)**
+
 - `0.32.12` — Integration gate auto-skip → PI decide, centralised round serialization, frontend restore error display (2026-07-09): 
-  - _The changes originally intended for `0.32.12` were merged into `0.32.13` above; this entry exists for version continuity._
+  - _The changes originally intended for `0.32.12` were merged into the `0.33.1` Snapshot V2 release; this entry exists for version continuity._
 
 - `0.32.11` — Stable integration gate detection via analysisPhase, `analysisPhase` type widening (2026-07-09):
   - **Stable integration gate detection (`frontend/src/components/AnalysisPanel.tsx`)**: Extracted `isCurrentIntegrationGate` combining both `status === 'waiting_input'` and `analysisPhase === 'integration'`. The effect that opens the `IntegrationGatePanel` now depends only on this stable boolean instead of `currentSession?.status`, preventing spurious re-triggers. When not in integration gate, `integrationGateData` is reliably cleared (functional setState). `IntegrationGatePanel` renders only when `isCurrentIntegrationGate && integrationGateData`, and `RoundFeedbackDialog` excludes it with an additional render-level guard.

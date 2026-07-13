@@ -176,6 +176,7 @@ export function AnalysisPanel() {
   // Snapshot panel state
   const [showSnapshotPanel, setShowSnapshotPanel] = useState(false)
   const snapshotRetryPollRef = useRef<{
+    transactionId: string
     cancelled: boolean
     attempts: number
     timer: ReturnType<typeof setTimeout> | null
@@ -192,6 +193,7 @@ export function AnalysisPanel() {
   const runtimeRestoreStatus = useAppStore(s => s.runtimeRestoreStatus)
   const runtimeRestoreWarning = useAppStore(s => s.runtimeRestoreWarning)
   const isForwardResumeBlocked = useAppStore(s => s.isForwardResumeBlocked)
+  const snapshotTransaction = useAppStore((state) => state.snapshotTransaction)
 
   const stopSnapshotRetryPolling = useCallback(() => {
     const poll = snapshotRetryPollRef.current
@@ -206,18 +208,31 @@ export function AnalysisPanel() {
     sessionId: string,
     seed: SnapshotTransactionRecord,
   ) => {
+    const activePoll = snapshotRetryPollRef.current
+    if (
+      activePoll?.transactionId === seed.transaction_id &&
+      !activePoll.cancelled
+    ) {
+      return
+    }
     stopSnapshotRetryPolling()
     useAppStore.getState().setSnapshotTransaction(seed)
-    const pollState = { cancelled: false, attempts: 0, timer: null as ReturnType<typeof setTimeout> | null }
+    const pollState = {
+      transactionId: seed.transaction_id,
+      cancelled: false,
+      attempts: 0,
+      timer: null as ReturnType<typeof setTimeout> | null,
+    }
     snapshotRetryPollRef.current = pollState
 
     const poll = async () => {
       if (pollState.cancelled) return
       const current = useAppStore.getState().snapshotTransaction
-      if (
-        current?.transaction_id === seed.transaction_id &&
-        SNAPSHOT_TERMINAL_STATUSES.has(current.status)
-      ) {
+      if (current?.transaction_id !== pollState.transactionId) {
+        stopSnapshotRetryPolling()
+        return
+      }
+      if (SNAPSHOT_TERMINAL_STATUSES.has(current.status)) {
         stopSnapshotRetryPolling()
         return
       }
@@ -229,6 +244,11 @@ export function AnalysisPanel() {
       try {
         const transaction = await getSnapshotTransaction(sessionId, seed.transaction_id)
         if (pollState.cancelled) return
+        const latest = useAppStore.getState().snapshotTransaction
+        if (latest?.transaction_id !== pollState.transactionId) {
+          stopSnapshotRetryPolling()
+          return
+        }
         useAppStore.getState().setSnapshotTransaction(transaction)
         if (SNAPSHOT_TERMINAL_STATUSES.has(transaction.status)) {
           stopSnapshotRetryPolling()
@@ -249,6 +269,29 @@ export function AnalysisPanel() {
     () => stopSnapshotRetryPolling,
     [stopSnapshotRetryPolling, currentSession?.id],
   )
+
+  useEffect(() => {
+    if (!currentSession || !snapshotTransaction) return
+    if (snapshotTransaction.session_id !== currentSession.id) return
+    if (SNAPSHOT_TERMINAL_STATUSES.has(snapshotTransaction.status)) {
+      stopSnapshotRetryPolling()
+      return
+    }
+    monitorSnapshotRetry(currentSession.id, snapshotTransaction)
+  }, [
+    currentSession,
+    snapshotTransaction,
+    monitorSnapshotRetry,
+    stopSnapshotRetryPolling,
+  ])
+
+  useEffect(() => {
+    if (!currentSession || !snapshotTransaction) return
+    if (snapshotTransaction.session_id !== currentSession.id) return
+    if (!snapshotTransaction.retry_of_transaction_id) return
+    if (snapshotTransaction.status === 'committed') return
+    setShowSnapshotPanel(true)
+  }, [currentSession, snapshotTransaction])
   const isRerunEnabled = useAppStore(s => s.isRerunEnabled)
 
   // Reset message refs when session changes so dialogs can re-trigger after page reload
@@ -799,6 +842,7 @@ export function AnalysisPanel() {
       }
       const transaction = resp?.data?.snapshot_transaction
       if (transaction) {
+        setShowSnapshotPanel(true)
         monitorSnapshotRetry(currentSession.id, transaction)
       }
       if (resp?.data?.status) {

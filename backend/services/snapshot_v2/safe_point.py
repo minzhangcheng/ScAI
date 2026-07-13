@@ -92,10 +92,32 @@ class SafePointManager:
         self._eligibility_trusted: dict[str, bool] = {}
         self._acquired_owners: dict[str, str] = {}
         self._generation_counters: dict[str, int] = {}
+        self._availability_waiters: dict[str, set[asyncio.Event]] = {}
         self._lock = asyncio.Lock()
 
+    def _request_safe_point_unlocked(
+        self, session_id: str, owner_token: str
+    ) -> SafePointRequest | None:
+        if session_id in self._events or session_id in self._pending_requests:
+            return None
+        generation = self._generation_counters.get(session_id, 0) + 1
+        self._generation_counters[session_id] = generation
+        request = SafePointRequest(
+            owner_token=owner_token,
+            generation=generation,
+            event=asyncio.Event(),
+        )
+        self._pending_requests[session_id] = request
+        return request
+
+    def _notify_available_unlocked(self, session_id: str) -> None:
+        if session_id in self._events or session_id in self._pending_requests:
+            return
+        for waiter in self._availability_waiters.pop(session_id, set()):
+            waiter.set()
+
     async def request_safe_point(
-        self, session_id: str, owner_token: str,
+        self, session_id: str, owner_token: str
     ) -> SafePointRequest | bool:
         """Signal the workflow to pause for an upcoming restore operation.
 
@@ -114,20 +136,44 @@ class SafePointManager:
         if not token:
             return False
         async with self._lock:
-            if session_id in self._events:
-                return False
-            if session_id in self._pending_requests:
-                return False
-            gen = self._generation_counters.get(session_id, 0) + 1
-            self._generation_counters[session_id] = gen
-            event = asyncio.Event()
-            req = SafePointRequest(
-                owner_token=token,
-                generation=gen,
-                event=event,
-            )
-            self._pending_requests[session_id] = req
-            return req
+            request = self._request_safe_point_unlocked(session_id, token)
+            return request if request is not None else False
+
+    async def request_safe_point_when_available(
+        self,
+        session_id: str,
+        owner_token: str,
+        *,
+        timeout_seconds: float,
+    ) -> SafePointRequest | None:
+        token = _normalize_owner_token(owner_token)
+        if not token or timeout_seconds < 0:
+            return None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+
+        while True:
+            waiter = asyncio.Event()
+            async with self._lock:
+                request = self._request_safe_point_unlocked(session_id, token)
+                if request is not None:
+                    return request
+                self._availability_waiters.setdefault(session_id, set()).add(waiter)
+
+            remaining = deadline - loop.time()
+            try:
+                if remaining <= 0:
+                    return None
+                await asyncio.wait_for(waiter.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return None
+            finally:
+                async with self._lock:
+                    waiters = self._availability_waiters.get(session_id)
+                    if waiters is not None:
+                        waiters.discard(waiter)
+                        if not waiters:
+                            self._availability_waiters.pop(session_id, None)
 
     async def cancel_safe_point_request(
         self, session_id: str, owner_token: str,
@@ -375,6 +421,7 @@ class SafePointManager:
         self._acquired_owners.pop(session_id, None)
         if event is not None:
             event.set()
+        self._notify_available_unlocked(session_id)
         return True
 
     def is_paused(self, session_id: str) -> bool:

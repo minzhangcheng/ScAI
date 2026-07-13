@@ -126,6 +126,8 @@ def _snapshot_error_status(exc: SnapshotV2Error) -> int:
     if isinstance(exc, SnapshotDeleteConflict):
         return 409
     if isinstance(exc, SnapshotTransactionError):
+        if exc.code == "SAFE_POINT_BUSY":
+            return 409
         return 503
     # ExportIntegrityError lives in exporter.py but inherits SnapshotV2Error
     if exc.__class__.__name__ == "ExportIntegrityError":

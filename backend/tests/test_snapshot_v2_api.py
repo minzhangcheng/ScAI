@@ -332,6 +332,22 @@ class TestSnapshotErrorDetailFunction:
         result = snapshot_error_detail(exc)
         assert result["status_code"] == 503
 
+    def test_safe_point_busy_maps_to_structured_conflict(self):
+        from backend.services.snapshot_v2.errors import (
+            SnapshotTransactionError,
+            snapshot_error_detail,
+        )
+
+        detail = snapshot_error_detail(
+            SnapshotTransactionError(
+                "SAFE_POINT_BUSY",
+                "Another operation owns the safe point",
+            )
+        )
+        assert detail["status_code"] == 409
+        assert detail["code"] == "SAFE_POINT_BUSY"
+        assert "owns the safe point" in detail["message"]
+
     def test_unknown_v2_error_500(self):
         from backend.services.snapshot_v2.errors import (
             SnapshotCaptureError,

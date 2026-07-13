@@ -69,6 +69,7 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
       language: 'en',
       wsConnected: true,
       snapshotFailure: blockedFailure,
+      snapshotTransaction: null,
       runtimeRestoreStatus: 'complete',
       runtimeRestoreWarning: null,
     })
@@ -205,5 +206,93 @@ describe('AnalysisPanel snapshot-failure retry gate', () => {
     })
 
     expect(useAppStore.getState().snapshotTransaction?.status).toBe('queued')
+  })
+
+  it('resumes polling a hydrated non-terminal retry transaction', async () => {
+    const queued = {
+      transaction_id: 'restore-job-reload',
+      session_id: 'sess-snap-retry',
+      snapshot_id: 'target-snapshot',
+      status: 'waiting_safe_point' as const,
+      recovery_mode: 'rollback' as const,
+      failure: null,
+      retry_of_transaction_id: 'restore-job-original',
+    }
+    useAppStore.setState({ snapshotTransaction: queued })
+    mockGetSnapshotTransaction.mockResolvedValueOnce({
+      ...queued, status: 'committed' as const,
+    })
+    render(<AnalysisPanel />)
+    await waitFor(() => expect(mockGetSnapshotTransaction).toHaveBeenCalledWith(
+      'sess-snap-retry', 'restore-job-reload'
+    ))
+  })
+
+  it('does not let an old poll overwrite a newer transaction', async () => {
+    const oldTransaction = {
+      transaction_id: 'restore-job-old',
+      session_id: 'sess-snap-retry',
+      snapshot_id: 'snapshot-old',
+      status: 'waiting_safe_point' as const,
+      recovery_mode: 'rollback' as const,
+      failure: null,
+    }
+    const newTransaction = {
+      ...oldTransaction,
+      transaction_id: 'restore-job-new',
+      snapshot_id: 'snapshot-new',
+    }
+    let resolveOld!: (value: SnapshotTransactionRecord) => void
+    useAppStore.setState({ snapshotTransaction: oldTransaction })
+    mockGetSnapshotTransaction.mockReturnValueOnce(
+      new Promise<SnapshotTransactionRecord>((resolve) => { resolveOld = resolve })
+    )
+    render(<AnalysisPanel />)
+    await waitFor(() => expect(mockGetSnapshotTransaction).toHaveBeenCalledOnce())
+    act(() => useAppStore.getState().setSnapshotTransaction(newTransaction))
+    await act(async () => {
+      resolveOld({ ...oldTransaction, status: 'failed' })
+      await Promise.resolve()
+    })
+    expect(useAppStore.getState().snapshotTransaction).toEqual(newTransaction)
+  })
+
+  it('opens progress and keeps a polled failure visible', async () => {
+    const queued = {
+      transaction_id: 'restore-job-retry',
+      session_id: 'sess-snap-retry',
+      snapshot_id: 'target-snapshot',
+      status: 'queued' as const,
+      recovery_mode: 'rollback' as const,
+      failure: null,
+      retry_of_transaction_id: 'restore-job-original',
+    }
+    const failed = {
+      ...queued,
+      status: 'failed' as const,
+      failure: {
+        code: 'RESTORE_APPLY_FAILED',
+        message: 'Restore apply failed safely',
+      },
+    }
+    mockApiFetch.mockResolvedValueOnce({
+      success: true,
+      data: {
+        status: 'paused',
+        snapshot_failure: null,
+        snapshot_transaction: queued,
+      },
+    })
+    mockApiFetch.mockResolvedValue({ snapshots: [], store_status: null })
+    mockGetSnapshotTransaction.mockResolvedValueOnce(failed)
+    render(<AnalysisPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+
+    expect(await screen.findByRole(
+      'dialog', { name: /restore progress/i }
+    )).toBeInTheDocument()
+    expect(await screen.findByText('Restore apply failed safely')).toBeInTheDocument()
+    expect(useAppStore.getState().snapshotTransaction).toEqual(failed)
+    expect(useAppStore.getState().snapshotFailure).toBeNull()
   })
 })
