@@ -2043,8 +2043,14 @@ class SnapshotService:
                 f"{self.session_quota_bytes}",
             )
         # Also enforce cumulative store size soft bound via logical objects.
+        # The v2 root dir is not created during a normal capture (objects/
+        # staging/committed are siblings), so probe the nearest existing
+        # ancestor — free space is identical across the same filesystem.
+        probe = self.paths.root
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
         try:
-            usage = shutil.disk_usage(self.paths.root)
+            usage = shutil.disk_usage(probe)
             free_after = usage.free - added
             if free_after < self.free_space_reserve_bytes:
                 raise SnapshotStorageError(

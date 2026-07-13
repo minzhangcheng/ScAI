@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.5.1 · **Last updated**: 2026-07-13
+**Version**: 0.33.5.2 · **Last updated**: 2026-07-13
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-13)**
+
+- `0.33.5.2` — Snapshot V2 quota check missing-v2-root regression fix; version bump (2026-07-13):
+  - **Quota check missing-v2-root fix (`backend/services/snapshot_v2/service.py`)**: `_check_quota` now probes parent directories when `SnapshotV2Paths.root` does not exist, falling back to the nearest existing ancestor for `shutil.disk_usage`. Real captures never create the `v2/` root dir before the quota check, so `disk_usage` would raise `FileNotFoundError` and block the workflow at bioinformatics start.
+  - **Regression test (`backend/tests/test_snapshot_v2_capture_transaction.py`)**: `test_check_quota_when_v2_root_dir_missing` reproduces the `DISK_USAGE_CHECK_FAILED` scenario using real `SnapshotV2Paths` (frozen dataclass, no ensure_dirs) with a missing `v2/` root, verifying `_check_quota` does not raise.
 
 - `0.33.5.1` — Snapshot V2 ObjectStore lazy directory creation on first write; version bump (2026-07-13):
   - **Lazy staging/objects dir creation (`backend/services/snapshot_v2/object_store.py`)**: New `_ensure_store_dirs()` method called at the top of `put_bytes`, `put_file`, and `put_stream` to create missing `staging/` and `objects/` directories on demand. Fresh sessions only create workspace/states/uploads/reports/logs; Snapshot V2 dirs are created lazily so `put_*` never fails with `FileNotFoundError`.

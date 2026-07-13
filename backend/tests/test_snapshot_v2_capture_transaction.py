@@ -1077,6 +1077,36 @@ class TestCaptureRequiredContent:
         assert service.free_space_reserve_bytes == default_config.snapshot_v2_free_space_reserve_bytes
 
     @pytest.mark.asyncio
+    async def test_check_quota_when_v2_root_dir_missing(self, tmp_path):
+        """Regression: real captures never create the ``v2/`` root dir before the
+        quota check, so ``shutil.disk_usage`` must not choke on a missing path.
+
+        Reproduces DISK_USAGE_CHECK_FAILED that blocked the workflow at
+        bioinformatics start (v0.33.x)."""
+        from types import SimpleNamespace
+        from backend.services.snapshot_v2.service import SnapshotService
+        from backend.services.snapshot_v2.paths import SnapshotV2Paths
+
+        # Use the REAL paths class (frozen dataclass, no ensure_dirs); the v2
+        # root deliberately does not exist on disk.
+        real_paths = SnapshotV2Paths(
+            root=tmp_path / "v2",
+            objects=tmp_path / "objects",
+            staging=tmp_path / "staging",
+            journals=tmp_path / "journals",
+            integrity=tmp_path / "integrity",
+            committed=tmp_path / "committed",
+        )
+        assert not real_paths.root.exists()
+
+        service = SnapshotService("sess-cap", real_paths)
+        # _check_quota only reads physical_added_bytes off the manifest.
+        manifest = SimpleNamespace(physical_added_bytes=0)
+
+        # Must not raise DISK_USAGE_CHECK_FAILED just because v2/ is absent.
+        await service._check_quota(manifest)
+
+    @pytest.mark.asyncio
     async def test_rebuilds_snapshots_list_from_committed_manifests(
         self, v2_paths, sandbox, scoped_workspace, analysis_state, tmp_path,
     ):
