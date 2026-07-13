@@ -173,6 +173,16 @@ class ObjectStore:
         self._evidence: dict[str, "VerifiedObjectEvidence"] = {}
         self._evidence_max = _EVIDENCE_CACHE_MAX
 
+    def _ensure_store_dirs(self) -> None:
+        """Create staging/objects dirs on demand for first-write paths.
+
+        Fresh sessions only create workspace/states/uploads/reports/logs.
+        Snapshot V2 dirs are created lazily so put_* never fails with
+        FileNotFoundError on missing staging/objects parents.
+        """
+        self._paths.staging.mkdir(parents=True, exist_ok=True)
+        self._objects_dir.mkdir(parents=True, exist_ok=True)
+
     def _register_evidence(self, sha256: str, evidence: "VerifiedObjectEvidence") -> None:
         if len(self._evidence) >= self._evidence_max:
             # Evict oldest entries (simple FIFO-style)
@@ -217,6 +227,7 @@ class ObjectStore:
                 created=False,
             )
 
+        self._ensure_store_dirs()
         temp = self._paths.staging / f".{sha}.tmp"
         temp.write_bytes(data)
         temp_fd = os.open(temp, os.O_RDONLY)
@@ -273,6 +284,7 @@ class ObjectStore:
                 created=False,
             )
 
+        self._ensure_store_dirs()
         with tempfile.NamedTemporaryFile(dir=str(self._paths.staging), prefix=f".{sha}.", delete=False) as tmp:
             tmp_path = Path(tmp.name)
             with open(resolved, "rb") as src:
@@ -360,6 +372,7 @@ class ObjectStore:
 
         hasher = hashlib.sha256()
         total = 0
+        self._ensure_store_dirs()
         with tempfile.NamedTemporaryFile(
             dir=str(self._paths.staging),
             prefix=f".{expected_sha256}.",

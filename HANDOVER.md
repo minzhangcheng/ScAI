@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.5 · **Last updated**: 2026-07-13
+**Version**: 0.33.5.1 · **Last updated**: 2026-07-13
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-13)**
+
+- `0.33.5.1` — Snapshot V2 ObjectStore lazy directory creation on first write; version bump (2026-07-13):
+  - **Lazy staging/objects dir creation (`backend/services/snapshot_v2/object_store.py`)**: New `_ensure_store_dirs()` method called at the top of `put_bytes`, `put_file`, and `put_stream` to create missing `staging/` and `objects/` directories on demand. Fresh sessions only create workspace/states/uploads/reports/logs; Snapshot V2 dirs are created lazily so `put_*` never fails with `FileNotFoundError`.
+  - **New tests (`backend/tests/test_snapshot_v2_object_store.py`)**: 3 tests (`test_put_bytes_creates_missing_staging_and_objects_dirs`, `test_put_file_creates_missing_staging_and_objects_dirs`, `test_put_stream_creates_missing_staging_and_objects_dirs`) validating that each `put_*` method creates the required directories when they do not exist.
 
 - `0.33.5` — ErrorBoundary self-recovery (reset local data), Zustand persist migration, defensive array checks in MessageStream/TextInputDialog; version bump (2026-07-13):
   - **ErrorBoundary self-recovery (`frontend/src/components/ErrorBoundary.tsx`)**: New "Reset local data" button that clears app-owned localStorage keys (`PERSIST_STORAGE_KEY`, `JWT_STORAGE_KEY`) and reloads, providing a recovery path when the app crashes on every load due to corrupted/legacy persisted state. Uses shared storage constants.

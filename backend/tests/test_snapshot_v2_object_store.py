@@ -97,6 +97,87 @@ class TestCanonicalJson:
 
 
 class TestObjectStore:
+    def test_put_bytes_creates_missing_staging_and_objects_dirs(self, tmp_path):
+        """Fresh sessions may not have Snapshot V2 dirs yet; put_bytes must create them."""
+        from backend.services.snapshot_v2.object_store import ObjectStore
+
+        class MissingDirsPaths:
+            root = tmp_path / "v2"
+            objects = tmp_path / "objects"
+            staging = tmp_path / "staging"
+            journals = tmp_path / "journals"
+            integrity = tmp_path / "integrity"
+            committed = tmp_path / "committed"
+
+        paths = MissingDirsPaths()
+        assert not paths.staging.exists()
+        assert not paths.objects.exists()
+
+        store = ObjectStore(paths)
+        result = store.put_bytes(b"hello world", "text/plain")
+
+        assert paths.staging.exists()
+        assert paths.objects.exists()
+        assert (paths.objects / result.ref.sha256).read_bytes() == b"hello world"
+        assert result.created is True
+
+    def test_put_file_creates_missing_staging_and_objects_dirs(self, tmp_path):
+        from backend.services.snapshot_v2.object_store import ObjectStore
+
+        class MissingDirsPaths:
+            root = tmp_path / "v2"
+            objects = tmp_path / "objects"
+            staging = tmp_path / "staging"
+            journals = tmp_path / "journals"
+            integrity = tmp_path / "integrity"
+            committed = tmp_path / "committed"
+
+        paths = MissingDirsPaths()
+        src = tmp_path / "source.bin"
+        src.write_bytes(b"file payload")
+        assert not paths.staging.exists()
+        assert not paths.objects.exists()
+
+        store = ObjectStore(paths)
+        result = store.put_file(src, "application/octet-stream")
+
+        assert paths.staging.exists()
+        assert paths.objects.exists()
+        assert (paths.objects / result.ref.sha256).read_bytes() == b"file payload"
+        assert result.created is True
+
+    def test_put_stream_creates_missing_staging_and_objects_dirs(self, tmp_path):
+        import hashlib
+        import io
+        from backend.services.snapshot_v2.object_store import ObjectStore
+
+        class MissingDirsPaths:
+            root = tmp_path / "v2"
+            objects = tmp_path / "objects"
+            staging = tmp_path / "staging"
+            journals = tmp_path / "journals"
+            integrity = tmp_path / "integrity"
+            committed = tmp_path / "committed"
+
+        paths = MissingDirsPaths()
+        payload = b"stream payload"
+        expected_sha = hashlib.sha256(payload).hexdigest()
+        assert not paths.staging.exists()
+        assert not paths.objects.exists()
+
+        store = ObjectStore(paths)
+        result = store.put_stream(
+            io.BytesIO(payload),
+            expected_sha256=expected_sha,
+            expected_size=len(payload),
+            media_type="application/octet-stream",
+        )
+
+        assert paths.staging.exists()
+        assert paths.objects.exists()
+        assert (paths.objects / result.ref.sha256).read_bytes() == payload
+        assert result.created is True
+
     def test_put_bytes_returns_object_ref(self, v2_paths):
         from backend.services.snapshot_v2.object_store import ObjectStore
 
