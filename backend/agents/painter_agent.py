@@ -2,10 +2,26 @@
 Painter Agent - Generates graphic abstracts using LLM image generation
 
 This agent uses the user-configured LLM hosting service to call image generation models.
-Supports multiple platforms via dual-path strategy:
-1. DashScope native async task API (when base_url contains dashscope.aliyuncs.com)
-2. Chat completions with modalities=["image", "text"] (OpenRouter)
-3. Images API (/v1/images/generations) fallback (OpenAI, Google AI Studio, SiliconFlow, etc.)
+It probes three protocols in a single unified cascade so any OpenAI-compatible
+gateway (New API, OpenRouter, OpenAI, Google AI Studio, DashScope, SiliconFlow,
+Zhipu, ...) works without provider-specific branching:
+
+  1. Images API — POST /v1/images/generations (text prompt) or /v1/images/edits
+     (when an input image is provided, i.e. revision)
+  2. Chat completions with modalities=["image", "text"]
+  3. DashScope native async task API
+
+On ANY failure (no image parsed, regardless of HTTP status) the cascade moves to
+the next protocol, waiting 1s between protocols. Once every protocol has been tried
+once, the whole cascade is retried, backing off 2s / 4s / 8s / 16s between rounds,
+up to 5 rounds. Each Images API / Chat attempt is bounded by a 60s timeout so a hung
+wrong-protocol call switches quickly (the DashScope native task keeps its own longer
+polling budget). Only auth (401/403) and content-moderation errors are treated as
+fatal and abort the cascade early, since no protocol or retry can recover them.
+
+The protocol *order* is nudged by base_url so known providers hit their working
+protocol first (DashScope -> native first; OpenRouter -> chat first; everything
+else -> Images API first); the full cascade remains as a safety net.
 """
 from typing import Dict, Any, Optional, List
 import logging
@@ -32,6 +48,11 @@ _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
 _GOOGLE_AI_STUDIO_BASE_URL = "generativelanguage.googleapis.com"
 _ZHIPU_BASE_URL = "open.bigmodel.cn"
 
+# Protocol cascade tuning (see module docstring).
+_MAX_RETRY_ROUNDS = 5          # full-cascade rounds before giving up
+_INTER_PROTOCOL_DELAY = 1.0    # seconds to wait when switching protocols within a round
+_PROTOCOL_TIMEOUT = 60.0       # per-attempt timeout for Images API / Chat protocols
+
 
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate: len/3 for mixed CJK+English (conservative)."""
@@ -51,43 +72,25 @@ def _is_client_error(exc: Exception) -> bool:
     return False
 
 
-async def _retry_with_backoff(
-    fn,
-    *,
-    max_attempts: int = 3,
-    log_prefix: str = "",
-    session_id: str = "",
-) -> Any:
-    """Call *fn* with exponential-backoff retry, skipping on client errors.
+def _is_fatal_image_error(exc: Exception) -> bool:
+    """Errors that no protocol switch or retry can recover, so the cascade aborts.
 
-    Args:
-        fn: Async callable to attempt.
-        max_attempts: Total attempts before giving up.
-        log_prefix: Prefix for warning log messages (e.g. "Images API").
-        session_id: Session ID for log correlation.
-
-    Returns:
-        The return value of *fn* on success.
-
-    Raises:
-        The last exception if all attempts fail or a client error is hit.
+    Only authentication (401/403) and content-moderation failures qualify: they
+    reproduce identically on every protocol and every round, and retrying wastes
+    time and may repeatedly trip content filters (possibly re-billing). Every
+    other error (400/404/422/5xx/timeout/parse) falls through to the next protocol.
     """
-    last_error: Optional[Exception] = None
-    for attempt in range(max_attempts):
-        try:
-            return await fn()
-        except Exception as e:
-            last_error = e
-            if _is_client_error(e):
-                break
-            if attempt < max_attempts - 1:
-                delay = 2 ** attempt
-                logger.warning(
-                    f"[{session_id}][Painter] {log_prefix} attempt {attempt + 1} failed: {e}, "
-                    f"retrying in {delay}s"
-                )
-                await asyncio.sleep(delay)
-    raise last_error  # type: ignore[misc]
+    err = str(exc).lower()
+    for code in ("401", "403"):
+        if f"error code: {code}" in err or f"status_code={code}" in err:
+            return True
+    for kw in (
+        "content_filter", "content policy", "content_policy",
+        "safety system", "moderation", "invalid api key", "incorrect api key",
+    ):
+        if kw in err:
+            return True
+    return False
 
 
 class PainterAgent(BaseAgent):
@@ -246,68 +249,24 @@ class PainterAgent(BaseAgent):
             revision_prompt = revision_prompt[:len(revision_prompt) - excess_chars] + \
                 "\n... [trimmed to fit token limit]"
 
+        # Text-only variant for the DashScope native path, which cannot see the
+        # current image and must regenerate from the revised instructions alone.
+        text_only_prompt = revision_prompt.replace(
+            "- Look at the attached current graphic abstract image carefully\n", ""
+        )
+
         try:
-            # DashScope native API: OpenAI compat mode does not support image models.
-            # Re-generate with revised text prompt via the native task API.
-            if _DASHSCOPE_BASE_URL in self.llm_client.base_url:
-                logger.info(f"[{self.session_id}][Painter] DashScope: revising via native text2image API")
-                text_only_prompt = revision_prompt.replace(
-                    "- Look at the attached current graphic abstract image carefully\n", ""
-                )
-                return await self._generate_image_dashscope(text_only_prompt)
-
-            # Build multimodal message: current image + revision instructions
-            if self.has_vision:
-                # Vision enabled: send current image so model can see and modify it
-                from ..utils.llm_client import _detect_image_mime_type
-                mime_type = _detect_image_mime_type(current_image_base64)
-                user_content = [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{current_image_base64}"
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": revision_prompt
-                    }
-                ]
-            else:
-                # No vision: only send text, model regenerates based on feedback alone
-                logger.info(f"[{self.session_id}][Painter] Vision disabled, revising with text-only prompt")
-                # Remove reference to attached image from prompt
-                text_only_prompt = revision_prompt.replace(
-                    "- Look at the attached current graphic abstract image carefully\n", ""
-                )
-                user_content = [{"type": "text", "text": text_only_prompt}]
-
-            async def _do_revise():
-                response = await self.llm_client.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": user_content}
-                    ],
-                    temperature=self.config.temperature,
-                    max_tokens=4096,
-                    extra_body={
-                        "modalities": ["image", "text"]
-                    }
-                )
-                new_image = self._extract_image_from_response(response)
-                logger.info(f"[{self.session_id}][Painter] Graphic abstract revision successful")
-                return new_image
-
-            try:
-                return await _retry_with_backoff(
-                    _do_revise,
-                    log_prefix="Revision",
-                    session_id=self.session_id,
-                )
-            except Exception:
-                raise  # let outer handler wrap as ValueError
-
+            # Revision has an input image, so the Images protocol uses /v1/images/edits.
+            protocols = self._build_protocols(
+                image_run=lambda: self._images_edit_attempt(revision_prompt, current_image_base64),
+                chat_run=lambda: self._chat_image_attempt(
+                    revision_prompt, input_image_b64=current_image_base64
+                ),
+                dashscope_run=lambda: self._generate_image_dashscope(text_only_prompt),
+            )
+            new_image = await self._run_protocol_cascade(protocols, op="revision")
+            logger.info(f"[{self.session_id}][Painter] Graphic abstract revision successful")
+            return new_image
         except Exception as e:
             logger.exception(f"[{self.session_id}][Painter] Error revising graphic abstract")
             raise ValueError(f"Graphic abstract revision failed: {e}") from e
@@ -636,84 +595,184 @@ The graphic abstract should tell the story of the research at a glance, highligh
 
         logger.debug(f"[{self.session_id}][Painter] Calling image generation")
 
-        # Strategy 0: DashScope native async task API
-        # DashScope's OpenAI compatibility mode does not expose image generation endpoints.
-        if _DASHSCOPE_BASE_URL in self.llm_client.base_url:
-            return await self._generate_image_dashscope(prompt)
-
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": prompt}
-        ]
-
-        # Google AI Studio and Zhipu do not support modalities in chat completions;
-        # skip Strategy 1 and go directly to Images API (Strategy 2).
-        _is_google_ai_studio = _GOOGLE_AI_STUDIO_BASE_URL in self.llm_client.base_url
-        _is_zhipu = _ZHIPU_BASE_URL in self.llm_client.base_url
-        _skip_chat_modalities = _is_google_ai_studio or _is_zhipu
+        _is_zhipu = _ZHIPU_BASE_URL in (self.llm_client.base_url or "")
 
         try:
-            # Strategy 1: Try chat completions with modalities (works on OpenRouter)
-            chat_error = None
-            if not _skip_chat_modalities:
-                async def _chat_attempt():
-                    response = await self.llm_client.client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        temperature=self.config.temperature,
-                        extra_body={
-                            "modalities": ["image", "text"]
-                        }
-                    )
-                    return self._extract_image_from_response(response)
-
-                try:
-                    return await _retry_with_backoff(
-                        _chat_attempt,
-                        log_prefix="Chat generation",
-                        session_id=self.session_id,
-                    )
-                except Exception as e:
-                    chat_error = e
-            else:
-                provider = "Google AI Studio" if _is_google_ai_studio else "Zhipu"
-                logger.info(
-                    f"[{self.session_id}][Painter] {provider} detected, "
-                    f"skipping chat modalities strategy"
-                )
-
-            # Strategy 2: Try Images API (/v1/images/generations)
-            # Works on OpenAI, Google AI Studio, n1n.ai, SiliconFlow, etc.
-            logger.info(
-                f"[{self.session_id}][Painter] Chat completions image gen "
-                f"{'skipped' if _skip_chat_modalities else f'failed ({chat_error})'}, "
-                f"trying Images API fallback"
+            # No input image, so the Images protocol uses /v1/images/generations.
+            protocols = self._build_protocols(
+                image_run=lambda: self._images_api_attempt(prompt, is_zhipu=_is_zhipu),
+                chat_run=lambda: self._chat_image_attempt(prompt),
+                dashscope_run=lambda: self._generate_image_dashscope(prompt),
             )
-            # Strategy 2 retries transient failures (timeouts / 5xx) with
-            # exponential backoff, mirroring Strategy 1. Client errors (4xx,
-            # except retriable 429) break out immediately.
-            try:
-                return await _retry_with_backoff(
-                    lambda: self._images_api_attempt(prompt, is_zhipu=_is_zhipu),
-                    log_prefix="Images API",
-                    session_id=self.session_id,
-                )
-            except Exception as images_error:
-                logger.warning(
-                    f"[{self.session_id}][Painter] Images API also failed: {images_error}"
-                )
-                # Raise the original chat error as primary, mention images API failure
-                raise ValueError(
-                    f"Image generation failed. "
-                    f"Chat completions: {chat_error}. "
-                    f"Images API: {images_error}"
-                ) from chat_error
-
+            return await self._run_protocol_cascade(protocols, op="generation")
         except ValueError:
             raise
         except Exception as e:
             logger.exception(f"[{self.session_id}][Painter] Error generating image")
             raise ValueError(f"Image generation failed: {e}") from e
+
+    def _protocol_order(self) -> List[str]:
+        """Order in which to try the ("images", "chat", "dashscope") protocols.
+
+        The full cascade is always tried; base_url only nudges which protocol
+        goes first so known providers hit their working one immediately:
+        - DashScope: only the native task API works -> native first.
+        - OpenRouter: image models are served via chat completions -> chat first.
+        - Everything else (New API, OpenAI, Google AI Studio, Zhipu, SiliconFlow,
+          ...): the OpenAI Images API is the most broadly supported -> images first.
+        """
+        base = (self.llm_client.base_url or "").lower()
+        if _DASHSCOPE_BASE_URL in base:
+            return ["dashscope", "images", "chat"]
+        if "openrouter" in base:
+            return ["chat", "images", "dashscope"]
+        return ["images", "chat", "dashscope"]
+
+    def _build_protocols(self, *, image_run, chat_run, dashscope_run) -> List[Dict[str, Any]]:
+        """Assemble the ordered protocol list consumed by ``_run_protocol_cascade``.
+
+        Each entry carries a human-readable ``name``, the async ``run`` callable,
+        and a per-attempt ``timeout`` (``None`` = no wrapper, used for the DashScope
+        native task which legitimately polls for minutes).
+        """
+        runners = {
+            "images": {"name": "images_api", "run": image_run, "timeout": _PROTOCOL_TIMEOUT},
+            "chat": {"name": "chat_modalities", "run": chat_run, "timeout": _PROTOCOL_TIMEOUT},
+            "dashscope": {"name": "dashscope_native", "run": dashscope_run, "timeout": None},
+        }
+        return [runners[p] for p in self._protocol_order()]
+
+    async def _run_protocol_cascade(
+        self, protocols: List[Dict[str, Any]], *, op: str = "generation"
+    ) -> str:
+        """Try each protocol in order; on any non-fatal failure move to the next.
+
+        Within a round, protocols are separated by ``_INTER_PROTOCOL_DELAY``. After
+        a full round fails, back off (2/4/8/16s) and retry the whole cascade, up to
+        ``_MAX_RETRY_ROUNDS`` rounds. Fatal errors (auth / content moderation) abort
+        immediately. Each protocol carrying a ``timeout`` is bounded by it so a hung
+        wrong-protocol call switches quickly.
+
+        Returns the first successfully parsed base64 image; raises ValueError if all
+        protocols fail across all rounds.
+        """
+        errors: Dict[str, str] = {}
+        for round_idx in range(_MAX_RETRY_ROUNDS):
+            if round_idx > 0:
+                backoff = 2 ** round_idx  # 2, 4, 8, 16 before rounds 1..4
+                logger.warning(
+                    f"[{self.session_id}][Painter] All protocols failed round {round_idx} "
+                    f"({op}); retrying whole cascade in {backoff}s"
+                )
+                await asyncio.sleep(backoff)
+
+            for i, proto in enumerate(protocols):
+                if i > 0:
+                    await asyncio.sleep(_INTER_PROTOCOL_DELAY)
+                name = proto["name"]
+                timeout = proto.get("timeout")
+                try:
+                    if timeout:
+                        return await asyncio.wait_for(proto["run"](), timeout=timeout)
+                    return await proto["run"]()
+                except asyncio.TimeoutError:
+                    errors[name] = f"timeout after {timeout}s"
+                    logger.warning(
+                        f"[{self.session_id}][Painter] protocol {name} ({op}) round "
+                        f"{round_idx + 1} timed out after {timeout}s, switching"
+                    )
+                except Exception as e:  # noqa: BLE001 - any parse/HTTP error switches protocol
+                    if _is_fatal_image_error(e):
+                        logger.warning(
+                            f"[{self.session_id}][Painter] fatal error on {name} ({op}), "
+                            f"aborting cascade: {e}"
+                        )
+                        raise ValueError(
+                            f"Image {op} aborted on {name} (unrecoverable): {e}"
+                        ) from e
+                    errors[name] = str(e)[:200]
+                    logger.warning(
+                        f"[{self.session_id}][Painter] protocol {name} ({op}) round "
+                        f"{round_idx + 1} failed: {e}, switching"
+                    )
+
+        detail = "; ".join(f"{k}: {v}" for k, v in errors.items()) or "no protocols attempted"
+        raise ValueError(
+            f"Image {op} failed after {_MAX_RETRY_ROUNDS} rounds across all protocols. {detail}"
+        )
+
+    async def _chat_image_attempt(
+        self, prompt: str, *, input_image_b64: Optional[str] = None
+    ) -> str:
+        """One attempt at image generation via chat completions modalities.
+
+        When ``input_image_b64`` is provided (revision) and vision is enabled, the
+        current image is attached so the model can see and modify it; otherwise the
+        prompt is sent text-only (the "look at the attached image" line is stripped).
+        """
+        if input_image_b64 is not None and self.has_vision:
+            from ..utils.llm_client import _detect_image_mime_type
+            mime_type = _detect_image_mime_type(input_image_b64)
+            user_content: Any = [
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{input_image_b64}"}},
+                {"type": "text", "text": prompt},
+            ]
+        elif input_image_b64 is not None:
+            # Revision without vision: text-only, drop the image reference line.
+            user_content = prompt.replace(
+                "- Look at the attached current graphic abstract image carefully\n", ""
+            )
+        else:
+            user_content = prompt
+
+        response = await self.llm_client.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=self.config.temperature,
+            max_tokens=4096,
+            extra_body={"modalities": ["image", "text"]},
+        )
+        return self._extract_image_from_response(response)
+
+    async def _images_edit_attempt(self, prompt: str, input_image_b64: str) -> str:
+        """One attempt at image revision via the Images edits API (/v1/images/edits).
+
+        Sends the current image plus the revision prompt. Falls back to omitting
+        ``response_format`` for providers that reject it (e.g. gpt-image-1, which
+        always returns b64). Raises on any failure so the cascade can switch.
+        """
+        from ..utils.llm_client import _detect_image_mime_type
+        img_bytes = base64.b64decode(input_image_b64)
+        mime = _detect_image_mime_type(input_image_b64)
+        ext = "jpg" if "jpeg" in mime else ("webp" if "webp" in mime else "png")
+        image_file = (f"image.{ext}", img_bytes, mime)
+
+        try:
+            response = await self.llm_client.client.images.edit(
+                model=self.model,
+                image=image_file,
+                prompt=prompt,
+                n=1,
+                response_format="b64_json",
+            )
+        except Exception as fmt_err:
+            # Only fall back for client errors (unsupported param); propagate the rest.
+            if not _is_client_error(fmt_err):
+                raise
+            logger.info(
+                f"[{self.session_id}][Painter] Images edits with b64_json failed ({fmt_err}), "
+                f"retrying without response_format"
+            )
+            response = await self.llm_client.client.images.edit(
+                model=self.model,
+                image=image_file,
+                prompt=prompt,
+                n=1,
+            )
+        return await self._extract_image_from_images_response(response)
 
     async def _images_api_attempt(self, prompt: str, *, is_zhipu: bool = False) -> str:
         """One attempt at the Images API (/v1/images/generations).
@@ -765,6 +824,15 @@ The graphic abstract should tell the story of the research at a glance, highligh
                     n=1,
                 )
 
+        return await self._extract_image_from_images_response(response)
+
+    async def _extract_image_from_images_response(self, response) -> str:
+        """Extract a base64 image from an Images API response (generations or edits).
+
+        Handles standard ``data[0].b64_json`` / ``data[0].url`` shapes plus the
+        non-standard SiliconFlow ``images`` array, surfacing provider error /
+        content_filter fields. Raises ValueError if no image can be extracted.
+        """
         # Debug: log raw response for diagnosis
         raw = None
         if hasattr(response, 'model_dump'):
@@ -775,7 +843,7 @@ The graphic abstract should tell the story of the research at a glance, highligh
             logger.debug(f"[{self.session_id}][Painter] Images API response type: {type(response)}")
 
         # Extract image from response
-        if response.data and len(response.data) > 0:
+        if getattr(response, "data", None):
             img_item = response.data[0]
             # Prefer b64_json (OpenAI, Google AI Studio)
             if hasattr(img_item, 'b64_json') and img_item.b64_json:
