@@ -271,6 +271,61 @@ print('dds ready', dds.shape)
         assert "dds" in runtime.adata_refs
 
     @pytest.mark.asyncio
+    async def test_anndata_with_raw_x_obsm_uns_edge_cases_is_captured(self, sandbox, v2_paths):
+        """End-to-end: raw.var object col, object-dtype X, obsm DataFrame with a
+        bad column, and uns list[dict] must all be sanitized so capture succeeds."""
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+        from backend.services.snapshot_v2.object_store import ObjectStore
+
+        code = """
+import anndata as ad
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
+adata = ad.AnnData(X=sp.csr_matrix(np.random.rand(6, 10)))
+adata.var_names = [f'g{i}' for i in range(10)]
+adata.var['flag'] = pd.Series([True, None, 'x'] + [False]*7, index=adata.var_names, dtype=object)
+adata.raw = adata.copy()
+adata = adata[:, :4].copy()
+adata.X = np.asarray(adata.X.toarray(), dtype=object)
+adata.obsm['meta'] = pd.DataFrame({'b': pd.Series([True, None]*3, dtype=object)}, index=adata.obs_names)
+adata.uns['markers'] = ['CD3', 'CD4']
+adata.uns['weird'] = [{'k': 1}, {'k': 2}]
+print('adata ready', adata.shape)
+"""
+        result = await sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+        assert result.success, result.error
+
+        capturer = RuntimeCapture(ObjectStore(v2_paths), v2_paths)
+        runtime = await capturer.capture(sandbox, declared_outputs={"adata"})
+        assert runtime.status == "complete"
+        assert "adata" in runtime.adata_refs
+
+    @pytest.mark.asyncio
+    async def test_anndata_with_unwritable_obs_column_is_captured(self, sandbox, v2_paths):
+        """AnnData whose obs has an object column of non-string objects
+        (scrublet 'predicted_doublet' bool/None) must still capture."""
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+        from backend.services.snapshot_v2.object_store import ObjectStore
+
+        code = """
+import anndata as ad
+import numpy as np
+import pandas as pd
+adata = ad.AnnData(X=np.random.rand(4, 3))
+adata.obs['predicted_doublet'] = pd.Series(
+    [True, False, None, True], index=adata.obs_names, dtype=object)
+print('adata ready', adata.shape)
+"""
+        result = await sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+        assert result.success, result.error
+
+        capturer = RuntimeCapture(ObjectStore(v2_paths), v2_paths)
+        runtime = await capturer.capture(sandbox, declared_outputs={"adata"})
+        assert runtime.status == "complete"
+        assert "adata" in runtime.adata_refs
+
+    @pytest.mark.asyncio
     async def test_capture_with_ample_free_space_succeeds(self, sandbox, v2_paths):
         """Normal-sized data with ample free space succeeds."""
         from backend.services.snapshot_v2.runtime import RuntimeCapture

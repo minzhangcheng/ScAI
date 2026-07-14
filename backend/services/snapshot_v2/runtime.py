@@ -101,11 +101,15 @@ if _adata is not None:
                 # 1) scipy sparse: keep (do NOT asarray — yields 0-d object)
                 if _sp is not None and _sp.issparse(_v):
                     continue
-                # 2) exact native types only (formulaic ModelMatrix is ObjectProxy;
-                #    isinstance(mm, DataFrame) is True but write still fails)
-                if type(_v) is _runtime_np.ndarray or type(_v) is _runtime_pd.DataFrame or type(_v) is _runtime_pd.Series:
+                # 2) DataFrame: keep, but sanitize its object columns.
+                if type(_v) is _runtime_pd.DataFrame:
+                    _sanitize_frame_columns(_v)
                     continue
-                # 3) formulaic / ModelMatrix: force convert
+                # 3) exact native types only (formulaic ModelMatrix is ObjectProxy;
+                #    isinstance(mm, DataFrame) is True but write still fails)
+                if type(_v) is _runtime_np.ndarray or type(_v) is _runtime_pd.Series:
+                    continue
+                # 4) formulaic / ModelMatrix: force convert
                 if _is_formulaic_like(_v):
                     try:
                         _mapping[_k] = _convert_value(_v)
@@ -132,6 +136,33 @@ if _adata is not None:
                 except Exception:
                     pass
                 print('__H5AD_SANITIZE_DROP__:' + _slot_name + '/' + str(_k) + ':' + type(_v).__module__ + '.' + type(_v).__qualname__)
+    def _sanitize_frame_columns(_df):
+        try:
+            _cols = list(_df.columns)
+        except Exception:
+            return
+        for _col in _cols:
+            try:
+                _s = _df[_col]
+                _dtype = getattr(_s, 'dtype', None)
+                _kind = getattr(_dtype, 'kind', None)
+                if _kind in ('M', 'm'):
+                    _df[_col] = _s.astype(str)
+                    continue
+                if _dtype != object:
+                    continue
+                _vals = _s.to_numpy()
+                if all(isinstance(_x, str) for _x in _vals):
+                    continue
+                try:
+                    _df[_col] = _s.astype(str)
+                except Exception:
+                    _df[_col] = _runtime_np.asarray([str(_x) for _x in _vals], dtype=object)
+            except Exception:
+                try:
+                    del _df[_col]
+                except Exception:
+                    pass
     def _sanitize_uns_mapping(_mapping):
         try:
             import scipy.sparse as _sp
@@ -150,7 +181,10 @@ if _adata is not None:
                 # Native h5ad-writable leaves kept untouched (isinstance for
                 # ndarray to preserve structured/recarray; exact DataFrame so a
                 # ModelMatrix ObjectProxy falls through to coercion).
-                if isinstance(_v, _runtime_np.ndarray) or type(_v) is _runtime_pd.DataFrame:
+                if type(_v) is _runtime_pd.DataFrame:
+                    _sanitize_frame_columns(_v)
+                    continue
+                if isinstance(_v, _runtime_np.ndarray):
                     continue
                 if _v is None or isinstance(_v, (str, bytes, bool, int, float, complex, _runtime_np.generic)):
                     continue
@@ -162,7 +196,12 @@ if _adata is not None:
                     _arr = _runtime_np.asarray(_v.values)
                 else:
                     _arr = _runtime_np.asarray(_v)
-                if _usable_asarray(_arr):
+                # Keep only if h5ad-writable: reject 0-d object and object
+                # arrays that are not entirely strings (e.g. coerced list[dict]).
+                if _usable_asarray(_arr) and (
+                    _arr.dtype != object
+                    or all(isinstance(_x, str) for _x in _arr.ravel().tolist())
+                ):
                     _mapping[_k] = _arr
                     continue
                 del _mapping[_k]
@@ -173,6 +212,18 @@ if _adata is not None:
                 except Exception:
                     pass
                 print('__H5AD_SANITIZE_DROP__:uns/' + str(_k) + ':' + type(_v).__module__ + '.' + type(_v).__qualname__)
+    # X: coerce an object-dtype dense matrix to float; leave sparse and
+    # genuinely non-numeric X untouched.
+    try:
+        import scipy.sparse as _spx
+    except Exception:
+        _spx = None
+    _X = getattr(_to_write, 'X', None)
+    if _X is not None and not (_spx is not None and _spx.issparse(_X)) and getattr(_X, 'dtype', None) == object:
+        try:
+            _to_write.X = _runtime_np.asarray(_X, dtype=float)
+        except Exception:
+            pass
     # Matrix-like slots: convert unwritable matrix-like values.
     for _slot, _mapping in (
         ('obsm', getattr(_to_write, 'obsm', None)),
@@ -187,6 +238,15 @@ if _adata is not None:
             _sanitize_mapping(_mapping, _slot)
         except Exception:
             pass
+    # obs / var: coerce object columns anndata cannot write as vlen-str
+    # (non-string objects like scrublet 'predicted_doublet' bool/None).
+    for _frame in (getattr(_to_write, 'obs', None), getattr(_to_write, 'var', None)):
+        if _frame is None:
+            continue
+        try:
+            _sanitize_frame_columns(_frame)
+        except Exception:
+            pass
     # uns: recursively coerce/drop leaves anndata cannot write, preserving
     # nested Scanpy metadata dicts (a bare pd.Series such as PyDESeq2
     # uns['trend_coeffs'] has no registered h5ad writer under /uns).
@@ -194,6 +254,22 @@ if _adata is not None:
     if _uns is not None:
         try:
             _sanitize_uns_mapping(_uns)
+        except Exception:
+            pass
+    # raw: rebuild from a sanitized AnnData view (raw carries the same
+    # unwritable object columns as the pre-HVG snapshot of adata).
+    _raw = getattr(_to_write, 'raw', None)
+    if _raw is not None:
+        try:
+            _raw_ad = _raw.to_adata()
+            _sanitize_frame_columns(_raw_ad.var)
+            _raw_varm = getattr(_raw_ad, 'varm', None)
+            if _raw_varm is not None:
+                try:
+                    _sanitize_mapping(_raw_varm, 'raw.varm')
+                except Exception:
+                    pass
+            _to_write.raw = _raw_ad
         except Exception:
             pass
     _to_write.write({h5ad_path_repr!r})
@@ -215,7 +291,13 @@ def sanitize_anndata_for_h5ad(adata):
     metadata dicts and native leaves are preserved, but leaves anndata cannot
     write to h5ad (a bare ``pd.Series`` such as PyDESeq2 ``uns['trend_coeffs']``,
     ``pd.Index``/``pd.Categorical``, formulaic ModelMatrix, ...) are coerced to
-    ``ndarray`` or dropped.
+    ``ndarray`` or dropped. Also coerces ``obs``/``var`` object columns holding
+    non-string objects (bool/None, e.g. scrublet ``predicted_doublet``) to str,
+    which anndata otherwise rejects with "Can't implicitly convert non-string
+    objects to strings". Covers the same object-column issue in DataFrame values
+    under obsm/varm/layers and inside uns, coerces an object-dtype dense ``X`` to
+    float, and rebuilds ``raw`` from a sanitized view so the raw layer's own
+    columns/varm cannot block capture.
 
     Kernel capture uses an equivalent algorithm in ``_SAVE_ANNDATA_TEMPLATE``
     (kernel cannot import this host module); keep both in sync.
@@ -256,10 +338,15 @@ def sanitize_anndata_for_h5ad(adata):
                 # 1) scipy sparse: keep unchanged
                 if sp is not None and sp.issparse(v):
                     continue
-                # 2) exact native types only (not isinstance — ObjectProxy)
-                if type(v) is np.ndarray or type(v) is pd.DataFrame or type(v) is pd.Series:
+                # 2) DataFrame: keep, but sanitize its object columns (a bad
+                #    object column would fail write_dataframe under this slot).
+                if type(v) is pd.DataFrame:
+                    _sanitize_frame_columns(v)
                     continue
-                # 3) formulaic / ModelMatrix: force convert
+                # 3) exact native types only (not isinstance — ObjectProxy)
+                if type(v) is np.ndarray or type(v) is pd.Series:
+                    continue
+                # 4) formulaic / ModelMatrix: force convert
                 if _is_formulaic_like(v):
                     try:
                         mapping[k] = _convert_value(v)
@@ -290,6 +377,39 @@ def sanitize_anndata_for_h5ad(adata):
                 except Exception:
                     pass
 
+    def _sanitize_frame_columns(df) -> None:
+        # Coerce object-dtype columns anndata cannot write as a vlen-string
+        # array (non-string objects: bool / None / NaN / arrays, e.g. scrublet
+        # 'predicted_doublet') to plain str. All-string object columns and
+        # numeric/bool/categorical columns are left untouched.
+        try:
+            cols = list(df.columns)
+        except Exception:
+            return
+        for col in cols:
+            try:
+                s = df[col]
+                dtype = getattr(s, "dtype", None)
+                kind = getattr(dtype, "kind", None)
+                if kind in ("M", "m"):
+                    # datetime64 / timedelta64: no h5ad writer — stringify.
+                    df[col] = s.astype(str)
+                    continue
+                if dtype != object:
+                    continue
+                vals = s.to_numpy()
+                if all(isinstance(x, str) for x in vals):
+                    continue
+                try:
+                    df[col] = s.astype(str)
+                except Exception:
+                    df[col] = np.asarray([str(x) for x in vals], dtype=object)
+            except Exception:
+                try:
+                    del df[col]
+                except Exception:
+                    pass
+
     def _sanitize_uns_mapping(mapping) -> None:
         # Recursively coerce/drop uns leaves anndata cannot write to h5ad,
         # while preserving nested Scanpy metadata dicts and native leaves.
@@ -309,7 +429,10 @@ def sanitize_anndata_for_h5ad(adata):
                 # ndarray to preserve structured/recarray/object-string arrays
                 # (rank_genes_groups etc.); exact type for DataFrame so a
                 # formulaic ModelMatrix (ObjectProxy) falls through to coercion.
-                if isinstance(v, np.ndarray) or type(v) is pd.DataFrame:
+                if type(v) is pd.DataFrame:
+                    _sanitize_frame_columns(v)
+                    continue
+                if isinstance(v, np.ndarray):
                     continue
                 if v is None or isinstance(
                     v, (str, bytes, bool, int, float, complex, np.generic)
@@ -323,7 +446,13 @@ def sanitize_anndata_for_h5ad(adata):
                     arr = np.asarray(v.values)
                 else:
                     arr = np.asarray(v)
-                if _usable_asarray(arr):
+                # Keep only if the coerced array is h5ad-writable: reject 0-d
+                # object and object arrays that are not entirely strings (e.g.
+                # a coerced list[dict] / list of arbitrary objects).
+                if _usable_asarray(arr) and (
+                    arr.dtype != object
+                    or all(isinstance(x, str) for x in arr.ravel().tolist())
+                ):
                     mapping[k] = arr
                     continue
                 del mapping[k]
@@ -332,6 +461,19 @@ def sanitize_anndata_for_h5ad(adata):
                     del mapping[k]
                 except Exception:
                     pass
+
+    # X: coerce an object-dtype dense matrix to float (numeric-in-object);
+    # leave sparse and genuinely non-numeric X untouched.
+    X = getattr(to_write, "X", None)
+    if (
+        X is not None
+        and not (sp is not None and sp.issparse(X))
+        and getattr(X, "dtype", None) == object
+    ):
+        try:
+            to_write.X = np.asarray(X, dtype=float)
+        except Exception:
+            pass
 
     # Matrix-like slots: convert unwritable matrix-like values.
     for slot, mapping in (
@@ -348,11 +490,38 @@ def sanitize_anndata_for_h5ad(adata):
         except Exception:
             pass
 
+    # obs / var: coerce object columns anndata cannot write as vlen-str.
+    for frame in (getattr(to_write, "obs", None), getattr(to_write, "var", None)):
+        if frame is None:
+            continue
+        try:
+            _sanitize_frame_columns(frame)
+        except Exception:
+            pass
+
     # uns: recursively coerce/drop leaves anndata cannot write.
     uns = getattr(to_write, "uns", None)
     if uns is not None:
         try:
             _sanitize_uns_mapping(uns)
+        except Exception:
+            pass
+
+    # raw: sanitize the raw layer's own var columns / varm (the pipeline sets
+    # adata.raw = adata.copy() before HVG subsetting, so raw carries the same
+    # unwritable object columns). Rebuild raw from a sanitized AnnData view.
+    raw = getattr(to_write, "raw", None)
+    if raw is not None:
+        try:
+            raw_ad = raw.to_adata()
+            _sanitize_frame_columns(raw_ad.var)
+            raw_varm = getattr(raw_ad, "varm", None)
+            if raw_varm is not None:
+                try:
+                    _sanitize_mapping(raw_varm, "raw.varm")
+                except Exception:
+                    pass
+            to_write.raw = raw_ad
         except Exception:
             pass
 

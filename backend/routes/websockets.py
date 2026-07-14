@@ -141,6 +141,26 @@ async def _resend_wait_input_state_sync(websocket, state, session_id: str) -> No
         logger.warning(f"[{session_id}] Failed to resend wait-input state_sync", exc_info=True)
 
 
+def _preserve_realtime_stream(prev, new) -> None:
+    """Carry the fuller realtime-message stream from the outgoing cached state
+    object onto the incoming one before it becomes canonical.
+
+    The running workflow replaces sessions[session_id] with fresh AnalysisState
+    objects (LangGraph checkpoint round-trips). Only the WebSocket
+    message_callback ever appends to realtime_messages, and it appends to the
+    *currently cached* object, so the cached (prev) object always holds the
+    fuller stream while the incoming graph object carries a stale/short copy.
+    Move the longer stream forward so /load and reconnect keep serving the full
+    history instead of the handful of messages that predate the first swap.
+    """
+    if (
+        prev is not None
+        and prev is not new
+        and len(prev.realtime_messages) > len(new.realtime_messages)
+    ):
+        new.realtime_messages = prev.realtime_messages
+
+
 def _serialize_realtime_messages(messages):
     """Serialize a list of WebSocketMessage to JSON-safe dicts."""
     msg_data_list = []
@@ -375,18 +395,27 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     async def message_callback(msg: WebSocketMessage):
         nonlocal ws_closed, active_ws
 
-        # Save message to state.realtime_messages for session restoration
+        # Save message to realtime_messages for session restoration.
+        # IMPORTANT: append to the *currently cached* session object, not the
+        # `state` captured at handler entry. The running workflow replaces
+        # sessions[session_id] with fresh AnalysisState objects (LangGraph
+        # checkpoint round-trips surfaced via state_callback), so appending to
+        # the stale closure would strand the live stream on an orphaned object
+        # that /load and reconnect never serve — the reason realtime messages
+        # vanished on refresh. _write_state_if_current carries this stream
+        # forward across each swap so nothing is lost.
+        target = _sessions.get(session_id) or state
         # Strip base64 from figure messages before persisting to avoid memory bloat
         if msg.type == "figure" and isinstance(msg.content, str) and len(msg.content) > 1000:
             from copy import copy
             stripped_msg = copy(msg)
             stripped_msg.content = "[image]"
-            state.realtime_messages.append(stripped_msg)
+            target.realtime_messages.append(stripped_msg)
         else:
-            state.realtime_messages.append(msg)
+            target.realtime_messages.append(msg)
         # Cap realtime_messages to prevent unbounded memory growth
-        if len(state.realtime_messages) > 1000:
-            state.realtime_messages = state.realtime_messages[-1000:]
+        if len(target.realtime_messages) > 1000:
+            target.realtime_messages = target.realtime_messages[-1000:]
 
         msg_data = {
             "type": msg.type,
@@ -484,6 +513,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 state.status = TaskStatus.PAUSED
             if set_failed:
                 state.status = TaskStatus.FAILED
+            # Preserve the live realtime-message stream across state-object swaps
+            # (see message_callback and _preserve_realtime_stream).
+            _preserve_realtime_stream(_sessions.get(session_id), state)
             await _update_session_cache(session_id, state)
             await _async_save_session(session_id, state)
             return True

@@ -1069,6 +1069,103 @@ def test_sanitize_anndata_coerces_unwritable_uns_leaves(tmp_path):
     assert "neighbors" in reloaded.uns
 
 
+def test_sanitize_anndata_coerces_unwritable_obs_var_columns(tmp_path):
+    """obs/var object-dtype columns holding non-string objects (bool/None,
+    e.g. scrublet 'predicted_doublet') must be coerced so write_h5ad succeeds.
+
+    Reproduces: TypeError: Can't implicitly convert non-string objects to
+    strings — Error raised while writing key 'predicted_doublet' to /obs.
+    """
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+
+    from backend.services.snapshot_v2.runtime import sanitize_anndata_for_h5ad
+
+    adata = ad.AnnData(X=np.random.rand(4, 3).astype(np.float32))
+    # Object column with Python bool + None → routed to vlen-str writer → fails.
+    adata.obs["predicted_doublet"] = pd.Series(
+        [True, False, None, True], index=adata.obs_names, dtype=object
+    )
+    # Object column that is all strings must be left as-is (still writable).
+    adata.obs["cell_label"] = pd.Series(
+        ["a", "b", "c", "d"], index=adata.obs_names, dtype=object
+    )
+    # A var object column with mixed types.
+    adata.var["note"] = pd.Series([1, "x", None], index=adata.var_names, dtype=object)
+    # datetime column has no h5ad writer either — must be stringified.
+    adata.obs["ingest_time"] = pd.to_datetime(["2020-01-01"] * 4)
+    live_obs_dtype = adata.obs["predicted_doublet"].dtype
+
+    # Unsanitized write must fail (documents the bug).
+    with pytest.raises(Exception):
+        adata.copy().write_h5ad(tmp_path / "dirty.h5ad")
+
+    cleaned = sanitize_anndata_for_h5ad(adata)
+
+    # Live original unchanged.
+    assert adata.obs["predicted_doublet"].dtype == live_obs_dtype
+    assert adata.obs["predicted_doublet"].iloc[2] is None
+
+    # Must now be writable to h5ad.
+    out = tmp_path / "scai_obs_coerce_test.h5ad"
+    cleaned.write_h5ad(out)
+    assert out.stat().st_size > 0
+    reloaded = ad.read_h5ad(out)
+    assert "predicted_doublet" in reloaded.obs
+    assert "cell_label" in reloaded.obs
+    assert "note" in reloaded.var
+    assert "ingest_time" in reloaded.obs
+    # All-string object column preserved as its values (not mangled).
+    assert list(reloaded.obs["cell_label"]) == ["a", "b", "c", "d"]
+
+
+def test_sanitize_anndata_covers_raw_x_obsm_df_and_uns_lists(tmp_path):
+    """Audit-driven: raw.var object cols, object-dtype X, DataFrame values in
+    obsm with bad columns, and uns list[dict] must all be made writable, while
+    uns list[str]/Series[str] keep their values."""
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+    import scipy.sparse as sp
+
+    from backend.services.snapshot_v2.runtime import sanitize_anndata_for_h5ad
+
+    n = 6
+    # raw carries an unwritable object column (set before HVG subsetting).
+    adata = ad.AnnData(X=sp.csr_matrix(np.random.rand(n, 10)))
+    adata.var_names = [f"g{i}" for i in range(10)]
+    adata.var["flag"] = pd.Series(
+        [True, None, "x"] + [False] * 7, index=adata.var_names, dtype=object
+    )
+    adata.raw = adata.copy()
+    adata = adata[:, :4].copy()  # raw retains 10 vars + bad column
+
+    # object-dtype dense X (numeric-in-object).
+    adata.X = np.asarray(adata.X.toarray(), dtype=object)
+    # DataFrame value in obsm with a bad object column.
+    adata.obsm["meta"] = pd.DataFrame(
+        {"b": pd.Series([True, None] * 3, dtype=object)}, index=adata.obs_names
+    )
+    # uns lists/series.
+    adata.uns["markers"] = ["CD3", "CD4"]            # keep (as string array)
+    adata.uns["weird"] = [{"k": 1}, {"k": 2}]        # drop (unwritable)
+    adata.uns["sstr"] = pd.Series(["x", "y"])        # keep values
+
+    cleaned = sanitize_anndata_for_h5ad(adata)
+
+    out = tmp_path / "scai_audit_test.h5ad"
+    cleaned.write_h5ad(out)  # must not raise
+    reloaded = ad.read_h5ad(out)
+
+    assert "flag" in reloaded.raw.var
+    assert reloaded.X.dtype != object
+    assert "meta" in reloaded.obsm
+    assert list(reloaded.uns["markers"]) == ["CD3", "CD4"]
+    assert list(reloaded.uns["sstr"]) == ["x", "y"]
+    assert "weird" not in reloaded.uns
+
+
 @pytest.mark.asyncio
 async def test_post_dill_advisory_unknown_type_soft_skipped(tmp_path):
     """Advisory residual with unknown type that dill skips → complete + incidental_skips.
