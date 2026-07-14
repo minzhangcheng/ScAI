@@ -930,33 +930,16 @@ export function partialize(state: AppState) {
         ? { ...state.currentSession.graphicAbstract, imageBase64: undefined, image_base64: undefined }
         : undefined,
     } : null,
-    // Limit persisted messages and strip ALL base64 content
+    // Limit persisted chat messages and strip ALL base64 content
     chatMessages: state.chatMessages.slice(-100).map(msg => ({
       ...msg,
       figures: msg.figures?.map((f) => f ? { ...f, base64: undefined } : f)
     })),
-    messages: state.messages.slice(-200).map(msg => {
-      if (msg.type === 'figure') {
-        return { ...msg, content: '[image]' }
-      }
-      if (msg.type === 'graphic_abstract' && msg.content != null && typeof msg.content === 'object') {
-        return { ...msg, content: { ...msg.content, image_base64: undefined, imageBase64: undefined } }
-      }
-      if ((msg.type === 'figure_review' || msg.type === 'figure_approved' || msg.type === 'figure_revision') && msg.content != null && typeof msg.content === 'object') {
-        return { ...msg, content: { ...msg.content, png_base64: undefined, pngBase64: undefined } }
-      }
-      const c = msg.content as unknown as Record<string, unknown> | undefined
-      if (c?.figures && Array.isArray(c.figures) && (c.figures as unknown[]).length > 0) {
-        return {
-          ...msg,
-          content: {
-            ...c,
-            figures: (c.figures as Record<string, unknown>[]).map((f) => f ? { ...f, data: undefined, pngBase64: undefined, png_base64: undefined } : f)
-          }
-        }
-      }
-      return msg
-    }),
+    // NOTE: realtime `messages` are intentionally NOT persisted here. They are
+    // server-authoritative (backend keeps them in AnalysisState.realtime_messages
+    // and on disk) and always re-hydrated from /session/{id}/load on open, refresh
+    // and WebSocket reconnect. Persisting them to localStorage only risked stale /
+    // crash-prone shapes with no upside — see merge() which strips any legacy copy.
   }
 }
 
@@ -1012,8 +995,11 @@ export const useAppStore = create<AppState>()(
         if (ps.agentServerConfigs && (typeof ps.agentServerConfigs !== 'object' || Array.isArray(ps.agentServerConfigs))) delete ps.agentServerConfigs
         if (ps.language && typeof ps.language !== 'string') delete ps.language
         if (ps.maxRounds && typeof ps.maxRounds !== 'number') delete ps.maxRounds
-        if (ps.messages && !Array.isArray(ps.messages)) delete ps.messages
-        // Expire persisted messages older than 7 days to prevent localStorage bloat.
+        // Realtime messages are server-authoritative and re-hydrated from /load on
+        // every open/refresh/reconnect, so never trust a persisted copy: drop any
+        // legacy `messages` left by older releases (prevents stale/crash-prone shapes).
+        delete ps.messages
+        // Expire persisted session/chat older than 7 days to prevent localStorage bloat.
         // A negative delta means the system clock moved backwards (clock skew or
         // user adjusted the date) — treat that as an invalid timestamp and clear,
         // otherwise the data could effectively live forever from the user's POV.
@@ -1021,7 +1007,6 @@ export const useAppStore = create<AppState>()(
         if (ps._persistedAt) {
           const delta = Date.now() - (ps._persistedAt as number)
           if (delta < 0 || delta > PERSIST_TTL_MS) {
-            delete ps.messages
             delete ps.currentSession
             delete ps.chatMessages
           }

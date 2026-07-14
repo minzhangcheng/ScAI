@@ -21,10 +21,25 @@ it('does not persist api keys (nested or top-level)', () => {
     literatureMaxSearchRounds: 3,
     messagePanelWidth: 400,
     chatMessages: [],
-    messages: [],
+    messages: [{ id: '1', type: 'findings', content: { suggestions: 'x' } }],
   } as any
   const persisted = partialize(state)
   expect(persisted.apiConfig?.apiKey ?? '').toBe('')
   expect((persisted as any).deepResearchApiKey).toBeUndefined()
   expect((persisted as any).googleApiKey).toBeUndefined()
+})
+
+it('does not persist realtime messages (server-authoritative, re-hydrated from /load)', () => {
+  const state = {
+    apiConfig: { apiKey: '', llmBaseUrl: '', proxyUrl: '' },
+    chatMessages: [{ id: 'c1', figures: [] }],
+    messages: [{ id: '1', type: 'findings', content: {} }],
+    currentSession: { id: 's1' },
+  } as any
+  const persisted = partialize(state) as any
+  // Realtime messages must NOT be persisted; they come back from the server.
+  expect(persisted.messages).toBeUndefined()
+  // Chat messages and session are still persisted (different restore sources).
+  expect(persisted.chatMessages).toHaveLength(1)
+  expect(persisted.currentSession).toEqual({ id: 's1' })
 })

@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.8 · **Last updated**: 2026-07-14
+**Version**: 0.33.9 · **Last updated**: 2026-07-14
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,10 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-14)**
+
+- `0.33.9` — Frontend realtime messages de-persisted (server-authoritative); version bump (2026-07-14):
+  - **Frontend realtime messages de-persisted (`frontend/src/stores/appStore.ts`)**: Removed `messages` from Zustand `partialize()` — realtime messages are now server-authoritative (kept in `AnalysisState.realtime_messages` on disk, re-hydrated from `/session/{id}/load` on open/refresh/reconnect). Previously persisted to localStorage with complex base64-stripping logic, risking stale or crash-prone shapes. The `merge()` migration now always `delete ps.messages` instead of conditionally dropping them, ensuring no legacy copy is ever trusted.
+  - **New test (`frontend/src/stores/__tests__/appStore.persist.test.ts`)**: Added test "does not persist realtime messages" verifying `messages` are excluded from the persisted state while `chatMessages` and `currentSession` still survive.
 
 - `0.33.8` — Version bump (2026-07-14): No code changes.
 
