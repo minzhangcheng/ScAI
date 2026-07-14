@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import json
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,7 @@ from backend.services.snapshot_v2.runtime_registry import (
     CANONICAL_RUNTIME_ARTIFACTS,
     build_required_runtime_manifest,
     build_required_runtime_set,
+    is_known_unpersistable_residual,
 )
 
 
@@ -35,9 +37,10 @@ from backend.services.snapshot_v2.runtime_registry import (
 __all__ = [
     "CANONICAL_RUNTIME_ARTIFACTS",
     "RuntimeCapture",
-    "RUNTIME_CAPTURE_QUOTA_BYTES",
+    "RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES",
     "build_required_runtime_manifest",
     "build_required_runtime_set",
+    "sanitize_anndata_for_h5ad",
     "validate_runtime_dependency_proof",
     "_parse_dill_skipped",
 ]
@@ -62,15 +65,196 @@ print('__RUNTIME_GLOBALS_END__')
 
 _SAVE_ANNDATA_TEMPLATE = """
 import anndata as _runtime_ad
+import numpy as _runtime_np
+import pandas as _runtime_pd
 _adata = globals().get({var_name_repr!r})
 if _adata is not None:
-    _adata.write({h5ad_path_repr!r})
+    # Never mutate the live analysis object; sanitize a copy for h5ad.
+    # Algorithm must stay in sync with host sanitize_anndata_for_h5ad().
+    _to_write = _adata.copy()
+    def _is_formulaic_like(_v):
+        _t = type(_v)
+        _mod = getattr(_t, '__module__', '') or ''
+        _qn = getattr(_t, '__qualname__', '') or getattr(_t, '__name__', '') or ''
+        return _mod.startswith('formulaic') or ('ModelMatrix' in _qn)
+    def _usable_asarray(_arr):
+        # Reject 0-d object holding an opaque type (failed cast of sparse/proxy).
+        if getattr(_arr, 'ndim', None) == 0 and getattr(_arr, 'dtype', None) == object:
+            return False
+        return True
+    def _convert_value(_v):
+        if hasattr(_v, 'to_numpy'):
+            return _runtime_np.asarray(_v.to_numpy())
+        if hasattr(_v, 'values') and not isinstance(_v, dict):
+            return _runtime_np.asarray(_v.values)
+        return _runtime_np.asarray(_v)
+    def _sanitize_mapping(_mapping, _slot_name):
+        try:
+            import scipy.sparse as _sp
+        except Exception:
+            _sp = None
+        _keys = list(_mapping.keys())
+        for _k in _keys:
+            _v = _mapping[_k]
+            try:
+                # 1) scipy sparse: keep (do NOT asarray — yields 0-d object)
+                if _sp is not None and _sp.issparse(_v):
+                    continue
+                # 2) exact native types only (formulaic ModelMatrix is ObjectProxy;
+                #    isinstance(mm, DataFrame) is True but write still fails)
+                if type(_v) is _runtime_np.ndarray or type(_v) is _runtime_pd.DataFrame or type(_v) is _runtime_pd.Series:
+                    continue
+                # 3) formulaic / ModelMatrix: force convert
+                if _is_formulaic_like(_v):
+                    try:
+                        _mapping[_k] = _convert_value(_v)
+                        continue
+                    except Exception:
+                        del _mapping[_k]
+                        print('__H5AD_SANITIZE_DROP__:' + _slot_name + '/' + str(_k) + ':' + type(_v).__module__ + '.' + type(_v).__qualname__)
+                        continue
+                # 4) to_numpy / values / asarray
+                if hasattr(_v, 'to_numpy'):
+                    _arr = _runtime_np.asarray(_v.to_numpy())
+                elif hasattr(_v, 'values') and not isinstance(_v, dict):
+                    _arr = _runtime_np.asarray(_v.values)
+                else:
+                    _arr = _runtime_np.asarray(_v)
+                if _usable_asarray(_arr):
+                    _mapping[_k] = _arr
+                    continue
+                del _mapping[_k]
+                print('__H5AD_SANITIZE_DROP__:' + _slot_name + '/' + str(_k) + ':' + type(_v).__module__ + '.' + type(_v).__qualname__)
+            except Exception as _se:
+                try:
+                    del _mapping[_k]
+                except Exception:
+                    pass
+                print('__H5AD_SANITIZE_DROP__:' + _slot_name + '/' + str(_k) + ':' + type(_v).__module__ + '.' + type(_v).__qualname__)
+    # Matrix-like slots only. Do NOT walk uns — nested Scanpy metadata
+    # (neighbors, log1p, pca, rank_genes_groups, ...) is dict-valued and
+    # would be dropped by the convert/drop loop; AnnData's writer handles uns.
+    for _slot, _mapping in (
+        ('obsm', getattr(_to_write, 'obsm', None)),
+        ('varm', getattr(_to_write, 'varm', None)),
+        ('layers', getattr(_to_write, 'layers', None)),
+        ('obsp', getattr(_to_write, 'obsp', None)),
+        ('varp', getattr(_to_write, 'varp', None)),
+    ):
+        if _mapping is None:
+            continue
+        try:
+            _sanitize_mapping(_mapping, _slot)
+        except Exception:
+            pass
+    _to_write.write({h5ad_path_repr!r})
     import os as _runtime_os
     _size = _runtime_os.path.getsize({h5ad_path_repr!r})
     print('__H5AD_SAVED__:' + str(_size))
 else:
     print('__H5AD_NOT_FOUND__:' + {var_name_repr!r})
 """
+
+
+def sanitize_anndata_for_h5ad(adata):
+    """Return a copy of *adata* safe for ``AnnData.write_h5ad``.
+
+    Converts unwritable matrix-like slots (e.g. formulaic ModelMatrix /
+    ObjectProxy in obsm/varm/layers/obsp/varp) and preserves scipy sparse
+    matrices and exact native ``ndarray`` / ``DataFrame`` / ``Series``.
+    Does not mutate *adata*. Does **not** sanitize ``uns`` — nested Scanpy
+    metadata is left for AnnData's own writer (ModelMatrix issues live in
+    obsm, not uns).
+
+    Kernel capture uses an equivalent algorithm in ``_SAVE_ANNDATA_TEMPLATE``
+    (kernel cannot import this host module); keep both in sync.
+    """
+    import numpy as np
+    import pandas as pd
+
+    try:
+        import scipy.sparse as sp
+    except Exception:  # pragma: no cover
+        sp = None
+
+    to_write = adata.copy()
+
+    def _is_formulaic_like(v) -> bool:
+        t = type(v)
+        mod = getattr(t, "__module__", "") or ""
+        qn = getattr(t, "__qualname__", "") or getattr(t, "__name__", "") or ""
+        return mod.startswith("formulaic") or ("ModelMatrix" in qn)
+
+    def _usable_asarray(arr) -> bool:
+        if getattr(arr, "ndim", None) == 0 and getattr(arr, "dtype", None) == object:
+            return False
+        return True
+
+    def _convert_value(v):
+        if hasattr(v, "to_numpy"):
+            return np.asarray(v.to_numpy())
+        if hasattr(v, "values") and not isinstance(v, dict):
+            return np.asarray(v.values)
+        return np.asarray(v)
+
+    def _sanitize_mapping(mapping, slot_name: str) -> None:
+        keys = list(mapping.keys())
+        for k in keys:
+            v = mapping[k]
+            try:
+                # 1) scipy sparse: keep unchanged
+                if sp is not None and sp.issparse(v):
+                    continue
+                # 2) exact native types only (not isinstance — ObjectProxy)
+                if type(v) is np.ndarray or type(v) is pd.DataFrame or type(v) is pd.Series:
+                    continue
+                # 3) formulaic / ModelMatrix: force convert
+                if _is_formulaic_like(v):
+                    try:
+                        mapping[k] = _convert_value(v)
+                        continue
+                    except Exception:
+                        del mapping[k]
+                        continue
+                # 4) to_numpy / values / asarray with usable check
+                if hasattr(v, "to_numpy"):
+                    arr = np.asarray(v.to_numpy())
+                    if _usable_asarray(arr):
+                        mapping[k] = arr
+                        continue
+                elif hasattr(v, "values") and not isinstance(v, dict):
+                    arr = np.asarray(v.values)
+                    if _usable_asarray(arr):
+                        mapping[k] = arr
+                        continue
+                else:
+                    arr = np.asarray(v)
+                    if _usable_asarray(arr):
+                        mapping[k] = arr
+                        continue
+                del mapping[k]
+            except Exception:
+                try:
+                    del mapping[k]
+                except Exception:
+                    pass
+
+    # Matrix-like slots only — never walk uns (nested dict metadata).
+    for slot, mapping in (
+        ("obsm", getattr(to_write, "obsm", None)),
+        ("varm", getattr(to_write, "varm", None)),
+        ("layers", getattr(to_write, "layers", None)),
+        ("obsp", getattr(to_write, "obsp", None)),
+        ("varp", getattr(to_write, "varp", None)),
+    ):
+        if mapping is None:
+            continue
+        try:
+            _sanitize_mapping(mapping, slot)
+        except Exception:
+            pass
+
+    return to_write
 
 _SAVE_DILL_TEMPLATE = """
 import dill as _runtime_dill
@@ -100,8 +284,9 @@ if _skipped:
 """
 
 
-# Default quota: 2 GB total captured runtime size
-RUNTIME_CAPTURE_QUOTA_BYTES: int = 2 * 1024 * 1024 * 1024
+# No hard size cap. Capacity is gated by free disk space minus reserve
+# (aligned with SystemConfig.snapshot_v2_free_space_reserve_bytes default).
+RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES: int = 5 * 1024 * 1024 * 1024
 
 
 def _parse_dill_skipped(output: str) -> list[str]:
@@ -207,7 +392,7 @@ def _validate_h5ad_file(path: Path) -> None:
 
 
 class RuntimeCapture:
-    QUOTA_BYTES: int = RUNTIME_CAPTURE_QUOTA_BYTES
+    FREE_SPACE_RESERVE_BYTES: int = RUNTIME_CAPTURE_FREE_SPACE_RESERVE_BYTES
 
     def __init__(self, object_store: ObjectStore, paths: SnapshotV2Paths):
         self._object_store = object_store
@@ -549,10 +734,32 @@ class RuntimeCapture:
 
             # Drop absent advisory dill names (soft-skip); keep absent mandatory
             # names so the fail-closed check below still raises for them.
+            # Also pre-skip present advisory names with known-unpersistable types
+            # (e.g. LoomConnection file handles) so they never brick capture.
             present_dill_names: list[str] = []
             for var_name in sorted(dill_names):
+                type_str = globals_meta.get(
+                    var_name, dep_manifest.required[var_name].type_name
+                )
                 if var_name not in globals_meta and var_name not in mandatory_names:
                     _soft_skip_absent(var_name, "dill")
+                    continue
+                if (
+                    var_name not in mandatory_names
+                    and var_name in globals_meta
+                    and is_known_unpersistable_residual(type_str)
+                ):
+                    incidental_skips.append(
+                        RuntimeSkip(
+                            name=var_name,
+                            type_name=type_str,
+                            reason=(
+                                "known unpersistable residual type; soft-skipped "
+                                f"(serializer=dill): {type_str}"
+                            ),
+                        )
+                    )
+                    pruned_required.pop(var_name, None)
                     continue
                 present_dill_names.append(var_name)
 
@@ -587,40 +794,122 @@ class RuntimeCapture:
                 if saved is not None:
                     not_accounted = set(residual_names) - set(saved) - set(dill_skipped)
                     required_skipped |= not_accounted
-                if required_skipped:
-                    # Raise with name/type/serializer for the first missing value;
-                    # include full set in details.
-                    first = sorted(required_skipped)[0]
+
+                advisory_skipped = {
+                    n for n in required_skipped if n not in mandatory_names
+                }
+                mandatory_skipped = {
+                    n for n in required_skipped if n in mandatory_names
+                }
+                for n in sorted(advisory_skipped):
+                    type_str = type_by_name.get(n, "unknown")
+                    incidental_skips.append(
+                        RuntimeSkip(
+                            name=n,
+                            type_name=type_str,
+                            reason=(
+                                "dill serialization failed for advisory residual; "
+                                "soft-skipped"
+                            ),
+                        )
+                    )
+                    pruned_required.pop(n, None)
+                if mandatory_skipped:
+                    first = sorted(mandatory_skipped)[0]
                     self._raise_unpersistable(
                         first,
                         type_by_name.get(first, "unknown"),
                         "dill",
                         f"could not be serialized via dill "
-                        f"(also missing: {sorted(required_skipped)})",
+                        f"(also missing: {sorted(mandatory_skipped)})",
                     )
 
-                if ref is None:
-                    self._raise_unpersistable(
-                        residual_names[0],
-                        type_by_name.get(residual_names[0], "unknown"),
-                        "dill",
-                        "residual pickle was not produced",
-                    )
+                # Only treat successfully saved residual names as captured
+                residual_names_saved = [
+                    n for n in residual_names if n in set(saved or [])
+                ]
+                if not residual_names_saved:
+                    if residual_names and not mandatory_names.intersection(
+                        residual_names
+                    ):
+                        # all advisory — ok to have no residual pickle
+                        captured_residual_vars = []
+                        captured_residual_ref = None
+                    elif residual_names:
+                        # mandatory names remained but none saved (should have raised)
+                        first = sorted(
+                            mandatory_names.intersection(residual_names)
+                        )[0]
+                        self._raise_unpersistable(
+                            first,
+                            type_by_name.get(first, "unknown"),
+                            "dill",
+                            "residual pickle was not produced",
+                        )
+                else:
+                    if ref is None:
+                        self._raise_unpersistable(
+                            residual_names_saved[0],
+                            type_by_name.get(residual_names_saved[0], "unknown"),
+                            "dill",
+                            "residual pickle was not produced",
+                        )
+                    captured_residual_vars = list(residual_names_saved)
+                    captured_residual_ref = ref
 
-                captured_residual_vars = list(residual_names)
-                captured_residual_ref = ref
-
-            # Quota check counts physical captured object sizes.
+            # Capacity gate (post-write): objects are already in the store, so
+            # disk free already accounts for payload. Require remaining free
+            # space to stay above reserve. Fail closed if we cannot probe.
             total_size = sum(ref.size for ref in captured_adata_refs.values())
             if captured_residual_ref is not None:
                 total_size += captured_residual_ref.size
-            if total_size > self.QUOTA_BYTES:
+
+            probe = getattr(self._paths, "staging", None) or getattr(self._paths, "root", None)
+            if probe is None:
                 raise SnapshotCaptureError(
-                    "RUNTIME_CAPTURE_QUOTA_EXCEEDED",
+                    "RUNTIME_CAPTURE_DISK_FULL",
                     (
-                        f"Total captured runtime size ({total_size} bytes) exceeds "
-                        f"quota ({self.QUOTA_BYTES} bytes)"
+                        "Cannot verify free disk space for runtime capture: "
+                        "no staging/root path available"
                     ),
+                    details={"total_size": total_size},
+                )
+            probe_path = Path(probe)
+            while not probe_path.exists() and probe_path != probe_path.parent:
+                probe_path = probe_path.parent
+            if not probe_path.exists():
+                raise SnapshotCaptureError(
+                    "RUNTIME_CAPTURE_DISK_FULL",
+                    (
+                        "Cannot verify free disk space for runtime capture: "
+                        f"no existing path from {probe}"
+                    ),
+                    details={"total_size": total_size, "probe": str(probe)},
+                )
+            try:
+                usage = shutil.disk_usage(probe_path)
+            except OSError as e:
+                raise SnapshotCaptureError(
+                    "RUNTIME_CAPTURE_DISK_FULL",
+                    f"Failed to check disk usage for runtime capture: {e}",
+                    details={"total_size": total_size},
+                ) from e
+            # After objects are written, free already accounts for payload.
+            # Require remaining free space to stay above reserve.
+            if usage.free < self.FREE_SPACE_RESERVE_BYTES:
+                raise SnapshotCaptureError(
+                    "RUNTIME_CAPTURE_DISK_FULL",
+                    (
+                        f"Insufficient disk space for runtime capture: "
+                        f"{usage.free} free after write, "
+                        f"{total_size} captured, "
+                        f"{self.FREE_SPACE_RESERVE_BYTES} reserve"
+                    ),
+                    details={
+                        "free": usage.free,
+                        "total_size": total_size,
+                        "reserve": self.FREE_SPACE_RESERVE_BYTES,
+                    },
                 )
 
             # Build complete RuntimeManifest with dependency proof.

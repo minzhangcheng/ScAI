@@ -211,10 +211,42 @@ print("dense adata created")
         assert "adata_dense" in manifest.captured_adata_vars
 
 
-class TestRuntimeQuota:
+class TestRuntimeFreeSpaceGate:
     @pytest.mark.asyncio
-    async def test_capture_below_quota_succeeds(self, sandbox, v2_paths):
-        """Normal-sized data under default quota succeeds."""
+    async def test_anndata_with_unwritable_obsm_is_captured(self, sandbox, v2_paths):
+        """AnnData with non-h5ad-native obsm values must still capture via sanitize."""
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+        from backend.services.snapshot_v2.object_store import ObjectStore
+        import pytest as _pytest
+
+        # formulaic may not be installed in all test envs
+        code_probe = "import formulaic\nprint('ok')"
+        probe = await sandbox.execute(code_probe, save_to_history=False, skip_safety_check=True)
+        if not probe.success:
+            _pytest.skip("formulaic not installed in sandbox")
+
+        code = """
+import anndata as ad
+import numpy as np
+import pandas as pd
+from formulaic import model_matrix
+dds = ad.AnnData(X=np.random.rand(4, 3))
+dds.obs['condition'] = pd.Categorical(['A','A','B','B'])
+# ModelMatrix is not natively writable to h5ad under obsm
+dds.obsm['design_matrix'] = model_matrix('~ condition', dds.obs)
+print('dds ready', dds.shape)
+"""
+        result = await sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+        assert result.success, result.error
+
+        capturer = RuntimeCapture(ObjectStore(v2_paths), v2_paths)
+        runtime = await capturer.capture(sandbox, declared_outputs={"dds"})
+        assert runtime.status == "complete"
+        assert "dds" in runtime.adata_refs
+
+    @pytest.mark.asyncio
+    async def test_capture_with_ample_free_space_succeeds(self, sandbox, v2_paths):
+        """Normal-sized data with ample free space succeeds."""
         from backend.services.snapshot_v2.runtime import RuntimeCapture
         from backend.services.snapshot_v2.object_store import ObjectStore
 
@@ -233,14 +265,12 @@ print("adata created")
         assert "adata" in manifest.captured_adata_vars
 
     @pytest.mark.asyncio
-    async def test_quota_exceeded_raises_error(self, sandbox, v2_paths):
-        """Capture raises SnapshotCaptureError when total size exceeds quota.
-
-        The quota is lowered to 1 byte so any real file triggers the branch.
-        """
+    async def test_disk_full_raises_error(self, sandbox, v2_paths):
+        """Capture raises when post-write free is below reserve."""
         from backend.services.snapshot_v2.runtime import RuntimeCapture
         from backend.services.snapshot_v2.object_store import ObjectStore
         from backend.services.snapshot_v2.errors import SnapshotCaptureError
+        from unittest.mock import patch
 
         code = """
 import anndata as ad
@@ -253,11 +283,13 @@ print("adata created")
 
         obj_store = ObjectStore(v2_paths)
         capturer = RuntimeCapture(obj_store, v2_paths)
-        capturer.QUOTA_BYTES = 1  # Any real file exceeds 1 byte
+        capturer.FREE_SPACE_RESERVE_BYTES = 10**15  # force free < reserve after write
 
-        with pytest.raises(SnapshotCaptureError) as exc_info:
-            await capturer.capture(sandbox, declared_outputs=set())
-        assert "RUNTIME_CAPTURE_QUOTA_EXCEEDED" in exc_info.value.code
+        fake_usage = type("U", (), {"total": 10**12, "used": 0, "free": 10**9})()
+        with patch("shutil.disk_usage", return_value=fake_usage):
+            with pytest.raises(SnapshotCaptureError) as exc_info:
+                await capturer.capture(sandbox, declared_outputs=set())
+        assert "RUNTIME_CAPTURE_DISK_FULL" in exc_info.value.code
 
 
 class TestSandboxRuntimeRevision:

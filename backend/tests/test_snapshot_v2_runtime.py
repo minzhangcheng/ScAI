@@ -251,6 +251,14 @@ def _write_valid_h5ad_stub(path: Path) -> None:
         path.write_bytes(b"not-a-real-h5ad")
 
 
+def test_known_unpersistable_residual_type_detection():
+    from backend.services.snapshot_v2.runtime_registry import is_known_unpersistable_residual
+    assert is_known_unpersistable_residual("loompy.loompy.LoomConnection") is True
+    assert is_known_unpersistable_residual("loompy.LoomConnection") is True
+    assert is_known_unpersistable_residual("pandas.core.frame.DataFrame") is False
+    assert is_known_unpersistable_residual("AnnData((10, 20))") is False
+
+
 class TestRuntimeCapture:
     def test_capture_requires_valid_workflow_state(self):
         from backend.services.snapshot_v2.runtime import RuntimeCapture
@@ -326,8 +334,8 @@ class TestRuntimeCapture:
 
     @pytest.mark.asyncio
     async def test_required_variable_dill_failure_raises_error(self, tmp_path):
-        """When a required non-AnnData variable fails dill serialization, an
-        error is raised (not silently skipped)."""
+        """When a mandatory (checkpoint) residual fails dill serialization, an
+        error is raised (not soft-skipped). Advisory declared outputs soft-skip."""
         from backend.services.snapshot_v2.runtime import RuntimeCapture
         from backend.services.snapshot_v2.errors import SnapshotCaptureError
 
@@ -360,7 +368,11 @@ class TestRuntimeCapture:
 
         capturer = RuntimeCapture(obj_store, paths)
         with pytest.raises(SnapshotCaptureError) as exc_info:
-            await capturer.capture(sandbox, declared_outputs={"results"})
+            await capturer.capture(
+                sandbox,
+                declared_outputs=set(),
+                checkpoint_dependencies={"results"},
+            )
         assert "required_runtime_unpersistable" in str(exc_info.value.code)
 
     @pytest.mark.asyncio
@@ -548,6 +560,119 @@ class TestRuntimeCapture:
         assert "continuation_only" in str(exc_info.value)
 
     @pytest.mark.asyncio
+    async def test_present_unpersistable_advisory_residual_is_soft_skipped(self, tmp_path):
+        """Present loom connection declared as residual must soft-skip, not brick capture."""
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+        from backend.services.snapshot_v2.models import ObjectRef
+        from backend.services.snapshot_v2.object_store import ObjectPutResult
+        from unittest.mock import patch
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        async def mock_execute(code, save_to_history=True, skip_safety_check=False):
+            if "__RUNTIME_GLOBALS_BEGIN__" in code:
+                return MagicMock(
+                    success=True,
+                    output=(
+                        '__RUNTIME_GLOBALS_BEGIN__\n'
+                        '{"adata": "AnnData(50, 10)", '
+                        '"ds": "loompy.loompy.LoomConnection"}\n'
+                        '__RUNTIME_GLOBALS_END__'
+                    ),
+                    error=None,
+                )
+            if ".h5ad" in code:
+                m = re.search(r"'([^']+\.h5ad)'", code)
+                if m:
+                    p = Path(m.group(1))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    _write_valid_h5ad_stub(p)
+                return MagicMock(success=True, output="__H5AD_SAVED__:1000", error=None)
+            if "dill" in code or "__DILL_SAVED__" in code:
+                # ds cannot pickle; if still requested, mark skipped
+                m = re.search(r"'([^']+\.pkl)'", code)
+                if m:
+                    p = Path(m.group(1))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_bytes(b"fake-dill")
+                return MagicMock(
+                    success=True,
+                    output="__DILL_SAVED__:0/1 size=0\n__DILL_SAVED_NAMES__:[]\n__DILL_SKIPPED__:['ds']",
+                    error=None,
+                )
+            return MagicMock(success=True, output="ok", error=None)
+
+        sandbox = AsyncMock()
+        sandbox.execute = mock_execute
+        sandbox.session_id = "test-session"
+        sandbox.km = MagicMock()
+
+        obj_store = MagicMock()
+        def put_file(path, media_type):
+            size = Path(path).stat().st_size if Path(path).exists() else 1000
+            return ObjectPutResult(
+                ref=ObjectRef(sha256="b" * 64, size=size, media_type=media_type),
+                created=True,
+            )
+        obj_store.put_file = MagicMock(side_effect=put_file)
+        paths = MagicMock(staging=staging, root=tmp_path)
+
+        capturer = RuntimeCapture(obj_store, paths)
+        fake_usage = type("U", (), {"total": 100 * 1024**3, "used": 0, "free": 100 * 1024**3})()
+        with patch("shutil.disk_usage", return_value=fake_usage):
+            runtime = await capturer.capture(
+                sandbox,
+                declared_outputs={"adata", "ds"},  # advisory declared residual
+            )
+        assert runtime.status == "complete"
+        assert "adata" in runtime.adata_refs
+        assert "ds" not in runtime.captured_residual_names
+        skip_names = {s.name for s in runtime.dependencies.incidental_skips}
+        assert "ds" in skip_names
+
+    @pytest.mark.asyncio
+    async def test_mandatory_unpersistable_residual_still_fails_closed(self, tmp_path):
+        """Checkpoint-mandatory residual that cannot dill must still raise."""
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+        from backend.services.snapshot_v2.errors import SnapshotCaptureError
+        from unittest.mock import patch
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        async def mock_execute(code, save_to_history=True, skip_safety_check=False):
+            if "__RUNTIME_GLOBALS_BEGIN__" in code:
+                return MagicMock(
+                    success=True,
+                    output='__RUNTIME_GLOBALS_BEGIN__\n{"ds": "loompy.loompy.LoomConnection"}\n__RUNTIME_GLOBALS_END__',
+                    error=None,
+                )
+            if "dill" in code or "__DILL_SAVED__" in code:
+                return MagicMock(
+                    success=True,
+                    output="__DILL_SAVED__:0/1 size=0\n__DILL_SAVED_NAMES__:[]\n__DILL_SKIPPED__:['ds']",
+                    error=None,
+                )
+            return MagicMock(success=True, output="ok", error=None)
+
+        sandbox = AsyncMock()
+        sandbox.execute = mock_execute
+        sandbox.session_id = "test-session"
+        sandbox.km = MagicMock()
+        paths = MagicMock(staging=staging, root=tmp_path)
+        capturer = RuntimeCapture(MagicMock(), paths)
+        fake_usage = type("U", (), {"total": 100 * 1024**3, "used": 0, "free": 100 * 1024**3})()
+        with patch("shutil.disk_usage", return_value=fake_usage):
+            with pytest.raises(SnapshotCaptureError) as exc_info:
+                await capturer.capture(
+                    sandbox,
+                    declared_outputs=set(),
+                    checkpoint_dependencies={"ds"},
+                )
+        assert "required_runtime_unpersistable" in str(exc_info.value.code)
+
+    @pytest.mark.asyncio
     async def test_mark_runtime_committed(self, tmp_path):
         """mark_runtime_committed sets saved_runtime_revision to runtime_revision."""
         from backend.services.snapshot_v2.runtime import RuntimeCapture
@@ -615,11 +740,13 @@ class TestRuntimeCapture:
         assert not execute_calls
 
     @pytest.mark.asyncio
-    async def test_capture_quota_exceeded(self, tmp_path):
-        """Capture raises SnapshotCaptureError when total size exceeds quota."""
+    async def test_large_runtime_does_not_hit_hard_size_quota(self, tmp_path):
+        """Captured runtime larger than the old 2 GiB constant must still succeed
+        when post-write free space stays above reserve (mocked)."""
         from backend.services.snapshot_v2.runtime import RuntimeCapture
-        from backend.services.snapshot_v2.errors import SnapshotCaptureError
         from backend.services.snapshot_v2.models import ObjectRef
+        from backend.services.snapshot_v2.object_store import ObjectPutResult
+        from unittest.mock import patch
 
         staging = tmp_path / "staging"
         staging.mkdir()
@@ -646,20 +773,348 @@ class TestRuntimeCapture:
         sandbox.km = MagicMock()
 
         obj_store = MagicMock()
-        from backend.services.snapshot_v2.object_store import ObjectPutResult
         obj_store.put_file = MagicMock(return_value=ObjectPutResult(
             ref=ObjectRef(
-                sha256="a" * 64, size=3 * 1024 * 1024 * 1024, media_type="application/x-hdf5"
+                sha256="a" * 64,
+                size=3 * 1024 * 1024 * 1024,  # 3 GiB — previously failed hard quota
+                media_type="application/x-hdf5",
             ),
             created=True,
         ))
         paths = MagicMock()
         paths.staging = staging
+        paths.root = tmp_path
 
         capturer = RuntimeCapture(obj_store, paths)
+        # Post-write semantics: 100 GiB free after write, 5 GiB reserve → OK
+        # (payload already accounted for in free; do not subtract total_size again)
+        fake_usage = type("U", (), {"total": 200 * 1024**3, "used": 100 * 1024**3, "free": 100 * 1024**3})()
+        with patch("shutil.disk_usage", return_value=fake_usage):
+            runtime = await capturer.capture(sandbox, declared_outputs={"adata"})
+        assert runtime.status == "complete"
+        assert "adata" in runtime.adata_refs
+
+    @pytest.mark.asyncio
+    async def test_runtime_capture_fails_when_disk_cannot_hold_payload(self, tmp_path):
+        """When post-write free is below reserve, capture must fail closed."""
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+        from backend.services.snapshot_v2.errors import SnapshotCaptureError
+        from backend.services.snapshot_v2.models import ObjectRef
+        from backend.services.snapshot_v2.object_store import ObjectPutResult
+        from unittest.mock import patch
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        async def mock_execute(code, save_to_history=True, skip_safety_check=False):
+            if "__RUNTIME_GLOBALS_BEGIN__" in code:
+                return MagicMock(
+                    success=True,
+                    output='__RUNTIME_GLOBALS_BEGIN__\n{"adata": "AnnData(50, 10)"}\n__RUNTIME_GLOBALS_END__',
+                    error=None,
+                )
+            if ".h5ad" in code:
+                m = re.search(r"'([^']+\.h5ad)'", code)
+                if m:
+                    p = Path(m.group(1))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    _write_valid_h5ad_stub(p)
+                return MagicMock(success=True, output="__H5AD_SAVED__:1000", error=None)
+            return MagicMock(success=True, output="ok", error=None)
+
+        sandbox = AsyncMock()
+        sandbox.execute = mock_execute
+        sandbox.session_id = "test-session"
+        sandbox.km = MagicMock()
+
+        obj_store = MagicMock()
+        obj_store.put_file = MagicMock(return_value=ObjectPutResult(
+            ref=ObjectRef(
+                sha256="a" * 64,
+                size=2 * 1024 * 1024 * 1024,
+                media_type="application/x-hdf5",
+            ),
+            created=True,
+        ))
+        paths = MagicMock()
+        paths.staging = staging
+        paths.root = tmp_path
+
+        capturer = RuntimeCapture(obj_store, paths)
+        # Post-write free below reserve (1 GiB free, 5 GiB reserve) → DISK_FULL.
+        # Do NOT require free - total_size < reserve (payload already on disk).
+        fake_usage = type("U", (), {"total": 10 * 1024**3, "used": 9 * 1024**3, "free": 1 * 1024**3})()
+        with patch("shutil.disk_usage", return_value=fake_usage):
+            with pytest.raises(SnapshotCaptureError) as exc_info:
+                await capturer.capture(sandbox, declared_outputs={"adata"})
+        assert "RUNTIME_CAPTURE_DISK_FULL" in str(exc_info.value.code)
+
+    @pytest.mark.asyncio
+    async def test_anndata_write_failure_still_surfaces_required_error(self, tmp_path):
+        """If even sanitized write fails, keep fail-closed required_runtime_unpersistable."""
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+        from backend.services.snapshot_v2.errors import SnapshotCaptureError
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+
+        async def mock_execute(code, save_to_history=True, skip_safety_check=False):
+            if "__RUNTIME_GLOBALS_BEGIN__" in code:
+                return MagicMock(
+                    success=True,
+                    output='__RUNTIME_GLOBALS_BEGIN__\n{"dds": "AnnData((2, 13704))"}\n__RUNTIME_GLOBALS_END__',
+                    error=None,
+                )
+            if ".h5ad" in code:
+                return MagicMock(
+                    success=False,
+                    output="",
+                    error="IORegistryError: No method registered for writing ModelMatrix",
+                )
+            return MagicMock(success=True, output="ok", error=None)
+
+        sandbox = AsyncMock()
+        sandbox.execute = mock_execute
+        sandbox.session_id = "test-session"
+        sandbox.km = MagicMock()
+        capturer = RuntimeCapture(MagicMock(), MagicMock(staging=staging, root=tmp_path))
         with pytest.raises(SnapshotCaptureError) as exc_info:
-            await capturer.capture(sandbox, declared_outputs={"adata"})
-        assert "RUNTIME_CAPTURE_QUOTA_EXCEEDED" in str(exc_info.value.code)
+            await capturer.capture(sandbox, declared_outputs={"dds"})
+        assert "required_runtime_unpersistable" in str(exc_info.value.code)
+        assert "dds" in str(exc_info.value)
+
+
+def test_save_anndata_template_sanitizes_unwritable_slots():
+    from backend.services.snapshot_v2 import runtime as runtime_mod
+    tpl = runtime_mod._SAVE_ANNDATA_TEMPLATE
+    assert "copy()" in tpl
+    assert "obsm" in tpl
+    # Aggressive mapping sanitize walks only matrix-like slots — not uns
+    # (nested Scanpy metadata must be left for AnnData's own writer).
+    assert "('uns'" not in tpl and "(\"uns\"" not in tpl
+    for slot in ("obsm", "varm", "layers", "obsp", "varp"):
+        assert f"'{slot}'" in tpl or f'"{slot}"' in tpl
+    # Must attempt conversion to numpy/DataFrame or drop on failure
+    assert "IORegistryError" in tpl or "write" in tpl
+    assert "to_numpy" in tpl or "asarray" in tpl
+    assert "__H5AD_SANITIZE_DROP__" in tpl
+    # Sparse must be preserved; exact-type checks for native frames
+    assert "issparse" in tpl
+    assert "type(_v) is _runtime_np.ndarray" in tpl or "type(_v) is" in tpl
+
+
+def test_sanitize_anndata_preserves_sparse_and_converts_modelmatrix(tmp_path):
+    """Behavioral host-side sanitize: sparse stays sparse; ModelMatrix becomes array; live unchanged."""
+    import numpy as np
+    import pandas as pd
+    import anndata as ad
+    import scipy.sparse as sp
+    import wrapt
+
+    from backend.services.snapshot_v2.runtime import sanitize_anndata_for_h5ad
+
+    n_obs, n_vars = 4, 3
+    X = np.arange(n_obs * n_vars, dtype=float).reshape(n_obs, n_vars)
+    sparse_layer = sp.csr_matrix(X)
+    adata = ad.AnnData(X=X.copy())
+    adata.layers["counts"] = sparse_layer
+    adata.obsm["X_pca"] = np.random.randn(n_obs, 2)
+
+    # Build a formulaic-like ModelMatrix (wrapt ObjectProxy): isinstance(..., DataFrame)
+    # is True but type(...) is not DataFrame, and write_h5ad fails if it remains.
+    try:
+        from formulaic import model_matrix
+
+        design_df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]}, index=list(adata.obs_names))
+        mm = model_matrix("1 + x", design_df)
+        if hasattr(mm, "index") and not mm.index.equals(adata.obs_names):
+            mm = mm.copy()
+            mm.index = adata.obs_names
+    except Exception:
+        class ModelMatrix(wrapt.ObjectProxy):
+            pass
+
+        ModelMatrix.__module__ = "formulaic.materializers.types.model_matrix"
+        ModelMatrix.__qualname__ = "ModelMatrix"
+        ModelMatrix.__name__ = "ModelMatrix"
+        base = pd.DataFrame(
+            {"Intercept": [1, 1, 1, 1], "x": [1.0, 2.0, 3.0, 4.0]},
+            index=list(adata.obs_names),
+        )
+        mm = ModelMatrix(base)
+
+    assert isinstance(mm, pd.DataFrame)
+    assert type(mm) is not pd.DataFrame
+    adata.obsm["design"] = mm
+
+    # AnnData.copy() often unwraps ObjectProxy to plain DataFrame; re-inject ModelMatrix
+    # on the copy so sanitize must convert (mirrors kernel slots that still hold proxy).
+    _orig_copy = adata.copy
+
+    def _copy_keep_modelmatrix():
+        c = _orig_copy()
+        c.obsm["design"] = mm
+        return c
+
+    adata.copy = _copy_keep_modelmatrix  # type: ignore[method-assign]
+
+    live_layer_id = id(adata.layers["counts"])
+    live_design_type = type(adata.obsm["design"])
+
+    # Unsanitized write with ModelMatrix must fail (documents the bug we fix)
+    dirty = _copy_keep_modelmatrix()
+    with pytest.raises(Exception):
+        dirty.write_h5ad(tmp_path / "dirty.h5ad")
+
+    sanitized = sanitize_anndata_for_h5ad(adata)
+
+    # Live original unchanged
+    assert id(adata.layers["counts"]) == live_layer_id
+    assert sp.issparse(adata.layers["counts"])
+    assert type(adata.obsm["design"]) is live_design_type
+
+    # Sparse layer preserved on sanitized copy
+    assert sp.issparse(sanitized.layers["counts"])
+    assert type(sanitized.layers["counts"]).__name__ in ("csr_matrix", "csc_matrix", "coo_matrix")
+
+    # design converted to plain ndarray (not ModelMatrix / DF proxy)
+    design = sanitized.obsm["design"]
+    assert type(design) is np.ndarray, f"expected ndarray, got {type(design)}"
+    assert design.ndim >= 1
+    assert not (design.dtype == object and design.shape == ())
+
+    # Must be writable to h5ad
+    out = tmp_path / "sanitized.h5ad"
+    sanitized.write_h5ad(out)
+    assert out.stat().st_size > 0
+    reloaded = ad.read_h5ad(out)
+    assert "counts" in reloaded.layers
+    assert "design" in reloaded.obsm
+
+
+def test_sanitize_anndata_preserves_standard_uns_metadata(tmp_path):
+    """Standard Scanpy-like uns nested dicts must survive sanitize + write_h5ad."""
+    import anndata as ad
+    import numpy as np
+
+    from backend.services.snapshot_v2.runtime import sanitize_anndata_for_h5ad
+
+    adata = ad.AnnData(X=np.random.rand(10, 5).astype(np.float32))
+    adata.uns["neighbors"] = {"params": {"n_neighbors": 15, "method": "umap"}}
+    adata.uns["log1p"] = {"base": None}
+    adata.uns["pca"] = {"variance": np.array([1.0, 0.5], dtype=np.float32)}
+    adata.uns["rank_genes_groups"] = {"params": {"groupby": "leiden"}}
+    live_keys = set(adata.uns.keys())
+
+    cleaned = sanitize_anndata_for_h5ad(adata)
+    for k in ("neighbors", "log1p", "pca", "rank_genes_groups"):
+        assert k in cleaned.uns, f"{k} dropped from uns"
+    assert set(adata.uns.keys()) == live_keys  # live unchanged
+
+    out = tmp_path / "scai_uns_sanitize_test.h5ad"
+    cleaned.write_h5ad(out)  # must succeed
+    reloaded = ad.read_h5ad(out)
+    for k in ("neighbors", "log1p", "pca", "rank_genes_groups"):
+        assert k in reloaded.uns
+
+
+@pytest.mark.asyncio
+async def test_post_dill_advisory_unknown_type_soft_skipped(tmp_path):
+    """Advisory residual with unknown type that dill skips → complete + incidental_skips.
+
+    Same name as a checkpoint dependency must still fail closed.
+    """
+    from unittest.mock import patch
+
+    from backend.services.snapshot_v2.errors import SnapshotCaptureError
+    from backend.services.snapshot_v2.models import ObjectRef
+    from backend.services.snapshot_v2.object_store import ObjectPutResult
+    from backend.services.snapshot_v2.runtime import RuntimeCapture
+    from backend.services.snapshot_v2.runtime_registry import is_known_unpersistable_residual
+
+    unknown_type = "some.package.MysteryHandle"
+    assert not is_known_unpersistable_residual(unknown_type)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    async def mock_execute(code, save_to_history=True, skip_safety_check=False):
+        if "__RUNTIME_GLOBALS_BEGIN__" in code:
+            return MagicMock(
+                success=True,
+                output=(
+                    '__RUNTIME_GLOBALS_BEGIN__\n'
+                    '{"adata": "AnnData(50, 10)", '
+                    f'"mystery": "{unknown_type}"}}\n'
+                    '__RUNTIME_GLOBALS_END__'
+                ),
+                error=None,
+            )
+        if ".h5ad" in code:
+            m = re.search(r"'([^']+\.h5ad)'", code)
+            if m:
+                p = Path(m.group(1))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                _write_valid_h5ad_stub(p)
+            return MagicMock(success=True, output="__H5AD_SAVED__:1000", error=None)
+        if "dill" in code or "__DILL_SAVED__" in code:
+            m = re.search(r"'([^']+\.pkl)'", code)
+            if m:
+                p = Path(m.group(1))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"fake-dill")
+            return MagicMock(
+                success=True,
+                output=(
+                    "__DILL_SAVED__:0/1 size=0\n"
+                    "__DILL_SAVED_NAMES__:[]\n"
+                    "__DILL_SKIPPED__:['mystery']"
+                ),
+                error=None,
+            )
+        return MagicMock(success=True, output="ok", error=None)
+
+    sandbox = AsyncMock()
+    sandbox.execute = mock_execute
+    sandbox.session_id = "test-session"
+    sandbox.km = MagicMock()
+
+    def put_file(path, media_type):
+        size = Path(path).stat().st_size if Path(path).exists() else 1000
+        return ObjectPutResult(
+            ref=ObjectRef(sha256="c" * 64, size=size, media_type=media_type),
+            created=True,
+        )
+
+    obj_store = MagicMock()
+    obj_store.put_file = MagicMock(side_effect=put_file)
+    paths = MagicMock(staging=staging, root=tmp_path)
+    capturer = RuntimeCapture(obj_store, paths)
+    fake_usage = type(
+        "U", (), {"total": 100 * 1024**3, "used": 0, "free": 100 * 1024**3}
+    )()
+
+    with patch("shutil.disk_usage", return_value=fake_usage):
+        runtime = await capturer.capture(
+            sandbox,
+            declared_outputs={"adata", "mystery"},
+        )
+    assert runtime.status == "complete"
+    assert "adata" in runtime.adata_refs
+    assert "mystery" not in runtime.captured_residual_names
+    skip_names = {s.name for s in runtime.dependencies.incidental_skips}
+    assert "mystery" in skip_names
+
+    # Same name as checkpoint dependency still fails closed.
+    with patch("shutil.disk_usage", return_value=fake_usage):
+        with pytest.raises(SnapshotCaptureError) as exc_info:
+            await capturer.capture(
+                sandbox,
+                declared_outputs={"adata"},
+                checkpoint_dependencies={"mystery"},
+            )
+    assert "required_runtime_unpersistable" in str(exc_info.value.code)
+    assert "mystery" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

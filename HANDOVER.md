@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.7 · **Last updated**: 2026-07-14
+**Version**: 0.33.8 · **Last updated**: 2026-07-14
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,8 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-14)**
+
+- `0.33.8` — Version bump (2026-07-14): No code changes.
 
 - `0.33.7` — PainterAgent unified protocol cascade with round-retry; version bump (2026-07-14):
   - **Unified protocol cascade (`backend/agents/painter_agent.py`)**: Replaced provider-specific branching (DashScope native / Chat modalities / Images API) with a single unified cascade that tries all three protocols in order regardless of provider. `base_url` only nudges which protocol goes first (DashScope→native, OpenRouter→chat, everything else→Images API). Fatal errors (401/403/content-moderation) abort immediately; all other failures (including timeout and parse errors) fall through to the next protocol. Full 5-round retry with exponential backoff (2/4/8/16s) when all protocols fail a round. New constants: `_MAX_RETRY_ROUNDS` (5), `_INTER_PROTOCOL_DELAY` (1s), `_PROTOCOL_TIMEOUT` (60s). Revision (`revise_graphic_abstract`) now uses a dedicated `_images_edit_attempt` (Images edits API `/v1/images/edits`) with automatic `response_format` fallback. `_extract_image_from_images_response` extracted as a shared helper for both generations and edits. Old `_retry_with_backoff` helper removed.

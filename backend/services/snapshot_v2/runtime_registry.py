@@ -41,6 +41,46 @@ def _is_anndata_type(type_str: str) -> bool:
     return "anndata" in lowered or "AnnData" in type_str
 
 
+_KNOWN_UNPERSISTABLE_RESIDUAL_MARKERS: tuple[str, ...] = (
+    "loompy.loompy.LoomConnection",
+    "loompy.LoomConnection",
+    "h5py._hl.files.File",
+    "h5py._hl.group.Group",
+    "h5py._hl.dataset.Dataset",
+    "tables.file.File",
+    "sqlite3.Connection",
+    "_io.BufferedReader",
+    "_io.BufferedWriter",
+    "_io.TextIOWrapper",
+)
+
+
+def is_known_unpersistable_residual(type_str: str) -> bool:
+    """Return True for residual types that cannot be dill-serialized safely.
+
+    Used to soft-skip advisory residual globals (open file handles, loom
+    connections) instead of permanently blocking required snapshots.
+    """
+    if not type_str:
+        return False
+    t = type_str.strip()
+    if t in _KNOWN_UNPERSISTABLE_RESIDUAL_MARKERS:
+        return True
+    lowered = t.lower()
+    # Substring matches for common file-handle patterns
+    for marker in (
+        "loomconnection",
+        "h5py._hl.files.file",
+        "sqlite3.connection",
+        "textiowrapper",
+        "bufferedreader",
+        "bufferedwriter",
+    ):
+        if marker in lowered:
+            return True
+    return False
+
+
 def _serializer_for(name: str, type_str: str) -> str:
     if _is_anndata_type(type_str):
         return "h5ad"
