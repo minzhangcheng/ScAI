@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.services.snapshot_v2.errors import SnapshotCaptureError, SnapshotIntegrityError
+from backend.utils.error_parsing import strip_ansi
 from backend.services.snapshot_v2.models import (
     ObjectRef,
     RuntimeDependency,
@@ -131,9 +132,48 @@ if _adata is not None:
                 except Exception:
                     pass
                 print('__H5AD_SANITIZE_DROP__:' + _slot_name + '/' + str(_k) + ':' + type(_v).__module__ + '.' + type(_v).__qualname__)
-    # Matrix-like slots only. Do NOT walk uns — nested Scanpy metadata
-    # (neighbors, log1p, pca, rank_genes_groups, ...) is dict-valued and
-    # would be dropped by the convert/drop loop; AnnData's writer handles uns.
+    def _sanitize_uns_mapping(_mapping):
+        try:
+            import scipy.sparse as _sp
+        except Exception:
+            _sp = None
+        for _k in list(_mapping.keys()):
+            _v = _mapping[_k]
+            try:
+                # Nested metadata dict (neighbors, log1p, pca,
+                # rank_genes_groups, ...): recurse, keep structure.
+                if isinstance(_v, dict):
+                    _sanitize_uns_mapping(_v)
+                    continue
+                if _sp is not None and _sp.issparse(_v):
+                    continue
+                # Native h5ad-writable leaves kept untouched (isinstance for
+                # ndarray to preserve structured/recarray; exact DataFrame so a
+                # ModelMatrix ObjectProxy falls through to coercion).
+                if isinstance(_v, _runtime_np.ndarray) or type(_v) is _runtime_pd.DataFrame:
+                    continue
+                if _v is None or isinstance(_v, (str, bytes, bool, int, float, complex, _runtime_np.generic)):
+                    continue
+                # Unwritable-in-uns (bare Series/Index/Categorical, ModelMatrix,
+                # list/tuple, ...): coerce to ndarray or drop.
+                if hasattr(_v, 'to_numpy'):
+                    _arr = _runtime_np.asarray(_v.to_numpy())
+                elif hasattr(_v, 'values') and not isinstance(_v, dict):
+                    _arr = _runtime_np.asarray(_v.values)
+                else:
+                    _arr = _runtime_np.asarray(_v)
+                if _usable_asarray(_arr):
+                    _mapping[_k] = _arr
+                    continue
+                del _mapping[_k]
+                print('__H5AD_SANITIZE_DROP__:uns/' + str(_k) + ':' + type(_v).__module__ + '.' + type(_v).__qualname__)
+            except Exception:
+                try:
+                    del _mapping[_k]
+                except Exception:
+                    pass
+                print('__H5AD_SANITIZE_DROP__:uns/' + str(_k) + ':' + type(_v).__module__ + '.' + type(_v).__qualname__)
+    # Matrix-like slots: convert unwritable matrix-like values.
     for _slot, _mapping in (
         ('obsm', getattr(_to_write, 'obsm', None)),
         ('varm', getattr(_to_write, 'varm', None)),
@@ -145,6 +185,15 @@ if _adata is not None:
             continue
         try:
             _sanitize_mapping(_mapping, _slot)
+        except Exception:
+            pass
+    # uns: recursively coerce/drop leaves anndata cannot write, preserving
+    # nested Scanpy metadata dicts (a bare pd.Series such as PyDESeq2
+    # uns['trend_coeffs'] has no registered h5ad writer under /uns).
+    _uns = getattr(_to_write, 'uns', None)
+    if _uns is not None:
+        try:
+            _sanitize_uns_mapping(_uns)
         except Exception:
             pass
     _to_write.write({h5ad_path_repr!r})
@@ -162,9 +211,11 @@ def sanitize_anndata_for_h5ad(adata):
     Converts unwritable matrix-like slots (e.g. formulaic ModelMatrix /
     ObjectProxy in obsm/varm/layers/obsp/varp) and preserves scipy sparse
     matrices and exact native ``ndarray`` / ``DataFrame`` / ``Series``.
-    Does not mutate *adata*. Does **not** sanitize ``uns`` — nested Scanpy
-    metadata is left for AnnData's own writer (ModelMatrix issues live in
-    obsm, not uns).
+    Does not mutate *adata*. Also recursively sanitizes ``uns``: nested
+    metadata dicts and native leaves are preserved, but leaves anndata cannot
+    write to h5ad (a bare ``pd.Series`` such as PyDESeq2 ``uns['trend_coeffs']``,
+    ``pd.Index``/``pd.Categorical``, formulaic ModelMatrix, ...) are coerced to
+    ``ndarray`` or dropped.
 
     Kernel capture uses an equivalent algorithm in ``_SAVE_ANNDATA_TEMPLATE``
     (kernel cannot import this host module); keep both in sync.
@@ -239,7 +290,50 @@ def sanitize_anndata_for_h5ad(adata):
                 except Exception:
                     pass
 
-    # Matrix-like slots only — never walk uns (nested dict metadata).
+    def _sanitize_uns_mapping(mapping) -> None:
+        # Recursively coerce/drop uns leaves anndata cannot write to h5ad,
+        # while preserving nested Scanpy metadata dicts and native leaves.
+        # A bare pd.Series (e.g. PyDESeq2 uns['trend_coeffs']) has no
+        # registered h5ad writer under /uns and must be coerced to ndarray.
+        for k in list(mapping.keys()):
+            v = mapping[k]
+            try:
+                # Nested metadata dict: recurse, keep structure.
+                if isinstance(v, dict):
+                    _sanitize_uns_mapping(v)
+                    continue
+                # scipy sparse: keep.
+                if sp is not None and sp.issparse(v):
+                    continue
+                # Native h5ad-writable leaves: keep untouched. Use isinstance for
+                # ndarray to preserve structured/recarray/object-string arrays
+                # (rank_genes_groups etc.); exact type for DataFrame so a
+                # formulaic ModelMatrix (ObjectProxy) falls through to coercion.
+                if isinstance(v, np.ndarray) or type(v) is pd.DataFrame:
+                    continue
+                if v is None or isinstance(
+                    v, (str, bytes, bool, int, float, complex, np.generic)
+                ):
+                    continue
+                # Unwritable-in-uns (bare Series/Index/Categorical, ModelMatrix,
+                # list/tuple, ...): coerce to ndarray or drop.
+                if hasattr(v, "to_numpy"):
+                    arr = np.asarray(v.to_numpy())
+                elif hasattr(v, "values") and not isinstance(v, dict):
+                    arr = np.asarray(v.values)
+                else:
+                    arr = np.asarray(v)
+                if _usable_asarray(arr):
+                    mapping[k] = arr
+                    continue
+                del mapping[k]
+            except Exception:
+                try:
+                    del mapping[k]
+                except Exception:
+                    pass
+
+    # Matrix-like slots: convert unwritable matrix-like values.
     for slot, mapping in (
         ("obsm", getattr(to_write, "obsm", None)),
         ("varm", getattr(to_write, "varm", None)),
@@ -251,6 +345,14 @@ def sanitize_anndata_for_h5ad(adata):
             continue
         try:
             _sanitize_mapping(mapping, slot)
+        except Exception:
+            pass
+
+    # uns: recursively coerce/drop leaves anndata cannot write.
+    uns = getattr(to_write, "uns", None)
+    if uns is not None:
+        try:
+            _sanitize_uns_mapping(uns)
         except Exception:
             pass
 
@@ -445,7 +547,7 @@ class RuntimeCapture:
         if not result.success:
             raise SnapshotCaptureError(
                 "RUNTIME_INTROSPECT_FAILED",
-                f"Kernel globals introspection failed: {result.error}",
+                f"Kernel globals introspection failed: {strip_ansi(result.error or '')}",
             )
         output = result.output or ""
         begin_marker = "__RUNTIME_GLOBALS_BEGIN__"
@@ -501,7 +603,7 @@ class RuntimeCapture:
                 "required_runtime_unpersistable",
                 (
                     f"AnnData variable '{var_name}' (type={type_str or 'unknown'}, "
-                    f"serializer=h5ad) write failed: {result.error}"
+                    f"serializer=h5ad) write failed: {strip_ansi(result.error or '')}"
                 ),
                 details={
                     "name": var_name,

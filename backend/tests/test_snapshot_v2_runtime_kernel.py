@@ -245,6 +245,32 @@ print('dds ready', dds.shape)
         assert "dds" in runtime.adata_refs
 
     @pytest.mark.asyncio
+    async def test_anndata_with_unwritable_uns_series_is_captured(self, sandbox, v2_paths):
+        """AnnData whose uns holds a bare pd.Series (PyDESeq2 trend_coeffs) must
+        still capture: the kernel template recursively sanitizes uns."""
+        from backend.services.snapshot_v2.runtime import RuntimeCapture
+        from backend.services.snapshot_v2.object_store import ObjectStore
+
+        code = """
+import anndata as ad
+import numpy as np
+import pandas as pd
+dds = ad.AnnData(X=np.random.rand(6, 8))
+# Bare Series in uns has no registered h5ad writer under /uns.
+dds.uns['trend_coeffs'] = pd.Series([0.1, 0.2, 0.3])
+dds.uns['fit'] = {'coeffs': pd.Series([1.0, 2.0]), 'n': 6}
+dds.uns['neighbors'] = {'params': {'n_neighbors': 15}}
+print('dds ready', dds.shape)
+"""
+        result = await sandbox.execute(code, save_to_history=False, skip_safety_check=True)
+        assert result.success, result.error
+
+        capturer = RuntimeCapture(ObjectStore(v2_paths), v2_paths)
+        runtime = await capturer.capture(sandbox, declared_outputs={"dds"})
+        assert runtime.status == "complete"
+        assert "dds" in runtime.adata_refs
+
+    @pytest.mark.asyncio
     async def test_capture_with_ample_free_space_succeeds(self, sandbox, v2_paths):
         """Normal-sized data with ample free space succeeds."""
         from backend.services.snapshot_v2.runtime import RuntimeCapture

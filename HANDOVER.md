@@ -2,7 +2,7 @@
 
 Architecture, module map, deployment, and developer guide for operators and contributors. For end-user workflow, see [user-guide.md](user-guide.md); for the project pitch and installation, see [README.md](README.md).
 
-**Version**: 0.33.9 · **Last updated**: 2026-07-14
+**Version**: 0.33.10 · **Last updated**: 2026-07-14
 
 ## 1. Runtime Architecture
 
@@ -195,6 +195,11 @@ scai/
 Detailed release notes for every version are available through `git log` and release tags. The summary below highlights the architectural arc of the project.
 
 **0.33.x — (2026-07-14)**
+
+- `0.33.10` — AnnData uns recursive sanitization (kernel template + host), ANSI error-strip in SnapshotCaptureError; version bump (2026-07-14):
+  - **AnnData uns recursive sanitization (`backend/services/snapshot_v2/runtime.py`)**: Both the kernel template (`_SAVE_ANNDATA_TEMPLATE`) and the host-side `sanitize_anndata_for_h5ad()` now recursively walk `uns`, coercing unwritable leaves (bare `pd.Series`, `pd.Index`, `pd.Categorical`, formulaic ModelMatrix/ObjectProxy) to `ndarray` or dropping them. Previously `uns` was entirely left for AnnData's own writer, but objects such as PyDESeq2's `uns['trend_coeffs']` (a bare `pd.Series`) have no registered h5ad writer under `/uns` and caused `write_h5ad` to fail during runtime capture. Nested Scanpy metadata dicts (neighbors, pca, log1p, rank_genes_groups) are preserved.
+  - **ANSI escape-strip in SnapshotCaptureError (`backend/services/snapshot_v2/runtime.py`)**: `_introspect_kernel_globals` and h5ad capture error paths now apply `strip_ansi()` from `backend.utils.error_parsing` to kernel error messages before wrapping them into `SnapshotCaptureError`, preventing raw terminal escape codes from surfacing in HITL dialogs and logs.
+  - **New tests**: `backend/tests/test_snapshot_v2_runtime.py` (`test_sanitize_anndata_coerces_unwritable_uns_leaves`, template assertion updated to `_sanitize_uns_mapping`); `backend/tests/test_snapshot_v2_runtime_kernel.py` (`test_anndata_with_unwritable_uns_series_is_captured`).
 
 - `0.33.9` — Frontend realtime messages de-persisted (server-authoritative); version bump (2026-07-14):
   - **Frontend realtime messages de-persisted (`frontend/src/stores/appStore.ts`)**: Removed `messages` from Zustand `partialize()` — realtime messages are now server-authoritative (kept in `AnalysisState.realtime_messages` on disk, re-hydrated from `/session/{id}/load` on open/refresh/reconnect). Previously persisted to localStorage with complex base64-stripping logic, risking stale or crash-prone shapes. The `merge()` migration now always `delete ps.messages` instead of conditionally dropping them, ensuring no legacy copy is ever trusted.

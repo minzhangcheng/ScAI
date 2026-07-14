@@ -889,9 +889,9 @@ def test_save_anndata_template_sanitizes_unwritable_slots():
     tpl = runtime_mod._SAVE_ANNDATA_TEMPLATE
     assert "copy()" in tpl
     assert "obsm" in tpl
-    # Aggressive mapping sanitize walks only matrix-like slots — not uns
-    # (nested Scanpy metadata must be left for AnnData's own writer).
-    assert "('uns'" not in tpl and "(\"uns\"" not in tpl
+    # uns is now recursively sanitized (coerce/drop unwritable leaves such as a
+    # bare pd.Series) while preserving nested metadata dicts.
+    assert "_sanitize_uns_mapping" in tpl
     for slot in ("obsm", "varm", "layers", "obsp", "varp"):
         assert f"'{slot}'" in tpl or f'"{slot}"' in tpl
     # Must attempt conversion to numpy/DataFrame or drop on failure
@@ -1016,6 +1016,57 @@ def test_sanitize_anndata_preserves_standard_uns_metadata(tmp_path):
     reloaded = ad.read_h5ad(out)
     for k in ("neighbors", "log1p", "pca", "rank_genes_groups"):
         assert k in reloaded.uns
+
+
+def test_sanitize_anndata_coerces_unwritable_uns_leaves(tmp_path):
+    """uns leaves that anndata cannot write (bare Series/Index/Categorical, and
+    the same nested inside dicts) must be coerced/dropped so write_h5ad succeeds.
+
+    Reproduces the PyDESeq2 DeseqDataSet failure: uns['trend_coeffs'] is a
+    pandas.Series, which has no registered h5ad writer under /uns.
+    """
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+
+    from backend.services.snapshot_v2.runtime import sanitize_anndata_for_h5ad
+
+    adata = ad.AnnData(X=np.random.rand(6, 4).astype(np.float32))
+    # The exact PyDESeq2 shape: a bare Series in uns.
+    adata.uns["trend_coeffs"] = pd.Series([0.1, 0.2, 0.3], index=["a", "b", "c"])
+    adata.uns["some_index"] = pd.Index(["g1", "g2", "g3"])
+    adata.uns["cat"] = pd.Categorical(["x", "y", "x"])
+    # Same unwritable type nested one level deep inside a metadata dict.
+    adata.uns["fit"] = {"coeffs": pd.Series([1.0, 2.0]), "n": 6}
+    # Legitimate nested Scanpy metadata must survive untouched.
+    adata.uns["neighbors"] = {"params": {"n_neighbors": 15}}
+    adata.uns["pca"] = {"variance": np.array([1.0, 0.5], dtype=np.float32)}
+    live_keys = set(adata.uns.keys())
+
+    # Unsanitized write must fail (documents the bug).
+    with pytest.raises(Exception):
+        adata.copy().write_h5ad(tmp_path / "dirty.h5ad")
+
+    cleaned = sanitize_anndata_for_h5ad(adata)
+
+    # Live original unchanged (no mutation of the analysis object).
+    assert set(adata.uns.keys()) == live_keys
+    assert isinstance(adata.uns["trend_coeffs"], pd.Series)
+
+    # Coerced leaves became ndarray; nested dict metadata preserved.
+    assert isinstance(cleaned.uns["trend_coeffs"], np.ndarray)
+    assert isinstance(cleaned.uns["fit"]["coeffs"], np.ndarray)
+    assert cleaned.uns["fit"]["n"] == 6
+    assert cleaned.uns["neighbors"]["params"]["n_neighbors"] == 15
+    assert isinstance(cleaned.uns["pca"]["variance"], np.ndarray)
+
+    # Must now be writable to h5ad.
+    out = tmp_path / "scai_uns_coerce_test.h5ad"
+    cleaned.write_h5ad(out)
+    assert out.stat().st_size > 0
+    reloaded = ad.read_h5ad(out)
+    assert "trend_coeffs" in reloaded.uns
+    assert "neighbors" in reloaded.uns
 
 
 @pytest.mark.asyncio
