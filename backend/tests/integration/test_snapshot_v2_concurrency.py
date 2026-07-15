@@ -8,6 +8,7 @@ import asyncio
 
 import pytest
 
+from backend.services.snapshot_v2.errors import SnapshotTransactionError
 from backend.services.snapshot_v2.jobs import RestoreJobManager
 from backend.services.snapshot_v2.models import (
     IdleCapsule,
@@ -166,10 +167,22 @@ class TestConcurrentLifecycle:
         final = mgr.get(record.transaction_id)
         assert final is None or final.status == "cancelled"
 
-    async def test_job_manager_concurrent_enqueue(self, v2_paths):
-        """Two sequential enqueues with different snapshot ids."""
+    async def test_job_manager_concurrent_enqueue(self, v2_paths, monkeypatch):
+        """A second restore is fenced out while the first owns the safe point.
+
+        Enqueuing reserves the session safe point and holds it until the job
+        resolves, so a second restore for a different snapshot must be rejected
+        with SAFE_POINT_BUSY (surfaced as HTTP 409) rather than queued
+        alongside. This test previously expected both to queue, which predates
+        safe-point fencing.
+        """
         session_id = "conc-enq"
         mgr = RestoreJobManager(v2_paths, session_id)
+        # Fail fast instead of waiting out the reservation timeout.
+        monkeypatch.setattr(
+            "backend.services.snapshot_v2.jobs.SAFE_POINT_RESERVATION_TIMEOUT_SECONDS",
+            0.01,
+        )
 
         preflight1 = RestorePreflightResult(
             session_id=session_id,
@@ -194,8 +207,11 @@ class TestConcurrentLifecycle:
         r2 = SnapshotRestoreRequest(snapshot_id="snap-enq-2", runtime_choice="keep")
 
         rec1 = await mgr.enqueue(session_id, preflight1, r1, timeout_seconds=5)
-        rec2 = await mgr.enqueue(session_id, preflight2, r2, timeout_seconds=5)
-
         assert rec1.status == "queued"
-        assert rec2.status == "queued"
-        assert rec1.transaction_id != rec2.transaction_id
+
+        with pytest.raises(SnapshotTransactionError) as error:
+            await mgr.enqueue(session_id, preflight2, r2, timeout_seconds=5)
+        assert error.value.code == "SAFE_POINT_BUSY"
+
+        # The fenced-out attempt must not leave a second job behind.
+        assert mgr.get(rec1.transaction_id) is not None

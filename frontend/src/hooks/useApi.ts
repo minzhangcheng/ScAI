@@ -70,6 +70,8 @@ export function applyStoreUpdates(updates: StoreUpdates): void {
   if (updates.stateVersion != null) store.setStateVersion(updates.stateVersion)
   if (updates.snapshotCount != null) store.setSnapshotCount(updates.snapshotCount)
   if (updates.roundWaitSeconds != null) store.setRoundWaitSeconds(updates.roundWaitSeconds)
+  // Presence check, not a null check: an absent gate must clear a stale one.
+  if ('annotationGateData' in updates) store.setAnnotationGateData(updates.annotationGateData ?? null)
   if (updates.literatureMode != null) store.setLiteratureMode(updates.literatureMode as AppState['literatureMode'])
   if (updates.deepResearchModel != null) store.setDeepResearchModel(updates.deepResearchModel)
   if (updates.deepResearchLlmBaseUrl != null) store.setDeepResearchLlmBaseUrl(updates.deepResearchLlmBaseUrl)

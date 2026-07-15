@@ -295,3 +295,34 @@ describe('transformRoundResults integration fields', () => {
     expect(round.integrationReportSummary).toBeUndefined()
   })
 })
+
+describe('transformLoadResponse — annotation gate', () => {
+  it('rebuilds annotationGateData from annotation_state so a reloaded client can reopen the gate', () => {
+    const result = transformLoadResponse({
+      ...MINIMAL_RESPONSE,
+      status: 'waiting_annotation',
+      annotation_report_url: '/api/session/test-123/annotation-report/html',
+      annotation_state: {
+        cluster_annotations: [
+          { cluster_id: '0', cell_type: 'Hepatocyte', key_markers: ['Alb'] },
+        ],
+        tissue: 'liver',
+        organism: 'mouse',
+        pending: true,
+      },
+    })
+
+    expect(result.storeUpdates.annotationGateData).not.toBeNull()
+    expect(result.storeUpdates.annotationGateData!.tissue).toBe('liver')
+    expect(result.storeUpdates.annotationGateData!.organism).toBe('mouse')
+    expect(result.storeUpdates.annotationGateData!.annotations).toHaveLength(1)
+    expect(result.storeUpdates.annotationGateData!.report_html_url).toBe(
+      '/api/session/test-123/annotation-report/html'
+    )
+  })
+
+  it('clears annotationGateData when the session has no pending gate', () => {
+    const result = transformLoadResponse(MINIMAL_RESPONSE)
+    expect(result.storeUpdates.annotationGateData).toBeNull()
+  })
+})

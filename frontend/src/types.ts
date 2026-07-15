@@ -15,6 +15,54 @@ export type { AgentType, TaskStatus, Session, TreatmentGroup, DataFile, Biochemi
 // Backend API response types (snake_case as returned by server)
 // ============================================================
 
+/** One cluster annotation as persisted in `annotation_state`. Fields are
+ * optional so states written by older releases still parse. */
+export interface RawClusterAnnotation {
+  cluster_id?: string
+  cell_type?: string
+  subtypes?: string[]
+  key_markers?: string[]
+  confidence?: string
+  evidence?: string
+  alternative_cell_types?: string[]
+  low_confidence_reason?: string
+  user_confirmed?: boolean
+  user_override?: string | null
+  group_proportions?: Record<string, number>
+  requires_reclustering?: boolean
+  reclustering_reason?: string
+  suggested_reclustering_scope?: string | null
+}
+
+/**
+ * Authoritative cell-annotation gate state, as persisted server-side.
+ * The `annotation_confirmation` realtime message carries the same payload but
+ * is lossy (replay window, stream cap, snapshot restore), so the dialog is
+ * rebuilt from this on reload.
+ */
+export interface RawAnnotationState {
+  cluster_annotations?: RawClusterAnnotation[]
+  tissue?: string
+  organism?: string
+  tissue_summary?: string
+  analysis_summary?: string
+  pending?: boolean
+  confirmed?: boolean
+  proportion_group_labels?: string[]
+  proportion_dimension?: string
+  validation_status?: string
+  validation_summary?: string
+  validation_text_summary?: string
+  validation_plan?: unknown
+  validation_result?: Record<string, unknown>
+  reclustering_recommendations?: Array<{
+    cluster_id: string
+    requires_reclustering: boolean
+    reclustering_reason: string
+    suggested_reclustering_scope?: string | null
+  }>
+}
+
 /** Raw session data as returned by GET /session/:id/load */
 export interface SessionLoadResponse {
   session_id: string
@@ -35,6 +83,9 @@ export interface SessionLoadResponse {
   integrated_report?: string | null
   exploration_report_url?: string
   integration_report_url?: string
+  annotation_report_url?: string
+  detailed_report_url?: string
+  annotation_state?: RawAnnotationState | null
   state_version?: number
   round_wait_seconds?: number
   waiting_input_started_at?: string

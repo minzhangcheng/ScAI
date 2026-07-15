@@ -5,9 +5,10 @@ import { useTranslation } from '../i18n/translations'
 import type { RoundSummary } from '../types'
 import type { SnapshotTransactionRecord } from '../types/snapshotV2'
 import { roundKey } from '../utils/roundKey'
+import type { AnnotationData } from '../utils/annotationGate'
 import ReactMarkdown from 'react-markdown'
 import { RoundFeedbackDialog, UploadedFileWithAgent } from './RoundFeedbackDialog'
-import { AnnotationConfirmationDialog, ClusterAnnotation } from './AnnotationConfirmationDialog'
+import { AnnotationConfirmationDialog } from './AnnotationConfirmationDialog'
 import { ExplorationReportDialog, ExplorationReport } from './ExplorationReportDialog'
 import { IntegrationGatePanel } from './IntegrationGatePanel'
 import { PlanReviewDialog, AnalysisPlan } from './PlanReviewDialog'
@@ -54,27 +55,6 @@ const SNAPSHOT_TERMINAL_STATUSES = new Set<SnapshotTransactionRecord['status']>(
   'cancelled',
   'timed_out',
 ])
-
-// Content shape for annotation_confirmation HITL message from backend
-interface AnnotationData {
-  annotations?: ClusterAnnotation[]
-  tissue?: string
-  organism?: string
-  tissue_summary?: string
-  report_html_url?: string
-  detailed_report_url?: string
-  validation_status?: string;
-  validation_summary?: string;
-  validation_text_summary?: string;
-  validation_plan?: any;
-  validation_result?: { artifacts?: Array<{ type: string; name: string; path: string }> } & Record<string, any>;
-  reclustering_recommendations?: Array<{
-    cluster_id: string; requires_reclustering: boolean;
-    reclustering_reason: string; suggested_reclustering_scope?: string | null;
-  }>;
-  proportion_group_labels?: string[]
-  proportion_dimension?: string
-}
 
 // Content shape for plan_review HITL message from backend
 interface PlanReviewData {
@@ -135,6 +115,10 @@ export function AnalysisPanel() {
   const llmModifySaved = useAppStore(s => s.llmModifySaved)
   const roundWaitSeconds = useAppStore(s => s.roundWaitSeconds)
   const maxRounds = useAppStore(s => s.maxRounds)
+
+  // Authoritative annotation gate from /load; the fallback when the
+  // annotation_confirmation message is not (or no longer) in the stream.
+  const annotationGateData = useAppStore(s => s.annotationGateData)
 
   const speciesInputInfo = useAppStore(s => s.speciesInputInfo)
   const showSpeciesInputDialog = useAppStore(s => s.showSpeciesInputDialog)
@@ -1031,6 +1015,10 @@ export function AnalysisPanel() {
 
   const handleReopenDialog = useCallback(() => {
     if (currentSession?.status === 'waiting_annotation') {
+      // The dialog renders only with a payload, so restore it from the server's
+      // annotation state when the gate message is not in the stream — otherwise
+      // this button is a no-op after a browser restart.
+      if (!annotationData && annotationGateData) setAnnotationData(annotationGateData)
       setShowAnnotationDialog(true)
     } else if (currentSession?.status === 'waiting_input') {
       if (integrationGateData) {
@@ -1046,7 +1034,7 @@ export function AnalysisPanel() {
     } else if (currentSession?.status === 'waiting_species_input') {
       useAppStore.getState().setShowSpeciesInputDialog(true)
     }
-  }, [currentSession?.status, currentSession?.currentRound, explorationReportData, feedbackRoundData, integrationGateData])
+  }, [currentSession?.status, currentSession?.currentRound, explorationReportData, feedbackRoundData, integrationGateData, annotationData, annotationGateData])
 
   // Countdown timer for LLM failure auto-skip
   const { timeRemaining } = useCountdownTimer({
@@ -1115,8 +1103,15 @@ export function AnalysisPanel() {
       if (!showAnnotationDialog) {
         setShowAnnotationDialog(true)
       }
+    } else if (!annMsg && !annotationData && annotationGateData) {
+      // No gate message in the stream — a restarted browser, a replay window
+      // that dropped it, or a snapshot restore. Fall back to the server's
+      // authoritative annotation state so the gate stays reachable. A live
+      // message always wins above: it is fresher after supplementary analysis.
+      setAnnotationData(annotationGateData)
+      setShowAnnotationDialog(true)
     }
-  }, [messages, currentSession?.status])
+  }, [messages, currentSession?.status, annotationGateData, annotationData])
 
   // Detect plan_review messages and show dialog
   useEffect(() => {

@@ -12,7 +12,8 @@ from backend.models.schemas import AnalysisState
 _EXCLUDED_FIELDS = {
     "original_max_rounds",
     "pre_pause_status",
-    "annotation_state",
+    # annotation_state is deliberately exposed: the client rebuilds the
+    # annotation gate from it after a reload.
     "exploration_report",
     "user_chosen_direction",
     "current_round_direction",
@@ -28,6 +29,9 @@ _EXCLUDED_FIELDS = {
     "last_restored_snapshot_id",
     "restore_provenance_snapshot_id",
     "last_snapshot_id",
+    # One-shot marker armed and consumed server-side by the snapshot failure
+    # gate (services/snapshot_v2/failure_gate.py); the client never reads it.
+    "skip_required_snapshot_phase",
     "code_history",
     "analysis_log",
     "literature_reports",

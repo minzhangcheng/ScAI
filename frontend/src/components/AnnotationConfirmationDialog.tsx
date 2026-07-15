@@ -273,7 +273,11 @@ export function AnnotationConfirmationDialog({
               </a>
             )}
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg">
+          <button
+            onClick={onClose}
+            aria-label={language === 'zh' ? '关闭' : 'Close'}
+            className="p-2 hover:bg-slate-100 rounded-lg"
+          >
             <X className="w-5 h-5 text-slate-400" />
           </button>
         </div>

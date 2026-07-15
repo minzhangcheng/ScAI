@@ -4,6 +4,7 @@ import { Language, getDefaultPrompts } from '../i18n/translations'
 import { getToken, setToken, clearToken } from '../utils/authStorage'
 import { PERSIST_STORAGE_KEY, PERSIST_VERSION } from '../constants/storage'
 import type { SnapshotRecordV2, SnapshotStoreStatus, SnapshotTransactionRecord, SnapshotFailureInfo } from '../types/snapshotV2'
+import type { AnnotationData } from '../utils/annotationGate'
 
 // Types
 export type AgentType = 'pi' | 'pathology' | 'bioinformatics' | 'biochemistry' | 'literature' | 'painter' | 'supervisor' | 'technique'
@@ -454,6 +455,13 @@ export interface AppState {
   setLlmModifySaved: (saved: boolean) => void
   clearLlmFailureState: () => void
 
+  // Cell-annotation gate, rebuilt from the server's authoritative
+  // annotation_state on every /load. Server-authoritative, so it is not
+  // persisted (see partialize) — the annotation_confirmation realtime message
+  // is too lossy to be the dialog's only source.
+  annotationGateData: AnnotationData | null
+  setAnnotationGateData: (data: AnnotationData | null) => void
+
   // Species input user intervention
   speciesInputInfo: SpeciesInputInfo | null
   showSpeciesInputDialog: boolean
@@ -705,6 +713,8 @@ const createAppState: StateCreator<AppState> = (set, get) => ({
             }
           : null,
       }),
+      annotationGateData: null,
+      setAnnotationGateData: (data) => set({ annotationGateData: data }),
       snapshotFailure: null,
       setSnapshotFailure: (failure) => set({ snapshotFailure: failure }),
       clearSnapshotFailure: () => set({ snapshotFailure: null }),

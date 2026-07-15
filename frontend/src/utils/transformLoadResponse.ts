@@ -1,4 +1,5 @@
 import { parseSnapshotFailure } from './snapshotV2'
+import { buildAnnotationDataFromState, type AnnotationData } from './annotationGate'
 import type {
   SessionLoadResponse,
   RawRoundResult,
@@ -120,6 +121,8 @@ export type StoreUpdates = {
   stateVersion?: number
   snapshotCount?: number
   roundWaitSeconds?: number
+  /** Rebuilt from the authoritative annotation_state; null when no gate pending. */
+  annotationGateData?: AnnotationData | null
   runtimeRestoreStatus?: 'complete' | 'unavailable' | 'intentionally_kept'
   runtimeRestoreWarning?: string | null
   snapshotFailure?: {
@@ -172,6 +175,10 @@ export function transformLoadResponse(data: SessionLoadResponse): TransformedLoa
     ...opt('stateVersion', data.state_version),
     ...opt('snapshotCount', data.snapshot_count),
     ...opt('roundWaitSeconds', typeof data.round_wait_seconds === 'number' ? data.round_wait_seconds : undefined),
+    annotationGateData: buildAnnotationDataFromState(data.annotation_state, {
+      ...opt('annotation_report_url', data.annotation_report_url),
+      ...opt('detailed_report_url', data.detailed_report_url),
+    }),
   }
 
   if (

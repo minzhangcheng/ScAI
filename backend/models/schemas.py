@@ -1083,6 +1083,10 @@ class AnalysisState(BaseModel):
         "round_results": "round_results",
         "final_summary": "final_summary",
         "analysis_phase": "analysis_phase",
+        # The annotation gate is rebuilt from this on reload; the
+        # annotation_confirmation message alone is too lossy to rely on
+        # (replay window, stream cap, snapshot restore all drop it).
+        "annotation_state": "annotation_state",
         "realtime_messages": "messages",
         "custom_prompts": "custom_prompts",
         "custom_models": "custom_models",

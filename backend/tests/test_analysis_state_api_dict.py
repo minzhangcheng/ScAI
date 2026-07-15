@@ -66,7 +66,7 @@ class TestAnalysisStateApiDictRoundTrip:
             "treatment_groups", "data_files", "biochemistry_indicators",
             "round_results", "final_summary",
             "exploration_report_url", "annotation_report_url", "detailed_report_url", "integration_report_url",
-            "analysis_phase", "messages", "custom_prompts",
+            "analysis_phase", "annotation_state", "messages", "custom_prompts",
             "custom_models", "custom_temperatures", "deg_thresholds",
             "literature_config",
             "state_version",
